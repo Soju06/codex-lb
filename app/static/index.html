@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Codex LB</title>
+  <link rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;32&quot; height=&quot;32&quot; fill=&quot;none&quot; viewBox=&quot;0 0 32 32&quot;%3E%3Cpath stroke=&quot;%23000&quot; stroke-linecap=&quot;round&quot; stroke-width=&quot;2.484&quot; d=&quot;M22.356 19.797H17.17M9.662 12.29l1.979 3.576a.511.511 0 0 1-.005.504l-1.974 3.409M30.758 16c0 8.15-6.607 14.758-14.758 14.758-8.15 0-14.758-6.607-14.758-14.758C1.242 7.85 7.85 1.242 16 1.242c8.15 0 14.758 6.608 14.758 14.758Z&quot;/%3E%3C/svg%3E"
+    type="image/svg+xml">
+  <link rel="stylesheet" href="/dashboard/7.css">
+  <link rel="stylesheet" href="/dashboard/index.css">
+</head>
+
+<body class="has-scrollbar" x-data="feApp" x-init="init()" x-cloak>
+  <div class="app-shell">
+    <div class="window glass active">
+      <div class="title-bar">
+        <div class="title-bar-text" x-text="currentPage.title"></div>
+        <div class="title-bar-controls">
+          <button aria-label="Minimize"></button>
+          <button aria-label="Maximize"></button>
+          <button aria-label="Close"></button>
+        </div>
+      </div>
+      <div class="window-body has-space">
+        <div class="loading-overlay" x-show="isLoading" x-transition.opacity>
+          <div class="loading-panel" role="status" aria-live="polite">
+            <span class="spinner animate" aria-hidden="true"></span>
+            <div>Loading dashboard...</div>
+          </div>
+        </div>
+        <section class="tabs" aria-label="Codex FE tabs">
+          <menu role="tablist" aria-label="Codex FE tabs">
+            <template x-for="page in pages" :key="page.id">
+              <button role="tab" type="button" :aria-controls="page.tabId" :aria-selected="view === page.id"
+                :tabindex="view === page.id ? 0 : -1" @click="setView(page.id)" @focus="setView(page.id)">
+                <span x-text="page.label"></span>
+              </button>
+            </template>
+          </menu>
+
+          <article role="tabpanel" id="tab-dashboard" :hidden="view !== 'dashboard'">
+            <div class="hero-banner">
+              <h2>Quota remaining and routing health</h2>
+              <p>Live summary of remaining quota for Codex traffic routed through the ChatGPT-style backend. Account
+                status and load
+                balancing signals are surfaced here.</p>
+              <div class="badge-row">
+                <template x-for="badge in dashboard.badges" :key="badge.label">
+                  <span class="status-pill" :class="badge.status" x-text="badge.label"></span>
+                </template>
+              </div>
+            </div>
+
+            <div class="section-grid" style="margin-top: 12px">
+              <template x-for="stat in dashboard.stats" :key="stat.title">
+                <div class="panel">
+                  <h3 x-text="stat.title"></h3>
+                  <div class="stat-value" x-text="stat.value"></div>
+                  <div class="stat-meta" x-text="stat.meta"></div>
+                </div>
+              </template>
+            </div>
+
+            <div class="two-column two-column--equal" style="margin-top: 12px">
+              <template x-for="donut in dashboard.donuts" :key="donut.title">
+                <div class="panel">
+                  <h3 x-text="donut.title"></h3>
+                  <div class="donut-wrap">
+                    <div class="donut" :style="{ '--donut-data': donut.gradient }">
+                      <div class="donut-center">
+                        <strong x-text="donut.range"></strong>
+                        <div x-text="donut.total"></div>
+                      </div>
+                    </div>
+                    <ul class="legend">
+                      <template x-for="item in donut.items" :key="item.label">
+                        <li>
+                          <span>
+                            <i :style="{ '--legend-color': item.color }"></i>
+                            <span x-text="item.label"></span>
+                          </span>
+                          <span x-text="item.detail"></span>
+                        </li>
+                      </template>
+                    </ul>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <section style="margin-top: 12px">
+              <h3>Account status</h3>
+              <div class="account-grid">
+                <template x-for="card in dashboard.accountCards" :key="card.email">
+                  <div class="account-card">
+                    <header>
+                      <div>
+                        <div x-text="`${card.email} (${card.plan})`"></div>
+                        <div class="account-id" x-text="card.accountId"></div>
+                      </div>
+                      <span class="status-pill" :class="card.status.class" x-text="card.status.label"></span>
+                    </header>
+                    <div class="progress-row">
+                      <label
+                        x-text="`Remaining (${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`"></label>
+                      <template x-if="card.marquee">
+                        <div role="progressbar" class="marquee"></div>
+                      </template>
+                      <template x-if="!card.marquee">
+                        <div role="progressbar" :class="card.progressClass" aria-valuemin="0" aria-valuemax="100"
+                          :aria-valuenow="card.remaining">
+                          <div :style="{ width: `${card.remaining}%` }"></div>
+                        </div>
+                      </template>
+                      <span class="text-muted" x-text="card.remainingText"></span>
+                    </div>
+                    <div class="text-muted" x-text="card.meta"></div>
+                    <div class="account-actions">
+                      <template x-for="action in card.actions" :key="action.label">
+                        <button x-text="action.label" @click="handleAccountAction(action, card)"></button>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </section>
+
+            <div class="panel" style="margin-top: 12px">
+              <h3>Recent requests</h3>
+              <div class="table-wrap table-wrap--requests table-wrap--column-lines has-scrollbar">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="highlighted indicator">Time</th>
+                      <th>Account</th>
+                      <th>Model</th>
+                      <th>Status</th>
+                      <th>Error</th>
+                      <th style="text-align: right">Tokens</th>
+                      <th style="text-align: right">Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="request in dashboard.requests" :key="request.key">
+                      <tr>
+                        <td x-text="request.time"></td>
+                        <td x-text="request.account"></td>
+                        <td x-text="request.model"></td>
+                        <td><span class="status-pill" :class="request.status.class"
+                            x-text="request.status.label"></span></td>
+                        <td x-text="request.error" :title="request.errorTitle || ''"></td>
+                        <td style="text-align: right" x-text="request.tokens"></td>
+                        <td style="text-align: right" x-text="request.cost"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </article>
+
+          <article role="tabpanel" id="tab-accounts" :hidden="view !== 'accounts'">
+            <div class="two-column">
+              <div class="panel account-list-panel">
+                <h3>Account list</h3>
+                <div class="list-actions">
+                  <div class="searchbox">
+                    <input type="search" placeholder="Search accounts" aria-label="Search accounts"
+                      x-ref="accountSearch" x-model="accounts.searchQuery" @keydown.escape.prevent="clearAccountSearch">
+                    <button type="button" aria-label="search" title="Search accounts"
+                      @click="focusAccountSearch"></button>
+                  </div>
+                  <label role="button" :class="{ 'is-disabled': importState.isLoading }"
+                    @click="logImportClick('label')">
+                    <input type="file" class="file-input" accept="application/json" @click="logImportClick('input')"
+                      @change="handleAuthImport($event)" :disabled="importState.isLoading">
+                    Import auth.json
+                  </label>
+                  <button type="button" @click="openAddAccountDialog">Add account</button>
+                </div>
+                <div class="table-wrap table-wrap--column-lines has-scrollbar">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th class="highlighted indicator">Account ID</th>
+                        <th>Email</th>
+                        <th>Plan</th>
+                        <th>Status</th>
+                        <th style="text-align: right"
+                          x-text="`Remaining (${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`">
+                        </th>
+                        <th
+                          x-text="`Quota reset (${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`">
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="account in filteredAccounts" :key="account.id">
+                        <tr :class="{ highlighted: account.id === accounts.selectedId }"
+                          @click="selectAccount(account.id)" style="cursor: pointer">
+                          <td x-text="account.id"></td>
+                          <td x-text="account.email"></td>
+                          <td x-text="planLabel(account.plan)"></td>
+                          <td><span class="status-pill" :class="account.status"
+                              x-text="statusLabel(account.status)"></span>
+                          </td>
+                          <td style="text-align: right"
+                            x-text="formatPercent(account.usage?.secondaryRemainingPercent)">
+                          </td>
+                          <td x-text="formatQuotaResetLabel(account.resetAtSecondary)"></td>
+                        </tr>
+                      </template>
+                      <template x-if="filteredAccounts.length === 0">
+                        <tr>
+                          <td colspan="6" class="text-muted" style="text-align: center">
+                            <span
+                              x-text="accounts.searchQuery ? 'No accounts match your search.' : 'No accounts available.'"></span>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="panel">
+                <h3>Selected account</h3>
+                <div class="summary-list">
+                  <div><span>Email</span><strong x-text="selectedAccount.email"></strong></div>
+                  <div><span>Account ID</span><strong x-text="selectedAccount.id"></strong></div>
+                  <div><span>Plan</span><strong x-text="planLabel(selectedAccount.plan)"></strong></div>
+                  <div>
+                    <span>Status</span>
+                    <span class="status-pill" :class="selectedAccount.status"
+                      x-text="statusLabel(selectedAccount.status)"></span>
+                  </div>
+                  <div><span
+                      x-text="`Quota reset (${formatWindowLabel('primary', dashboardData.usage.primary.windowMinutes)})`"></span><strong
+                      x-text="formatQuotaResetLabel(selectedAccount.resetAtPrimary)"></strong></div>
+                  <div><span
+                      x-text="`Quota reset (${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`"></span><strong
+                      x-text="formatQuotaResetLabel(selectedAccount.resetAtSecondary)"></strong></div>
+                </div>
+
+                <div class="split-stack" style="margin-top: 12px">
+                  <div class="progress-row">
+                    <label
+                      x-text="`Remaining (${formatWindowLabel('primary', dashboardData.usage.primary.windowMinutes)})`"></label>
+                    <div role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                      :aria-valuenow="formatPercentValue(selectedAccount.usage?.primaryRemainingPercent)">
+                      <div :style="{ width: `${formatPercentValue(selectedAccount.usage?.primaryRemainingPercent)}%` }">
+                      </div>
+                    </div>
+                    <span class="text-muted"
+                      x-text="formatPercent(selectedAccount.usage?.primaryRemainingPercent)"></span>
+                  </div>
+                  <div class="progress-row">
+                    <label
+                      x-text="`Remaining (${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`"></label>
+                    <div role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                      :aria-valuenow="formatPercentValue(selectedAccount.usage?.secondaryRemainingPercent)">
+                      <div
+                        :style="{ width: `${formatPercentValue(selectedAccount.usage?.secondaryRemainingPercent)}%` }">
+                      </div>
+                    </div>
+                    <span class="text-muted"
+                      x-text="formatPercent(selectedAccount.usage?.secondaryRemainingPercent)"></span>
+                  </div>
+                </div>
+
+                <fieldset style="margin-top: 12px">
+                  <legend>Tokens</legend>
+                  <div class="summary-list">
+                    <div><span>Access token</span><span x-text="formatAccessTokenLabel(selectedAccount.auth)"></span>
+                    </div>
+                    <div><span>Refresh token</span><span x-text="formatRefreshTokenLabel(selectedAccount.auth)"></span>
+                    </div>
+                    <div><span>Id token</span><span x-text="formatIdTokenLabel(selectedAccount.auth)"></span></div>
+                  </div>
+                </fieldset>
+
+                <div class="inline-actions" style="margin-top: 12px">
+                  <template x-if="selectedAccount.status === 'deactivated'">
+                    <button @click="startReauthFlow">Re-authenticate</button>
+                  </template>
+                  <template x-if="selectedAccount.status === 'paused'">
+                    <button @click="resumeSelectedAccount">Resume</button>
+                  </template>
+                  <template x-if="selectedAccount.status !== 'deactivated' && selectedAccount.status !== 'paused'">
+                    <button @click="pauseSelectedAccount">Pause</button>
+                  </template>
+                  <button @click="deleteSelectedAccount">Delete</button>
+                </div>
+              </div>
+            </div>
+          </article>
+        </section>
+      </div>
+      <div class="status-bar">
+        <template x-for="item in statusItems" :key="item">
+          <p class="status-bar-field" x-text="item"></p>
+        </template>
+      </div>
+      <div class="dialog-backdrop auth-dialog-backdrop" :class="{ 'is-open': authDialog.open }"
+        :aria-hidden="!authDialog.open"></div>
+      <div class="window active is-bright auth-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="add-account-title" :aria-hidden="!authDialog.open" :class="{ 'is-open': authDialog.open }">
+        <div class="title-bar">
+          <div class="title-bar-text" id="add-account-title">Add account</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" @click="closeAddAccountDialog"></button>
+          </div>
+        </div>
+        <div class="window-body has-space auth-dialog__body">
+          <template x-if="authDialog.stage === 'intro'">
+            <div class="auth-dialog__intro">
+              <p class="auth-dialog__lead">Sign in with ChatGPT OAuth. API keys are not supported.</p>
+              <fieldset class="auth-dialog__methods">
+                <legend>Sign-in method</legend>
+                <div class="auth-dialog__option">
+                  <input id="auth-method-browser" type="radio" name="auth-method" value="browser"
+                    x-model="authDialog.selectedMethod">
+                  <label for="auth-method-browser">Browser login (PKCE)</label>
+                  <div class="auth-dialog__option-meta text-muted">Requires local callback on port 1455.</div>
+                </div>
+                <div class="auth-dialog__option">
+                  <input id="auth-method-device" type="radio" name="auth-method" value="device"
+                    x-model="authDialog.selectedMethod">
+                  <label for="auth-method-device">Device code</label>
+                  <div class="auth-dialog__option-meta text-muted">Use when running in Docker or remote environments.
+                  </div>
+                </div>
+              </fieldset>
+            </div>
+          </template>
+          <template x-if="authDialog.stage === 'browser'">
+            <div class="auth-dialog__panel">
+              <p class="auth-dialog__lead">Open the authorization page to complete sign-in.</p>
+              <div class="auth-dialog__detail">
+                <div class="auth-dialog__label">Authorization URL</div>
+                <div class="auth-dialog__value auth-dialog__link" x-text="authDialog.authorizationUrl"></div>
+              </div>
+              <div class="auth-dialog__status">
+                <span class="spinner animate" aria-hidden="true" x-show="authDialog.status === 'pending'"></span>
+                <span x-text="authDialog.statusLabel"></span>
+              </div>
+            </div>
+          </template>
+          <template x-if="authDialog.stage === 'device'">
+            <div class="auth-dialog__panel">
+              <p class="auth-dialog__lead">Use the device code to sign in. Enter the code at the verification URL.</p>
+              <ol class="auth-dialog__steps">
+                <li>Open the verification URL.</li>
+                <li>Enter the user code shown below.</li>
+                <li>Return here to finish the sign-in.</li>
+              </ol>
+              <div class="auth-dialog__device-grid">
+                <div>
+                  <div class="auth-dialog__label">User code</div>
+                  <div class="auth-dialog__code-value" x-text="authDialog.userCode"></div>
+                </div>
+                <div>
+                  <div class="auth-dialog__label">Verification URL</div>
+                  <div class="auth-dialog__value auth-dialog__link" x-text="authDialog.verificationUrl"></div>
+                </div>
+              </div>
+              <div class="auth-dialog__device-meta text-muted">
+                Expires in <span x-text="formatCountdown(authDialog.remainingSeconds)"></span>
+              </div>
+              <div class="auth-dialog__status">
+                <span class="spinner animate" aria-hidden="true" x-show="authDialog.status === 'pending'"></span>
+                <span x-text="authDialog.statusLabel"></span>
+              </div>
+            </div>
+          </template>
+          <template x-if="authDialog.stage === 'success'">
+            <div class="auth-dialog__panel">
+              <p class="auth-dialog__lead">Account linked successfully.</p>
+              <p class="text-muted">Return to the dashboard and select the new account.</p>
+            </div>
+          </template>
+          <template x-if="authDialog.stage === 'error'">
+            <div class="auth-dialog__panel auth-dialog__error">
+              <p class="auth-dialog__lead">Authorization failed.</p>
+              <p class="text-muted" x-text="authDialog.errorMessage"></p>
+            </div>
+          </template>
+        </div>
+        <footer class="auth-dialog__actions">
+          <div class="auth-dialog__actions-row" x-show="authDialog.stage === 'intro'">
+            <button type="button" @click="closeAddAccountDialog">Cancel</button>
+            <button type="button" class="default" @click="startOAuth" :disabled="authDialog.isLoading">Start sign-in
+            </button>
+          </div>
+          <div class="auth-dialog__actions-row" x-show="authDialog.stage === 'browser'">
+            <button type="button" @click="resetAuthDialogState">Change method</button>
+            <button type="button" class="default" @click="openAuthorizationUrl"
+              :disabled="!authDialog.authorizationUrl">Open sign-in page</button>
+          </div>
+          <div class="auth-dialog__actions-row" x-show="authDialog.stage === 'device'">
+            <button type="button" @click="resetAuthDialogState">Change method</button>
+            <button type="button" @click="copyToClipboard(authDialog.userCode, 'User code')"
+              :disabled="!authDialog.userCode">Copy code</button>
+            <button type="button" @click="openVerificationUrl" :disabled="!authDialog.verificationUrl">Open link
+            </button>
+          </div>
+          <div class="auth-dialog__actions-row" x-show="authDialog.stage === 'success'">
+            <button type="button" class="default" @click="closeAddAccountDialog">Done</button>
+          </div>
+          <div class="auth-dialog__actions-row" x-show="authDialog.stage === 'error'">
+            <button type="button" @click="resetAuthDialogState">Try again</button>
+            <button type="button" class="default" @click="closeAddAccountDialog">Close</button>
+          </div>
+        </footer>
+      </div>
+      <div class="dialog-backdrop" :class="{ 'is-open': messageBox.open }" :aria-hidden="!messageBox.open"
+        @click="closeMessageBox"></div>
+      <div class="window active is-bright message-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="message-box-title" aria-describedby="message-box-body" :aria-hidden="!messageBox.open"
+        :class="{ 'is-open': messageBox.open }">
+        <div class="title-bar">
+          <div class="title-bar-text" id="message-box-title" x-text="messageBox.title"></div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" @click="closeMessageBox"></button>
+          </div>
+        </div>
+        <div class="window-body has-space message-dialog__body">
+          <div class="message-dialog__content">
+            <div class="message-dialog__icon" :class="messageBox.iconTone ? `is-${messageBox.iconTone}` : ''"
+              aria-hidden="true" x-show="messageBox.iconTone"></div>
+            <div class="message-dialog__copy">
+              <p id="message-box-body" x-text="messageBox.message"></p>
+              <template x-if="messageBox.details">
+                <pre class="code-box message-dialog__details" x-text="messageBox.details"></pre>
+              </template>
+            </div>
+          </div>
+        </div>
+        <footer class="message-dialog__actions">
+          <button x-show="messageBox.mode === 'confirm'" type="button" @click="cancelMessageBox"
+            x-text="messageBox.cancelLabel"></button>
+          <button x-show="messageBox.mode === 'confirm'" type="button" class="default" @click="confirmMessageBox"
+            x-text="messageBox.confirmLabel"></button>
+          <button x-show="messageBox.mode !== 'confirm'" type="button" class="default"
+            @click="closeMessageBox">OK</button>
+        </footer>
+      </div>
+    </div>
+  </div>
+  <script defer src="/dashboard/index.js"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.13.2/dist/cdn.min.js"></script>
+</body>
+
+</html>

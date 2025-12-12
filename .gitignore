@@ -1,0 +1,37 @@
+# Project-specific
+refs/
+poc/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env/config
+.env
+.env.*
+!.env.example
+.python-version
+
+# Build artifacts
+build/
+dist/
+
+# Node
+node_modules/
+
+# Editors/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local
+.local/
+
+app/static/components

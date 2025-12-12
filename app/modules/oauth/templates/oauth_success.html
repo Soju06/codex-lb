@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+  <title>Sign into Codex LB</title>
+  <link rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;32&quot; height=&quot;32&quot; fill=&quot;none&quot; viewBox=&quot;0 0 32 32&quot;%3E%3Cpath stroke=&quot;%23000&quot; stroke-linecap=&quot;round&quot; stroke-width=&quot;2.484&quot; d=&quot;M22.356 19.797H17.17M9.662 12.29l1.979 3.576a.511.511 0 0 1-.005.504l-1.974 3.409M30.758 16c0 8.15-6.607 14.758-14.758 14.758-8.15 0-14.758-6.607-14.758-14.758C1.242 7.85 7.85 1.242 16 1.242c8.15 0 14.758 6.608 14.758 14.758Z&quot;/%3E%3C/svg%3E"
+    type="image/svg+xml">
+  <style>
+    .container {
+      margin: auto;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      background: white;
+
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    }
+
+    .inner-container {
+      width: 400px;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 20px;
+      display: inline-flex;
+    }
+
+    .content {
+      align-self: stretch;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 20px;
+      display: flex;
+      margin-top: 15vh;
+    }
+
+    .title {
+      text-align: center;
+      color: var(--text-primary, #0D0D0D);
+      font-size: 32px;
+      font-weight: 400;
+      line-height: 40px;
+      word-wrap: break-word;
+    }
+
+    .setup-description {
+      align-self: stretch;
+      color: var(--text-secondary, #5D5D5D);
+      font-size: 14px;
+      font-weight: 400;
+      line-height: 20px;
+      word-wrap: break-word;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 4rem;
+      height: 4rem;
+      border-radius: 16px;
+      border: .5px solid rgba(0, 0, 0, 0.1);
+      box-shadow: rgba(0, 0, 0, 0.1) 0px 4px 16px 0px;
+      box-sizing: border-box;
+      background-color: rgb(255, 255, 255);
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="inner-container">
+      <div class="content">
+        <div class="logo">
+          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="none" viewBox="0 0 32 32">
+            <path stroke="#000" stroke-linecap="round" stroke-width="2.484"
+              d="M22.356 19.797H17.17M9.662 12.29l1.979 3.576a.511.511 0 0 1-.005.504l-1.974 3.409M30.758 16c0 8.15-6.607 14.758-14.758 14.758-8.15 0-14.758-6.607-14.758-14.758C1.242 7.85 7.85 1.242 16 1.242c8.15 0 14.758 6.608 14.758 14.758Z">
+            </path>
+          </svg>
+        </div>
+        <div class="title">Signed in to Codex LB</div>
+      </div>
+      <div class="close-box" style="display: flex;">
+        <div class="setup-description" id="close-message">
+          Closing in <span id="close-countdown">3</span>s...
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    (() => {
+      const countdown = document.getElementById("close-countdown");
+      const message = document.getElementById("close-message");
+      let remaining = 3;
+      const tick = () => {
+        if (remaining <= 0) {
+          if (message) {
+            message.textContent = "Closing...";
+          }
+          window.close();
+          return;
+        }
+        if (countdown) {
+          countdown.textContent = String(remaining);
+        } else if (message) {
+          message.textContent = `Closing in ${remaining}s...`;
+        }
+        remaining -= 1;
+        window.setTimeout(tick, 1000);
+      };
+      tick();
+    })();
+  </script>
+</body>
+
+</html>

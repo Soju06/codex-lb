@@ -1,0 +1,79 @@
+[project]
+name = "codex-lb"
+version = "0.1.0"
+description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Soju06", email = "qlskssk@gmail.com" }]
+maintainers = [{ name = "Soju06", email = "qlskssk@gmail.com" }]
+keywords = [
+    "codex",
+    "load-balancer",
+    "proxy",
+    "fastapi",
+    "chatgpt",
+    "rate-limit",
+    "usage",
+    "dashboard",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Networking",
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.13.2",
+    "aiohttp-retry>=2.9.1",
+    "aiosqlite>=0.22.1",
+    "cryptography>=46.0.3",
+    "python-dotenv>=1.2.1",
+    "fastapi[standard]>=0.128.0",
+    "greenlet>=3.3.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "python-multipart>=0.0.21",
+    "sqlalchemy>=2.0.45",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "httpx>=0.28.1",
+    "ruff>=0.14.10",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that exercise multiple layers together",
+    "unit: fast isolated tests",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[project.scripts]
+codex-lb = "app.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

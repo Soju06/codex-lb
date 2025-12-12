@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
+TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
+
+os.environ["CODEX_LB_DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
+os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
+os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
+
+from app.db.models import Base  # noqa: E402
+from app.db.session import engine  # noqa: E402
+from app.main import create_app  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def app_instance():
+    app = create_app()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    return app
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def dispose_engine():
+    yield
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_setup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    return True
+
+
+@pytest_asyncio.fixture
+async def async_client(app_instance):
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            yield client
+
+
+@pytest.fixture(autouse=True)
+def temp_key_file(tmp_path, monkeypatch):
+    key_path = tmp_path / "encryption.key"
+    monkeypatch.setenv("CODEX_LB_ENCRYPTION_KEY_FILE", str(key_path))
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    return key_path

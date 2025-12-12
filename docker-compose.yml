@@ -1,0 +1,35 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "2455:2455"
+      - "1455:1455"
+    command:
+      - fastapi
+      - run
+      - app/main.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "2455"
+      - --reload
+    environment:
+      CODEX_LB_DATABASE_URL: "sqlite+aiosqlite:////var/lib/codex-lb/store.db"
+      CODEX_LB_ENCRYPTION_KEY_FILE: "/var/lib/codex-lb/encryption.key"
+      CODEX_LB_OAUTH_CALLBACK_HOST: "0.0.0.0"
+    volumes:
+      - "${HOME}/.codex-lb:/var/lib/codex-lb"
+    develop:
+      watch:
+        - action: sync
+          path: ./app
+          target: /app/app
+        - action: rebuild
+          path: ./pyproject.toml
+        - action: rebuild
+          path: ./uv.lock
+        - action: rebuild
+          path: ./Dockerfile
+    restart: unless-stopped

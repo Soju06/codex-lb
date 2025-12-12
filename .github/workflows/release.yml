@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (sdist + wheel)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Verify tag matches pyproject version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+          try:
+              import tomllib  # py3.11+
+          except Exception:  # pragma: no cover
+              import tomli as tomllib
+
+          tag_ref = os.environ.get("GITHUB_REF", "")
+          tag = tag_ref.split("/")[-1]
+          m = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
+          if not m:
+              print(f"Invalid tag format: {tag!r}")
+              sys.exit(1)
+          tag_ver = m.group(1)
+
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          proj_ver = data["project"]["version"]
+          if proj_ver != tag_ver:
+              print(f"pyproject.toml version ({proj_ver}) does not match tag ({tag_ver})")
+              sys.exit(1)
+          print(f"OK: {tag} matches pyproject.toml version {proj_ver}")
+          PY
+
+      - name: Build sdist + wheel
+        run: uvx --from build python -m build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: [build]
+    runs-on: ubuntu-24.04
+
+    permissions:
+      id-token: write
+
+    environment:
+      name: pypi
+      url: https://pypi.org/project/codex-lb/
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: List dist files
+        run: ls -la dist/
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+          print-hash: true
+
+  docker-image:
+    name: Build and push Docker image
+    needs: [build]
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  create-github-release:
+    name: Create GitHub Release
+    needs: [publish-to-pypi, docker-image]
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+
+          PREV_TAG=""
+          if git describe --tags --abbrev=0 "${TAG_NAME}^" >/dev/null 2>&1; then
+            PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^")"
+          fi
+
+          {
+            echo "## What's New in ${TAG_NAME}"
+            echo
+            if [ -n "${PREV_TAG}" ]; then
+              echo "### Changes"
+              git log --pretty=format:"- %s" "${PREV_TAG}..${TAG_NAME}"
+            else
+              echo "### Changes"
+              git log --pretty=format:"- %s" "${TAG_NAME}"
+            fi
+            echo
+            echo
+            echo "### Install / Run"
+            echo '```bash'
+            echo 'uvx codex-lb'
+            echo '```'
+          } > release_notes.md
+
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.notes.outputs.tag_name }}
+          name: Release ${{ steps.notes.outputs.tag_name }}
+          body_path: release_notes.md
+          files: "dist/*"
+          draft: false
+          prerelease: false

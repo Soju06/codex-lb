@@ -1,0 +1,12 @@
+{
+  "release-type": "python",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "app/__init__.py"
+      ]
+    }
+  }
+}

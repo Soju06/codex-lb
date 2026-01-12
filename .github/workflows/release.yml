@@ -216,7 +216,7 @@ jobs:
             echo
             echo "### Artifacts"
             if ls dist >/dev/null 2>&1; then
-              ls -1 dist | sed 's/^/- dist\\//'
+              ls -1 dist | sed 's|^|- dist/|'
             else
               echo "- dist/ (not available)"
             fi

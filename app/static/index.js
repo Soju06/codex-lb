@@ -251,6 +251,19 @@
 		return `${formatCompactNumber(total)} (${formatCompactNumber(cached)} Cached)`;
 	};
 
+	const formatModelLabel = (model, reasoningEffort) => {
+		const base = (model || "").trim();
+		if (!base) {
+			return "--";
+		}
+		const effort = (reasoningEffort || "").trim();
+		if (!effort) {
+			return base;
+		}
+		const normalized = effort.startsWith("x") ? effort.slice(1) : effort;
+		return `${base} ${normalized}`;
+	};
+
 	const formatCurrency = (value) => {
 		const numeric = toNumber(value);
 		if (numeric === null) {
@@ -562,6 +575,7 @@
 			accountId: entry.accountId,
 			requestId: entry.requestId,
 			model: entry.model,
+			reasoningEffort: entry.reasoningEffort ?? null,
 			status: entry.status,
 			tokens: toNumber(entry.tokens),
 			cachedInputTokens: toNumber(entry.cachedInputTokens),
@@ -887,12 +901,13 @@
 		const requests = state.dashboardData.recentRequests.map((request) => {
 			const rawError = request.errorMessage || request.errorCode || "";
 			const accountLabel = formatAccountLabel(request.accountId, accounts);
+			const modelLabel = formatModelLabel(request.model, request.reasoningEffort);
 			return {
 				key: `${request.requestId}-${request.timestamp}`,
 				requestId: request.requestId,
 				time: formatTimeLong(request.timestamp),
 				account: accountLabel,
-				model: request.model,
+				model: modelLabel,
 				status: {
 					class: requestStatusClass(request.status),
 					label: requestStatusLabel(request.status),

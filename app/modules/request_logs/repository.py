@@ -33,6 +33,7 @@ class RequestLogsRepository:
         requested_at: datetime | None = None,
         cached_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         log = RequestLog(
@@ -43,6 +44,7 @@ class RequestLogsRepository:
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
             reasoning_tokens=reasoning_tokens,
+            reasoning_effort=reasoning_effort,
             latency_ms=latency_ms,
             status=status,
             error_code=error_code,

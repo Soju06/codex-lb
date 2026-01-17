@@ -295,6 +295,7 @@ class ProxyService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account_id_value)
         model = payload.model
+        reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         start = time.monotonic()
         status = "success"
         error_code = None
@@ -375,6 +376,7 @@ class ProxyService:
                     output_tokens=output_tokens,
                     cached_input_tokens=cached_input_tokens,
                     reasoning_tokens=reasoning_tokens,
+                    reasoning_effort=reasoning_effort,
                     latency_ms=latency_ms,
                     status=status,
                     error_code=error_code,

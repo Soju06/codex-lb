@@ -18,6 +18,7 @@ class RequestLogEntry(DashboardModel):
     error_message: str | None = None
     tokens: int | None = None
     cached_input_tokens: int | None = None
+    reasoning_effort: str | None = None
     cost_usd: float | None = None
     latency_ms: int | None = None
 

@@ -243,6 +243,7 @@ async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, d
             output_tokens=None,
             cached_input_tokens=100,
             reasoning_tokens=400,
+            reasoning_effort="xhigh",
             latency_ms=50,
             status="success",
             error_code=None,
@@ -256,5 +257,6 @@ async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, d
     entry = payload[0]
     assert entry["tokens"] == 1400
     assert entry["cachedInputTokens"] == 100
+    assert entry["reasoningEffort"] == "xhigh"
     expected = round(_cost(1000, 400, 100), 6)
     assert entry["costUsd"] == pytest.approx(expected)

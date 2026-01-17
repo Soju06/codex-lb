@@ -68,6 +68,7 @@ def _to_entry(log: RequestLog) -> RequestLogEntry:
         account_id=log.account_id,
         request_id=log.request_id,
         model=log.model,
+        reasoning_effort=log.reasoning_effort,
         status=_log_status(log),
         error_code=log.error_code,
         error_message=log.error_message,

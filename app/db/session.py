@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import AsyncIterator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config.settings import get_settings
@@ -71,3 +72,12 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if DATABASE_URL.startswith("sqlite"):
+            await _ensure_sqlite_request_logs_columns(conn)
+
+
+async def _ensure_sqlite_request_logs_columns(conn) -> None:
+    result = await conn.execute(text("PRAGMA table_info(request_logs)"))
+    columns = {row[1] for row in result.fetchall()}
+    if "reasoning_effort" not in columns:
+        await conn.execute(text("ALTER TABLE request_logs ADD COLUMN reasoning_effort VARCHAR"))

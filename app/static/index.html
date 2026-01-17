@@ -105,6 +105,21 @@
                     </header>
                     <div class="progress-row">
                       <label
+                        x-text="`Remaining (${formatWindowLabel('primary', dashboardData.usage.primary.windowMinutes)})`"></label>
+                      <template x-if="card.marquee">
+                        <div role="progressbar" class="marquee"></div>
+                      </template>
+                      <template x-if="!card.marquee">
+                        <div role="progressbar" :class="card.progressClass" aria-valuemin="0" aria-valuemax="100"
+                          :aria-valuenow="card.primaryRemaining">
+                          <div :style="{ width: `${card.primaryRemaining}%` }"></div>
+                        </div>
+                      </template>
+                      <span class="text-muted" x-text="card.primaryRemainingText"></span>
+                    </div>
+                    <div class="text-muted" x-text="card.primaryMeta"></div>
+                    <div class="progress-row" style="margin-top: 6px">
+                      <label
                         x-text="`Remaining (${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`"></label>
                       <template x-if="card.marquee">
                         <div role="progressbar" class="marquee"></div>

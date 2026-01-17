@@ -368,13 +368,17 @@
 	};
 
 	const formatRelative = (ms) => {
-		const minutes = Math.ceil(ms / 60000);
+		const minutes = Math.max(0, Math.ceil(ms / 60000));
 		if (minutes < 60) {
 			return `in ${minutes}m`;
 		}
-		const hours = Math.ceil(minutes / 60);
+		const hours = Math.floor(minutes / 60);
 		if (hours < 24) {
-			return `in ${hours}h`;
+			const remainderMinutes = minutes % 60;
+			if (remainderMinutes === 0) {
+				return `in ${hours}h`;
+			}
+			return `in ${hours}h${remainderMinutes}m`;
 		}
 		const days = Math.ceil(hours / 24);
 		return `in ${days}d`;
@@ -399,17 +403,13 @@
 		return formatRelative(diffMs);
 	};
 
-	const formatQuotaResetMeta = (resetAtSecondary, windowMinutesSecondary) => {
-		const labelSecondary = formatQuotaResetLabel(resetAtSecondary);
-		const windowSecondary = formatWindowLabel(
-			"secondary",
-			windowMinutesSecondary,
-		);
-		const secondaryOk = labelSecondary !== RESET_ERROR_LABEL;
-		if (!secondaryOk) {
+	const formatQuotaResetMeta = (resetAt, windowKey, windowMinutes) => {
+		const label = formatQuotaResetLabel(resetAt);
+		const window = formatWindowLabel(windowKey, windowMinutes);
+		if (label === RESET_ERROR_LABEL) {
 			return "Quota reset unavailable";
 		}
-		return `Quota reset (${windowSecondary}) · ${labelSecondary}`;
+		return `Quota reset (${window}) · ${label}`;
 	};
 
 	const buildUsageWindowTitle = (key, minutes) =>
@@ -815,6 +815,8 @@
 			.filter(Boolean);
 
 		const metrics = state.dashboardData.metrics;
+		const primaryWindowMinutes =
+			state.dashboardData.usage?.primary?.windowMinutes ?? null;
 		const stats = [
 			{
 				title: `Tokens (${formatWindowLabel("secondary", secondaryWindowMinutes)})`,
@@ -885,8 +887,11 @@
 		});
 
 		const accountCards = accounts.map((account) => {
+			const primaryRemaining =
+				toNumber(account.usage?.primaryRemainingPercent) || 0;
 			const secondaryRemaining =
 				toNumber(account.usage?.secondaryRemainingPercent) || 0;
+			const primaryRemainingRounded = formatPercentValue(primaryRemaining);
 			const remainingRounded = formatPercentValue(secondaryRemaining);
 			return {
 				email: account.email,
@@ -896,12 +901,20 @@
 					class: account.status,
 					label: statusLabel(account.status),
 				},
+				primaryRemaining: primaryRemainingRounded,
+				primaryRemainingText: formatPercent(primaryRemaining),
+				primaryMeta: formatQuotaResetMeta(
+					account.resetAtPrimary,
+					"primary",
+					primaryWindowMinutes,
+				),
 				remaining: remainingRounded,
 				remainingText: formatPercent(secondaryRemaining),
 				progressClass: progressClass(account.status),
 				marquee: account.status === "deactivated",
 				meta: formatQuotaResetMeta(
 					account.resetAtSecondary,
+					"secondary",
 					secondaryWindowMinutes,
 				),
 				actions: buildAccountActions(account),

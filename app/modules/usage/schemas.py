@@ -30,6 +30,7 @@ class UsageCost(DashboardModel):
 class UsageMetrics(DashboardModel):
     requests_7d: int | None = Field(default=None, alias="requests7d")
     tokens_secondary_window: int | None = None
+    cached_tokens_secondary_window: int | None = None
     error_rate_7d: float | None = Field(default=None, alias="errorRate7d")
     top_error: str | None = None
 

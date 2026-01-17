@@ -13,6 +13,17 @@ class RequestLogLike(Protocol):
     reasoning_tokens: int | None
 
 
+def cached_input_tokens_from_log(log: RequestLogLike) -> int | None:
+    cached_tokens = log.cached_input_tokens
+    if cached_tokens is None:
+        return None
+    cached_tokens = max(0, int(cached_tokens))
+    input_tokens = log.input_tokens
+    if input_tokens is not None:
+        cached_tokens = min(cached_tokens, int(input_tokens))
+    return cached_tokens
+
+
 def usage_tokens_from_log(log: RequestLogLike) -> UsageTokens | None:
     input_tokens = log.input_tokens
     if input_tokens is None:
@@ -20,8 +31,7 @@ def usage_tokens_from_log(log: RequestLogLike) -> UsageTokens | None:
     output_tokens = log.output_tokens if log.output_tokens is not None else log.reasoning_tokens
     if output_tokens is None:
         return None
-    cached_tokens = log.cached_input_tokens or 0
-    cached_tokens = max(0, min(cached_tokens, input_tokens))
+    cached_tokens = cached_input_tokens_from_log(log) or 0
     return UsageTokens(
         input_tokens=float(input_tokens),
         output_tokens=float(output_tokens),

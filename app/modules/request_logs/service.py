@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.core.usage.logs import cost_from_log, total_tokens_from_log
+from app.core.usage.logs import cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
 from app.db.models import RequestLog
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.schemas import RequestLogEntry
@@ -72,6 +72,7 @@ def _to_entry(log: RequestLog) -> RequestLogEntry:
         error_code=log.error_code,
         error_message=log.error_message,
         tokens=total_tokens_from_log(log),
+        cached_input_tokens=cached_input_tokens_from_log(log),
         cost_usd=cost_from_log(log, precision=6),
         latency_ms=log.latency_ms,
     )

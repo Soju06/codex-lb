@@ -74,3 +74,4 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     older = payload[1]
     assert older["status"] == "ok"
     assert older["tokens"] == 300
+    assert older["cachedInputTokens"] is None

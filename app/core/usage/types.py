@@ -67,8 +67,9 @@ class UsageCostSummary:
 class UsageMetricsSummary:
     requests_7d: int | None
     tokens_secondary_window: int | None
-    error_rate_7d: float | None
-    top_error: str | None
+    cached_tokens_secondary_window: int | None = None
+    error_rate_7d: float | None = None
+    top_error: str | None = None
 
 
 @dataclass(frozen=True)

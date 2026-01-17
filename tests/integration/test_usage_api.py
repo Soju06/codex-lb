@@ -61,6 +61,7 @@ async def test_usage_summary_empty_returns_zeroes(async_client):
     metrics = payload["metrics"]
     assert metrics["requests7d"] == 0
     assert metrics["tokensSecondaryWindow"] == 0
+    assert metrics["cachedTokensSecondaryWindow"] == 0
     assert metrics["errorRate7d"] is None
     assert metrics["topError"] is None
 

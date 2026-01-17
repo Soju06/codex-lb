@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -52,8 +53,8 @@ async def async_client(app_instance):
 
 
 @pytest.fixture(autouse=True)
-def temp_key_file(tmp_path, monkeypatch):
-    key_path = tmp_path / "encryption.key"
+def temp_key_file(monkeypatch):
+    key_path = TEST_DB_DIR / f"encryption-{uuid4().hex}.key"
     monkeypatch.setenv("CODEX_LB_ENCRYPTION_KEY_FILE", str(key_path))
     from app.core.config.settings import get_settings
 

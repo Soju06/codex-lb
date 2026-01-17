@@ -16,6 +16,9 @@ PERMANENT_FAILURE_CODES = {
     "account_deleted": "Account has been deleted",
 }
 
+SECONDS_PER_DAY = 60 * 60 * 24
+UNKNOWN_RESET_BUCKET_DAYS = 10_000
+
 
 @dataclass
 class AccountState:
@@ -23,6 +26,8 @@ class AccountState:
     status: AccountStatus
     used_percent: float | None = None
     reset_at: float | None = None
+    secondary_used_percent: float | None = None
+    secondary_reset_at: int | None = None
     last_error_at: float | None = None
     last_selected_at: float | None = None
     error_count: int = 0
@@ -84,10 +89,21 @@ def select_account(states: Iterable[AccountState], now: float | None = None) -> 
                 return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
         return SelectionResult(None, "No available accounts")
 
-    def _sort_key(state: AccountState) -> tuple[float, float, str]:
-        used = state.used_percent if state.used_percent is not None else 0.0
+    def _sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
+        reset_bucket_days = UNKNOWN_RESET_BUCKET_DAYS
+        if state.secondary_reset_at is not None:
+            reset_bucket_days = max(
+                0,
+                int((state.secondary_reset_at - current) // SECONDS_PER_DAY),
+            )
+
+        primary_used = state.used_percent if state.used_percent is not None else 0.0
+        secondary_used = (
+            state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+        )
         last_selected = state.last_selected_at or 0.0
-        return used, last_selected, state.account_id
+
+        return reset_bucket_days, secondary_used, primary_used, last_selected, state.account_id
 
     selected = min(available, key=_sort_key)
     return SelectionResult(selected, None)

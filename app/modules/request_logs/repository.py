@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 
+import anyio
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,6 +97,7 @@ async def _safe_rollback(session: AsyncSession) -> None:
     if not session.in_transaction():
         return
     try:
-        await asyncio.shield(session.rollback())
-    except Exception:
+        with anyio.CancelScope(shield=True):
+            await session.rollback()
+    except BaseException:
         return

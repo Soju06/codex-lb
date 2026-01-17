@@ -19,8 +19,8 @@ services:
       CODEX_LB_DATABASE_URL: "sqlite+aiosqlite:////var/lib/codex-lb/store.db"
       CODEX_LB_ENCRYPTION_KEY_FILE: "/var/lib/codex-lb/encryption.key"
       CODEX_LB_OAUTH_CALLBACK_HOST: "0.0.0.0"
-      CODEX_LB_LOG_PROXY_REQUEST_SHAPE: "true"
-      CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY: "true"
+      CODEX_LB_LOG_PROXY_REQUEST_SHAPE: "${CODEX_LB_LOG_PROXY_REQUEST_SHAPE:-false}"
+      CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY: "${CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY:-false}"
     volumes:
       - "codex_lb_data-2:/var/lib/codex-lb"
     develop:

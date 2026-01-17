@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.errors import dashboard_error
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
-from app.db.session import init_db
+from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
@@ -37,7 +37,10 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        await close_http_client()
+        try:
+            await close_http_client()
+        finally:
+            await close_db()
 
 
 def create_app() -> FastAPI:

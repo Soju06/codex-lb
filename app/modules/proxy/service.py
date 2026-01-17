@@ -7,6 +7,7 @@ import time
 from datetime import timedelta
 from typing import AsyncIterator, Iterable, Mapping
 
+import anyio
 from pydantic import ValidationError
 
 from app.core import usage as usage_core
@@ -367,28 +368,29 @@ class ProxyService:
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
-            try:
-                await self._logs_repo.add_log(
-                    account_id=account_id_value,
-                    request_id=request_id,
-                    model=model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cached_input_tokens=cached_input_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    reasoning_effort=reasoning_effort,
-                    latency_ms=latency_ms,
-                    status=status,
-                    error_code=error_code,
-                    error_message=error_message,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to persist request log account_id=%s request_id=%s",
-                    account_id_value,
-                    request_id,
-                    exc_info=True,
-                )
+            with anyio.CancelScope(shield=True):
+                try:
+                    await self._logs_repo.add_log(
+                        account_id=account_id_value,
+                        request_id=request_id,
+                        model=model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_input_tokens=cached_input_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                        reasoning_effort=reasoning_effort,
+                        latency_ms=latency_ms,
+                        status=status,
+                        error_code=error_code,
+                        error_message=error_message,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to persist request log account_id=%s request_id=%s",
+                        account_id_value,
+                        request_id,
+                        exc_info=True,
+                    )
 
     async def _refresh_usage(self, accounts: list[Account]) -> None:
         latest_usage = await self._usage_repo.latest_by_account(window="primary")

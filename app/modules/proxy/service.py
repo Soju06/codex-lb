@@ -30,6 +30,7 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.auth_manager import AuthManager
 from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitStatusDetailsData,
@@ -49,13 +50,14 @@ class ProxyService:
         accounts_repo: AccountsRepository,
         usage_repo: UsageRepository,
         logs_repo: RequestLogsRepository,
+        sticky_repo: StickySessionsRepository,
     ) -> None:
         self._accounts_repo = accounts_repo
         self._usage_repo = usage_repo
         self._logs_repo = logs_repo
         self._encryptor = TokenEncryptor()
         self._auth_manager = AuthManager(accounts_repo)
-        self._load_balancer = LoadBalancer(accounts_repo, usage_repo)
+        self._load_balancer = LoadBalancer(accounts_repo, usage_repo, sticky_repo)
         self._usage_updater = UsageUpdater(usage_repo, accounts_repo)
 
     def stream_responses(
@@ -186,9 +188,10 @@ class ProxyService:
         propagate_http_errors: bool,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
+        sticky_key = _sticky_key_from_payload(payload)
         max_attempts = 3
         for attempt in range(max_attempts):
-            selection = await self._load_balancer.select_account()
+            selection = await self._load_balancer.select_account(sticky_key=sticky_key)
             account = selection.account
             if not account:
                 event = response_failed_event(
@@ -745,6 +748,11 @@ def _maybe_log_proxy_request_shape(
     request_id = get_request_id()
     prompt_cache_key = getattr(payload, "prompt_cache_key", None)
     prompt_cache_key_hash = _hash_identifier(prompt_cache_key) if isinstance(prompt_cache_key, str) else None
+    prompt_cache_key_raw = (
+        _truncate_identifier(prompt_cache_key)
+        if settings.log_proxy_request_shape_raw_cache_key and isinstance(prompt_cache_key, str)
+        else None
+    )
 
     extra_keys = sorted(payload.model_extra.keys()) if payload.model_extra else []
     fields_set = sorted(payload.model_fields_set)
@@ -752,13 +760,14 @@ def _maybe_log_proxy_request_shape(
     header_keys = _interesting_header_keys(headers)
 
     logger.warning(
-        "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s prompt_cache_key=%s fields=%s extra=%s headers=%s",
+        "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s",
         request_id,
         kind,
         payload.model,
         getattr(payload, "stream", None),
         input_summary,
         prompt_cache_key_hash,
+        prompt_cache_key_raw,
         fields_set,
         extra_keys,
         header_keys,
@@ -781,6 +790,12 @@ def _summarize_input(items: Sequence[object]) -> str:
     return f"{len(items)}({summary})"
 
 
+def _truncate_identifier(value: str, *, max_length: int = 96) -> str:
+    if len(value) <= max_length:
+        return value
+    return f"{value[:48]}...{value[-16:]}"
+
+
 def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
     allowlist = {
         "user-agent",
@@ -795,3 +810,11 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
         "x-codex-conversation-id",
     }
     return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})
+
+
+def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
+    value = payload.prompt_cache_key
+    if not value:
+        return None
+    stripped = value.strip()
+    return stripped or None

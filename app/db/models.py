@@ -77,6 +77,21 @@ class RequestLog(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class StickySession(Base):
+    __tablename__ = "sticky_sessions"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
+Index("idx_sticky_account", StickySession.account_id)

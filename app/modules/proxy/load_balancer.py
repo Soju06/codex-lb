@@ -6,6 +6,7 @@ from typing import Iterable
 
 from app.core.balancer import (
     AccountState,
+    SelectionResult,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
@@ -14,6 +15,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.proxy.usage_updater import UsageUpdater
 from app.modules.usage.repository import UsageRepository
 
@@ -33,13 +35,19 @@ class AccountSelection:
 
 
 class LoadBalancer:
-    def __init__(self, accounts_repo: AccountsRepository, usage_repo: UsageRepository) -> None:
+    def __init__(
+        self,
+        accounts_repo: AccountsRepository,
+        usage_repo: UsageRepository,
+        sticky_repo: StickySessionsRepository | None = None,
+    ) -> None:
         self._accounts_repo = accounts_repo
         self._usage_repo = usage_repo
         self._usage_updater = UsageUpdater(usage_repo, accounts_repo)
+        self._sticky_repo = sticky_repo
         self._runtime: dict[str, RuntimeState] = {}
 
-    async def select_account(self) -> AccountSelection:
+    async def select_account(self, sticky_key: str | None = None) -> AccountSelection:
         accounts = await self._accounts_repo.list_accounts()
         latest_primary = await self._usage_repo.latest_by_account()
         await self._usage_updater.refresh_accounts(accounts, latest_primary)
@@ -53,7 +61,11 @@ class LoadBalancer:
             runtime=self._runtime,
         )
 
-        result = select_account(states)
+        result = await self._select_with_stickiness(
+            states=states,
+            account_map=account_map,
+            sticky_key=sticky_key,
+        )
         for state in states:
             account = account_map.get(state.account_id)
             if account:
@@ -71,6 +83,31 @@ class LoadBalancer:
         if selected is None:
             return AccountSelection(account=None, error_message=result.error_message)
         return AccountSelection(account=selected, error_message=None)
+
+    async def _select_with_stickiness(
+        self,
+        *,
+        states: list[AccountState],
+        account_map: dict[str, Account],
+        sticky_key: str | None,
+    ) -> SelectionResult:
+        if not sticky_key or not self._sticky_repo:
+            return select_account(states)
+
+        existing = await self._sticky_repo.get_account_id(sticky_key)
+        if existing:
+            pinned = next((state for state in states if state.account_id == existing), None)
+            if pinned is None:
+                await self._sticky_repo.delete(sticky_key)
+            else:
+                pinned_result = select_account([pinned])
+                if pinned_result.account is not None:
+                    return pinned_result
+
+        chosen = select_account(states)
+        if chosen.account is not None and chosen.account.account_id in account_map:
+            await self._sticky_repo.upsert(sticky_key, chosen.account.account_id)
+        return chosen
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
         state = self._state_for(account)
@@ -152,13 +189,22 @@ def _state_from_account(
     runtime: RuntimeState,
 ) -> AccountState:
     primary_used = primary_entry.used_percent if primary_entry else None
+    primary_reset = primary_entry.reset_at if primary_entry else None
     secondary_used = secondary_entry.used_percent if secondary_entry else None
     secondary_reset = secondary_entry.reset_at if secondary_entry else None
+
+    effective_reset_at = runtime.reset_at
+    if account.status == AccountStatus.RATE_LIMITED and primary_reset is not None:
+        primary_reset_at = float(primary_reset)
+        if effective_reset_at is None:
+            effective_reset_at = primary_reset_at
+        else:
+            effective_reset_at = min(effective_reset_at, primary_reset_at)
 
     status, used_percent, reset_at = _apply_secondary_quota(
         status=account.status,
         primary_used=primary_used,
-        runtime_reset=runtime.reset_at,
+        runtime_reset=effective_reset_at,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
     )

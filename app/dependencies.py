@@ -12,6 +12,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.service import ProxyService
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
 from app.modules.usage.repository import UsageRepository
@@ -112,7 +113,8 @@ def get_proxy_context(
     accounts_repository = AccountsRepository(session)
     usage_repository = UsageRepository(session)
     request_logs_repository = RequestLogsRepository(session)
-    service = ProxyService(accounts_repository, usage_repository, request_logs_repository)
+    sticky_repository = StickySessionsRepository(session)
+    service = ProxyService(accounts_repository, usage_repository, request_logs_repository, sticky_repository)
     return ProxyContext(service=service)
 
 

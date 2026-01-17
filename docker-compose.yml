@@ -20,6 +20,7 @@ services:
       CODEX_LB_ENCRYPTION_KEY_FILE: "/var/lib/codex-lb/encryption.key"
       CODEX_LB_OAUTH_CALLBACK_HOST: "0.0.0.0"
       CODEX_LB_LOG_PROXY_REQUEST_SHAPE: "true"
+      CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY: "true"
     volumes:
       - "./.codex-lb:/var/lib/codex-lb"
     develop:

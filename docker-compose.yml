@@ -22,7 +22,7 @@ services:
       CODEX_LB_LOG_PROXY_REQUEST_SHAPE: "true"
       CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY: "true"
     volumes:
-      - "./.codex-lb:/var/lib/codex-lb"
+      - "codex_lb_data-2:/var/lib/codex-lb"
     develop:
       watch:
         - action: sync
@@ -35,3 +35,5 @@ services:
         - action: rebuild
           path: ./Dockerfile
     restart: unless-stopped
+volumes:
+  codex_lb_data-2:

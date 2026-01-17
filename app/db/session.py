@@ -15,12 +15,23 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 
 
 def _ensure_sqlite_dir(url: str) -> None:
-    prefix = "sqlite+aiosqlite:///"
-    if not url.startswith(prefix):
+    if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
         return
-    path = url[len(prefix) :]
-    if path == ":memory:":
+
+    marker = ":///"
+    marker_index = url.find(marker)
+    if marker_index < 0:
         return
+
+    # Works for both relative (sqlite+aiosqlite:///./db.sqlite) and absolute
+    # paths (sqlite+aiosqlite:////var/lib/app/db.sqlite).
+    path = url[marker_index + len(marker) :]
+    path = path.partition("?")[0]
+    path = path.partition("#")[0]
+
+    if not path or path == ":memory:":
+        return
+
     Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 

@@ -35,3 +35,4 @@ node_modules/
 .local/
 
 app/static/components
+.codex-lb/

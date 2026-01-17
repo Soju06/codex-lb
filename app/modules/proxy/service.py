@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from hashlib import sha256
 import time
 from datetime import timedelta
 from typing import AsyncIterator, Iterable, Mapping
@@ -9,6 +11,7 @@ from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
+from app.core.config.settings import get_settings
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
@@ -20,7 +23,7 @@ from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.usage.types import UsageWindowRow, UsageWindowSummary
-from app.core.utils.request_id import ensure_request_id
+from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -62,6 +65,7 @@ class ProxyService:
         *,
         propagate_http_errors: bool = False,
     ) -> AsyncIterator[str]:
+        _maybe_log_proxy_request_shape("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
         return self._stream_with_retry(
             payload,
@@ -74,6 +78,7 @@ class ProxyService:
         payload: ResponsesCompactRequest,
         headers: Mapping[str, str],
     ) -> OpenAIResponsePayload:
+        _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
         selection = await self._load_balancer.select_account()
         account = selection.account
@@ -726,3 +731,67 @@ def _upstream_error_from_openai(error: OpenAIError | None) -> UpstreamError:
     if isinstance(resets_in_seconds, (int, float)):
         payload["resets_in_seconds"] = resets_in_seconds
     return payload
+
+
+def _maybe_log_proxy_request_shape(
+    kind: str,
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    headers: Mapping[str, str],
+) -> None:
+    settings = get_settings()
+    if not settings.log_proxy_request_shape:
+        return
+
+    request_id = get_request_id()
+    prompt_cache_key = getattr(payload, "prompt_cache_key", None)
+    prompt_cache_key_hash = _hash_identifier(prompt_cache_key) if isinstance(prompt_cache_key, str) else None
+
+    extra_keys = sorted(payload.model_extra.keys()) if payload.model_extra else []
+    fields_set = sorted(payload.model_fields_set)
+    input_summary = _summarize_input(payload.input)
+    header_keys = _interesting_header_keys(headers)
+
+    logger.warning(
+        "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s prompt_cache_key=%s fields=%s extra=%s headers=%s",
+        request_id,
+        kind,
+        payload.model,
+        getattr(payload, "stream", None),
+        input_summary,
+        prompt_cache_key_hash,
+        fields_set,
+        extra_keys,
+        header_keys,
+    )
+
+
+def _hash_identifier(value: str) -> str:
+    digest = sha256(value.encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:12]}"
+
+
+def _summarize_input(items: Sequence[object]) -> str:
+    if not items:
+        return "0"
+    type_counts: dict[str, int] = {}
+    for item in items:
+        type_name = type(item).__name__
+        type_counts[type_name] = type_counts.get(type_name, 0) + 1
+    summary = ",".join(f"{key}={type_counts[key]}" for key in sorted(type_counts))
+    return f"{len(items)}({summary})"
+
+
+def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
+    allowlist = {
+        "user-agent",
+        "x-request-id",
+        "request-id",
+        "x-openai-client-id",
+        "x-openai-client-version",
+        "x-openai-client-arch",
+        "x-openai-client-os",
+        "x-openai-client-user-agent",
+        "x-codex-session-id",
+        "x-codex-conversation-id",
+    }
+    return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})

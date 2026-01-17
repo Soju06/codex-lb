@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = 60
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
+    log_proxy_request_shape: bool = False
 
     @field_validator("database_url")
     @classmethod

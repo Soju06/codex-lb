@@ -255,6 +255,16 @@
 		return `${formatCompactNumber(total)} (${formatCompactNumber(cached)} Cached)`;
 	};
 
+	const formatCachedTokensMeta = (totalTokens, cachedInputTokens) => {
+		const total = toNumber(totalTokens);
+		const cached = toNumber(cachedInputTokens);
+		if (total === null || total <= 0 || cached === null || cached <= 0) {
+			return "Cached: --";
+		}
+		const percent = Math.min(100, Math.max(0, (cached / total) * 100));
+		return `Cached: ${formatCompactNumber(cached)} (${Math.round(percent)}%)`;
+	};
+
 	const formatModelLabel = (model, reasoningEffort) => {
 		const base = (model || "").trim();
 		if (!base) {
@@ -264,7 +274,8 @@
 		if (!effort) {
 			return base;
 		}
-		return `${base} (${effort})`;
+		const normalized = effort.startsWith("x") ? effort.slice(1) : effort;
+		return `${base} ${normalized}`;
 	};
 
 	const formatCurrency = (value) => {
@@ -823,11 +834,11 @@
 		const stats = [
 			{
 				title: `Tokens (${formatWindowLabel("secondary", secondaryWindowMinutes)})`,
-				value: formatTokensWithCached(
+				value: formatCompactNumber(metrics.tokensSecondaryWindow),
+				meta: formatCachedTokensMeta(
 					metrics.tokensSecondaryWindow,
 					metrics.cachedTokensSecondaryWindow,
 				),
-				meta: "Scope: responses",
 			},
 			{
 				title: "Cost (7d)",

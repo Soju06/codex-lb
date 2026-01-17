@@ -8,6 +8,7 @@ import pytest
 
 import app.modules.proxy.service as proxy_module
 from app.core.crypto import TokenEncryptor
+from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -188,3 +189,86 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
     # First attempt is pinned acc_a, which rate limits; retry should switch to acc_b and update stickiness.
     assert seen[:2] == [acc_a.id, acc_b.id]
 
+
+@pytest.mark.asyncio
+async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatch):
+    await _import_account(async_client, "acc_c1", "c1@example.com")
+    await _import_account(async_client, "acc_c2", "c2@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id="acc_c1",
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id="acc_c2",
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    stream_seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        stream_seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    compact_seen: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        compact_seen.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    thread_key = "thread_compact_1"
+    stream_payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "prompt_cache_key": thread_key,
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_c1"]
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id="acc_c1",
+            used_percent=90.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id="acc_c2",
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    compact_payload = {
+        "model": "gpt-5.1",
+        "instructions": "summarize",
+        "input": [],
+        "prompt_cache_key": thread_key,  # extra field accepted by ResponsesCompactRequest (extra="allow")
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=compact_payload)
+    assert response.status_code == 200
+    assert compact_seen == ["acc_c2"]
+
+    response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_c1", "acc_c2"]

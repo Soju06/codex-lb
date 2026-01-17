@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import stat
 
 import pytest
@@ -54,6 +55,8 @@ def test_key_file_permissions_and_reuse(temp_key_file):
     first = get_or_create_key()
     second = get_or_create_key()
     assert first == second
+    if os.name == "nt":
+        pytest.skip("POSIX chmod semantics are not enforced on Windows")
     mode = stat.S_IMODE(temp_key_file.stat().st_mode)
     assert mode == 0o600
 

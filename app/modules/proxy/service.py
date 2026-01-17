@@ -82,7 +82,11 @@ class ProxyService:
     ) -> OpenAIResponsePayload:
         _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
-        selection = await self._load_balancer.select_account()
+        sticky_key = _sticky_key_from_compact_payload(payload)
+        selection = await self._load_balancer.select_account(
+            sticky_key=sticky_key,
+            reallocate_sticky=sticky_key is not None,
+        )
         account = selection.account
         if not account:
             raise ProxyResponseError(
@@ -747,6 +751,10 @@ def _maybe_log_proxy_request_shape(
 
     request_id = get_request_id()
     prompt_cache_key = getattr(payload, "prompt_cache_key", None)
+    if prompt_cache_key is None and payload.model_extra:
+        extra_value = payload.model_extra.get("prompt_cache_key")
+        if isinstance(extra_value, str):
+            prompt_cache_key = extra_value
     prompt_cache_key_hash = _hash_identifier(prompt_cache_key) if isinstance(prompt_cache_key, str) else None
     prompt_cache_key_raw = (
         _truncate_identifier(prompt_cache_key)
@@ -815,6 +823,16 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
     value = payload.prompt_cache_key
     if not value:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
+    if not payload.model_extra:
+        return None
+    value = payload.model_extra.get("prompt_cache_key")
+    if not isinstance(value, str):
         return None
     stripped = value.strip()
     return stripped or None

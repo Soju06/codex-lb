@@ -47,7 +47,12 @@ class LoadBalancer:
         self._sticky_repo = sticky_repo
         self._runtime: dict[str, RuntimeState] = {}
 
-    async def select_account(self, sticky_key: str | None = None) -> AccountSelection:
+    async def select_account(
+        self,
+        sticky_key: str | None = None,
+        *,
+        reallocate_sticky: bool = False,
+    ) -> AccountSelection:
         accounts = await self._accounts_repo.list_accounts()
         latest_primary = await self._usage_repo.latest_by_account()
         await self._usage_updater.refresh_accounts(accounts, latest_primary)
@@ -65,6 +70,7 @@ class LoadBalancer:
             states=states,
             account_map=account_map,
             sticky_key=sticky_key,
+            reallocate_sticky=reallocate_sticky,
         )
         for state in states:
             account = account_map.get(state.account_id)
@@ -90,9 +96,16 @@ class LoadBalancer:
         states: list[AccountState],
         account_map: dict[str, Account],
         sticky_key: str | None,
+        reallocate_sticky: bool,
     ) -> SelectionResult:
         if not sticky_key or not self._sticky_repo:
             return select_account(states)
+
+        if reallocate_sticky:
+            chosen = select_account(states)
+            if chosen.account is not None and chosen.account.account_id in account_map:
+                await self._sticky_repo.upsert(sticky_key, chosen.account.account_id)
+            return chosen
 
         existing = await self._sticky_repo.get_account_id(sticky_key)
         if existing:

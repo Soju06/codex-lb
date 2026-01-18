@@ -29,6 +29,12 @@ class StreamIdleTimeoutError(Exception):
     pass
 
 
+class StreamLineTooLongError(Exception):
+    def __init__(self, limit_bytes: int) -> None:
+        super().__init__(f"SSE line exceeded limit ({limit_bytes} bytes)")
+        self.limit_bytes = limit_bytes
+
+
 class ProxyResponseError(Exception):
     def __init__(self, status_code: int, payload: OpenAIErrorEnvelope) -> None:
         super().__init__(f"Proxy response error ({status_code})")
@@ -76,18 +82,34 @@ def _normalize_error_code(code: str | None, error_type: str | None) -> str:
 async def _iter_sse_lines(
     resp: aiohttp.ClientResponse,
     idle_timeout_seconds: float,
+    max_line_bytes: int,
 ) -> AsyncIterator[bytes]:
+    if max_line_bytes <= 0:
+        raise ValueError("max_line_bytes must be positive")
+
+    buffer = bytearray()
     while True:
         try:
-            line = await asyncio.wait_for(
-                resp.content.readline(),
-                timeout=idle_timeout_seconds,
-            )
+            chunk = await asyncio.wait_for(resp.content.readany(), timeout=idle_timeout_seconds)
         except asyncio.TimeoutError as exc:
             raise StreamIdleTimeoutError() from exc
-        if not line:
+        if not chunk:
             break
-        yield line
+
+        buffer.extend(chunk)
+        while True:
+            newline_index = buffer.find(b"\n")
+            if newline_index < 0:
+                break
+            line = bytes(buffer[: newline_index + 1])
+            del buffer[: newline_index + 1]
+            yield line
+
+        if len(buffer) > max_line_bytes:
+            raise StreamLineTooLongError(max_line_bytes)
+
+    if buffer:
+        yield bytes(buffer)
 
 
 async def _error_event_from_response(resp: aiohttp.ClientResponse) -> ResponseFailedEvent:
@@ -169,7 +191,11 @@ async def stream_responses(
                 yield format_sse_event(event)
                 return
 
-            async for raw_line in _iter_sse_lines(resp, settings.stream_idle_timeout_seconds):
+            async for raw_line in _iter_sse_lines(
+                resp,
+                settings.stream_idle_timeout_seconds,
+                settings.upstream_sse_max_line_bytes,
+            ):
                 line = raw_line.decode("utf-8", errors="replace")
                 event = parse_sse_event(line)
                 if event:
@@ -184,6 +210,15 @@ async def stream_responses(
             response_failed_event(
                 "stream_idle_timeout",
                 "Upstream stream idle timeout",
+                response_id=get_request_id(),
+            ),
+        )
+        return
+    except StreamLineTooLongError as exc:
+        yield format_sse_event(
+            response_failed_event(
+                "stream_line_too_long",
+                f"Upstream SSE line exceeded {exc.limit_bytes} bytes",
                 response_id=get_request_id(),
             ),
         )

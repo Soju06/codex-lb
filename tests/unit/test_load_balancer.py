@@ -41,7 +41,7 @@ def test_handle_rate_limit_sets_reset_at_from_message(monkeypatch):
     monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_rate_limit(state, {"message": "Try again in 1.5s"})
-    assert state.status == AccountStatus.ACTIVE
+    assert state.status == AccountStatus.RATE_LIMITED
     assert state.cooldown_until is not None
     assert state.cooldown_until == pytest.approx(now + 1.5)
 
@@ -52,7 +52,7 @@ def test_handle_rate_limit_uses_backoff_when_no_delay(monkeypatch):
     monkeypatch.setattr("app.core.balancer.logic.backoff_seconds", lambda _: 0.2)
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_rate_limit(state, {"message": "Rate limit exceeded."})
-    assert state.status == AccountStatus.ACTIVE
+    assert state.status == AccountStatus.RATE_LIMITED
     assert state.cooldown_until is not None
     assert state.cooldown_until == pytest.approx(now + 0.2)
 
@@ -127,3 +127,61 @@ def test_handle_permanent_failure_sets_reason():
     handle_permanent_failure(state, "refresh_token_expired")
     assert state.status == AccountStatus.DEACTIVATED
     assert state.deactivation_reason is not None
+
+def test_apply_usage_quota_respects_runtime_reset_for_quota_exceeded(monkeypatch):
+    now = 1_700_000_000.0
+    future = now + 3600.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    
+    # Normally 50% used would reset it to ACTIVE, but runtime_reset is in future
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        primary_used=50.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=None,
+        secondary_reset=None,
+    )
+    assert status == AccountStatus.QUOTA_EXCEEDED
+    assert used_percent == 50.0
+    assert reset_at == future
+
+
+def test_apply_usage_quota_respects_runtime_reset_for_rate_limited(monkeypatch):
+    now = 1_700_000_000.0
+    future = now + 3600.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    
+    # Normally 50% used would reset it to ACTIVE, but runtime_reset is in future
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.RATE_LIMITED,
+        primary_used=50.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=None,
+        secondary_reset=None,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 50.0
+    assert reset_at == future
+
+
+def test_apply_usage_quota_resets_to_active_if_runtime_reset_expired(monkeypatch):
+    now = 1_700_000_000.0
+    past = now - 3600.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.RATE_LIMITED,
+        primary_used=50.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=past,
+        secondary_used=None,
+        secondary_reset=None,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 50.0
+    assert reset_at is None

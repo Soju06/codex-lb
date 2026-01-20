@@ -105,8 +105,14 @@ def select_account(states: Iterable[AccountState], now: float | None = None) -> 
 
 
 def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
+    state.status = AccountStatus.RATE_LIMITED
     state.error_count += 1
     state.last_error_at = time.time()
+    
+    reset_at = _extract_reset_at(error)
+    if reset_at is not None:
+        state.reset_at = reset_at
+    
     message = error.get("message")
     delay = parse_retry_after(message) if message else None
     if delay is None:

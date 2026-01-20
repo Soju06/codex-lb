@@ -8,7 +8,11 @@ from typing import Awaitable, Callable, Final
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.migrations.versions import add_request_logs_reasoning_effort, normalize_account_plan_types
+from app.db.migrations.versions import (
+    add_accounts_reset_at,
+    add_request_logs_reasoning_effort,
+    normalize_account_plan_types,
+)
 
 _CREATE_MIGRATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -33,6 +37,7 @@ class Migration:
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("001_normalize_account_plan_types", normalize_account_plan_types.run),
     Migration("002_add_request_logs_reasoning_effort", add_request_logs_reasoning_effort.run),
+    Migration("003_add_accounts_reset_at", add_accounts_reset_at.run),
 )
 
 

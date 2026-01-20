@@ -42,11 +42,12 @@ class AccountsRepository:
         account_id: str,
         status: AccountStatus,
         deactivation_reason: str | None = None,
+        reset_at: int | None = None,
     ) -> bool:
         result = await self._session.execute(
             update(Account)
             .where(Account.id == account_id)
-            .values(status=status, deactivation_reason=deactivation_reason)
+            .values(status=status, deactivation_reason=deactivation_reason, reset_at=reset_at)
         )
         await self._session.commit()
         return bool(getattr(result, "rowcount", 0) or 0)

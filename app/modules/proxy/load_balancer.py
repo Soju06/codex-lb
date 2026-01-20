@@ -116,14 +116,21 @@ class LoadBalancer:
         runtime.last_error_at = state.last_error_at
         runtime.error_count = state.error_count
 
-        if account.status != state.status or account.deactivation_reason != state.deactivation_reason:
+        reset_at_int = int(state.reset_at) if state.reset_at else None
+        status_changed = account.status != state.status
+        reason_changed = account.deactivation_reason != state.deactivation_reason
+        reset_changed = account.reset_at != reset_at_int
+
+        if status_changed or reason_changed or reset_changed:
             await self._accounts_repo.update_status(
                 account.id,
                 state.status,
                 state.deactivation_reason,
+                reset_at_int,
             )
             account.status = state.status
             account.deactivation_reason = state.deactivation_reason
+            account.reset_at = reset_at_int
 
 
 def _build_states(
@@ -161,12 +168,17 @@ def _state_from_account(
     secondary_used = secondary_entry.used_percent if secondary_entry else None
     secondary_reset = secondary_entry.reset_at if secondary_entry else None
 
+    # Use account.reset_at from DB as the authoritative source for runtime reset
+    # This survives across requests since LoadBalancer is instantiated per-request
+    db_reset_at = float(account.reset_at) if account.reset_at else None
+    effective_runtime_reset = db_reset_at or runtime.reset_at
+
     status, used_percent, reset_at = apply_usage_quota(
         status=account.status,
         primary_used=primary_used,
         primary_reset=primary_reset,
         primary_window_minutes=primary_window_minutes,
-        runtime_reset=runtime.reset_at,
+        runtime_reset=effective_runtime_reset,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
     )

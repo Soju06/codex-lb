@@ -41,6 +41,7 @@ class Account(Base):
         nullable=False,
     )
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class UsageHistory(Base):

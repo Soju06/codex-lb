@@ -892,7 +892,7 @@
 					color: item.color,
 				};
 			});
-			if (capacity > 0 && consumed > 0) {
+			if (capacity > 0) {
 				const consumedPercent = Math.min(
 					100,
 					Math.max(0, (consumed / capacity) * 100),

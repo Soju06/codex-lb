@@ -608,17 +608,21 @@
 			const secondaryRemainingPercent = toNumber(
 				secondaryRow?.remainingPercentAvg,
 			);
+			const mergedSecondaryRemaining =
+				secondaryRemainingPercent ??
+				account.usage?.secondaryRemainingPercent ??
+				0;
+			const mergedPrimaryRemaining =
+				primaryRemainingPercent ??
+				account.usage?.primaryRemainingPercent ??
+				0;
+			const effectivePrimaryRemaining =
+				mergedSecondaryRemaining <= 0 ? 0 : mergedPrimaryRemaining;
 			return {
 				...account,
 				usage: {
-					primaryRemainingPercent:
-						primaryRemainingPercent ??
-						account.usage?.primaryRemainingPercent ??
-						0,
-					secondaryRemainingPercent:
-						secondaryRemainingPercent ??
-						account.usage?.secondaryRemainingPercent ??
-						0,
+					primaryRemainingPercent: effectivePrimaryRemaining,
+					secondaryRemainingPercent: mergedSecondaryRemaining,
 				},
 				resetAtPrimary: account.resetAtPrimary ?? null,
 				resetAtSecondary: account.resetAtSecondary ?? null,
@@ -764,6 +768,38 @@
 		}));
 	};
 
+	const buildSecondaryExhaustedIndex = (accounts) => {
+		const exhausted = new Set();
+		(accounts || []).forEach((account) => {
+			const remaining = toNumber(account?.usage?.secondaryRemainingPercent);
+			if (remaining !== null && remaining <= 0 && account?.id) {
+				exhausted.add(account.id);
+			}
+		});
+		return exhausted;
+	};
+
+	const applySecondaryExhaustedToPrimary = (entries, exhaustedIds) => {
+		if (!entries?.length || !exhaustedIds?.size) {
+			return entries || [];
+		}
+		return entries.map((entry) => {
+			if (entry?.accountId && exhaustedIds.has(entry.accountId)) {
+				return {
+					...entry,
+					remainingCredits: 0,
+				};
+			}
+			return entry;
+		});
+	};
+
+	const sumRemainingCredits = (entries) =>
+		(entries || []).reduce(
+			(acc, entry) => acc + (toNumber(entry?.remainingCredits) || 0),
+			0,
+		);
+
 	const buildDonutGradient = (items, total) => {
 		if (!items.length || total <= 0) {
 			return `conic-gradient(${CONSUMED_COLOR} 0 100%)`;
@@ -806,6 +842,7 @@
 		const statusCounts = countByStatus(accounts);
 		const secondaryWindowMinutes =
 			state.dashboardData.usage?.secondary?.windowMinutes ?? null;
+		const secondaryExhaustedAccounts = buildSecondaryExhaustedIndex(accounts);
 
 		const badges = ["active", "paused", "limited", "exceeded", "deactivated"]
 			.map((status) => {
@@ -853,11 +890,28 @@
 				resetAt: null,
 				byAccount: [],
 			};
-			const remaining = toNumber(usage.remaining) || 0;
+			const rawEntries = usage.byAccount || [];
+			const hasPrimaryAdjustments =
+				window.key === "primary" &&
+				rawEntries.some(
+					(entry) =>
+						entry?.accountId && secondaryExhaustedAccounts.has(entry.accountId),
+				);
+			const entries =
+				window.key === "primary"
+					? applySecondaryExhaustedToPrimary(
+							rawEntries,
+							secondaryExhaustedAccounts,
+						)
+					: rawEntries;
+			const remaining =
+				hasPrimaryAdjustments
+					? sumRemainingCredits(entries)
+					: toNumber(usage.remaining) || 0;
 			const capacity = Math.max(remaining, toNumber(usage.capacity) || 0);
 			const consumed = Math.max(0, capacity - remaining);
 			const items = buildRemainingItems(
-				usage.byAccount || [],
+				entries,
 				accounts,
 				capacity,
 				window.key,

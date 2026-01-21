@@ -4,18 +4,39 @@ from datetime import timedelta
 
 import pytest
 
+from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
 
+def _make_account(account_id: str, email: str) -> Account:
+    encryptor = TokenEncryptor()
+    return Account(
+        id=account_id,
+        email=email,
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_usage_repository_aggregate(db_setup):
     async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
         repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1", "acc1@example.com"))
+        await accounts_repo.upsert(_make_account("acc2", "acc2@example.com"))
         now = utcnow()
         await repo.add_entry("acc1", 10.0, recorded_at=now - timedelta(hours=1))
         await repo.add_entry("acc1", 30.0, recorded_at=now - timedelta(minutes=30))
@@ -30,7 +51,10 @@ async def test_usage_repository_aggregate(db_setup):
 @pytest.mark.asyncio
 async def test_request_logs_repository_filters(db_setup):
     async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
         repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc1", "acc1@example.com"))
+        await accounts_repo.upsert(_make_account("acc2", "acc2@example.com"))
         now = utcnow()
         await repo.add_log(
             account_id="acc1",

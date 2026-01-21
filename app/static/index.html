@@ -363,7 +363,12 @@
           <p class="auth-dialog__lead">Open the authorization page to complete sign-in.</p>
           <div class="auth-dialog__detail">
             <div class="auth-dialog__label">Authorization URL</div>
-            <div class="auth-dialog__value auth-dialog__link" x-text="authDialog.authorizationUrl"></div>
+            <div class="url-copy-row">
+              <a class="auth-dialog__value auth-dialog__link" :href="authDialog.authorizationUrl" target="_blank"
+                x-text="authDialog.authorizationUrl"></a>
+              <button type="button" class="copy-btn"
+                @click="copyToClipboard(authDialog.authorizationUrl, 'Authorization URL')">Copy</button>
+            </div>
           </div>
           <div class="auth-dialog__status">
             <span class="spinner animate" aria-hidden="true" x-show="authDialog.status === 'pending'"></span>
@@ -386,7 +391,12 @@
             </div>
             <div>
               <div class="auth-dialog__label">Verification URL</div>
-              <div class="auth-dialog__value auth-dialog__link" x-text="authDialog.verificationUrl"></div>
+              <div class="url-copy-row">
+                <a class="auth-dialog__value auth-dialog__link" :href="authDialog.verificationUrl" target="_blank"
+                  x-text="authDialog.verificationUrl"></a>
+                <button type="button" class="copy-btn"
+                  @click="copyToClipboard(authDialog.verificationUrl, 'Verification URL')">Copy</button>
+              </div>
             </div>
           </div>
           <div class="auth-dialog__device-meta text-muted">

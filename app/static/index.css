@@ -1024,6 +1024,55 @@ button {
   color: var(--accent-primary);
 }
 
+.url-copy-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.url-copy-row a {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 8px;
+  font-family: monospace;
+  font-size: 13px;
+  text-decoration: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent-primary) !important;
+  transition: color 0.2s;
+}
+
+.url-copy-row a:hover {
+  text-decoration: underline;
+  color: var(--accent-primary-hover) !important;
+}
+
+.copy-btn {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.copy-btn:hover {
+  background: var(--bg-card);
+  color: var(--text-main);
+  border-color: var(--text-muted);
+}
+
 .status-bar {
   position: fixed;
   bottom: 0;

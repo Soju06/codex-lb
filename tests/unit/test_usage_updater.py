@@ -135,11 +135,13 @@ class StubAccountsRepository:
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
     ) -> bool:
-        self.status_updates.append({
-            "account_id": account_id,
-            "status": status,
-            "deactivation_reason": deactivation_reason,
-        })
+        self.status_updates.append(
+            {
+                "account_id": account_id,
+                "status": status,
+                "deactivation_reason": deactivation_reason,
+            }
+        )
         return True
 
     async def update_tokens(self, *args: Any, **kwargs: Any) -> bool:

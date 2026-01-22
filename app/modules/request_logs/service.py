@@ -64,9 +64,7 @@ class RequestLogsService:
             until=until,
             account_ids=account_ids,
             model_options=(
-                [(option.model, option.reasoning_effort) for option in model_options]
-                if model_options
-                else None
+                [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
             ),
             models=models,
             reasoning_efforts=reasoning_efforts,

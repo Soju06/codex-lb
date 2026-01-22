@@ -91,13 +91,9 @@ class RequestLogsRepository:
                 if not base:
                     continue
                 if effort is None:
-                    pair_conditions.append(
-                        and_(RequestLog.model == base, RequestLog.reasoning_effort.is_(None))
-                    )
+                    pair_conditions.append(and_(RequestLog.model == base, RequestLog.reasoning_effort.is_(None)))
                 else:
-                    pair_conditions.append(
-                        and_(RequestLog.model == base, RequestLog.reasoning_effort == effort)
-                    )
+                    pair_conditions.append(and_(RequestLog.model == base, RequestLog.reasoning_effort == effort))
             if pair_conditions:
                 conditions.append(or_(*pair_conditions))
         else:
@@ -110,9 +106,7 @@ class RequestLogsRepository:
         if include_success:
             status_conditions.append(RequestLog.status == "success")
         if error_codes_in:
-            status_conditions.append(
-                and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in))
-            )
+            status_conditions.append(and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in)))
         if include_error_other:
             error_clause = [RequestLog.status == "error"]
             if error_codes_excluding:
@@ -178,9 +172,7 @@ class RequestLogsRepository:
         if include_success:
             status_conditions.append(RequestLog.status == "success")
         if error_codes_in:
-            status_conditions.append(
-                and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in))
-            )
+            status_conditions.append(and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in)))
         if include_error_other:
             error_clause = [RequestLog.status == "error"]
             if error_codes_excluding:

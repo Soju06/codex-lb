@@ -259,9 +259,7 @@ async def test_request_logs_filters_by_multiple_accounts_returns_union(async_cli
             requested_at=now,
         )
 
-    response = await async_client.get(
-        "/api/request-logs?accountId=acc_multi_a&accountId=acc_multi_b&limit=10"
-    )
+    response = await async_client.get("/api/request-logs?accountId=acc_multi_a&accountId=acc_multi_b&limit=10")
     assert response.status_code == 200
     payload = response.json()["requests"]
     assert {entry["accountId"] for entry in payload} == {"acc_multi_a", "acc_multi_b"}

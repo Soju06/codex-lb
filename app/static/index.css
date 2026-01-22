@@ -602,6 +602,13 @@ body {
   text-align: center;
 }
 
+.table-wrap--requests th:nth-child(2),
+.table-wrap--requests td:nth-child(2),
+.table-wrap--requests th:nth-child(5),
+.table-wrap--requests td:nth-child(5) {
+  text-align: left;
+}
+
 
 
 table {

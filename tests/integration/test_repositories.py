@@ -79,10 +79,10 @@ async def test_request_logs_repository_filters(db_setup):
             requested_at=now - timedelta(minutes=5),
         )
 
-        results = await repo.list_recent(limit=0, account_id="acc1")
+        results = await repo.list_recent(limit=0, account_ids=["acc1"])
         assert len(results) == 1
         assert results[0].account_id == "acc1"
 
-        results = await repo.list_recent(limit=0, status="error")
+        results = await repo.list_recent(limit=0, include_success=False)
         assert len(results) == 1
         assert results[0].error_code == "rate_limit_exceeded"

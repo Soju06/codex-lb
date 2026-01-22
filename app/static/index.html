@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>Codex LB</title>
   <link rel="icon"
     href="data:image/svg+xml,%3Csvg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;32&quot; height=&quot;32&quot; fill=&quot;none&quot; viewBox=&quot;0 0 32 32&quot;%3E%3Cpath stroke=&quot;%23000&quot; stroke-linecap=&quot;round&quot; stroke-width=&quot;2.484&quot; d=&quot;M22.356 19.797H17.17M9.662 12.29l1.979 3.576a.511.511 0 0 1-.005.504l-1.974 3.409M30.758 16c0 8.15-6.607 14.758-14.758 14.758-8.15 0-14.758-6.607-14.758-14.758C1.242 7.85 7.85 1.242 16 1.242c8.15 0 14.758 6.608 14.758 14.758Z&quot;/%3E%3C/svg%3E"
@@ -149,6 +149,114 @@
 
           <div class="panel" style="margin-top: 12px">
             <h3>Recent requests</h3>
+
+            <div class="controls-toolbar">
+              <div class="controls-group">
+                <input type="text" class="filter-input" placeholder="Search..." x-model="filtersDraft.search"
+                  @keyup.enter="applyFilters()"
+                  style="width: 200px;">
+
+                <select class="filter-select" x-model="filtersDraft.timeframe">
+                  <option value="all">All time</option>
+                  <option value="1h">Last 1h</option>
+                  <option value="24h">Last 24h</option>
+                  <option value="7d">Last 7d</option>
+                </select>
+
+                <div class="multi-select" x-data="{ open: false }" @click.outside="open = false">
+                  <button type="button" class="filter-select multi-select-trigger" @click="open = !open"
+                    :aria-expanded="open" :disabled="requestLogOptions.isLoading">
+                    <span x-text="multiSelectSummary(filtersDraft.accountIds, 'All accounts', 'account', 'accounts')"></span>
+                  </button>
+                  <div class="multi-select-menu" x-show="open" x-transition.opacity>
+                    <div class="multi-select-actions">
+                      <button type="button" class="multi-select-action"
+                        @click="filtersDraft.accountIds = []; open = false">Clear</button>
+                    </div>
+                    <template x-for="accountId in requestLogOptions.accountIds" :key="accountId">
+                      <label class="multi-select-item">
+                        <input type="checkbox" :checked="filtersDraft.accountIds.includes(accountId)"
+                          @change="toggleMultiSelectValue('accountIds', accountId)">
+                        <span class="multi-select-label" x-text="accountFilterLabel(accountId)"></span>
+                      </label>
+                    </template>
+                  </div>
+                </div>
+
+                <div class="multi-select" x-data="{ open: false }" @click.outside="open = false">
+                  <button type="button" class="filter-select multi-select-trigger" @click="open = !open"
+                    :aria-expanded="open" :disabled="requestLogOptions.isLoading">
+                    <span x-text="multiSelectSummary(filtersDraft.modelOptions, 'All models', 'model', 'models')"></span>
+                  </button>
+                  <div class="multi-select-menu" x-show="open" x-transition.opacity>
+                    <div class="multi-select-actions">
+                      <button type="button" class="multi-select-action"
+                        @click="filtersDraft.modelOptions = []; open = false">Clear</button>
+                    </div>
+                    <template x-for="modelOption in requestLogOptions.modelOptions"
+                      :key="modelOptionValue(modelOption)">
+                      <label class="multi-select-item">
+                        <input type="checkbox"
+                          :checked="filtersDraft.modelOptions.includes(modelOptionValue(modelOption))"
+                          @change="toggleMultiSelectValue('modelOptions', modelOptionValue(modelOption))">
+                        <span class="multi-select-label" x-text="modelOptionLabel(modelOption)"></span>
+                      </label>
+                    </template>
+                  </div>
+                </div>
+
+                <div class="multi-select" x-data="{ open: false }" @click.outside="open = false">
+                  <button type="button" class="filter-select multi-select-trigger" @click="open = !open"
+                    :aria-expanded="open">
+                    <span x-text="multiSelectSummary(filtersDraft.statuses, 'All status', 'status', 'statuses')"></span>
+                  </button>
+                  <div class="multi-select-menu" x-show="open" x-transition.opacity>
+                    <div class="multi-select-actions">
+                      <button type="button" class="multi-select-action"
+                        @click="filtersDraft.statuses = []; open = false">Clear</button>
+                    </div>
+                    <label class="multi-select-item">
+                      <input type="checkbox" :checked="filtersDraft.statuses.includes('ok')"
+                        @change="toggleMultiSelectValue('statuses', 'ok')">
+                      <span class="multi-select-label">OK</span>
+                    </label>
+                    <label class="multi-select-item">
+                      <input type="checkbox" :checked="filtersDraft.statuses.includes('rate_limit')"
+                        @change="toggleMultiSelectValue('statuses', 'rate_limit')">
+                      <span class="multi-select-label">Rate Limit</span>
+                    </label>
+                    <label class="multi-select-item">
+                      <input type="checkbox" :checked="filtersDraft.statuses.includes('quota')"
+                        @change="toggleMultiSelectValue('statuses', 'quota')">
+                      <span class="multi-select-label">Quota</span>
+                    </label>
+                    <label class="multi-select-item">
+                      <input type="checkbox" :checked="filtersDraft.statuses.includes('error')"
+                        @change="toggleMultiSelectValue('statuses', 'error')">
+                      <span class="multi-select-label">Error</span>
+                    </label>
+                  </div>
+                </div>
+
+                <input type="number" class="filter-input" placeholder="Min Cost ($)" x-model="filtersDraft.minCost"
+                  @keyup.enter="applyFilters()"
+                  style="width: 110px;" step="0.01">
+
+                <button type="button" class="filter-apply" @click="applyFilters()"
+                  :disabled="recentRequestsState.isLoading">Apply</button>
+              </div>
+
+              <div class="controls-group">
+                <span style="font-size: 13px; color: var(--text-muted);">Show:</span>
+                <select class="filter-select" x-model="pagination.limit">
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="250">250</option>
+                </select>
+              </div>
+            </div>
+
             <div class="table-wrap table-wrap--requests table-wrap--column-lines has-scrollbar">
               <table>
                 <thead>

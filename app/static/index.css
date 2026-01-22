@@ -90,6 +90,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+body[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body[data-theme="light"] {
+  color-scheme: light;
+}
+
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -590,6 +598,168 @@ body {
   background: var(--accent-primary-hover);
 }
 
+.controls-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.controls-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.filter-input {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  min-width: 120px;
+}
+
+.filter-input:focus {
+  border-color: var(--accent-primary);
+}
+
+.filter-select {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 8px 32px 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23AAAAAA%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px top 50%;
+  background-size: 10px auto;
+}
+
+.filter-select[multiple] {
+  padding-right: 12px;
+  background-image: none;
+}
+
+.filter-select option {
+  background: var(--bg-surface);
+  color: var(--text-main);
+}
+
+.multi-select {
+  position: relative;
+}
+
+.multi-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 180px;
+  cursor: pointer;
+}
+
+.multi-select-trigger:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.multi-select-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  width: max-content;
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-md);
+}
+
+.multi-select-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+.multi-select-action {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.multi-select-action:hover {
+  border-color: var(--border-strong);
+  color: var(--text-main);
+}
+
+.multi-select-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.multi-select-item:hover {
+  background: var(--bg-list-hover);
+}
+
+.multi-select-item input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+}
+
+.multi-select-label {
+  color: var(--text-main);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+.filter-apply {
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--accent-primary-text);
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.filter-apply:hover {
+  border-color: var(--accent-primary-hover);
+  background: var(--accent-primary-hover);
+}
+
+.filter-apply:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -602,9 +772,7 @@ body {
   text-align: center;
 }
 
-.table-wrap--requests th:nth-child(2),
 .table-wrap--requests td:nth-child(2),
-.table-wrap--requests th:nth-child(5),
 .table-wrap--requests td:nth-child(5) {
   text-align: left;
 }

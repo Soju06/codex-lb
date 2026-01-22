@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
 
 from pydantic import Field
 
@@ -24,4 +23,14 @@ class RequestLogEntry(DashboardModel):
 
 
 class RequestLogsResponse(DashboardModel):
-    requests: List[RequestLogEntry] = Field(default_factory=list)
+    requests: list[RequestLogEntry] = Field(default_factory=list)
+
+
+class RequestLogModelOption(DashboardModel):
+    model: str
+    reasoning_effort: str | None = None
+
+
+class RequestLogFilterOptionsResponse(DashboardModel):
+    account_ids: list[str] = Field(default_factory=list)
+    model_options: list[RequestLogModelOption] = Field(default_factory=list)

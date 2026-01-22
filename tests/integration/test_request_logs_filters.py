@@ -228,6 +228,135 @@ async def test_request_logs_filters_by_account_model_and_time(async_client, db_s
 
 
 @pytest.mark.asyncio
+async def test_request_logs_filters_by_multiple_accounts_returns_union(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_multi_a", "a@example.com"))
+        await accounts_repo.upsert(_make_account("acc_multi_b", "b@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_multi_a",
+            request_id="req_multi_1",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=1),
+        )
+        await logs_repo.add_log(
+            account_id="acc_multi_b",
+            request_id="req_multi_2",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=now,
+        )
+
+    response = await async_client.get(
+        "/api/request-logs?accountId=acc_multi_a&accountId=acc_multi_b&limit=10"
+    )
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert {entry["accountId"] for entry in payload} == {"acc_multi_a", "acc_multi_b"}
+
+
+@pytest.mark.asyncio
+async def test_request_logs_status_error_excludes_rate_limit_and_quota(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_err_only", "err-only@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_err_only",
+            request_id="req_err_rate_limit",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="error",
+            error_code="rate_limit_exceeded",
+            requested_at=now - timedelta(minutes=2),
+        )
+        await logs_repo.add_log(
+            account_id="acc_err_only",
+            request_id="req_err_quota",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="error",
+            error_code="insufficient_quota",
+            requested_at=now - timedelta(minutes=1),
+        )
+        await logs_repo.add_log(
+            account_id="acc_err_only",
+            request_id="req_err_other",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="error",
+            error_code="upstream_error",
+            error_message="upstream failure",
+            requested_at=now,
+        )
+
+    response = await async_client.get("/api/request-logs?status=error&limit=10")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert len(payload) == 1
+    assert payload[0]["status"] == "error"
+    assert payload[0]["errorCode"] == "upstream_error"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_search_matches_email_and_error(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_search", "example@myemail.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_search",
+            request_id="req_search_1",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=1),
+        )
+        await logs_repo.add_log(
+            account_id="acc_search",
+            request_id="req_search_2",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="error",
+            error_code="upstream_error",
+            error_message="This is an example string",
+            requested_at=now,
+        )
+
+    response = await async_client.get("/api/request-logs?search=example&limit=50")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert {entry["requestId"] for entry in payload} == {"req_search_1", "req_search_2"}
+
+
+@pytest.mark.asyncio
 async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

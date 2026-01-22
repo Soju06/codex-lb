@@ -424,6 +424,11 @@ body {
   color: var(--status-error-text);
 }
 
+.status-pill.error {
+  background: var(--status-error-bg);
+  color: var(--status-error-text);
+}
+
 .status-pill.deactivated,
 .status-pill.paused {
   background: var(--status-paused-bg);

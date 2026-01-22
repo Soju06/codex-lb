@@ -79,7 +79,7 @@
 		ok: "active",
 		rate_limit: "limited",
 		quota: "exceeded",
-		error: "deactivated",
+		error: "error",
 	};
 
 	const KNOWN_PLAN_TYPES = new Set([

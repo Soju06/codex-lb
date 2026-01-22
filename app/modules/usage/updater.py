@@ -201,5 +201,6 @@ def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: 
         return None
     return now_epoch + max(0, int(reset_after_seconds))
 
+
 def _is_client_error(status_code: int) -> bool:
     return 400 <= status_code < 500

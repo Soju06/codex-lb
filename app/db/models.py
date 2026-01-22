@@ -48,7 +48,7 @@ class UsageHistory(Base):
     __tablename__ = "usage_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     window: Mapped[str | None] = mapped_column(String, nullable=True)
     used_percent: Mapped[float] = mapped_column(Float, nullable=False)
@@ -65,7 +65,7 @@ class RequestLog(Base):
     __tablename__ = "request_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
@@ -84,7 +84,7 @@ class StickySession(Base):
     __tablename__ = "sticky_sessions"
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

@@ -89,7 +89,7 @@ class UsageUpdater:
     async def _refresh_account(self, account: Account, *, usage_account_id: str | None) -> None:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         try:
-            payload = await fetch_usage(
+            await fetch_usage(
                 access_token=access_token,
                 account_id=usage_account_id,
             )
@@ -105,7 +105,7 @@ class UsageUpdater:
                 return
             access_token = self._encryptor.decrypt(account.access_token_encrypted)
             try:
-                payload = await fetch_usage(
+                await fetch_usage(
                     access_token=access_token,
                     account_id=usage_account_id,
                 )
@@ -128,38 +128,6 @@ class UsageUpdater:
         await self._auth_manager._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
         account.status = AccountStatus.DEACTIVATED
         account.deactivation_reason = reason
-
-        rate_limit = payload.rate_limit
-        primary = rate_limit.primary_window if rate_limit else None
-        credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
-        primary_window_minutes = _window_minutes(primary.limit_window_seconds) if primary else None
-        secondary = rate_limit.secondary_window if rate_limit else None
-        secondary_window_minutes = _window_minutes(secondary.limit_window_seconds) if secondary else None
-
-        if primary and primary.used_percent is not None:
-            await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=primary.used_percent,
-                input_tokens=None,
-                output_tokens=None,
-                window="primary",
-                reset_at=primary.reset_at,
-                window_minutes=primary_window_minutes,
-                credits_has=credits_has,
-                credits_unlimited=credits_unlimited,
-                credits_balance=credits_balance,
-            )
-
-        if secondary and secondary.used_percent is not None:
-            await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=secondary.used_percent,
-                input_tokens=None,
-                output_tokens=None,
-                window="secondary",
-                reset_at=secondary.reset_at,
-                window_minutes=secondary_window_minutes,
-            )
 
 
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:

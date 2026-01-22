@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, RequestLog, StickySession, UsageHistory
 
 
 class AccountsRepository:
@@ -54,6 +54,9 @@ class AccountsRepository:
         return result.scalar_one_or_none() is not None
 
     async def delete(self, account_id: str) -> bool:
+        await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
+        await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+        await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
         result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
         await self._session.commit()
         return result.scalar_one_or_none() is not None

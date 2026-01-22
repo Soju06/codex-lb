@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from app.core.clients.proxy import _error_event_from_response, _error_payload_from_response
 
 pytestmark = pytest.mark.unit

@@ -602,12 +602,7 @@ body {
   text-align: center;
 }
 
-.table-wrap--requests th:last-child,
-.table-wrap--requests th:nth-last-child(2),
-.table-wrap--requests td:last-child,
-.table-wrap--requests td:nth-last-child(2) {
-  text-align: right;
-}
+
 
 table {
   width: 100%;

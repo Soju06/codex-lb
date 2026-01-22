@@ -158,8 +158,8 @@
                     <th style="width: 15%">Model</th>
                     <th style="width: 10%">Status</th>
                     <th style="width: 15%">Error</th>
-                    <th style="text-align: right; width: 10%">Tokens</th>
-                    <th style="text-align: right; width: 10%">Cost</th>
+                    <th style="width: 10%">Tokens</th>
+                    <th style="width: 10%">Cost</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -181,8 +181,8 @@
                           </template>
                         </div>
                       </td>
-                      <td style="text-align: right" x-text="request.tokens"></td>
-                      <td style="text-align: right" x-text="request.cost"></td>
+                      <td x-text="request.tokens"></td>
+                      <td x-text="request.cost"></td>
                     </tr>
                   </template>
                 </tbody>

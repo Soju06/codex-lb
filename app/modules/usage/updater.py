@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
 from app.core.auth.refresh import RefreshError
@@ -56,7 +55,6 @@ class UsageUpdater:
         if not settings.usage_refresh_enabled:
             return
 
-        shared_chatgpt_account_ids = _shared_chatgpt_account_ids(accounts)
         now = utcnow()
         interval = settings.usage_refresh_interval_seconds
         for account in accounts:
@@ -65,16 +63,11 @@ class UsageUpdater:
             latest = latest_usage.get(account.id)
             if latest and (now - latest.recorded_at).total_seconds() < interval:
                 continue
-            usage_account_id = (
-                None
-                if account.chatgpt_account_id and account.chatgpt_account_id in shared_chatgpt_account_ids
-                else account.chatgpt_account_id
-            )
             # NOTE: AsyncSession is not safe for concurrent use. Run sequentially
             # within the request-scoped session to avoid PK collisions and
             # flush-time warnings (SAWarning: Session.add during flush).
             try:
-                await self._refresh_account(account, usage_account_id=usage_account_id)
+                await self._refresh_account(account, usage_account_id=account.chatgpt_account_id)
             except Exception as exc:
                 logger.warning(
                     "Usage refresh failed account_id=%s request_id=%s error=%s",
@@ -88,8 +81,9 @@ class UsageUpdater:
 
     async def _refresh_account(self, account: Account, *, usage_account_id: str | None) -> None:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        payload: UsagePayload | None = None
         try:
-            await fetch_usage(
+            payload = await fetch_usage(
                 access_token=access_token,
                 account_id=usage_account_id,
             )
@@ -105,7 +99,7 @@ class UsageUpdater:
                 return
             access_token = self._encryptor.decrypt(account.access_token_encrypted)
             try:
-                await fetch_usage(
+                payload = await fetch_usage(
                     access_token=access_token,
                     account_id=usage_account_id,
                 )
@@ -113,6 +107,43 @@ class UsageUpdater:
                 if _is_client_error(retry_exc.status_code) and retry_exc.status_code != 401:
                     await self._deactivate_for_client_error(account, retry_exc)
                 return
+
+        if payload is None:
+            return
+
+        rate_limit = payload.rate_limit
+        if rate_limit is None:
+            return
+
+        primary = rate_limit.primary_window
+        secondary = rate_limit.secondary_window
+        credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
+        now_epoch = _now_epoch()
+
+        if primary and primary.used_percent is not None:
+            await self._usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=float(primary.used_percent),
+                input_tokens=None,
+                output_tokens=None,
+                window="primary",
+                reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
+                window_minutes=_window_minutes(primary.limit_window_seconds),
+                credits_has=credits_has,
+                credits_unlimited=credits_unlimited,
+                credits_balance=credits_balance,
+            )
+
+        if secondary and secondary.used_percent is not None:
+            await self._usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=float(secondary.used_percent),
+                input_tokens=None,
+                output_tokens=None,
+                window="secondary",
+                reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
+                window_minutes=_window_minutes(secondary.limit_window_seconds),
+            )
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
@@ -159,10 +190,16 @@ def _window_minutes(limit_seconds: int | None) -> int | None:
     return max(1, math.ceil(limit_seconds / 60))
 
 
-def _shared_chatgpt_account_ids(accounts: list[Account]) -> set[str]:
-    counts = Counter(account.chatgpt_account_id for account in accounts if account.chatgpt_account_id)
-    return {account_id for account_id, count in counts.items() if count > 1}
+def _now_epoch() -> int:
+    return int(utcnow().replace(tzinfo=timezone.utc).timestamp())
 
+
+def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: int) -> int | None:
+    if reset_at is not None:
+        return int(reset_at)
+    if reset_after_seconds is None:
+        return None
+    return now_epoch + max(0, int(reset_after_seconds))
 
 def _is_client_error(status_code: int) -> bool:
     return 400 <= status_code < 500

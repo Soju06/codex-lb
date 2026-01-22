@@ -82,7 +82,7 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
 
 
 @pytest.mark.asyncio
-async def test_usage_updater_omits_shared_chatgpt_account_id(monkeypatch) -> None:
+async def test_usage_updater_includes_chatgpt_account_id_even_when_shared(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings
 
@@ -121,7 +121,7 @@ async def test_usage_updater_omits_shared_chatgpt_account_id(monkeypatch) -> Non
 
     await updater.refresh_accounts([acc_a, acc_b, acc_c], latest_usage={})
 
-    assert [call["account_id"] for call in calls] == [None, None, "workspace_unique"]
+    assert [call["account_id"] for call in calls] == [shared, shared, "workspace_unique"]
 
 
 class StubAccountsRepository:
@@ -223,3 +223,97 @@ async def test_usage_updater_does_not_deactivate_on_5xx(monkeypatch) -> None:
     await updater.refresh_accounts([acc], latest_usage={})
 
     assert len(accounts_repo.status_updates) == 0
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_persists_primary_and_secondary_usage(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        assert access_token
+        assert account_id == "workspace_123"
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 12.5,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 300,
+                    },
+                    "secondary_window": {
+                        "used_percent": 55.0,
+                        "reset_at": 1735693200,
+                        "limit_window_seconds": 60,
+                    },
+                },
+                "credits": {"has_credits": True, "unlimited": False, "balance": "42.5"},
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_test", "workspace_123", email="persist@example.com")
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert len(usage_repo.entries) == 2
+    by_window = {entry.window: entry for entry in usage_repo.entries}
+
+    primary = by_window["primary"]
+    assert primary.account_id == "acc_test"
+    assert primary.used_percent == 12.5
+    assert primary.reset_at == 1735689600
+    assert primary.window_minutes == 5
+    assert primary.credits_has is True
+    assert primary.credits_unlimited is False
+    assert primary.credits_balance == 42.5
+
+    secondary = by_window["secondary"]
+    assert secondary.account_id == "acc_test"
+    assert secondary.used_percent == 55.0
+    assert secondary.reset_at == 1735693200
+    assert secondary.window_minutes == 1
+    assert secondary.credits_has is None
+    assert secondary.credits_unlimited is None
+    assert secondary.credits_balance is None
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_computes_reset_at_from_reset_after_seconds(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr("app.modules.usage.updater._now_epoch", lambda: 1000)
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 1.0,
+                        "reset_after_seconds": 120,
+                        "limit_window_seconds": 60,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_reset", "workspace_reset", email="reset@example.com")
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert len(usage_repo.entries) == 1
+    entry = usage_repo.entries[0]
+    assert entry.window == "primary"
+    assert entry.reset_at == 1120

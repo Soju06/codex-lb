@@ -2251,15 +2251,19 @@
 			},
 			get statusItems() {
 				const lastSync = formatTimeLong(this.dashboardData.lastSyncAt);
+				const lastSyncLabel =
+					lastSync && lastSync.time && lastSync.time !== "--"
+						? `${lastSync.time} · ${lastSync.date}`
+						: "--";
 				const items =
 					this.view === "accounts"
 						? [
 							`Selection: ${this.accounts.selectedId || "--"}`,
 							`Rotation: ${this.dashboardData.routing?.rotationEnabled ? "enabled" : "disabled"}`,
-							`Last sync: ${lastSync}`,
+							`Last sync: ${lastSyncLabel}`,
 						]
 						: [
-							`Last sync: ${lastSync}`,
+							`Last sync: ${lastSyncLabel}`,
 							`Routing: ${routingLabel(this.dashboardData.routing?.strategy)}`,
 							`Backend: ${this.backendPath}`,
 						];

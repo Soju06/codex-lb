@@ -13,8 +13,7 @@ from app.core.usage.models import UsagePayload
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.accounts.auth_manager import AuthManager
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ class UsageUpdater:
     def __init__(
         self,
         usage_repo: UsageRepositoryPort,
-        accounts_repo: AccountsRepository | None = None,
+        accounts_repo: AccountsRepositoryPort | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._encryptor = TokenEncryptor()

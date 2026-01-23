@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator, Mapping
+from typing import AsyncIterator, Mapping, Protocol, TypeAlias
 
 import aiohttp
 
@@ -26,6 +26,18 @@ _ERROR_TYPE_CODE_MAP = {
 
 class StreamIdleTimeoutError(Exception):
     pass
+
+
+class ErrorResponseProtocol(Protocol):
+    status: int
+    reason: str | None
+
+    async def json(self, *, content_type: str | None = None) -> object: ...
+
+    async def text(self, *, encoding: str | None = None, errors: str = "strict") -> str: ...
+
+
+ErrorResponse: TypeAlias = aiohttp.ClientResponse | ErrorResponseProtocol
 
 
 class ProxyResponseError(Exception):
@@ -88,7 +100,7 @@ async def _iter_sse_lines(
         yield line
 
 
-async def _error_event_from_response(resp: aiohttp.ClientResponse) -> ResponseFailedEvent:
+async def _error_event_from_response(resp: ErrorResponse) -> ResponseFailedEvent:
     fallback_message = f"Upstream error: HTTP {resp.status}"
     if resp.reason:
         fallback_message += f" {resp.reason}"
@@ -117,7 +129,7 @@ async def _error_event_from_response(resp: aiohttp.ClientResponse) -> ResponseFa
     return response_failed_event("upstream_error", fallback_message, response_id=get_request_id())
 
 
-async def _error_payload_from_response(resp: aiohttp.ClientResponse) -> OpenAIErrorEnvelope:
+async def _error_payload_from_response(resp: ErrorResponse) -> OpenAIErrorEnvelope:
     fallback_message = f"Upstream error: HTTP {resp.status}"
     if resp.reason:
         fallback_message += f" {resp.reason}"

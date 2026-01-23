@@ -14,12 +14,12 @@ class MockResponse:
         self._json = json_data
         self._text = text_data
 
-    async def json(self, content_type=None):
+    async def json(self, *, content_type=None):
         if self._json is None:
             raise Exception("No JSON")
         return self._json
 
-    async def text(self):
+    async def text(self, *, encoding=None, errors="strict"):
         return self._text
 
 

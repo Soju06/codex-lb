@@ -143,4 +143,6 @@ async def test_fetch_usage_raises_after_retries(failing_usage_server):
             timeout_seconds=1.0,
             client=client,
         )
-    assert excinfo.value.status_code == 503
+    exc = excinfo.value
+    assert isinstance(exc, UsageFetchError)
+    assert exc.status_code == 503

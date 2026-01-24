@@ -30,6 +30,26 @@ jobs:
       - name: Ruff format (check)
         run: uvx ruff format --check .
 
+  typecheck:
+    name: Type check (ty)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev --frozen
+
+      - name: Ty check
+        run: uv run ty check
+
   test:
     name: Tests (pytest)
     runs-on: ubuntu-24.04

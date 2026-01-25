@@ -4,6 +4,7 @@ import base64
 import json
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
@@ -76,6 +77,30 @@ async def test_v1_responses_rewrites(async_client):
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["object"] == "response"
+    assert event["response"]["status"] == "failed"
+    assert event["response"]["id"] == request_id
+    assert event["response"]["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_rewrites_under_root_path(app_instance):
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    request_id = "req_v1_root_path_123"
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, root_path="/api")
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            async with client.stream(
+                "POST",
+                "/v1/responses",
+                json=payload,
+                headers={"x-request-id": request_id},
+            ) as resp:
+                assert resp.status_code == 200
+                lines = [line async for line in resp.aiter_lines() if line]
 
     event = _extract_first_event(lines)
     assert event["type"] == "response.failed"

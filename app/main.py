@@ -49,8 +49,9 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def v1_compat_middleware(request: Request, call_next) -> Response:
-        if request.url.path.startswith("/v1/"):
-            rewritten = "/backend-api/codex" + request.url.path[3:]
+        path = request.scope.get("path", request.url.path)
+        if path.startswith("/v1/"):
+            rewritten = "/backend-api/codex" + path[3:]
             request.scope["path"] = rewritten
             request.scope["raw_path"] = rewritten.encode("utf-8")
         return await call_next(request)

@@ -58,6 +58,32 @@ chatgpt_base_url = "http://127.0.0.1:2455"
 requires_openai_auth = true  # Required: enables model selection in Codex IDE extension
 ```
 
+## OpenCode Setup
+
+Run:
+
+```bash
+opencode auth login
+```
+
+Then select `OpenAI` -> `Manually enter API Key` and enter any value.
+
+Add the following to `~/.config/opencode/opencode.json`:
+
+```jsonc
+{
+  ...
+  "provider": {
+    "openai": {
+      "options": {
+        "baseURL": "http://127.0.0.1:2455/v1"
+      }
+    },
+    ...
+  }
+}
+```
+
 ## Data
 
 All data stored in `~/.codex-lb/`:

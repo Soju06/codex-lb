@@ -146,7 +146,7 @@ class UsageService:
 
         try:
             if created:
-                await task
+                await asyncio.shield(task)
             else:
                 await asyncio.shield(task)
         finally:

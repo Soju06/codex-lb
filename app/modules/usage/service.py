@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
-from typing import cast
+from typing import ClassVar, cast
 
 from app.core import usage as usage_core
 from app.core.usage.logs import (
@@ -38,6 +39,9 @@ from app.modules.usage.updater import UsageUpdater
 
 
 class UsageService:
+    _refresh_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+    _refresh_task: ClassVar[asyncio.Task[None] | None] = None
+
     def __init__(
         self,
         usage_repo: UsageRepository,
@@ -114,6 +118,32 @@ class UsageService:
         )
 
     async def _refresh_usage(self) -> None:
+        task = type(self)._refresh_task
+        if task and not task.done():
+            await asyncio.shield(task)
+            return
+
+        created = False
+        async with type(self)._refresh_lock:
+            task = type(self)._refresh_task
+            if not task or task.done():
+                task = asyncio.create_task(self._refresh_usage_once())
+                type(self)._refresh_task = task
+                created = True
+
+        if task is None:
+            return
+
+        try:
+            if created:
+                await task
+            else:
+                await asyncio.shield(task)
+        finally:
+            if task.done() and type(self)._refresh_task is task:
+                type(self)._refresh_task = None
+
+    async def _refresh_usage_once(self) -> None:
         accounts = await self._accounts_repo.list_accounts()
         latest_usage = await self._usage_repo.latest_by_account(window="primary")
         await self._usage_updater.refresh_accounts(accounts, latest_usage)

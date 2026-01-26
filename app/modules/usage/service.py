@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar, cast
 
@@ -38,9 +40,16 @@ from app.modules.usage.schemas import (
 from app.modules.usage.updater import UsageUpdater
 
 
+@dataclass(slots=True)
+class _RefreshState:
+    lock: asyncio.Lock
+    task: asyncio.Task[None] | None = None
+
+
 class UsageService:
-    _refresh_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
-    _refresh_task: ClassVar[asyncio.Task[None] | None] = None
+    _refresh_states: ClassVar[weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _RefreshState]] = (
+        weakref.WeakKeyDictionary()
+    )
 
     def __init__(
         self,
@@ -118,17 +127,18 @@ class UsageService:
         )
 
     async def _refresh_usage(self) -> None:
-        task = type(self)._refresh_task
+        state = self._refresh_state()
+        task = state.task
         if task and not task.done():
             await asyncio.shield(task)
             return
 
         created = False
-        async with type(self)._refresh_lock:
-            task = type(self)._refresh_task
+        async with state.lock:
+            task = state.task
             if not task or task.done():
                 task = asyncio.create_task(self._refresh_usage_once())
-                type(self)._refresh_task = task
+                state.task = task
                 created = True
 
         if task is None:
@@ -140,13 +150,22 @@ class UsageService:
             else:
                 await asyncio.shield(task)
         finally:
-            if task.done() and type(self)._refresh_task is task:
-                type(self)._refresh_task = None
+            if task.done() and state.task is task:
+                state.task = None
 
     async def _refresh_usage_once(self) -> None:
         accounts = await self._accounts_repo.list_accounts()
         latest_usage = await self._usage_repo.latest_by_account(window="primary")
         await self._usage_updater.refresh_accounts(accounts, latest_usage)
+
+    @classmethod
+    def _refresh_state(cls) -> _RefreshState:
+        loop = asyncio.get_running_loop()
+        state = cls._refresh_states.get(loop)
+        if state is None:
+            state = _RefreshState(lock=asyncio.Lock())
+            cls._refresh_states[loop] = state
+        return state
 
     async def _latest_usage_rows(self, window: str) -> list[UsageWindowRow]:
         latest = await self._usage_repo.latest_by_account(window=window)

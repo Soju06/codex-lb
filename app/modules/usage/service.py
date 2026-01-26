@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import ClassVar, cast
+from typing import AsyncContextManager, ClassVar, cast
 
 from app.core import usage as usage_core
 from app.core.usage.logs import (
@@ -56,11 +57,14 @@ class UsageService:
         usage_repo: UsageRepository,
         logs_repo: RequestLogsRepository,
         accounts_repo: AccountsRepository,
+        refresh_repo_factory: Callable[[], AsyncContextManager[tuple[UsageRepository, AccountsRepository]]]
+        | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._logs_repo = logs_repo
         self._accounts_repo = accounts_repo
         self._usage_updater = UsageUpdater(usage_repo, accounts_repo)
+        self._refresh_repo_factory = refresh_repo_factory
 
     async def get_usage_summary(self) -> UsageSummaryResponse:
         await self._refresh_usage()
@@ -154,9 +158,17 @@ class UsageService:
                 state.task = None
 
     async def _refresh_usage_once(self) -> None:
-        accounts = await self._accounts_repo.list_accounts()
-        latest_usage = await self._usage_repo.latest_by_account(window="primary")
-        await self._usage_updater.refresh_accounts(accounts, latest_usage)
+        if self._refresh_repo_factory is None:
+            accounts = await self._accounts_repo.list_accounts()
+            latest_usage = await self._usage_repo.latest_by_account(window="primary")
+            await self._usage_updater.refresh_accounts(accounts, latest_usage)
+            return
+
+        async with self._refresh_repo_factory() as (usage_repo, accounts_repo):
+            latest_usage = await usage_repo.latest_by_account(window="primary")
+            accounts = await accounts_repo.list_accounts()
+            updater = UsageUpdater(usage_repo, accounts_repo)
+            await updater.refresh_accounts(accounts, latest_usage)
 
     @classmethod
     def _refresh_state(cls) -> _RefreshState:

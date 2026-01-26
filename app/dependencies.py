@@ -79,7 +79,12 @@ def get_usage_context(
     usage_repository = UsageRepository(session)
     request_logs_repository = RequestLogsRepository(session)
     accounts_repository = AccountsRepository(session)
-    service = UsageService(usage_repository, request_logs_repository, accounts_repository)
+    service = UsageService(
+        usage_repository,
+        request_logs_repository,
+        accounts_repository,
+        refresh_repo_factory=_usage_refresh_context,
+    )
     return UsageContext(
         session=session,
         usage_repository=usage_repository,
@@ -92,6 +97,20 @@ async def _accounts_repo_context() -> AsyncIterator[AccountsRepository]:
     session = SessionLocal()
     try:
         yield AccountsRepository(session)
+    except BaseException:
+        await _safe_rollback(session)
+        raise
+    finally:
+        if session.in_transaction():
+            await _safe_rollback(session)
+        await _safe_close(session)
+
+
+@asynccontextmanager
+async def _usage_refresh_context() -> AsyncIterator[tuple[UsageRepository, AccountsRepository]]:
+    session = SessionLocal()
+    try:
+        yield UsageRepository(session), AccountsRepository(session)
     except BaseException:
         await _safe_rollback(session)
         raise

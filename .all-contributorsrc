@@ -54,6 +54,15 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "pcy06",
+      "name": "PARK CHANYOUNG",
+      "avatar_url": "https://avatars.githubusercontent.com/u/44970486?v=4",
+      "profile": "https://github.com/pcy06",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

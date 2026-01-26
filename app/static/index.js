@@ -788,7 +788,7 @@
 			typeof windowMinutes === "number" && windowMinutes > 0
 				? windowMinutes / 60
 				: 24 * 7;
-		return Math.round(numeric / hours);
+		return numeric / hours;
 	};
 
 	const countByStatus = (accounts) =>

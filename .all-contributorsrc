@@ -44,6 +44,16 @@
         "maintenance",
         "design"
       ]
+    },
+    {
+      "login": "hhsw2015",
+      "name": "Jill Kok, San Mou",
+      "avatar_url": "https://avatars.githubusercontent.com/u/103614420?v=4",
+      "profile": "https://github.com/hhsw2015",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -19,18 +19,18 @@ class AccountsRepository:
     async def upsert(self, account: Account) -> Account:
         existing = await self._session.get(Account, account.id)
         if existing:
-            existing.chatgpt_account_id = account.chatgpt_account_id
-            existing.email = account.email
-            existing.plan_type = account.plan_type
-            existing.access_token_encrypted = account.access_token_encrypted
-            existing.refresh_token_encrypted = account.refresh_token_encrypted
-            existing.id_token_encrypted = account.id_token_encrypted
-            existing.last_refresh = account.last_refresh
-            existing.status = account.status
-            existing.deactivation_reason = account.deactivation_reason
+            _apply_account_updates(existing, account)
             await self._session.commit()
             await self._session.refresh(existing)
             return existing
+
+        result = await self._session.execute(select(Account).where(Account.email == account.email))
+        existing_by_email = result.scalar_one_or_none()
+        if existing_by_email:
+            _apply_account_updates(existing_by_email, account)
+            await self._session.commit()
+            await self._session.refresh(existing_by_email)
+            return existing_by_email
 
         self._session.add(account)
         await self._session.commit()
@@ -89,3 +89,15 @@ class AccountsRepository:
         )
         await self._session.commit()
         return result.scalar_one_or_none() is not None
+
+
+def _apply_account_updates(target: Account, source: Account) -> None:
+    target.chatgpt_account_id = source.chatgpt_account_id
+    target.email = source.email
+    target.plan_type = source.plan_type
+    target.access_token_encrypted = source.access_token_encrypted
+    target.refresh_token_encrypted = source.refresh_token_encrypted
+    target.id_token_encrypted = source.id_token_encrypted
+    target.last_refresh = source.last_refresh
+    target.status = source.status
+    target.deactivation_reason = source.deactivation_reason

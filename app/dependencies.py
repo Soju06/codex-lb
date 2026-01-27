@@ -11,6 +11,7 @@ from app.db.session import SessionLocal, _safe_close, _safe_rollback, get_sessio
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.oauth.service import OauthService
+from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -120,6 +121,26 @@ async def _usage_refresh_context() -> AsyncIterator[tuple[UsageRepository, Accou
         await _safe_close(session)
 
 
+@asynccontextmanager
+async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
+    session = SessionLocal()
+    try:
+        yield ProxyRepositories(
+            accounts=AccountsRepository(session),
+            usage=UsageRepository(session),
+            request_logs=RequestLogsRepository(session),
+            sticky_sessions=StickySessionsRepository(session),
+            settings=SettingsRepository(session),
+        )
+    except BaseException:
+        await _safe_rollback(session)
+        raise
+    finally:
+        if session.in_transaction():
+            await _safe_rollback(session)
+        await _safe_close(session)
+
+
 def get_oauth_context(
     session: AsyncSession = Depends(get_session),
 ) -> OauthContext:
@@ -127,21 +148,8 @@ def get_oauth_context(
     return OauthContext(service=OauthService(accounts_repository, repo_factory=_accounts_repo_context))
 
 
-def get_proxy_context(
-    session: AsyncSession = Depends(get_session),
-) -> ProxyContext:
-    accounts_repository = AccountsRepository(session)
-    usage_repository = UsageRepository(session)
-    request_logs_repository = RequestLogsRepository(session)
-    sticky_repository = StickySessionsRepository(session)
-    settings_repository = SettingsRepository(session)
-    service = ProxyService(
-        accounts_repository,
-        usage_repository,
-        request_logs_repository,
-        sticky_repository,
-        settings_repository,
-    )
+def get_proxy_context() -> ProxyContext:
+    service = ProxyService(repo_factory=_proxy_repo_context)
     return ProxyContext(service=service)
 
 

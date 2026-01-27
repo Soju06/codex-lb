@@ -29,7 +29,6 @@ from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
-from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
@@ -46,33 +45,18 @@ from app.modules.proxy.helpers import (
     _window_snapshot,
 )
 from app.modules.proxy.load_balancer import LoadBalancer
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.types import RateLimitStatusPayloadData
-from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.settings.repository import SettingsRepository
-from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
 
 class ProxyService:
-    def __init__(
-        self,
-        accounts_repo: AccountsRepository,
-        usage_repo: UsageRepository,
-        logs_repo: RequestLogsRepository,
-        sticky_repo: StickySessionsRepository,
-        settings_repo: SettingsRepository,
-    ) -> None:
-        self._accounts_repo = accounts_repo
-        self._usage_repo = usage_repo
-        self._logs_repo = logs_repo
-        self._settings_repo = settings_repo
+    def __init__(self, repo_factory: ProxyRepoFactory) -> None:
+        self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
-        self._auth_manager = AuthManager(accounts_repo)
-        self._load_balancer = LoadBalancer(accounts_repo, usage_repo, sticky_repo)
-        self._usage_updater = UsageUpdater(usage_repo, accounts_repo)
+        self._load_balancer = LoadBalancer(repo_factory)
 
     def stream_responses(
         self,
@@ -98,9 +82,11 @@ class ProxyService:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
-        settings = await self._settings_repo.get_or_create()
-        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_key = _sticky_key_from_compact_payload(payload) if settings.sticky_threads_enabled else None
+        async with self._repo_factory() as repos:
+            settings = await repos.settings.get_or_create()
+            prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+            sticky_threads_enabled = settings.sticky_threads_enabled
+        sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
             reallocate_sticky=sticky_key is not None,
@@ -139,69 +125,71 @@ class ProxyService:
 
     async def rate_limit_headers(self) -> dict[str, str]:
         now = utcnow()
-        accounts = await self._accounts_repo.list_accounts()
-        account_map = {account.id: account for account in accounts}
-
         headers: dict[str, str] = {}
-        primary_minutes = await self._usage_repo.latest_window_minutes("primary")
-        if primary_minutes is None:
-            primary_minutes = usage_core.default_window_minutes("primary")
-        if primary_minutes:
-            primary_rows = await self._usage_repo.aggregate_since(
-                now - timedelta(minutes=primary_minutes),
-                window="primary",
-            )
-            if primary_rows:
-                summary = usage_core.summarize_usage_window(
-                    [row.to_window_row() for row in primary_rows],
-                    account_map,
-                    "primary",
-                )
-                headers.update(_rate_limit_headers("primary", summary))
+        async with self._repo_factory() as repos:
+            accounts = await repos.accounts.list_accounts()
+            account_map = {account.id: account for account in accounts}
 
-        secondary_minutes = await self._usage_repo.latest_window_minutes("secondary")
-        if secondary_minutes is None:
-            secondary_minutes = usage_core.default_window_minutes("secondary")
-        if secondary_minutes:
-            secondary_rows = await self._usage_repo.aggregate_since(
-                now - timedelta(minutes=secondary_minutes),
-                window="secondary",
-            )
-            if secondary_rows:
-                summary = usage_core.summarize_usage_window(
-                    [row.to_window_row() for row in secondary_rows],
-                    account_map,
-                    "secondary",
+            primary_minutes = await repos.usage.latest_window_minutes("primary")
+            if primary_minutes is None:
+                primary_minutes = usage_core.default_window_minutes("primary")
+            if primary_minutes:
+                primary_rows = await repos.usage.aggregate_since(
+                    now - timedelta(minutes=primary_minutes),
+                    window="primary",
                 )
-                headers.update(_rate_limit_headers("secondary", summary))
+                if primary_rows:
+                    summary = usage_core.summarize_usage_window(
+                        [row.to_window_row() for row in primary_rows],
+                        account_map,
+                        "primary",
+                    )
+                    headers.update(_rate_limit_headers("primary", summary))
 
-        latest_usage = await self._usage_repo.latest_by_account()
-        headers.update(_credits_headers(latest_usage.values()))
+            secondary_minutes = await repos.usage.latest_window_minutes("secondary")
+            if secondary_minutes is None:
+                secondary_minutes = usage_core.default_window_minutes("secondary")
+            if secondary_minutes:
+                secondary_rows = await repos.usage.aggregate_since(
+                    now - timedelta(minutes=secondary_minutes),
+                    window="secondary",
+                )
+                if secondary_rows:
+                    summary = usage_core.summarize_usage_window(
+                        [row.to_window_row() for row in secondary_rows],
+                        account_map,
+                        "secondary",
+                    )
+                    headers.update(_rate_limit_headers("secondary", summary))
+
+            latest_usage = await repos.usage.latest_by_account()
+            headers.update(_credits_headers(latest_usage.values()))
         return headers
 
     async def get_rate_limit_payload(self) -> RateLimitStatusPayloadData:
-        accounts = await self._accounts_repo.list_accounts()
-        await self._refresh_usage(accounts)
-        selected_accounts = _select_accounts_for_limits(accounts)
-        if not selected_accounts:
-            return RateLimitStatusPayloadData(plan_type="guest")
+        async with self._repo_factory() as repos:
+            accounts = await repos.accounts.list_accounts()
+            await self._refresh_usage(repos, accounts)
+            selected_accounts = _select_accounts_for_limits(accounts)
+            if not selected_accounts:
+                return RateLimitStatusPayloadData(plan_type="guest")
 
-        account_map = {account.id: account for account in selected_accounts}
-        primary_rows = await self._latest_usage_rows(account_map, "primary")
-        secondary_rows = await self._latest_usage_rows(account_map, "secondary")
+            account_map = {account.id: account for account in selected_accounts}
+            primary_rows = await self._latest_usage_rows(repos, account_map, "primary")
+            secondary_rows = await self._latest_usage_rows(repos, account_map, "secondary")
 
-        primary_summary = _summarize_window(primary_rows, account_map, "primary")
-        secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
+            primary_summary = _summarize_window(primary_rows, account_map, "primary")
+            secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
 
-        now_epoch = int(time.time())
-        primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
-        secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
+            now_epoch = int(time.time())
+            primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
+            secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
 
-        return RateLimitStatusPayloadData(
-            plan_type=_plan_type_for_accounts(selected_accounts),
-            rate_limit=_rate_limit_details(primary_window, secondary_window),
-            credits=_credits_snapshot(await self._latest_usage_entries(account_map)),
-        )
+            return RateLimitStatusPayloadData(
+                plan_type=_plan_type_for_accounts(selected_accounts),
+                rate_limit=_rate_limit_details(primary_window, secondary_window),
+                credits=_credits_snapshot(await self._latest_usage_entries(repos, account_map)),
+            )
 
     async def _stream_with_retry(
         self,
@@ -211,9 +199,11 @@ class ProxyService:
         propagate_http_errors: bool,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
-        settings = await self._settings_repo.get_or_create()
-        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_key = _sticky_key_from_payload(payload) if settings.sticky_threads_enabled else None
+        async with self._repo_factory() as repos:
+            settings = await repos.settings.get_or_create()
+            prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+            sticky_threads_enabled = settings.sticky_threads_enabled
+        sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
         max_attempts = 3
         for attempt in range(max_attempts):
             selection = await self._load_balancer.select_account(
@@ -401,20 +391,21 @@ class ProxyService:
             )
             with anyio.CancelScope(shield=True):
                 try:
-                    await self._logs_repo.add_log(
-                        account_id=account_id_value,
-                        request_id=request_id,
-                        model=model,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cached_input_tokens=cached_input_tokens,
-                        reasoning_tokens=reasoning_tokens,
-                        reasoning_effort=reasoning_effort,
-                        latency_ms=latency_ms,
-                        status=status,
-                        error_code=error_code,
-                        error_message=error_message,
-                    )
+                    async with self._repo_factory() as repos:
+                        await repos.request_logs.add_log(
+                            account_id=account_id_value,
+                            request_id=request_id,
+                            model=model,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            cached_input_tokens=cached_input_tokens,
+                            reasoning_tokens=reasoning_tokens,
+                            reasoning_effort=reasoning_effort,
+                            latency_ms=latency_ms,
+                            status=status,
+                            error_code=error_code,
+                            error_message=error_message,
+                        )
                 except Exception:
                     logger.warning(
                         "Failed to persist request log account_id=%s request_id=%s",
@@ -423,18 +414,20 @@ class ProxyService:
                         exc_info=True,
                     )
 
-    async def _refresh_usage(self, accounts: list[Account]) -> None:
-        latest_usage = await self._usage_repo.latest_by_account(window="primary")
-        await self._usage_updater.refresh_accounts(accounts, latest_usage)
+    async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
+        latest_usage = await repos.usage.latest_by_account(window="primary")
+        updater = UsageUpdater(repos.usage, repos.accounts)
+        await updater.refresh_accounts(accounts, latest_usage)
 
     async def _latest_usage_rows(
         self,
+        repos: ProxyRepositories,
         account_map: dict[str, Account],
         window: str,
     ) -> list[UsageWindowRow]:
         if not account_map:
             return []
-        latest = await self._usage_repo.latest_by_account(window=window)
+        latest = await repos.usage.latest_by_account(window=window)
         return [
             UsageWindowRow(
                 account_id=entry.account_id,
@@ -448,15 +441,18 @@ class ProxyService:
 
     async def _latest_usage_entries(
         self,
+        repos: ProxyRepositories,
         account_map: dict[str, Account],
     ) -> list[UsageHistory]:
         if not account_map:
             return []
-        latest = await self._usage_repo.latest_by_account()
+        latest = await repos.usage.latest_by_account()
         return [entry for entry in latest.values() if entry.account_id in account_map]
 
     async def _ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
-        return await self._auth_manager.ensure_fresh(account, force=force)
+        async with self._repo_factory() as repos:
+            auth_manager = AuthManager(repos.accounts)
+            return await auth_manager.ensure_fresh(account, force=force)
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:
         error = _parse_openai_error(exc.payload)

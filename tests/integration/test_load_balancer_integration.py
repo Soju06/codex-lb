@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timezone
 
 import pytest
@@ -10,9 +12,25 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+@asynccontextmanager
+async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
+    async with SessionLocal() as session:
+        yield ProxyRepositories(
+            accounts=AccountsRepository(session),
+            usage=UsageRepository(session),
+            request_logs=RequestLogsRepository(session),
+            sticky_sessions=StickySessionsRepository(session),
+            settings=SettingsRepository(session),
+        )
 
 
 @pytest.mark.asyncio
@@ -81,7 +99,7 @@ async def test_load_balancer_skips_secondary_quota(db_setup):
             window_minutes=10080,
         )
 
-        balancer = LoadBalancer(accounts_repo, usage_repo)
+        balancer = LoadBalancer(_repo_factory)
         selection = await balancer.select_account()
 
         assert selection.account is not None
@@ -89,6 +107,7 @@ async def test_load_balancer_skips_secondary_quota(db_setup):
 
         refreshed = await session.get(Account, account_a.id)
         assert refreshed is not None
+        await session.refresh(refreshed)
         assert refreshed.status == AccountStatus.QUOTA_EXCEEDED
 
 
@@ -132,7 +151,7 @@ async def test_load_balancer_reactivates_after_secondary_reset(db_setup):
             window_minutes=10080,
         )
 
-        balancer = LoadBalancer(accounts_repo, usage_repo)
+        balancer = LoadBalancer(_repo_factory)
         selection = await balancer.select_account()
 
         assert selection.account is not None
@@ -140,4 +159,5 @@ async def test_load_balancer_reactivates_after_secondary_reset(db_setup):
 
         refreshed = await session.get(Account, account.id)
         assert refreshed is not None
+        await session.refresh(refreshed)
         assert refreshed.status == AccountStatus.ACTIVE

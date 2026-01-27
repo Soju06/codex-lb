@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import time
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.core.openai.chat_requests import ChatCompletionsRequest
+from app.core.openai.chat_responses import collect_chat_completion, stream_chat_chunks
+from app.core.openai.models_catalog import MODEL_CATALOG
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.dependencies import ProxyContext, get_proxy_context
@@ -33,6 +37,58 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
 ) -> Response:
     return await _stream_responses(request, payload.to_responses_request(), context)
+
+
+@v1_router.get("/models")
+async def v1_models() -> JSONResponse:
+    created = int(time.time())
+    items = [
+        {
+            "id": model_id,
+            "object": "model",
+            "created": created,
+            "owned_by": "codex-lb",
+            "metadata": entry.model_dump(mode="json"),
+        }
+        for model_id, entry in MODEL_CATALOG.items()
+    ]
+    return JSONResponse({"object": "list", "data": items})
+
+
+@v1_router.post("/chat/completions")
+async def v1_chat_completions(
+    request: Request,
+    payload: ChatCompletionsRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+) -> Response:
+    rate_limit_headers = await context.service.rate_limit_headers()
+    stream = context.service.stream_responses(
+        payload.to_responses_request(),
+        request.headers,
+        propagate_http_errors=True,
+    )
+    try:
+        first = await stream.__anext__()
+    except StopAsyncIteration:
+        first = None
+    except ProxyResponseError as exc:
+        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=rate_limit_headers)
+
+    stream_with_first = _prepend_first(first, stream)
+    if payload.stream:
+        return StreamingResponse(
+            stream_chat_chunks(stream_with_first, model=payload.model),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **rate_limit_headers},
+        )
+
+    result = await collect_chat_completion(stream_with_first, model=payload.model)
+    status_code = 200
+    if isinstance(result, dict) and "error" in result:
+        error = result.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        status_code = 503 if code == "no_accounts" else 502
+    return JSONResponse(content=result, status_code=status_code, headers=rate_limit_headers)
 
 
 async def _stream_responses(

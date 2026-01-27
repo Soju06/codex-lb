@@ -23,12 +23,12 @@ def test_store_true_is_rejected():
         ResponsesRequest.model_validate(payload)
 
 
-def test_store_omitted_is_excluded():
+def test_store_omitted_defaults_to_false():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.store is None
-    assert "store" not in request.to_payload()
+    assert request.store is False
+    assert request.to_payload()["store"] is False
 
 
 def test_store_false_is_preserved():

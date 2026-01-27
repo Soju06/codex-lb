@@ -38,7 +38,7 @@ class ResponsesRequest(BaseModel):
     tool_choice: str | None = None
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
-    store: bool | None = None
+    store: bool = False
     stream: bool | None = None
     include: list[str] = Field(default_factory=list)
     prompt_cache_key: str | None = None
@@ -46,10 +46,10 @@ class ResponsesRequest(BaseModel):
 
     @field_validator("store")
     @classmethod
-    def _ensure_store_false(cls, value: bool | None) -> bool | None:
+    def _ensure_store_false(cls, value: bool | None) -> bool:
         if value is True:
             raise ValueError("store must be false")
-        return value
+        return False if value is None else value
 
     def to_payload(self) -> JsonObject:
         payload = self.model_dump(mode="json", exclude_none=True)

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import anyio
 from sqlalchemy import String, and_, cast, or_, select
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.request_id import ensure_request_id
@@ -55,6 +56,8 @@ class RequestLogsRepository:
         try:
             await self._session.commit()
             await self._session.refresh(log)
+            return log
+        except sa_exc.ResourceClosedError:
             return log
         except BaseException:
             await _safe_rollback(self._session)

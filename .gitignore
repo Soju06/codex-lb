@@ -33,6 +33,7 @@ node_modules/
 
 # Local
 .local/
+.worktrees/
 
 app/static/components
 .codex-lb/

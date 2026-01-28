@@ -97,3 +97,43 @@ def test_chat_tool_choice_object_passes_through():
     dumped = responses.to_payload()
     tool_choice = dumped.get("tool_choice")
     assert tool_choice == {"type": "function", "name": "do_thing"}
+
+
+def test_chat_response_format_json_object_maps_to_text_format():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_object"},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+    text = dumped.get("text")
+    assert isinstance(text, dict)
+    assert text.get("format") == {"type": "json_object"}
+
+
+def test_chat_response_format_json_schema_maps_schema_fields():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "output",
+                "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                "strict": True,
+            },
+        },
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+    text = dumped.get("text")
+    assert isinstance(text, dict)
+    fmt = text.get("format")
+    assert isinstance(fmt, dict)
+    assert fmt.get("type") == "json_schema"
+    assert fmt.get("name") == "output"
+    assert fmt.get("schema") == {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    assert fmt.get("strict") is True

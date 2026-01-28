@@ -14,7 +14,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 
-IGNORE_INBOUND_HEADERS = {"authorization", "chatgpt-account-id", "content-encoding", "content-length", "host"}
+IGNORE_INBOUND_HEADERS = {"authorization", "chatgpt-account-id", "content-length", "host"}
 
 _ERROR_TYPE_CODE_MAP = {
     "rate_limit_exceeded": "rate_limit_exceeded",

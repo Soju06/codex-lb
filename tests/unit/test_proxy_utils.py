@@ -18,14 +18,14 @@ def test_filter_inbound_headers_strips_auth_and_account():
     headers = {
         "Authorization": "Bearer x",
         "chatgpt-account-id": "acc_1",
-        "Content-Encoding": "zstd",
+        "Content-Encoding": "gzip",
         "Content-Type": "application/json",
         "X-Request-Id": "req_1",
     }
     filtered = filter_inbound_headers(headers)
     assert "Authorization" not in filtered
     assert "chatgpt-account-id" not in filtered
-    assert "Content-Encoding" not in filtered
+    assert filtered["Content-Encoding"] == "gzip"
     assert filtered["Content-Type"] == "application/json"
     assert filtered["X-Request-Id"] == "req_1"
 

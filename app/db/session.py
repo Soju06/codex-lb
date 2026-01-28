@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config.settings import get_settings
 from app.db.migrations import run_migrations
 
-DATABASE_URL = get_settings().database_url
+_settings = get_settings()
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +43,24 @@ def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
             cursor.close()
 
 
-if _is_sqlite_url(DATABASE_URL):
+if _is_sqlite_url(_settings.database_url):
     engine = create_async_engine(
-        DATABASE_URL,
+        _settings.database_url,
         echo=False,
+        pool_size=_settings.database_pool_size,
+        max_overflow=_settings.database_max_overflow,
+        pool_timeout=_settings.database_pool_timeout_seconds,
         connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
     )
-    _configure_sqlite_engine(engine.sync_engine, enable_wal=not _is_sqlite_memory_url(DATABASE_URL))
+    _configure_sqlite_engine(engine.sync_engine, enable_wal=not _is_sqlite_memory_url(_settings.database_url))
 else:
-    engine = create_async_engine(DATABASE_URL, echo=False)
+    engine = create_async_engine(
+        _settings.database_url,
+        echo=False,
+        pool_size=_settings.database_pool_size,
+        max_overflow=_settings.database_max_overflow,
+        pool_timeout=_settings.database_pool_timeout_seconds,
+    )
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -116,7 +125,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 async def init_db() -> None:
     from app.db.models import Base
 
-    _ensure_sqlite_dir(DATABASE_URL)
+    _ensure_sqlite_dir(_settings.database_url)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

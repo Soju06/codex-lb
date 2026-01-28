@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     )
 
     database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+    database_pool_size: int = Field(default=15, gt=0)
+    database_max_overflow: int = Field(default=10, ge=0)
+    database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_connect_timeout_seconds: float = 30.0
     stream_idle_timeout_seconds: float = 300.0
@@ -43,37 +46,26 @@ class Settings(BaseSettings):
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False
     log_proxy_request_payload: bool = False
-    max_decompressed_body_bytes: int = 32 * 1024 * 1024
+    max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
 
     @field_validator("database_url")
     @classmethod
-    def _normalize_database_url(cls, value: str) -> str:
-        if not isinstance(value, str):
-            return value
-
+    def _expand_database_url(cls, value: str) -> str:
         for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
             if value.startswith(prefix):
                 path = value[len(prefix) :]
                 if path.startswith("~"):
-                    expanded = str(Path(path).expanduser())
-                    return f"{prefix}{expanded}"
+                    return f"{prefix}{Path(path).expanduser()}"
         return value
 
     @field_validator("encryption_key_file", mode="before")
     @classmethod
-    def _normalize_encryption_key_file(cls, value: object) -> Path:
+    def _expand_encryption_key_file(cls, value: str | Path) -> Path:
         if isinstance(value, Path):
             return value.expanduser()
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
-
-    @field_validator("max_decompressed_body_bytes")
-    @classmethod
-    def _validate_max_decompressed_body_bytes(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("max_decompressed_body_bytes must be positive")
-        return value
 
 
 @lru_cache(maxsize=1)

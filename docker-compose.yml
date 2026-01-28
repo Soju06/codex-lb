@@ -17,6 +17,9 @@ services:
       - --reload
     environment:
       CODEX_LB_DATABASE_URL: "sqlite+aiosqlite:////var/lib/codex-lb/store.db"
+      CODEX_LB_DATABASE_POOL_SIZE: "15"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "10"
+      CODEX_LB_DATABASE_POOL_TIMEOUT_SECONDS: "30"
       CODEX_LB_ENCRYPTION_KEY_FILE: "/var/lib/codex-lb/encryption.key"
       CODEX_LB_OAUTH_CALLBACK_HOST: "0.0.0.0"
       # CODEX_LB_LOG_PROXY_REQUEST_SHAPE: "true"

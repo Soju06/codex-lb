@@ -46,6 +46,8 @@ def _replace_request_body(request: Request, body: bytes) -> None:
         headers.append((key, value))
     headers.append((b"content-length", str(len(body)).encode("ascii")))
     request.scope["headers"] = headers
+    # Ensure subsequent request.headers reflects the updated scope headers.
+    request._headers = None
 
 
 def add_request_decompression_middleware(app: FastAPI) -> None:

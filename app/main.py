@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import uuid4
 
-from fastapi import FastAPI, Request
-from fastapi.exception_handlers import (
-    http_exception_handler,
-    request_validation_exception_handler,
-)
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.clients.http import close_http_client, init_http_client
-from app.core.errors import dashboard_error
-from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
+from app.core.handlers import add_exception_handlers
+from app.core.middleware import (
+    add_api_unhandled_error_middleware,
+    add_request_decompression_middleware,
+    add_request_id_middleware,
+)
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.health import api as health_api
@@ -26,8 +22,6 @@ from app.modules.proxy import api as proxy_api
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.usage import api as usage_api
-
-logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -47,59 +41,10 @@ async def lifespan(_: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="codex-lb", version="0.1.0", lifespan=lifespan)
 
-    @app.middleware("http")
-    async def request_id_middleware(request: Request, call_next) -> JSONResponse:
-        inbound_request_id = request.headers.get("x-request-id") or request.headers.get("request-id")
-        request_id = inbound_request_id or str(uuid4())
-        token = set_request_id(request_id)
-        try:
-            response = await call_next(request)
-        except Exception:
-            reset_request_id(token)
-            raise
-        response.headers.setdefault("x-request-id", request_id)
-        return response
-
-    @app.middleware("http")
-    async def api_unhandled_error_middleware(request: Request, call_next) -> Response:
-        try:
-            return await call_next(request)
-        except Exception:
-            if request.url.path.startswith("/api/"):
-                logger.exception(
-                    "Unhandled API error request_id=%s",
-                    get_request_id(),
-                )
-                return JSONResponse(
-                    status_code=500,
-                    content=dashboard_error("internal_error", "Unexpected error"),
-                )
-            raise
-
-    @app.exception_handler(RequestValidationError)
-    async def _validation_error_handler(
-        request: Request,
-        exc: RequestValidationError,
-    ) -> Response:
-        if request.url.path.startswith("/api/"):
-            return JSONResponse(
-                status_code=422,
-                content=dashboard_error("validation_error", "Invalid request payload"),
-            )
-        return await request_validation_exception_handler(request, exc)
-
-    @app.exception_handler(StarletteHTTPException)
-    async def _http_error_handler(
-        request: Request,
-        exc: StarletteHTTPException,
-    ) -> Response:
-        if request.url.path.startswith("/api/"):
-            detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
-            return JSONResponse(
-                status_code=exc.status_code,
-                content=dashboard_error(f"http_{exc.status_code}", detail),
-            )
-        return await http_exception_handler(request, exc)
+    add_request_decompression_middleware(app)
+    add_request_id_middleware(app)
+    add_api_unhandled_error_middleware(app)
+    add_exception_handlers(app)
 
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.v1_router)

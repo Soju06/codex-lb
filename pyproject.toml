@@ -41,6 +41,7 @@ dependencies = [
     "pydantic-settings>=2.12.0",
     "python-multipart>=0.0.21",
     "sqlalchemy>=2.0.45",
+    "zstandard>=0.25.0",
 ]
 
 [dependency-groups]

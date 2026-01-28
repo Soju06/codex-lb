@@ -7,7 +7,29 @@ import zstandard as zstd
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from app.core.config.settings import get_settings
 from app.core.errors import dashboard_error
+
+
+class _DecompressedBodyTooLarge(Exception):
+    def __init__(self, max_size: int) -> None:
+        super().__init__(f"Decompressed body exceeded {max_size} bytes")
+        self.max_size = max_size
+
+
+def _read_limited(reader: io.BufferedIOBase, max_size: int) -> bytes:
+    buffer = bytearray()
+    total = 0
+    chunk_size = 64 * 1024
+    while True:
+        chunk = reader.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise _DecompressedBodyTooLarge(max_size)
+        buffer.extend(chunk)
+    return bytes(buffer)
 
 
 def _replace_request_body(request: Request, body: bytes) -> None:
@@ -34,12 +56,32 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
         if encodings != ["zstd"]:
             return await call_next(request)
         body = await request.body()
+        settings = get_settings()
+        max_size = settings.max_decompressed_body_bytes
         try:
-            decompressed = zstd.ZstdDecompressor().decompress(body)
+            decompressed = zstd.ZstdDecompressor().decompress(body, max_output_size=max_size)
+            if len(decompressed) > max_size:
+                raise _DecompressedBodyTooLarge(max_size)
+        except _DecompressedBodyTooLarge:
+            return JSONResponse(
+                status_code=413,
+                content=dashboard_error(
+                    "payload_too_large",
+                    "Request body exceeds the maximum allowed size",
+                ),
+            )
         except Exception:
             try:
                 with zstd.ZstdDecompressor().stream_reader(io.BytesIO(body)) as reader:
-                    decompressed = reader.read()
+                    decompressed = _read_limited(reader, max_size)
+            except _DecompressedBodyTooLarge:
+                return JSONResponse(
+                    status_code=413,
+                    content=dashboard_error(
+                        "payload_too_large",
+                        "Request body exceeds the maximum allowed size",
+                    ),
+                )
             except Exception:
                 return JSONResponse(
                     status_code=400,

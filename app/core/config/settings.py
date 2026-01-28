@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False
     log_proxy_request_payload: bool = False
+    max_decompressed_body_bytes: int = 32 * 1024 * 1024
 
     @field_validator("database_url")
     @classmethod
@@ -66,6 +67,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
+
+    @field_validator("max_decompressed_body_bytes")
+    @classmethod
+    def _validate_max_decompressed_body_bytes(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("max_decompressed_body_bytes must be positive")
+        return value
 
 
 @lru_cache(maxsize=1)

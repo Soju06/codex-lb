@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 import zstandard as zstd
 from fastapi import FastAPI, Request
@@ -17,7 +18,11 @@ class _DecompressedBodyTooLarge(Exception):
         self.max_size = max_size
 
 
-def _read_limited(reader: io.BufferedIOBase, max_size: int) -> bytes:
+class _Readable(Protocol):
+    def read(self, size: int = ...) -> bytes: ...
+
+
+def _read_limited(reader: _Readable, max_size: int) -> bytes:
     buffer = bytearray()
     total = 0
     chunk_size = 64 * 1024

@@ -44,15 +44,23 @@ def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
 
 
 if _is_sqlite_url(_settings.database_url):
-    engine = create_async_engine(
-        _settings.database_url,
-        echo=False,
-        pool_size=_settings.database_pool_size,
-        max_overflow=_settings.database_max_overflow,
-        pool_timeout=_settings.database_pool_timeout_seconds,
-        connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
-    )
-    _configure_sqlite_engine(engine.sync_engine, enable_wal=not _is_sqlite_memory_url(_settings.database_url))
+    is_sqlite_memory = _is_sqlite_memory_url(_settings.database_url)
+    if is_sqlite_memory:
+        engine = create_async_engine(
+            _settings.database_url,
+            echo=False,
+            connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
+        )
+    else:
+        engine = create_async_engine(
+            _settings.database_url,
+            echo=False,
+            pool_size=_settings.database_pool_size,
+            max_overflow=_settings.database_max_overflow,
+            pool_timeout=_settings.database_pool_timeout_seconds,
+            connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
+        )
+    _configure_sqlite_engine(engine.sync_engine, enable_wal=not is_sqlite_memory)
 else:
     engine = create_async_engine(
         _settings.database_url,

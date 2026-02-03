@@ -64,6 +64,17 @@
       "contributions": [
         "doc"
       ]
+    },
+    {
+      "login": "choi138",
+      "name": "Choi138",
+      "avatar_url": "https://avatars.githubusercontent.com/u/84369321?v=4",
+      "profile": "https://github.com/choi138",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -100,6 +100,27 @@ async def test_request_decompression_supports_deflate():
 
 
 @pytest.mark.asyncio
+async def test_request_decompression_allows_identity():
+    app = _build_echo_app()
+
+    payload = {"hello": "identity"}
+    body = json.dumps(payload).encode("utf-8")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/echo",
+            content=body,
+            headers={"Content-Encoding": "identity", "Content-Type": "application/json"},
+        )
+
+    assert resp.status_code == 200
+    response_data = resp.json()
+    assert response_data["content_encoding"] is None
+    assert response_data["data"] == payload
+
+
+@pytest.mark.asyncio
 async def test_request_decompression_supports_multiple_encodings():
     app = _build_echo_app()
 

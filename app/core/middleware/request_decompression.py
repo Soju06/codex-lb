@@ -50,12 +50,23 @@ def _decompress_deflate(data: bytes, max_size: int) -> bytes:
     chunk_size = 64 * 1024
     for start in range(0, len(data), chunk_size):
         chunk = data[start : start + chunk_size]
-        buffer.extend(decompressor.decompress(chunk))
-        if len(buffer) > max_size:
+        # Bound output growth to avoid oversized allocations.
+        while chunk:
+            remaining = max_size - len(buffer)
+            if remaining == 0:
+                raise _DecompressedBodyTooLarge(max_size)
+            buffer.extend(decompressor.decompress(chunk, max_length=remaining))
+            chunk = decompressor.unconsumed_tail
+    while True:
+        remaining = max_size - len(buffer)
+        if remaining == 0:
             raise _DecompressedBodyTooLarge(max_size)
-    buffer.extend(decompressor.flush())
-    if len(buffer) > max_size:
-        raise _DecompressedBodyTooLarge(max_size)
+        drained = decompressor.decompress(b"", max_length=remaining)
+        if not drained:
+            break
+        buffer.extend(drained)
+    if not decompressor.eof:
+        raise zlib.error("Incomplete deflate stream")
     return bytes(buffer)
 
 
@@ -73,7 +84,7 @@ def _decompress_zstd(data: bytes, max_size: int) -> bytes:
 
 
 def _decompress_body(data: bytes, encodings: list[str], max_size: int) -> bytes:
-    supported = {"zstd", "gzip", "deflate"}
+    supported = {"zstd", "gzip", "deflate", "identity"}
     if any(encoding not in supported for encoding in encodings):
         raise ValueError("Unsupported content-encoding")
     result = data
@@ -84,6 +95,8 @@ def _decompress_body(data: bytes, encodings: list[str], max_size: int) -> bytes:
             result = _decompress_gzip(result, max_size)
         elif encoding == "deflate":
             result = _decompress_deflate(result, max_size)
+        elif encoding == "identity":
+            continue
     return result
 
 

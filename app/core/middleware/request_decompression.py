@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import io
+import zlib
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
@@ -37,6 +39,54 @@ def _read_limited(reader: _Readable, max_size: int) -> bytes:
     return bytes(buffer)
 
 
+def _decompress_gzip(data: bytes, max_size: int) -> bytes:
+    with gzip.GzipFile(fileobj=io.BytesIO(data)) as reader:
+        return _read_limited(reader, max_size)
+
+
+def _decompress_deflate(data: bytes, max_size: int) -> bytes:
+    decompressor = zlib.decompressobj()
+    buffer = bytearray()
+    chunk_size = 64 * 1024
+    for start in range(0, len(data), chunk_size):
+        chunk = data[start : start + chunk_size]
+        buffer.extend(decompressor.decompress(chunk))
+        if len(buffer) > max_size:
+            raise _DecompressedBodyTooLarge(max_size)
+    buffer.extend(decompressor.flush())
+    if len(buffer) > max_size:
+        raise _DecompressedBodyTooLarge(max_size)
+    return bytes(buffer)
+
+
+def _decompress_zstd(data: bytes, max_size: int) -> bytes:
+    try:
+        decompressed = zstd.ZstdDecompressor().decompress(data, max_output_size=max_size)
+        if len(decompressed) > max_size:
+            raise _DecompressedBodyTooLarge(max_size)
+        return decompressed
+    except _DecompressedBodyTooLarge:
+        raise
+    except Exception:
+        with zstd.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+            return _read_limited(reader, max_size)
+
+
+def _decompress_body(data: bytes, encodings: list[str], max_size: int) -> bytes:
+    supported = {"zstd", "gzip", "deflate"}
+    if any(encoding not in supported for encoding in encodings):
+        raise ValueError("Unsupported content-encoding")
+    result = data
+    for encoding in reversed(encodings):
+        if encoding == "zstd":
+            result = _decompress_zstd(result, max_size)
+        elif encoding == "gzip":
+            result = _decompress_gzip(result, max_size)
+        elif encoding == "deflate":
+            result = _decompress_deflate(result, max_size)
+    return result
+
+
 def _replace_request_body(request: Request, body: bytes) -> None:
     request._body = body
     headers: list[tuple[bytes, bytes]] = []
@@ -60,15 +110,13 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
         if not content_encoding:
             return await call_next(request)
         encodings = [enc.strip().lower() for enc in content_encoding.split(",") if enc.strip()]
-        if encodings != ["zstd"]:
+        if not encodings:
             return await call_next(request)
         body = await request.body()
         settings = get_settings()
         max_size = settings.max_decompressed_body_bytes
         try:
-            decompressed = zstd.ZstdDecompressor().decompress(body, max_output_size=max_size)
-            if len(decompressed) > max_size:
-                raise _DecompressedBodyTooLarge(max_size)
+            decompressed = _decompress_body(body, encodings, max_size)
         except _DecompressedBodyTooLarge:
             return JSONResponse(
                 status_code=413,
@@ -77,25 +125,21 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
                     "Request body exceeds the maximum allowed size",
                 ),
             )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content=dashboard_error(
+                    "invalid_request",
+                    "Unsupported Content-Encoding",
+                ),
+            )
         except Exception:
-            try:
-                with zstd.ZstdDecompressor().stream_reader(io.BytesIO(body)) as reader:
-                    decompressed = _read_limited(reader, max_size)
-            except _DecompressedBodyTooLarge:
-                return JSONResponse(
-                    status_code=413,
-                    content=dashboard_error(
-                        "payload_too_large",
-                        "Request body exceeds the maximum allowed size",
-                    ),
-                )
-            except Exception:
-                return JSONResponse(
-                    status_code=400,
-                    content=dashboard_error(
-                        "invalid_request",
-                        "Request body is zstd-compressed but could not be decompressed",
-                    ),
-                )
+            return JSONResponse(
+                status_code=400,
+                content=dashboard_error(
+                    "invalid_request",
+                    "Request body is compressed but could not be decompressed",
+                ),
+            )
         _replace_request_body(request, decompressed)
         return await call_next(request)

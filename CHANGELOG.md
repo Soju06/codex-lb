@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/Soju06/codex-lb/compare/v0.5.2...v0.5.3) (2026-02-04)
+
+
+### Documentation
+
+* **openspec:** add context docs policy ([#57](https://github.com/Soju06/codex-lb/issues/57)) ([8a491f8](https://github.com/Soju06/codex-lb/commit/8a491f88637d3b4eb28e24aa5063f495350ecca1))
+
 ## [0.5.2](https://github.com/Soju06/codex-lb/compare/v0.5.1...v0.5.2) (2026-02-04)
 
 

@@ -46,6 +46,12 @@
 - Background tasks or standalone scripts must create and manage their own session; do not reuse request contexts.
 - When adding a new module, define `api.py` endpoints that depend on a module-specific context provider.
 
+## OpenSpec Best Practices
+
+- Use the OpenSpec workflow for non-trivial changes: explore, define change artifacts, implement, verify, archive.
+- Keep change artifacts scoped, minimal, and stored under `openspec/`; avoid duplicating or forking specs.
+- Sync delta specs back to main specs after implementation and update tests/contracts to match.
+
 ## Git Workflow & Contribution
 
 1. **Important**: Create branches, commits, or PRs **only upon explicit user request**. Implicit actions are not allowed.

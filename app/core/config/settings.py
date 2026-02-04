@@ -9,12 +9,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parents[3]
 
 DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
+DOCKER_CALLBACK_HOST = "0.0.0.0"
+
+
+def _in_container() -> bool:
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
 
 def _default_home_dir() -> Path:
-    if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+    if _in_container():
         return DOCKER_DATA_DIR
     return Path.home() / ".codex-lb"
+
+
+def _default_oauth_callback_host() -> str:
+    if _in_container():
+        return DOCKER_CALLBACK_HOST
+    return "127.0.0.1"
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
@@ -42,7 +53,7 @@ class Settings(BaseSettings):
     oauth_scope: str = "openid profile email"
     oauth_timeout_seconds: float = 30.0
     oauth_redirect_uri: str = "http://localhost:1455/auth/callback"
-    oauth_callback_host: str = "127.0.0.1"
+    oauth_callback_host: str = _default_oauth_callback_host()
     oauth_callback_port: int = 1455  # Do not change the port. OpenAI dislikes changes.
     token_refresh_timeout_seconds: float = 30.0
     token_refresh_interval_days: int = 8

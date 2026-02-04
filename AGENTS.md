@@ -52,6 +52,17 @@
 - Keep change artifacts scoped, minimal, and stored under `openspec/`; avoid duplicating or forking specs.
 - Sync delta specs back to main specs after implementation and update tests/contracts to match.
 
+## OpenSpec Documentation Model (Spec + Context)
+
+- `spec.md` is the normative SSOT and should contain only testable requirements.
+- Use `openspec/specs/<capability>/context.md` for free-form context (purpose, rationale, examples, ops notes).
+- If context grows, split into `overview.md`, `rationale.md`, `examples.md`, or `ops.md` within the same capability folder.
+- Change-level notes live in `openspec/changes/<change>/context.md` or `notes.md`, then sync stable context back into the main context docs.
+- Use the `openspec-context-docs` skill when writing or updating OpenSpec documentation, context docs, or onboarding/guide docs.
+
+Prompting cue:
+"Keep `spec.md` strictly for requirements. Add/update `context.md` with purpose, decisions, constraints, failure modes, and at least one concrete example."
+
 ## Git Workflow & Contribution
 
 1. **Important**: Create branches, commits, or PRs **only upon explicit user request**. Implicit actions are not allowed.

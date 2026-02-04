@@ -107,6 +107,7 @@ async def _stream_responses(
     context: ProxyContext,
 ) -> Response:
     rate_limit_headers = await context.service.rate_limit_headers()
+    payload.stream = True
     stream = context.service.stream_responses(
         payload,
         request.headers,
@@ -135,6 +136,7 @@ async def _collect_responses(
     context: ProxyContext,
 ) -> Response:
     rate_limit_headers = await context.service.rate_limit_headers()
+    payload.stream = True
     stream = context.service.stream_responses(
         payload,
         request.headers,

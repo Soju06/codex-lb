@@ -224,6 +224,33 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_forces_stream(async_client, monkeypatch):
+    email = "stream-force@example.com"
+    raw_account_id = "acc_stream_force"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    observed_stream: dict[str, bool | None] = {"value": None}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        observed_stream["value"] = payload.stream
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": False}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert observed_stream["value"] is True
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_streams_event_sequence(async_client, monkeypatch):
     email = "stream-seq@example.com"
     raw_account_id = "acc_stream_seq"
@@ -260,7 +287,10 @@ async def test_v1_responses_non_streaming_returns_response(async_client, monkeyp
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
+    observed_stream: dict[str, bool | None] = {"value": None}
+
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        observed_stream["value"] = payload.stream
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
             '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
@@ -268,7 +298,7 @@ async def test_v1_responses_non_streaming_returns_response(async_client, monkeyp
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}]}
+    payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}], "stream": False}
     resp = await async_client.post("/v1/responses", json=payload)
 
     assert resp.status_code == 200
@@ -276,3 +306,4 @@ async def test_v1_responses_non_streaming_returns_response(async_client, monkeyp
     assert body["id"] == "resp_1"
     assert body["object"] == "response"
     assert body["status"] == "completed"
+    assert observed_stream["value"] is True

@@ -52,6 +52,31 @@
 - Keep change artifacts scoped, minimal, and stored under `openspec/`; avoid duplicating or forking specs.
 - Sync delta specs back to main specs after implementation and update tests/contracts to match.
 
+## Prompting & Documentation (OpenSpec)
+
+- Avoid repo-internal history references in user-facing docs/tasks (e.g., "Replace X"); write as a clean starting point for first-time readers.
+- When producing OpenSpec artifacts, keep them under `openspec/` (do not place specs/design/tasks under `docs/`).
+- Activate relevant skills when the task matches:
+  - `openspec-context-docs` for OpenSpec docs/context/guide or spec-adjacent narrative.
+  - OpenSpec workflow (`/opsx:*`, `openspec-*`) for spec-driven changes (proposal -> specs -> design -> tasks -> apply -> verify -> sync -> archive).
+
+## OpenSpec Locations (when used)
+
+- Active changes: `openspec/changes/<change>/`
+- Main specs: `openspec/specs/<capability>/spec.md`
+- Context docs: `openspec/specs/<capability>/context.md` (or `overview.md`/`rationale.md`/`examples.md`/`ops.md`)
+- Archived changes: `openspec/changes/archive/YYYY-MM-DD-<change>/`
+
+## OpenSpec Commands (recommended)
+
+- Start a change: `/opsx:new <kebab-case>`
+- Create artifacts (step): `/opsx:continue <change>`
+- Create artifacts (fast): `/opsx:ff <change>`
+- Implement tasks: `/opsx:apply <change>`
+- Verify before archive: `/opsx:verify <change>`
+- Sync delta specs -> main specs: `/opsx:sync <change>`
+- Archive: `/opsx:archive <change>`
+
 ## OpenSpec Documentation Model (Spec + Context)
 
 - `spec.md` is the normative SSOT and should contain only testable requirements.

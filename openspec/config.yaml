@@ -18,3 +18,12 @@ schema: spec-driven
 #       - Always include a "Non-goals" section
 #     tasks:
 #       - Break tasks into chunks of max 2 hours
+
+context: |
+  Process: This repo uses the OpenSpec workflow. Always read AGENTS.md.
+  OpenSpec docs: spec.md is requirements-only. Put narrative context in openspec/specs/<capability>/context.md (purpose, rationale, examples, ops notes).
+
+rules:
+  context_docs:
+    - Context docs are free-form but should include purpose/scope, decisions, constraints, failure modes, and at least one example.
+    - Do not duplicate normative requirements; link to spec.md.

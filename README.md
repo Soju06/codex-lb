@@ -86,7 +86,12 @@ Add the following to `~/.config/opencode/opencode.json`:
 
 ## Data
 
-All data stored in `~/.codex-lb/`:
+Data storage locations:
+
+- Local/uvx: `~/.codex-lb/`
+- Docker: `/var/lib/codex-lb/`
+
+Files:
 
 - `store.db` – accounts, usage logs
 - `encryption.key` – encrypts tokens (auto-generated)

@@ -8,7 +8,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
-DEFAULT_HOME_DIR = Path.home() / ".codex-lb"
+DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
+
+
+def _default_home_dir() -> Path:
+    if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+        return DOCKER_DATA_DIR
+    return Path.home() / ".codex-lb"
+
+
+DEFAULT_HOME_DIR = _default_home_dir()
 DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
 

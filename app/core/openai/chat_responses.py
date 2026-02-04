@@ -336,7 +336,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dic
         if not payload:
             continue
         event_type = payload.get("type")
-        if event_type == "response.output_text.delta":
+        if event_type in ("response.output_text.delta", "response.refusal.delta"):
             delta = payload.get("delta")
             if isinstance(delta, str):
                 content_parts.append(delta)

@@ -181,3 +181,23 @@ async def test_collect_completion_returns_error_event():
     result = await collect_chat_completion(_stream(), model="gpt-5.2")
     error = cast(dict[str, JsonValue], result.get("error"))
     assert error.get("code") == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_includes_refusal_delta():
+    lines = [
+        'data: {"type":"response.refusal.delta","delta":"no"}\n\n',
+        (
+            'data: {"type":"response.incomplete","response":{"id":"r1",'
+            '"incomplete_details":{"reason":"content_filter"}}}\n\n'
+        ),
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    choices = cast(list[dict[str, JsonValue]], result.get("choices"))
+    message = cast(dict[str, JsonValue], choices[0].get("message"))
+    assert message.get("content") == "no"

@@ -6,9 +6,9 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app.core.errors import openai_error
+from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, ResponseUsage
 from app.core.types import JsonValue
 
 
@@ -96,6 +96,9 @@ class ChatCompletion(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: ChatCompletionUsage | None = None
+
+
+ChatCompletionResult = ChatCompletion | OpenAIErrorEnvelope
 
 
 @dataclass
@@ -271,7 +274,7 @@ def iter_chat_chunks(
             if include_usage:
                 response = payload.get("response")
                 if isinstance(response, dict):
-                    usage = _map_usage(response.get("usage") if isinstance(response.get("usage"), dict) else None)
+                    usage = _map_usage(_parse_usage(response.get("usage")))
             finish_reason = "tool_calls" if state.saw_tool_call else "stop"
             if event_type == "response.incomplete" and not state.saw_tool_call:
                 finish_reason = _finish_reason_from_incomplete(payload.get("response"))
@@ -322,11 +325,11 @@ async def stream_chat_chunks(
                 return
 
 
-async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dict[str, JsonValue]:
+async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> ChatCompletionResult:
     created = int(time.time())
     content_parts: list[str] = []
     response_id: str | None = None
-    usage: dict[str, JsonValue] | None = None
+    usage: ResponseUsage | None = None
     incomplete_reason: str | None = None
     tool_index = ToolCallIndex()
     tool_calls: list[ToolCallState] = []
@@ -356,17 +359,15 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dic
                 if isinstance(maybe_error, dict):
                     error = maybe_error
             if error is not None:
-                return {"error": error}
-            return cast(dict[str, JsonValue], openai_error("upstream_error", "Upstream error"))
+                return _error_envelope_from_payload(error)
+            return _default_error_envelope()
         if event_type in ("response.completed", "response.incomplete"):
             response = payload.get("response")
             if isinstance(response, dict):
                 response_id_value = response.get("id")
                 if isinstance(response_id_value, str):
                     response_id = response_id_value
-                usage_value = response.get("usage")
-                if isinstance(usage_value, dict):
-                    usage = usage_value
+                usage = _parse_usage(response.get("usage"))
                 if event_type == "response.incomplete":
                     incomplete_reason = _finish_reason_from_incomplete(response)
 
@@ -391,21 +392,15 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dic
         choices=[choice],
         usage=_map_usage(usage),
     )
-    return _dump_completion(completion)
+    return completion
 
 
-def _map_usage(usage: dict[str, JsonValue] | None) -> ChatCompletionUsage | None:
-    if not usage:
+def _map_usage(usage: ResponseUsage | None) -> ChatCompletionUsage | None:
+    if usage is None:
         return None
-    prompt_tokens = usage.get("input_tokens")
-    completion_tokens = usage.get("output_tokens")
-    total_tokens = usage.get("total_tokens")
-    if not isinstance(prompt_tokens, int):
-        prompt_tokens = None
-    if not isinstance(completion_tokens, int):
-        completion_tokens = None
-    if not isinstance(total_tokens, int):
-        total_tokens = None
+    prompt_tokens = usage.input_tokens
+    completion_tokens = usage.output_tokens
+    total_tokens = usage.total_tokens
     if prompt_tokens is None and completion_tokens is None and total_tokens is None:
         return None
     return ChatCompletionUsage(
@@ -415,16 +410,20 @@ def _map_usage(usage: dict[str, JsonValue] | None) -> ChatCompletionUsage | None
     )
 
 
+def _parse_usage(value: JsonValue) -> ResponseUsage | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return ResponseUsage.model_validate(value)
+    except ValidationError:
+        return None
+
+
 def _dump_chunk(chunk: ChatCompletionChunk, *, include_usage: bool = False) -> str:
     payload = chunk.model_dump(mode="json", exclude_none=True)
     if include_usage and "usage" not in payload:
         payload["usage"] = None
     return _dump_sse(payload)
-
-
-def _dump_completion(completion: ChatCompletion) -> dict[str, JsonValue]:
-    payload = completion.model_dump(mode="json", exclude_none=True)
-    return cast(dict[str, JsonValue], payload)
 
 
 def _dump_sse(payload: dict[str, JsonValue]) -> str:
@@ -444,6 +443,52 @@ def _finish_reason_from_incomplete(response: JsonValue | None) -> str:
         if reason == "content_filter":
             return "content_filter"
     return "stop"
+
+
+def _default_error_envelope() -> OpenAIErrorEnvelope:
+    return OpenAIErrorEnvelope(
+        error=OpenAIError(
+            message="Upstream error",
+            type="server_error",
+            code="upstream_error",
+        )
+    )
+
+
+def _error_envelope_from_payload(payload: Mapping[str, JsonValue]) -> OpenAIErrorEnvelope:
+    normalized = _normalize_error_payload(payload)
+    if not normalized:
+        return _default_error_envelope()
+    try:
+        error = OpenAIError.model_validate(normalized)
+    except ValidationError:
+        return _default_error_envelope()
+    return OpenAIErrorEnvelope(error=error)
+
+
+def _normalize_error_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    normalized: dict[str, JsonValue] = {}
+    for key in ("message", "type", "code", "param", "plan_type"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            normalized[key] = value
+    for key in ("resets_at", "resets_in_seconds"):
+        value = payload.get(key)
+        number = _coerce_number(value)
+        if number is not None:
+            normalized[key] = number
+    return normalized
+
+
+def _coerce_number(value: JsonValue) -> int | float | None:
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def _tool_call_delta_from_payload(payload: Mapping[str, JsonValue], indexer: ToolCallIndex) -> ToolCallDelta | None:

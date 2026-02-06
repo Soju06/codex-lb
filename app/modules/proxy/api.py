@@ -3,28 +3,48 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import cast
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
 from app.core.clients.proxy import ProxyResponseError
-from app.core.errors import openai_error
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.chat_requests import ChatCompletionsRequest
-from app.core.openai.chat_responses import collect_chat_completion, stream_chat_chunks
+from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
+from app.core.openai.models import (
+    OpenAIError,
+    OpenAIResponsePayload,
+    OpenAIResponseResult,
+)
+from app.core.openai.models import (
+    OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
+)
 from app.core.openai.models_catalog import MODEL_CATALOG
+from app.core.openai.parsing import parse_response_payload
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
 from app.dependencies import ProxyContext, get_proxy_context
-from app.modules.proxy.schemas import RateLimitStatusPayload
+from app.modules.proxy.schemas import ModelListItem, ModelListResponse, RateLimitStatusPayload
 
 router = APIRouter(prefix="/backend-api/codex", tags=["proxy"])
 v1_router = APIRouter(prefix="/v1", tags=["proxy"])
 usage_router = APIRouter(tags=["proxy"])
 
 
-@router.post("/responses")
+@router.post(
+    "/responses",
+    responses={
+        200: {
+            "content": {
+                "text/event-stream": {
+                    "schema": {"type": "string"},
+                }
+            }
+        }
+    },
+)
 async def responses(
     request: Request,
     payload: ResponsesRequest = Body(...),
@@ -33,42 +53,73 @@ async def responses(
     return await _stream_responses(request, payload, context)
 
 
-@v1_router.post("/responses")
+@v1_router.post(
+    "/responses",
+    response_model=OpenAIResponseResult,
+    responses={
+        200: {
+            "content": {
+                "text/event-stream": {
+                    "schema": {"type": "string"},
+                }
+            }
+        }
+    },
+)
 async def v1_responses(
     request: Request,
     payload: V1ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
 ) -> Response:
-    responses_payload = payload.to_responses_request()
+    try:
+        responses_payload = payload.to_responses_request()
+    except ValidationError as exc:
+        error = _openai_validation_error(exc)
+        return JSONResponse(status_code=400, content=error)
     if responses_payload.stream:
         return await _stream_responses(request, responses_payload, context)
     return await _collect_responses(request, responses_payload, context)
 
 
-@v1_router.get("/models")
-async def v1_models() -> JSONResponse:
+@v1_router.get("/models", response_model=ModelListResponse)
+async def v1_models() -> ModelListResponse:
     created = int(time.time())
     items = [
-        {
-            "id": model_id,
-            "object": "model",
-            "created": created,
-            "owned_by": "codex-lb",
-            "metadata": entry.model_dump(mode="json"),
-        }
+        ModelListItem(
+            id=model_id,
+            created=created,
+            owned_by="codex-lb",
+            metadata=entry,
+        )
         for model_id, entry in MODEL_CATALOG.items()
     ]
-    return JSONResponse({"object": "list", "data": items})
+    return ModelListResponse(data=items)
 
 
-@v1_router.post("/chat/completions")
+@v1_router.post(
+    "/chat/completions",
+    response_model=ChatCompletionResult,
+    responses={
+        200: {
+            "content": {
+                "text/event-stream": {
+                    "schema": {"type": "string"},
+                }
+            }
+        }
+    },
+)
 async def v1_chat_completions(
     request: Request,
     payload: ChatCompletionsRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
 ) -> Response:
     rate_limit_headers = await context.service.rate_limit_headers()
-    responses_payload = payload.to_responses_request()
+    try:
+        responses_payload = payload.to_responses_request()
+    except ValidationError as exc:
+        error = _openai_validation_error(exc)
+        return JSONResponse(status_code=400, content=error, headers=rate_limit_headers)
     responses_payload.stream = True
     stream = context.service.stream_responses(
         responses_payload,
@@ -93,12 +144,20 @@ async def v1_chat_completions(
         )
 
     result = await collect_chat_completion(stream_with_first, model=payload.model)
-    status_code = 200
-    if isinstance(result, dict) and "error" in result:
-        error = result.get("error")
-        code = error.get("code") if isinstance(error, dict) else None
+    if isinstance(result, OpenAIErrorEnvelopeModel):
+        error = result.error
+        code = error.code if error else None
         status_code = 503 if code == "no_accounts" else 502
-    return JSONResponse(content=result, status_code=status_code, headers=rate_limit_headers)
+        return JSONResponse(
+            content=result.model_dump(mode="json", exclude_none=True),
+            status_code=status_code,
+            headers=rate_limit_headers,
+        )
+    return JSONResponse(
+        content=result.model_dump(mode="json", exclude_none=True),
+        status_code=200,
+        headers=rate_limit_headers,
+    )
 
 
 async def _stream_responses(
@@ -145,23 +204,34 @@ async def _collect_responses(
     try:
         response_payload = await _collect_responses_payload(stream)
     except ProxyResponseError as exc:
-        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=rate_limit_headers)
-    if isinstance(response_payload, dict) and response_payload.get("object") == "response":
-        status = response_payload.get("status")
-        if status == "failed":
-            error_payload = _error_envelope_from_response(response_payload.get("error"))
-            status_code = _status_for_error(error_payload.get("error"))
-            return JSONResponse(status_code=status_code, content=error_payload, headers=rate_limit_headers)
-    if (
-        isinstance(response_payload, dict)
-        and "error" in response_payload
-        and response_payload.get("object") != "response"
-    ):
-        return JSONResponse(status_code=502, content=response_payload, headers=rate_limit_headers)
-    return JSONResponse(content=response_payload, headers=rate_limit_headers)
+        error = _parse_error_envelope(exc.payload)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error.model_dump(mode="json", exclude_none=True),
+            headers=rate_limit_headers,
+        )
+    if isinstance(response_payload, OpenAIResponsePayload):
+        if response_payload.status == "failed":
+            error_payload = _error_envelope_from_response(response_payload.error)
+            status_code = _status_for_error(error_payload.error)
+            return JSONResponse(
+                status_code=status_code,
+                content=error_payload.model_dump(mode="json", exclude_none=True),
+                headers=rate_limit_headers,
+            )
+        return JSONResponse(
+            content=response_payload.model_dump(mode="json", exclude_none=True),
+            headers=rate_limit_headers,
+        )
+    status_code = _status_for_error(response_payload.error)
+    return JSONResponse(
+        status_code=status_code,
+        content=response_payload.model_dump(mode="json", exclude_none=True),
+        headers=rate_limit_headers,
+    )
 
 
-@router.post("/responses/compact")
+@router.post("/responses/compact", response_model=OpenAIResponseResult)
 async def responses_compact(
     request: Request,
     payload: ResponsesCompactRequest = Body(...),
@@ -170,7 +240,7 @@ async def responses_compact(
     return await _compact_responses(request, payload, context)
 
 
-@v1_router.post("/responses/compact")
+@v1_router.post("/responses/compact", response_model=OpenAIResponseResult)
 async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),
@@ -188,11 +258,29 @@ async def _compact_responses(
     try:
         result = await context.service.compact_responses(payload, request.headers)
     except NotImplementedError:
-        error = openai_error("not_implemented", "responses/compact is not implemented")
-        return JSONResponse(status_code=501, content=error, headers=rate_limit_headers)
+        error = OpenAIErrorEnvelopeModel(
+            error=OpenAIError(
+                message="responses/compact is not implemented",
+                type="server_error",
+                code="not_implemented",
+            )
+        )
+        return JSONResponse(
+            status_code=501,
+            content=error.model_dump(mode="json", exclude_none=True),
+            headers=rate_limit_headers,
+        )
     except ProxyResponseError as exc:
-        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=rate_limit_headers)
-    return JSONResponse(content=result.model_dump(exclude_none=True), headers=rate_limit_headers)
+        error = _parse_error_envelope(exc.payload)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error.model_dump(mode="json", exclude_none=True),
+            headers=rate_limit_headers,
+        )
+    return JSONResponse(
+        content=result.model_dump(mode="json", exclude_none=True),
+        headers=rate_limit_headers,
+    )
 
 
 @usage_router.get("/api/codex/usage", response_model=RateLimitStatusPayload)
@@ -232,8 +320,8 @@ def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
     return None
 
 
-async def _collect_responses_payload(stream: AsyncIterator[str]) -> dict[str, JsonValue]:
-    response_payload: dict[str, JsonValue] | None = None
+async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
+    response_payload: OpenAIResponsePayload | None = None
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
@@ -242,21 +330,52 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> dict[str, Js
         if event_type in ("response.completed", "response.incomplete", "response.failed"):
             response = payload.get("response")
             if isinstance(response, dict):
-                response_payload = cast(dict[str, JsonValue], response)
+                parsed = parse_response_payload(response)
+                if parsed is not None:
+                    response_payload = parsed
     if response_payload is not None:
         return response_payload
-    return cast(dict[str, JsonValue], openai_error("upstream_error", "Upstream error"))
+    return _default_error_envelope()
 
 
-def _error_envelope_from_response(error_value: JsonValue | None) -> dict[str, JsonValue]:
-    if isinstance(error_value, dict):
-        return {"error": cast(dict[str, JsonValue], error_value)}
-    return cast(dict[str, JsonValue], openai_error("upstream_error", "Upstream error"))
+def _default_error_envelope() -> OpenAIErrorEnvelopeModel:
+    return OpenAIErrorEnvelopeModel(
+        error=OpenAIError(
+            message="Upstream error",
+            type="server_error",
+            code="upstream_error",
+        )
+    )
 
 
-def _status_for_error(error_value: JsonValue | None) -> int:
-    if isinstance(error_value, dict):
-        code = error_value.get("code")
-        if code == "no_accounts":
-            return 503
+def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErrorEnvelopeModel:
+    if not isinstance(payload, dict):
+        return _default_error_envelope()
+    try:
+        return OpenAIErrorEnvelopeModel.model_validate(payload)
+    except ValidationError:
+        return _default_error_envelope()
+
+
+def _openai_validation_error(exc: ValidationError) -> OpenAIErrorEnvelope:
+    error = openai_error("invalid_request_error", "Invalid request payload", error_type="invalid_request_error")
+    if exc.errors():
+        first = exc.errors()[0]
+        loc = first.get("loc", [])
+        if isinstance(loc, (list, tuple)):
+            param = ".".join(str(part) for part in loc if part != "body")
+            if param:
+                error["error"]["param"] = param
+    return error
+
+
+def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErrorEnvelopeModel:
+    if error_value is None:
+        return _default_error_envelope()
+    return OpenAIErrorEnvelopeModel(error=error_value)
+
+
+def _status_for_error(error_value: OpenAIError | None) -> int:
+    if error_value and error_value.code == "no_accounts":
+        return 503
     return 502

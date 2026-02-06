@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
-from typing import cast
 
 import pytest
 
-from app.core.openai.chat_responses import collect_chat_completion, iter_chat_chunks, stream_chat_chunks
-from app.core.types import JsonValue
+from app.core.openai.chat_responses import (
+    ChatCompletion,
+    collect_chat_completion,
+    iter_chat_chunks,
+    stream_chat_chunks,
+)
+from app.core.openai.models import OpenAIErrorEnvelope
 
 
 def test_output_text_delta_to_chat_chunk():
@@ -157,15 +161,16 @@ async def test_collect_completion_merges_tool_call_arguments():
             yield line
 
     result = await collect_chat_completion(_stream(), model="gpt-5.2")
-    choices = cast(list[dict[str, JsonValue]], result.get("choices"))
-    choice = choices[0]
-    assert choice.get("finish_reason") == "tool_calls"
-    message = cast(dict[str, JsonValue], choice.get("message"))
-    tool_calls = cast(list[dict[str, JsonValue]], message.get("tool_calls"))
+    assert isinstance(result, ChatCompletion)
+    choice = result.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    tool_calls = choice.message.tool_calls
+    assert tool_calls is not None
     tool_call = tool_calls[0]
-    assert tool_call["id"] == "call_1"
-    function = cast(dict[str, JsonValue], tool_call.get("function"))
-    assert function.get("arguments") == '{"a":1}'
+    assert tool_call.id == "call_1"
+    function = tool_call.function
+    assert function is not None
+    assert function.arguments == '{"a":1}'
 
 
 @pytest.mark.asyncio
@@ -179,8 +184,9 @@ async def test_collect_completion_returns_error_event():
             yield line
 
     result = await collect_chat_completion(_stream(), model="gpt-5.2")
-    error = cast(dict[str, JsonValue], result.get("error"))
-    assert error.get("code") == "no_accounts"
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "no_accounts"
 
 
 @pytest.mark.asyncio
@@ -198,6 +204,6 @@ async def test_collect_completion_includes_refusal_delta():
             yield line
 
     result = await collect_chat_completion(_stream(), model="gpt-5.2")
-    choices = cast(list[dict[str, JsonValue]], result.get("choices"))
-    message = cast(dict[str, JsonValue], choices[0].get("message"))
-    assert message.get("content") == "no"
+    assert isinstance(result, ChatCompletion)
+    message = result.choices[0].message
+    assert message.content == "no"

@@ -8,6 +8,7 @@ from app.core.openai.requests import (
     ResponsesReasoning,
     ResponsesRequest,
     ResponsesTextControls,
+    validate_tool_types,
 )
 from app.core.types import JsonValue
 
@@ -47,6 +48,11 @@ class V1ResponsesRequest(BaseModel):
         if value is True:
             raise ValueError("store must be false")
         return value
+
+    @field_validator("tools")
+    @classmethod
+    def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
+        return validate_tool_types(value)
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesRequest":

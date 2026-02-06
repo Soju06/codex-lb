@@ -7,7 +7,13 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.openai.message_coercion import coerce_messages
-from app.core.openai.requests import ResponsesRequest, ResponsesTextControls, ResponsesTextFormat
+from app.core.openai.requests import (
+    ResponsesRequest,
+    ResponsesTextControls,
+    ResponsesTextFormat,
+    normalize_tool_type,
+    validate_tool_types,
+)
 from app.core.types import JsonValue
 
 
@@ -34,6 +40,35 @@ class ChatCompletionsRequest(BaseModel):
     max_completion_tokens: int | None = None
     store: bool | None = None
     stream_options: ChatStreamOptions | None = None
+
+    @field_validator("tools")
+    @classmethod
+    def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
+        return validate_tool_types(value)
+
+    @field_validator("messages")
+    @classmethod
+    def _reject_file_id(cls, value: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
+        for message in value:
+            if not isinstance(message, Mapping):
+                continue
+            content = message.get("content")
+            parts = content if isinstance(content, list) else [content]
+            for part in parts:
+                if not isinstance(part, Mapping):
+                    continue
+                part_map = cast(Mapping[str, JsonValue], part)
+                part_type = part_map.get("type") or ("text" if "text" in part_map else None)
+                if part_type != "file" and "file" not in part_map:
+                    continue
+                file_info = part_map.get("file")
+                if not isinstance(file_info, Mapping):
+                    continue
+                file_map = cast(Mapping[str, JsonValue], file_info)
+                file_id = file_map.get("file_id")
+                if isinstance(file_id, str) and file_id:
+                    raise ValueError("file_id is not supported")
+        return value
 
     @model_validator(mode="after")
     def _validate_messages(self) -> "ChatCompletionsRequest":
@@ -137,6 +172,14 @@ def _normalize_chat_tools(tools: list[JsonValue]) -> list[JsonValue]:
                 }
             )
             continue
+        if isinstance(tool_type, str):
+            normalized_type = normalize_tool_type(tool_type)
+            if normalized_type == "web_search":
+                if normalized_type != tool_type:
+                    tool = dict(tool)
+                    tool["type"] = normalized_type
+                normalized.append(tool)
+                continue
         name = tool.get("name")
         if isinstance(name, str) and name:
             normalized.append(tool)
@@ -147,6 +190,10 @@ def _normalize_tool_choice(tool_choice: JsonValue | None) -> JsonValue | None:
     if not isinstance(tool_choice, dict):
         return tool_choice
     tool_type = tool_choice.get("type")
+    if isinstance(tool_type, str) and tool_type == "web_search_preview":
+        tool_choice = dict(tool_choice)
+        tool_choice["type"] = "web_search"
+        tool_type = "web_search"
     function = tool_choice.get("function")
     if isinstance(function, dict):
         name = function.get("name")
@@ -261,14 +308,7 @@ def _validate_user_content(content: JsonValue) -> None:
                 raise ValueError("Image content parts must include image_url.url.")
             continue
         if part_type == "input_audio":
-            input_audio = part_map.get("input_audio")
-            if not isinstance(input_audio, Mapping):
-                raise ValueError("Audio content parts must include input_audio.")
-            audio_map = cast(Mapping[str, JsonValue], input_audio)
-            audio_format = audio_map.get("format")
-            if audio_format not in ("wav", "mp3"):
-                raise ValueError("Audio input format must be 'wav' or 'mp3'.")
-            continue
+            raise ValueError("Audio input is not supported.")
         if part_type == "file":
             file_info = part_map.get("file")
             if not isinstance(file_info, Mapping):

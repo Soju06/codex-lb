@@ -3,9 +3,7 @@
 ## Purpose
 
 Ensure `/v1/chat/completions` behavior matches OpenAI Chat Completions expectations by mapping to Responses semantics and preserving streaming and error envelopes.
-
 ## Requirements
-
 ### Requirement: Validate Chat Completions requests
 The service MUST accept POST requests to `/v1/chat/completions` with a JSON body and MUST validate required fields according to OpenAI Chat Completions expectations. The request MUST include `model` and a non-empty `messages` array of objects. Invalid payloads MUST return a 4xx response with an OpenAI error envelope.
 
@@ -18,7 +16,7 @@ The service MUST accept POST requests to `/v1/chat/completions` with a JSON body
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 ### Requirement: Enforce message content type rules
-The service MUST enforce role-specific message content rules: `system` and `developer` messages MUST contain text-only content, while `user` messages MAY contain text, image, audio, or file content parts per OpenAI chat spec. Unsupported content types MUST return an OpenAI error envelope.
+The service MUST enforce role-specific message content rules: `system` and `developer` messages MUST contain text-only content, while `user` messages MAY contain text, image, or file content parts per OpenAI chat spec. Unsupported content types MUST return an OpenAI error envelope.
 
 #### Scenario: Non-text system message
 - **WHEN** a `system` or `developer` message includes a non-text content part
@@ -38,6 +36,13 @@ The service MUST map chat messages into the Responses request format by merging 
 #### Scenario: Tool choice values
 - **WHEN** the client sets `tool_choice` to `none`, `auto`, or `required`
 - **THEN** the service forwards the value consistently in the mapped Responses request
+
+### Requirement: Reject file_id in Chat Completions
+The service MUST reject chat `file` content parts that include `file_id` and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
+
+#### Scenario: file_id rejected in chat file part
+- **WHEN** a user message includes `{ "type": "file", "file": {"file_id":"file_123"} }`
+- **THEN** the service returns a 4xx OpenAI invalid_request_error with message "Invalid request payload" and param `messages`
 
 ### Requirement: Streaming chat completions are emitted as chat.completion.chunk
 When `stream=true`, the service MUST respond with `text/event-stream` and emit `chat.completion.chunk` payloads. The first chunk MUST include the `assistant` role, tool call deltas MUST be streamed when present, and the stream MUST terminate with `data: [DONE]`.
@@ -79,12 +84,12 @@ If a `user` message includes an image input larger than 8MB, the service MUST dr
 - **WHEN** a `user` message includes an image input larger than 8MB
 - **THEN** the service drops the image input and proceeds with remaining parts
 
-### Requirement: Audio input formats are validated
-When a `user` message includes audio input, the service MUST accept only supported formats (e.g., `wav`, `mp3`) and MUST reject unsupported formats with an OpenAI error envelope.
+### Requirement: Reject input_audio in Chat Completions
+The service MUST reject chat user content parts with type `input_audio` and return a 4xx OpenAI invalid_request_error.
 
-#### Scenario: Unsupported audio format
-- **WHEN** a `user` message includes audio input in an unsupported format
-- **THEN** the service returns a 4xx response with an OpenAI error envelope
+#### Scenario: input_audio rejected
+- **WHEN** a user message includes `{ "type": "input_audio", "input_audio": {"data":"...","format":"wav"} }`
+- **THEN** the service returns a 4xx OpenAI invalid_request_error indicating audio input is unsupported
 
 ### Requirement: Error mapping for chat requests
 For upstream failures or invalid requests, the service MUST return an OpenAI error envelope for non-streaming responses and MUST emit an error chunk followed by `data: [DONE]` for streaming responses. Error `code`, `type`, and `message` MUST be preserved or normalized into stable values.
@@ -92,3 +97,4 @@ For upstream failures or invalid requests, the service MUST return an OpenAI err
 #### Scenario: Streaming error
 - **WHEN** the upstream returns a failure during streaming
 - **THEN** the service emits an error chunk and terminates the stream with `data: [DONE]`
+

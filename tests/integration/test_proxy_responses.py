@@ -251,6 +251,44 @@ async def test_proxy_responses_forces_stream(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", ["web_search", "web_search_preview"])
+async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, tool_type):
+    email = "tools@example.com"
+    raw_account_id = "acc_tools"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield 'data: {"type":"response.completed","response":{"id":"resp_tools"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "tools": [{"type": tool_type}],
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert getattr(seen.get("payload"), "tools", None) == [{"type": "web_search"}]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_streams_event_sequence(async_client, monkeypatch):
     email = "stream-seq@example.com"
     raw_account_id = "acc_stream_seq"
@@ -276,6 +314,38 @@ async def test_v1_responses_streams_event_sequence(async_client, monkeypatch):
     assert any("response.output_text.delta" in line for line in lines)
     assert any("response.function_call_arguments.delta" in line for line in lines)
     assert any("response.refusal.delta" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_stream_large_event_line(async_client, monkeypatch):
+    email = "stream-large@example.com"
+    raw_account_id = "acc_stream_large"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        delta = "A" * (200 * 1024)
+        yield f'data: {{"type":"response.output_text.delta","delta":"{delta}"}}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_large"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    request_id = "req_stream_large_123"
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-request-id": request_id},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    assert any("response.output_text.delta" in line for line in lines)
+    assert any("response.completed" in line for line in lines)
+    assert not any("stream_event_too_large" in line for line in lines)
 
 
 @pytest.mark.asyncio

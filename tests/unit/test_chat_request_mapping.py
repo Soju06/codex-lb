@@ -21,7 +21,7 @@ def test_chat_messages_to_responses_mapping():
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
     assert responses.instructions == "sys"
-    assert responses.input == [{"role": "user", "content": "hi"}]
+    assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 def test_chat_messages_require_objects():
@@ -200,5 +200,5 @@ def test_chat_oversized_image_is_dropped():
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
     assert responses.input == [
-        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     ]

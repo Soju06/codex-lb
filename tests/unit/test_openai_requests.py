@@ -50,7 +50,39 @@ def test_responses_accepts_string_input():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": "hello"}
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.input == "hello"
+    assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+
+
+@pytest.mark.parametrize(
+    ("tool_type", "expected"),
+    [
+        ("web_search", "web_search"),
+        ("web_search_preview", "web_search"),
+    ],
+)
+def test_responses_accepts_builtin_tools(tool_type, expected):
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "tools": [{"type": tool_type}],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.tools == [{"type": expected}]
+
+
+@pytest.mark.parametrize("tool_choice", [{"type": "web_search"}, {"type": "web_search_preview"}])
+def test_responses_normalizes_tool_choice_web_search_preview(tool_choice):
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "tool_choice": tool_choice,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.tool_choice == {"type": "web_search"}
 
 
 def test_responses_rejects_invalid_include_value():
@@ -83,7 +115,7 @@ def test_responses_rejects_conversation_previous_response_id():
         "conversation": "conv_1",
         "previous_response_id": "resp_1",
     }
-    with pytest.raises(ValueError, match="either 'conversation' or 'previous_response_id'"):
+    with pytest.raises(ValueError, match="previous_response_id is not supported"):
         ResponsesRequest.model_validate(payload)
 
 
@@ -95,7 +127,7 @@ def test_v1_messages_convert_to_responses_input():
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
     assert request.instructions == ""
-    assert request.input == [{"role": "user", "content": "hi"}]
+    assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 def test_v1_system_message_moves_to_instructions():
@@ -109,7 +141,7 @@ def test_v1_system_message_moves_to_instructions():
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
     assert request.instructions == "sys"
-    assert request.input == [{"role": "user", "content": "hi"}]
+    assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 def test_v1_instructions_merge():
@@ -138,7 +170,13 @@ def test_v1_input_string_passthrough():
     payload = {"model": "gpt-5.1", "input": "hello"}
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
-    assert request.input == "hello"
+    assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+
+
+def test_v1_rejects_builtin_tools():
+    payload = {"model": "gpt-5.1", "input": [], "tools": [{"type": "image_generation"}]}
+    with pytest.raises(ValidationError, match="Unsupported tool type"):
+        V1ResponsesRequest.model_validate(payload)
 
 
 def test_v1_compact_messages_convert():
@@ -150,11 +188,11 @@ def test_v1_compact_messages_convert():
 
     assert isinstance(request, ResponsesCompactRequest)
     assert request.instructions == ""
-    assert request.input == [{"role": "user", "content": "hi"}]
+    assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 def test_v1_compact_input_string_passthrough():
     payload = {"model": "gpt-5.1", "input": "hello"}
     request = V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
 
-    assert request.input == "hello"
+    assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]

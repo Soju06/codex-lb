@@ -5,6 +5,7 @@ import json
 from pydantic import TypeAdapter, ValidationError
 
 from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, OpenAIEvent, OpenAIResponsePayload
+from app.core.types import JsonValue
 
 _EVENT_ADAPTER = TypeAdapter(OpenAIEvent)
 _ERROR_ADAPTER = TypeAdapter(OpenAIErrorEnvelope)
@@ -36,7 +37,7 @@ def parse_sse_event(line: str) -> OpenAIEvent | None:
         return None
 
 
-def parse_error_payload(payload: object) -> OpenAIError | None:
+def parse_error_payload(payload: JsonValue) -> OpenAIError | None:
     if not isinstance(payload, dict):
         return None
     try:
@@ -46,7 +47,7 @@ def parse_error_payload(payload: object) -> OpenAIError | None:
     return envelope.error
 
 
-def parse_response_payload(payload: object) -> OpenAIResponsePayload | None:
+def parse_response_payload(payload: JsonValue) -> OpenAIResponsePayload | None:
     if not isinstance(payload, dict):
         return None
     try:

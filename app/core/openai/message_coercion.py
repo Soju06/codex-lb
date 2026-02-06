@@ -20,7 +20,7 @@ def coerce_messages(existing_instructions: str, messages: list[JsonValue]) -> tu
             if content_text:
                 instruction_parts.append(content_text)
             continue
-        input_messages.append(cast(JsonValue, message_dict))
+        input_messages.append(cast(JsonValue, _normalize_message_content(message_dict)))
     merged = _merge_instructions(existing_instructions, instruction_parts)
     return merged, input_messages
 
@@ -36,7 +36,7 @@ def _merge_instructions(existing: str, extra_parts: list[str]) -> str:
     return extra
 
 
-def _content_to_text(content: object) -> str | None:
+def _content_to_text(content: JsonValue) -> str | None:
     if content is None:
         return None
     if isinstance(content, str):
@@ -61,7 +61,7 @@ def _content_to_text(content: object) -> str | None:
     return None
 
 
-def _ensure_text_only_content(content: object, role: str) -> None:
+def _ensure_text_only_content(content: JsonValue, role: str) -> None:
     if content is None:
         return
     if isinstance(content, str):
@@ -89,3 +89,108 @@ def _ensure_text_only_content(content: object, role: str) -> None:
         if isinstance(text, str):
             return
     raise ValueError(f"{role} messages must be text-only.")
+
+
+def _normalize_message_content(message: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    content = message.get("content")
+    if content is None:
+        return message
+    normalized = _normalize_content_parts(content)
+    if normalized is content:
+        return message
+    updated = dict(message)
+    updated["content"] = normalized
+    return updated
+
+
+def _normalize_content_parts(content: JsonValue) -> JsonValue:
+    if content is None:
+        return content
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    parts = content if isinstance(content, list) else [content]
+    normalized_parts: list[JsonValue] = []
+    for part in parts:
+        if isinstance(part, str):
+            normalized_parts.append({"type": "input_text", "text": part})
+            continue
+        if not isinstance(part, dict):
+            normalized_parts.append(part)
+            continue
+        normalized_parts.append(_normalize_content_part(cast(dict[str, JsonValue], part)))
+    if isinstance(content, list):
+        return normalized_parts
+    return normalized_parts[0] if normalized_parts else ""
+
+
+def _normalize_content_part(part: dict[str, JsonValue]) -> JsonValue:
+    part_type = part.get("type") or ("text" if "text" in part else None)
+    if part_type in ("text", "input_text"):
+        text = part.get("text")
+        if isinstance(text, str):
+            return {"type": "input_text", "text": text}
+        return part
+    if part_type == "image_url":
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+        elif isinstance(image_url, str):
+            url = image_url
+        else:
+            url = None
+        if isinstance(url, str):
+            return {"type": "input_image", "image_url": url}
+        return part
+    if part_type == "input_image":
+        return part
+    if part_type == "input_audio":
+        data_url = _audio_input_to_data_url(part.get("input_audio"))
+        if data_url:
+            return {"type": "input_file", "file_url": data_url}
+        return part
+    if part_type == "file":
+        return _file_part_to_input_file(part.get("file"))
+    return part
+
+
+def _audio_input_to_data_url(input_audio: JsonValue) -> str | None:
+    if not isinstance(input_audio, dict):
+        return None
+    audio_map = cast(dict[str, JsonValue], input_audio)
+    data = audio_map.get("data")
+    audio_format = audio_map.get("format")
+    if not isinstance(data, str) or not isinstance(audio_format, str):
+        return None
+    mime_type = _audio_mime_type(audio_format)
+    return f"data:{mime_type};base64,{data}"
+
+
+def _audio_mime_type(audio_format: str) -> str:
+    if audio_format == "wav":
+        return "audio/wav"
+    if audio_format == "mp3":
+        return "audio/mpeg"
+    return f"audio/{audio_format}"
+
+
+def _file_part_to_input_file(file_info: JsonValue) -> dict[str, JsonValue]:
+    if not isinstance(file_info, dict):
+        return {"type": "input_file"}
+    file_map = cast(dict[str, JsonValue], file_info)
+    file_id = file_map.get("file_id")
+    if isinstance(file_id, str) and file_id:
+        return {"type": "input_file", "file_id": file_id}
+    file_url = file_map.get("file_url")
+    if isinstance(file_url, str) and file_url:
+        return {"type": "input_file", "file_url": file_url}
+    file_data = file_map.get("file_data")
+    if not isinstance(file_data, str):
+        file_data = file_map.get("data") if isinstance(file_map.get("data"), str) else None
+    if isinstance(file_data, str):
+        mime_type = file_map.get("mime_type")
+        if not isinstance(mime_type, str) or not mime_type:
+            mime_type = file_map.get("content_type")
+        if not isinstance(mime_type, str) or not mime_type:
+            mime_type = "application/octet-stream"
+        return {"type": "input_file", "file_url": f"data:{mime_type};base64,{file_data}"}
+    return {"type": "input_file"}

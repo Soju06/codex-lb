@@ -16,7 +16,7 @@ services:
       - "2455"
       - --reload
     volumes:
-      - "${HOME}/.codex-lb:/var/lib/codex-lb"
+      - codex-lb-data:/var/lib/codex-lb
     develop:
       watch:
         - action: sync
@@ -29,3 +29,8 @@ services:
         - action: rebuild
           path: ./Dockerfile
     restart: unless-stopped
+
+volumes:
+  codex-lb-data:
+    name: codex-lb-data
+    external: true

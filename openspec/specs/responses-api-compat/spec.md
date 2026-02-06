@@ -3,9 +3,7 @@
 ## Purpose
 
 Ensure `/v1/responses` behavior matches OpenAI Responses API expectations for request validation, streaming events, and error envelopes within upstream constraints.
-
 ## Requirements
-
 ### Requirement: Validate Responses create requests
 The service MUST accept POST requests to `/v1/responses` with a JSON body and MUST validate required fields according to OpenAI Responses API expectations. The request MUST include `model` and `input`, MAY omit `instructions`, MUST reject mutually exclusive fields (`input` and `messages` when both are present), and MUST reject `store=true` with an OpenAI error envelope.
 
@@ -31,6 +29,13 @@ The service MUST accept `input` as either a string or an array of input items. T
 #### Scenario: conversation and previous_response_id conflict
 - **WHEN** the client provides both `conversation` and `previous_response_id`
 - **THEN** the service returns a 4xx response with an OpenAI error envelope indicating invalid parameters
+
+### Requirement: Reject input_file file_id in Responses
+The service MUST reject `input_file.file_id` in Responses input items and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
+
+#### Scenario: input_file file_id rejected
+- **WHEN** a request includes an input item with `{"type":"input_file","file_id":"file_123"}`
+- **THEN** the service returns a 4xx OpenAI invalid_request_error with message "Invalid request payload" and param `input`
 
 ### Requirement: Stream Responses events with terminal completion
 When `stream=true`, the service MUST respond with `text/event-stream` and emit OpenAI Responses streaming events. The stream MUST include a terminal event of `response.completed` or `response.failed`. If upstream closes the stream without a terminal event, the service MUST emit `response.failed` with a stable error code indicating an incomplete stream.
@@ -99,3 +104,4 @@ When usage data is provided by the upstream, the service MUST include `input_tok
 #### Scenario: Usage included
 - **WHEN** the upstream includes usage in `response.completed`
 - **THEN** the service forwards usage fields in the completed event and in the final response object
+

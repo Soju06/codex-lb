@@ -23,6 +23,7 @@ from app.core.errors import openai_error, response_failed_event
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event
@@ -560,7 +561,7 @@ def _hash_identifier(value: str) -> str:
     return f"sha256:{digest[:12]}"
 
 
-def _summarize_input(items: object) -> str:
+def _summarize_input(items: JsonValue) -> str:
     if items is None:
         return "0"
     if isinstance(items, str):

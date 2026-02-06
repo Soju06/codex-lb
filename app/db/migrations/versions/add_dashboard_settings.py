@@ -26,6 +26,9 @@ async def run(session: AsyncSession) -> None:
             id=1,
             sticky_threads_enabled=False,
             prefer_earlier_reset_accounts=False,
+            totp_required_on_login=False,
+            totp_secret_encrypted=None,
+            totp_last_verified_step=None,
         )
     )
     await session.flush()

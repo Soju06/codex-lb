@@ -18,6 +18,12 @@
 		oauthStatus: "/api/oauth/status",
 		oauthComplete: "/api/oauth/complete",
 		settings: "/api/settings",
+		dashboardAuthSession: "/api/dashboard-auth/session",
+		dashboardAuthTotpVerify: "/api/dashboard-auth/totp/verify",
+		dashboardAuthTotpSetupStart: "/api/dashboard-auth/totp/setup/start",
+		dashboardAuthTotpSetupConfirm: "/api/dashboard-auth/totp/setup/confirm",
+		dashboardAuthTotpDisable: "/api/dashboard-auth/totp/disable",
+		dashboardAuthLogout: "/api/dashboard-auth/logout",
 	};
 
 	const PAGES = [
@@ -1371,6 +1377,8 @@
 	const normalizeSettingsPayload = (payload) => ({
 		stickyThreadsEnabled: Boolean(payload?.stickyThreadsEnabled),
 		preferEarlierResetAccounts: Boolean(payload?.preferEarlierResetAccounts),
+		totpRequiredOnLogin: Boolean(payload?.totpRequiredOnLogin),
+		totpConfigured: Boolean(payload?.totpConfigured),
 	});
 
 	const fetchSettings = async () => {
@@ -1407,6 +1415,16 @@
 			settings: {
 				stickyThreadsEnabled: false,
 				preferEarlierResetAccounts: false,
+				totpRequiredOnLogin: false,
+				totpConfigured: false,
+				totpSetup: {
+					open: false,
+					secret: "",
+					otpauthUri: "",
+					qrSvgDataUri: "",
+					code: "",
+					isSubmitting: false,
+				},
 				isSaving: false,
 			},
 			accounts: {
@@ -1464,6 +1482,20 @@
 					this.refreshRequests();
 				});
 
+				try {
+					const shouldContinue = await this.ensureDashboardAccess();
+					if (!shouldContinue) {
+						return;
+					}
+				} catch (error) {
+					this.isLoading = false;
+					this.openMessageBox({
+						tone: "error",
+						title: "Authentication required",
+						message: error?.message || "TOTP verification is required to access the dashboard.",
+					});
+					return;
+				}
 				await this.loadData();
 				this.syncTitle();
 				this.syncUrl(true);
@@ -1589,6 +1621,159 @@
 					"7d": "Last 7d",
 				};
 				return labels[value] || "All time";
+			},
+			async ensureDashboardAccess() {
+				const session = await fetchJson(
+					API_ENDPOINTS.dashboardAuthSession,
+					"dashboard auth session",
+				);
+				if (session?.authenticated) {
+					return true;
+				}
+				if (!session?.totpRequiredOnLogin) {
+					return true;
+				}
+				await this.verifyTotpWithPrompt();
+				if (window.location.pathname !== "/dashboard") {
+					window.location.replace("/dashboard");
+					return false;
+				}
+				this.view = "dashboard";
+				this.syncTitle();
+				this.syncUrl(true);
+				return true;
+			},
+			async verifyTotpWithPrompt() {
+				let lastError = "";
+				while (true) {
+					const promptLines = [
+						"Enter the 6-digit TOTP code to access the dashboard.",
+					];
+					if (lastError) {
+						promptLines.push(`Last error: ${lastError}`);
+					}
+					const rawCode = window.prompt(promptLines.join("\n"));
+					if (rawCode === null) {
+						throw new Error("TOTP verification was cancelled.");
+					}
+					const code = String(rawCode || "")
+						.trim()
+						.replace(/\D/g, "");
+					if (!code) {
+						lastError = "Code is required.";
+						continue;
+					}
+					try {
+						await postJson(
+							API_ENDPOINTS.dashboardAuthTotpVerify,
+							{ code },
+							"verify TOTP",
+						);
+						return;
+					} catch (error) {
+						lastError = error?.message || "Invalid TOTP code.";
+					}
+				}
+			},
+			async setupTotp() {
+				try {
+					const started = await postJson(
+						API_ENDPOINTS.dashboardAuthTotpSetupStart,
+						{},
+						"start TOTP setup",
+					);
+					this.settings.totpSetup.open = true;
+					this.settings.totpSetup.secret = started.secret || "";
+					this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
+					this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
+					this.settings.totpSetup.code = "";
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "TOTP setup failed",
+						message: error.message || "Failed to configure TOTP.",
+					});
+				}
+			},
+			cancelTotpSetup() {
+				this.settings.totpSetup.open = false;
+				this.settings.totpSetup.secret = "";
+				this.settings.totpSetup.otpauthUri = "";
+				this.settings.totpSetup.qrSvgDataUri = "";
+				this.settings.totpSetup.code = "";
+				this.settings.totpSetup.isSubmitting = false;
+			},
+			async confirmTotpSetup() {
+				if (this.settings.totpSetup.isSubmitting) {
+					return;
+				}
+				const secret = String(this.settings.totpSetup.secret || "").trim();
+				const code = String(this.settings.totpSetup.code || "")
+					.trim()
+					.replace(/\D/g, "");
+				if (!secret || !code) {
+					this.openMessageBox({
+						tone: "warning",
+						title: "TOTP setup",
+						message: "Enter the 6-digit code from your authenticator app.",
+					});
+					return;
+				}
+
+				this.settings.totpSetup.isSubmitting = true;
+				try {
+					await postJson(
+						API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
+						{ secret, code },
+						"confirm TOTP setup",
+					);
+					this.settings.totpConfigured = true;
+					this.cancelTotpSetup();
+					this.openMessageBox({
+						tone: "success",
+						title: "TOTP enabled",
+						message: "TOTP secret configured successfully.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "TOTP setup failed",
+						message: error.message || "Failed to confirm TOTP setup.",
+					});
+				} finally {
+					this.settings.totpSetup.isSubmitting = false;
+				}
+			},
+			async disableTotp() {
+				const rawCode = window.prompt(
+					"Enter the current 6-digit TOTP code to disable TOTP.",
+				);
+				const code = String(rawCode || "")
+					.trim()
+					.replace(/\D/g, "");
+				if (!code) {
+					return;
+				}
+				try {
+					await postJson(
+						API_ENDPOINTS.dashboardAuthTotpDisable,
+						{ code },
+						"disable TOTP",
+					);
+					this.settings.totpConfigured = false;
+					this.settings.totpRequiredOnLogin = false;
+					this.openMessageBox({
+						tone: "success",
+						title: "TOTP disabled",
+						message: "TOTP protection has been removed.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "TOTP disable failed",
+						message: error.message || "Failed to disable TOTP.",
+					});
+				}
 			},
 
 			async loadData() {
@@ -1761,6 +1946,10 @@
 					this.settings.preferEarlierResetAccounts = Boolean(
 						data.settings.preferEarlierResetAccounts,
 					);
+					this.settings.totpRequiredOnLogin = Boolean(
+						data.settings.totpRequiredOnLogin,
+					);
+					this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
 				}
 				this.ui.usageWindows = buildUsageWindowConfig(data.summary);
 				this.dashboard = buildDashboardView(this);
@@ -1775,6 +1964,7 @@
 					const payload = {
 						stickyThreadsEnabled: this.settings.stickyThreadsEnabled,
 						preferEarlierResetAccounts: this.settings.preferEarlierResetAccounts,
+						totpRequiredOnLogin: this.settings.totpRequiredOnLogin,
 					};
 					const updated = await putJson(
 						API_ENDPOINTS.settings,
@@ -1785,10 +1975,15 @@
 					this.settings.stickyThreadsEnabled = normalized.stickyThreadsEnabled;
 					this.settings.preferEarlierResetAccounts =
 						normalized.preferEarlierResetAccounts;
+					this.settings.totpRequiredOnLogin = normalized.totpRequiredOnLogin;
+					this.settings.totpConfigured = normalized.totpConfigured;
+					if (this.settings.totpRequiredOnLogin) {
+						await this.ensureDashboardAccess();
+					}
 					this.openMessageBox({
 						tone: "success",
 						title: "Settings saved",
-						message: "Routing settings updated.",
+						message: "Settings updated.",
 					});
 				} catch (error) {
 					this.openMessageBox({

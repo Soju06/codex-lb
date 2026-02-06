@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import SessionLocal, _safe_close, _safe_rollback, get_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
+from app.modules.dashboard_auth.repository import DashboardAuthRepository
+from app.modules.dashboard_auth.service import DashboardAuthService, get_dashboard_session_store
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
@@ -39,6 +41,13 @@ class UsageContext:
 @dataclass(slots=True)
 class OauthContext:
     service: OauthService
+
+
+@dataclass(slots=True)
+class DashboardAuthContext:
+    session: AsyncSession
+    repository: DashboardAuthRepository
+    service: DashboardAuthService
 
 
 @dataclass(slots=True)
@@ -151,6 +160,14 @@ def get_oauth_context(
 def get_proxy_context() -> ProxyContext:
     service = ProxyService(repo_factory=_proxy_repo_context)
     return ProxyContext(service=service)
+
+
+def get_dashboard_auth_context(
+    session: AsyncSession = Depends(get_session),
+) -> DashboardAuthContext:
+    repository = DashboardAuthRepository(session)
+    service = DashboardAuthService(repository, get_dashboard_session_store())
+    return DashboardAuthContext(session=session, repository=repository, service=service)
 
 
 def get_request_logs_context(

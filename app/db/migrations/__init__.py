@@ -12,6 +12,7 @@ from app.db.migrations.versions import (
     add_accounts_chatgpt_account_id,
     add_accounts_reset_at,
     add_dashboard_settings,
+    add_dashboard_settings_totp,
     add_request_logs_reasoning_effort,
     normalize_account_plan_types,
 )
@@ -43,6 +44,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("003_add_accounts_reset_at", add_accounts_reset_at.run),
     Migration("004_add_accounts_chatgpt_account_id", add_accounts_chatgpt_account_id.run),
     Migration("005_add_dashboard_settings", add_dashboard_settings.run),
+    Migration("006_add_dashboard_settings_totp", add_dashboard_settings_totp.run),
 )
 
 

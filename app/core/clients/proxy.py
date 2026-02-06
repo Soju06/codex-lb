@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
+import socket
 from typing import AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, cast
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -36,6 +39,7 @@ _SSE_READ_CHUNK_SIZE = 8 * 1024
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
+_BLOCKED_LITERAL_HOSTS = {"localhost", "localhost.localdomain"}
 
 
 class StreamIdleTimeoutError(Exception):
@@ -345,13 +349,15 @@ async def _fetch_image_data_url(
     image_url: str,
     connect_timeout: float,
 ) -> str | None:
+    if not _is_safe_image_fetch_url(image_url):
+        return None
     timeout = aiohttp.ClientTimeout(
         total=_IMAGE_INLINE_TIMEOUT_SECONDS,
         sock_connect=connect_timeout,
         sock_read=_IMAGE_INLINE_TIMEOUT_SECONDS,
     )
     try:
-        async with session.get(image_url, timeout=timeout) as resp:
+        async with session.get(image_url, timeout=timeout, allow_redirects=False) as resp:
             if resp.status != 200:
                 return None
             content_type = resp.headers.get("Content-Type")
@@ -375,6 +381,82 @@ async def _fetch_image_data_url(
         return None
 
 
+def _is_safe_image_fetch_url(url: str) -> bool:
+    settings = get_settings()
+    if not settings.image_inline_fetch_enabled:
+        return False
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+    if parsed.username or parsed.password:
+        return False
+    hostname = parsed.hostname
+    if not hostname:
+        return False
+    host = hostname.strip().lower().rstrip(".")
+    if not host:
+        return False
+    if host in _BLOCKED_LITERAL_HOSTS:
+        return False
+
+    allowed_hosts = settings.image_inline_allowed_hosts
+    if allowed_hosts and host not in allowed_hosts:
+        return False
+
+    if _is_blocked_ip_literal(host):
+        return False
+    if _resolves_to_blocked_ip(host):
+        return False
+    return True
+
+
+def _is_blocked_ip_literal(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return _is_disallowed_ip(ip)
+
+
+def _resolves_to_blocked_ip(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return True
+    if not infos:
+        return True
+
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        addr = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return True
+        if _is_disallowed_ip(ip):
+            return True
+    return False
+
+
+def _is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if ip.is_loopback:
+        return True
+    if ip.is_private:
+        return True
+    if ip.is_link_local:
+        return True
+    if ip.is_multicast:
+        return True
+    if ip.is_unspecified:
+        return True
+    if ip.is_reserved:
+        return True
+    return False
+
+
 class ImageFetchContent(Protocol):
     def iter_chunked(self, size: int) -> AsyncIterator[bytes]: ...
 
@@ -386,7 +468,13 @@ class ImageFetchResponse(Protocol):
 
 
 class ImageFetchSession(Protocol):
-    def get(self, url: str, timeout: aiohttp.ClientTimeout) -> AsyncContextManager[ImageFetchResponse]: ...
+    def get(
+        self,
+        url: str,
+        timeout: aiohttp.ClientTimeout,
+        *,
+        allow_redirects: bool = False,
+    ) -> AsyncContextManager[ImageFetchResponse]: ...
 
 
 def _as_image_fetch_session(session: aiohttp.ClientSession) -> ImageFetchSession:
@@ -414,11 +502,13 @@ async def stream_responses(
 
     seen_terminal = False
     client_session = session or get_http_client().session
-    payload_dict = await _inline_input_image_urls(
-        payload.to_payload(),
-        _as_image_fetch_session(client_session),
-        settings.upstream_connect_timeout_seconds,
-    )
+    payload_dict = payload.to_payload()
+    if settings.image_inline_fetch_enabled:
+        payload_dict = await _inline_input_image_urls(
+            payload_dict,
+            _as_image_fetch_session(client_session),
+            settings.upstream_connect_timeout_seconds,
+        )
     try:
         async with client_session.post(
             url,
@@ -510,11 +600,13 @@ async def compact_responses(
     )
 
     client_session = session or get_http_client().session
-    payload_dict = await _inline_input_image_urls(
-        payload.to_payload(),
-        _as_image_fetch_session(client_session),
-        settings.upstream_connect_timeout_seconds,
-    )
+    payload_dict = payload.to_payload()
+    if settings.image_inline_fetch_enabled:
+        payload_dict = await _inline_input_image_urls(
+            payload_dict,
+            _as_image_fetch_session(client_session),
+            settings.upstream_connect_timeout_seconds,
+        )
     try:
         async with client_session.post(
             url,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_dict, is_json_list
 
@@ -11,7 +12,7 @@ def coerce_messages(existing_instructions: str, messages: Sequence[JsonValue]) -
     input_messages: list[JsonValue] = []
     for message in messages:
         if not is_json_dict(message):
-            raise ValueError("Each message must be an object.")
+            raise ClientPayloadError("Each message must be an object.", param="messages")
         role_value = message.get("role")
         role = role_value if isinstance(role_value, str) else None
         if role in ("system", "developer"):
@@ -71,20 +72,20 @@ def _ensure_text_only_content(content: JsonValue, role: str) -> None:
             if is_json_dict(part):
                 part_type = part.get("type")
                 if part_type not in (None, "text"):
-                    raise ValueError(f"{role} messages must be text-only.")
+                    raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
                 text = part.get("text")
                 if isinstance(text, str):
                     continue
-            raise ValueError(f"{role} messages must be text-only.")
+            raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
         return
     if is_json_dict(content):
         part_type = content.get("type")
         if part_type not in (None, "text"):
-            raise ValueError(f"{role} messages must be text-only.")
+            raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
         text = content.get("text")
         if isinstance(text, str):
             return
-    raise ValueError(f"{role} messages must be text-only.")
+    raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
 
 
 def _normalize_message_content(message: dict[str, JsonValue]) -> dict[str, JsonValue]:

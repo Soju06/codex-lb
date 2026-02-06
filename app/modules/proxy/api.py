@@ -12,6 +12,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import (
     OpenAIError,
     OpenAIResponsePayload,
@@ -73,6 +74,9 @@ async def v1_responses(
 ) -> Response:
     try:
         responses_payload = payload.to_responses_request()
+    except ClientPayloadError as exc:
+        error = _openai_invalid_payload_error(exc.param)
+        return JSONResponse(status_code=400, content=error)
     except ValidationError as exc:
         error = _openai_validation_error(exc)
         return JSONResponse(status_code=400, content=error)
@@ -246,7 +250,15 @@ async def v1_responses_compact(
     payload: V1ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
 ) -> JSONResponse:
-    return await _compact_responses(request, payload.to_compact_request(), context)
+    try:
+        compact_payload = payload.to_compact_request()
+    except ClientPayloadError as exc:
+        error = _openai_invalid_payload_error(exc.param)
+        return JSONResponse(status_code=400, content=error)
+    except ValidationError as exc:
+        error = _openai_validation_error(exc)
+        return JSONResponse(status_code=400, content=error)
+    return await _compact_responses(request, compact_payload, context)
 
 
 async def _compact_responses(
@@ -358,7 +370,7 @@ def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErr
 
 
 def _openai_validation_error(exc: ValidationError) -> OpenAIErrorEnvelope:
-    error = openai_error("invalid_request_error", "Invalid request payload", error_type="invalid_request_error")
+    error = _openai_invalid_payload_error()
     if exc.errors():
         first = exc.errors()[0]
         loc = first.get("loc", [])
@@ -366,6 +378,13 @@ def _openai_validation_error(exc: ValidationError) -> OpenAIErrorEnvelope:
             param = ".".join(str(part) for part in loc if part != "body")
             if param:
                 error["error"]["param"] = param
+    return error
+
+
+def _openai_invalid_payload_error(param: str | None = None) -> OpenAIErrorEnvelope:
+    error = openai_error("invalid_request_error", "Invalid request payload", error_type="invalid_request_error")
+    if param:
+        error["error"]["param"] = param
     return error
 
 

@@ -377,3 +377,45 @@ async def test_v1_responses_non_streaming_returns_response(async_client, monkeyp
     assert body["object"] == "response"
     assert body["status"] == "completed"
     assert observed_stream["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_invalid_messages_returns_openai_400(async_client):
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {
+                "role": "system",
+                "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}],
+            },
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "invalid_request_error"
+    assert body["error"]["param"] == "messages"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_compact_invalid_messages_returns_openai_400(async_client):
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {
+                "role": "developer",
+                "content": [{"type": "file", "file": {"file_url": "https://example.com/a.pdf"}}],
+            },
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    resp = await async_client.post("/v1/responses/compact", json=payload)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "invalid_request_error"
+    assert body["error"]["param"] == "messages"

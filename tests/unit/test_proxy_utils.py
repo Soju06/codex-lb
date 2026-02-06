@@ -157,3 +157,12 @@ def test_log_proxy_request_payload(monkeypatch, caplog):
 
     assert "proxy_request_payload" in caplog.text
     assert '"model":"gpt-5.1"' in caplog.text
+
+
+def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS", "a.example, b.example ,,C.Example")
+    from app.core.config.settings import Settings
+
+    settings = Settings()
+
+    assert settings.image_inline_allowed_hosts == ["a.example", "b.example", "c.example"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.message_coercion import coerce_messages
 from app.core.openai.requests import (
     ResponsesCompactRequest,
@@ -74,7 +75,12 @@ class V1ResponsesRequest(BaseModel):
         input_text: str | None = input_value if isinstance(input_value, str) else None
 
         if messages is not None:
-            instruction_text, input_items = coerce_messages(instruction_text, messages)
+            try:
+                instruction_text, input_items = coerce_messages(instruction_text, messages)
+            except ClientPayloadError:
+                raise
+            except ValueError as exc:
+                raise ClientPayloadError(str(exc), param="messages") from exc
 
         data["instructions"] = instruction_text
         if messages is None and input_text is not None:
@@ -119,7 +125,12 @@ class V1ResponsesCompactRequest(BaseModel):
         input_text: str | None = input_value if isinstance(input_value, str) else None
 
         if messages is not None:
-            instruction_text, input_items = coerce_messages(instruction_text, messages)
+            try:
+                instruction_text, input_items = coerce_messages(instruction_text, messages)
+            except ClientPayloadError:
+                raise
+            except ValueError as exc:
+                raise ClientPayloadError(str(exc), param="messages") from exc
 
         data["instructions"] = instruction_text
         if messages is None and input_text is not None:

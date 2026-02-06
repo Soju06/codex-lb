@@ -9,9 +9,7 @@
 			`/api/accounts/${encodeURIComponent(accountId)}/pause`,
 		accountDelete: (accountId) =>
 			`/api/accounts/${encodeURIComponent(accountId)}`,
-		usageSummary: "/api/usage/summary",
-		usageWindow: (window) =>
-			`/api/usage/window?window=${encodeURIComponent(window)}`,
+		dashboardOverview: "/api/dashboard/overview",
 		requestLogs: "/api/request-logs",
 		requestLogOptions: "/api/request-logs/options",
 		oauthStart: "/api/oauth/start",
@@ -631,22 +629,28 @@
 	};
 
 	const normalizeAccountsPayload = (payload) => {
-		return payload.accounts.map(normalizeAccount);
+		const accounts = Array.isArray(payload) ? payload : payload?.accounts;
+		if (!Array.isArray(accounts)) {
+			return [];
+		}
+		return accounts.map(normalizeAccount);
 	};
 
 	const normalizeUsageEntry = (entry) => {
 		return {
 			accountId: entry.accountId,
-			requestCount: entry.requestCount ?? 0,
 			remainingPercentAvg: toNumber(entry.remainingPercentAvg),
 			capacityCredits: toNumber(entry.capacityCredits) ?? 0,
 			remainingCredits: toNumber(entry.remainingCredits) ?? 0,
-			costUsd: toNumber(entry.costUsd) ?? 0,
 		};
 	};
 
 	const normalizeUsagePayload = (payload) => {
-		return payload.accounts.map(normalizeUsageEntry);
+		const accounts = Array.isArray(payload) ? payload : payload?.accounts;
+		if (!Array.isArray(accounts)) {
+			return [];
+		}
+		return accounts.map(normalizeUsageEntry);
 	};
 
 	const normalizeRequestLog = (entry) => {
@@ -666,7 +670,11 @@
 	};
 
 	const normalizeRequestLogsPayload = (payload) => {
-		return payload.requests.map(normalizeRequestLog);
+		const requests = Array.isArray(payload) ? payload : payload?.requests;
+		if (!Array.isArray(requests)) {
+			return [];
+		}
+		return requests.map(normalizeRequestLog);
 	};
 
 	const buildUsageIndex = (entries) =>
@@ -747,6 +755,7 @@
 		primaryUsage,
 		secondaryUsage,
 		requestLogs,
+		lastSyncAt,
 	}) => {
 		const metrics = summary?.metrics || {};
 		const requests7d = toNumber(metrics.requests7d) ?? 0;
@@ -755,7 +764,7 @@
 		const errorRate7d = toNumber(metrics.errorRate7d);
 		const topError = metrics.topError || "";
 		return {
-			lastSyncAt: new Date().toISOString(),
+			lastSyncAt: lastSyncAt || new Date().toISOString(),
 			routing: {
 				strategy: "usage_weighted",
 				rotationEnabled: true,
@@ -1255,16 +1264,15 @@
 		return responsePayload;
 	};
 
-	const fetchAccounts = async () => {
-		const payload = await fetchJson(API_ENDPOINTS.accounts, "accounts");
-		return normalizeAccountsPayload(payload);
+	const fetchDashboardOverview = async (params) => {
+		const query = buildQueryString(params);
+		return fetchJson(
+			query
+				? `${API_ENDPOINTS.dashboardOverview}?${query}`
+				: API_ENDPOINTS.dashboardOverview,
+			"dashboard overview",
+		);
 	};
-
-	const fetchUsageSummary = async () =>
-		fetchJson(API_ENDPOINTS.usageSummary, "usage summary");
-
-	const fetchUsageWindow = async (window) =>
-		fetchJson(API_ENDPOINTS.usageWindow(window), `usage window (${window})`);
 
 	const parseMinCostUsd = (value) => {
 		if (value === null || value === undefined) {
@@ -1314,6 +1322,28 @@
 			params.since = since;
 		}
 		return params;
+	};
+
+	const hasServerSideRequestFilters = (filters) => {
+		if (!filters) {
+			return false;
+		}
+		if (filters.search) {
+			return true;
+		}
+		if (filters.timeframe && filters.timeframe !== "all") {
+			return true;
+		}
+		if (Array.isArray(filters.accountIds) && filters.accountIds.length) {
+			return true;
+		}
+		if (Array.isArray(filters.modelOptions) && filters.modelOptions.length) {
+			return true;
+		}
+		if (Array.isArray(filters.statuses) && filters.statuses.length) {
+			return true;
+		}
+		return false;
 	};
 
 	const applyClientSideRequestFilters = (requests, filters) => {
@@ -1402,12 +1432,15 @@
 				modelOptions: [],
 				isLoading: false,
 				error: "",
+				hasLoaded: false,
 			},
 
 			settings: {
 				stickyThreadsEnabled: false,
 				preferEarlierResetAccounts: false,
+				isLoading: false,
 				isSaving: false,
+				hasLoaded: false,
 			},
 			accounts: {
 				selectedId: "",
@@ -1451,6 +1484,7 @@
 			isLoading: true,
 			hasInitialized: false,
 			refreshPromise: null,
+			settingsLoadPromise: null,
 
 			async init() {
 				if (this.hasInitialized) {
@@ -1465,11 +1499,17 @@
 				});
 
 				await this.loadData();
+				if (this.view === "settings") {
+					this.ensureSettingsLoaded();
+				}
 				this.syncTitle();
 				this.syncUrl(true);
-				this.$watch("view", () => {
+				this.$watch("view", (value) => {
 					this.syncTitle();
 					this.syncUrl(false);
+					if (value === "settings") {
+						this.ensureSettingsLoaded();
+					}
 				});
 				this.$watch("accounts.searchQuery", () => {
 					this.syncAccountSearchSelection();
@@ -1507,6 +1547,68 @@
 					console.error("Failed to refresh requests:", err);
 				} finally {
 					this.recentRequestsState.isLoading = false;
+				}
+			},
+
+			async loadRequestLogOptions() {
+				if (this.requestLogOptions.isLoading) {
+					return;
+				}
+				this.requestLogOptions.isLoading = true;
+				this.requestLogOptions.error = "";
+				try {
+					const payload = await fetchRequestLogOptions({});
+					this.requestLogOptions.accountIds = Array.isArray(payload?.accountIds)
+						? payload.accountIds
+						: [];
+					this.requestLogOptions.modelOptions = Array.isArray(payload?.modelOptions)
+						? payload.modelOptions
+						: [];
+					this.requestLogOptions.hasLoaded = true;
+				} catch (err) {
+					this.requestLogOptions.error =
+						err?.message || "Failed to load request log options.";
+				} finally {
+					this.requestLogOptions.isLoading = false;
+				}
+			},
+
+			ensureRequestLogOptions() {
+				if (this.requestLogOptions.hasLoaded || this.requestLogOptions.isLoading) {
+					return;
+				}
+				this.loadRequestLogOptions();
+			},
+
+			async ensureSettingsLoaded() {
+				if (this.settings.hasLoaded) {
+					return;
+				}
+				if (this.settingsLoadPromise) {
+					return this.settingsLoadPromise;
+				}
+				this.settings.isLoading = true;
+				this.settingsLoadPromise = (async () => {
+					try {
+						const settings = await fetchSettings();
+						this.settings.stickyThreadsEnabled = settings.stickyThreadsEnabled;
+						this.settings.preferEarlierResetAccounts =
+							settings.preferEarlierResetAccounts;
+						this.settings.hasLoaded = true;
+					} catch (err) {
+						console.error("Failed to load settings:", err);
+						this.openMessageBox({
+							tone: "error",
+							title: "Settings load failed",
+							message: err?.message || "Failed to load settings.",
+						});
+					}
+				})();
+				try {
+					await this.settingsLoadPromise;
+				} finally {
+					this.settingsLoadPromise = null;
+					this.settings.isLoading = false;
 				}
 			},
 
@@ -1612,87 +1714,27 @@
 				if (this.refreshPromise) {
 					return this.refreshPromise;
 				}
-				const { preferredId, silent = false } = options;
-				this.requestLogOptions.isLoading = true;
-				this.requestLogOptions.error = "";
+				const { preferredId } = options;
 				this.refreshPromise = (async () => {
-					const params = buildRequestLogsQueryParams({
-						filters: this.filtersApplied,
-						pagination: this.pagination,
-					});
-
-					const [
-						accountsResult,
-						summaryResult,
-						primaryResult,
-						secondaryResult,
-						requestLogsResult,
-						requestLogOptionsResult,
-						settingsResult,
-					] = await Promise.allSettled([
-						fetchAccounts(),
-						fetchUsageSummary(),
-						fetchUsageWindow("primary"),
-						fetchUsageWindow("secondary"),
-						fetchRequestLogs(params),
-						fetchRequestLogOptions({}),
-						fetchSettings(),
-					]);
-
-					const errors = [];
-					if (accountsResult.status !== "fulfilled") {
-						throw accountsResult.reason;
-					}
-					const summary =
-						summaryResult.status === "fulfilled" ? summaryResult.value : null;
-					if (summaryResult.status === "rejected") {
-						errors.push(summaryResult.reason);
-					}
-					const primaryUsage =
-						primaryResult.status === "fulfilled"
-							? normalizeUsagePayload(primaryResult.value)
-							: [];
-					if (primaryResult.status === "rejected") {
-						errors.push(primaryResult.reason);
-					}
-					const secondaryUsage =
-						secondaryResult.status === "fulfilled"
-							? normalizeUsagePayload(secondaryResult.value)
-							: [];
-					if (secondaryResult.status === "rejected") {
-						errors.push(secondaryResult.reason);
-					}
-					const requestLogs =
-						requestLogsResult.status === "fulfilled"
-							? normalizeRequestLogsPayload(requestLogsResult.value)
-							: [];
-					if (requestLogsResult.status === "rejected") {
-						errors.push(requestLogsResult.reason);
-					}
-
-					if (requestLogOptionsResult.status === "fulfilled") {
-						const payload = requestLogOptionsResult.value;
-						this.requestLogOptions.accountIds = Array.isArray(payload?.accountIds)
-							? payload.accountIds
-							: [];
-						this.requestLogOptions.modelOptions = Array.isArray(payload?.modelOptions)
-							? payload.modelOptions
-							: [];
-					} else {
-						this.requestLogOptions.error =
-							requestLogOptionsResult.reason?.message ||
-							"Failed to load request log options.";
-						errors.push(requestLogOptionsResult.reason);
-					}
-
-					const settings =
-						settingsResult.status === "fulfilled" ? settingsResult.value : null;
-					if (settingsResult.status === "rejected") {
-						errors.push(settingsResult.reason);
-					}
+					const overviewParams = {
+						requestLimit: this.pagination.limit,
+						requestOffset: this.pagination.offset,
+					};
+					const overview = await fetchDashboardOverview(overviewParams);
+					const summary = overview?.summary || null;
+					const accounts = normalizeAccountsPayload(overview?.accounts || []);
+					const primaryUsage = normalizeUsagePayload(
+						overview?.windows?.primary || {},
+					);
+					const secondaryUsage = normalizeUsagePayload(
+						overview?.windows?.secondary || {},
+					);
+					const requestLogs = normalizeRequestLogsPayload(
+						overview?.requestLogs || [],
+					);
 
 					const mergedAccounts = mergeUsageIntoAccounts(
-						accountsResult.value,
+						accounts,
 						primaryUsage,
 						secondaryUsage,
 					);
@@ -1706,28 +1748,21 @@
 								requestLogs,
 								this.filtersApplied,
 							),
-							settings,
+							lastSyncAt: overview?.lastSyncAt || "",
 						},
 						preferredId,
 					);
 
-					if (errors.length && !silent) {
-						this.openMessageBox({
-							tone: "warning",
-							title: "Partial data loaded",
-							message:
-								"Some usage endpoints failed. Account list loaded, but usage data may be incomplete.",
-							details: errors
-								.map((err) => err?.message || String(err))
-								.join("\n"),
-						});
+					if (hasServerSideRequestFilters(this.filtersApplied)) {
+						await this.refreshRequests();
 					}
+
+					this.ensureRequestLogOptions();
 				})();
 				try {
 					await this.refreshPromise;
 				} finally {
 					this.refreshPromise = null;
-					this.requestLogOptions.isLoading = false;
 				}
 			},
 			applyData(data, preferredId) {
@@ -1752,16 +1787,8 @@
 					primaryUsage: data.primaryUsage,
 					secondaryUsage: data.secondaryUsage,
 					requestLogs: data.requestLogs,
-					settings: data.settings,
+					lastSyncAt: data.lastSyncAt,
 				});
-				if (data.settings) {
-					this.settings.stickyThreadsEnabled = Boolean(
-						data.settings.stickyThreadsEnabled,
-					);
-					this.settings.preferEarlierResetAccounts = Boolean(
-						data.settings.preferEarlierResetAccounts,
-					);
-				}
 				this.ui.usageWindows = buildUsageWindowConfig(data.summary);
 				this.dashboard = buildDashboardView(this);
 				this.syncAccountSearchSelection();
@@ -1769,6 +1796,12 @@
 			async saveSettings() {
 				if (this.settings.isSaving) {
 					return;
+				}
+				if (!this.settings.hasLoaded) {
+					await this.ensureSettingsLoaded();
+					if (!this.settings.hasLoaded) {
+						return;
+					}
 				}
 				this.settings.isSaving = true;
 				try {

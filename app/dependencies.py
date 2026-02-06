@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import SessionLocal, _safe_close, _safe_rollback, get_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
+from app.modules.dashboard.repository import DashboardRepository
+from app.modules.dashboard.service import DashboardService
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
@@ -60,13 +62,19 @@ class SettingsContext:
     service: SettingsService
 
 
+@dataclass(slots=True)
+class DashboardContext:
+    session: AsyncSession
+    repository: DashboardRepository
+    service: DashboardService
+
+
 def get_accounts_context(
     session: AsyncSession = Depends(get_session),
 ) -> AccountsContext:
     repository = AccountsRepository(session)
     usage_repository = UsageRepository(session)
-    request_logs_repository = RequestLogsRepository(session)
-    service = AccountsService(repository, usage_repository, request_logs_repository)
+    service = AccountsService(repository, usage_repository)
     return AccountsContext(
         session=session,
         repository=repository,
@@ -84,7 +92,6 @@ def get_usage_context(
         usage_repository,
         request_logs_repository,
         accounts_repository,
-        refresh_repo_factory=_usage_refresh_context,
     )
     return UsageContext(
         session=session,
@@ -98,20 +105,6 @@ async def _accounts_repo_context() -> AsyncIterator[AccountsRepository]:
     session = SessionLocal()
     try:
         yield AccountsRepository(session)
-    except BaseException:
-        await _safe_rollback(session)
-        raise
-    finally:
-        if session.in_transaction():
-            await _safe_rollback(session)
-        await _safe_close(session)
-
-
-@asynccontextmanager
-async def _usage_refresh_context() -> AsyncIterator[tuple[UsageRepository, AccountsRepository]]:
-    session = SessionLocal()
-    try:
-        yield UsageRepository(session), AccountsRepository(session)
     except BaseException:
         await _safe_rollback(session)
         raise
@@ -167,3 +160,11 @@ def get_settings_context(
     repository = SettingsRepository(session)
     service = SettingsService(repository)
     return SettingsContext(session=session, repository=repository, service=service)
+
+
+def get_dashboard_context(
+    session: AsyncSession = Depends(get_session),
+) -> DashboardContext:
+    repository = DashboardRepository(session)
+    service = DashboardService(repository)
+    return DashboardContext(session=session, repository=repository, service=service)

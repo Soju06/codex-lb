@@ -38,7 +38,6 @@ class AccountSummary(DashboardModel):
     remaining_credits_primary: float | None = None
     capacity_credits_secondary: float | None = None
     remaining_credits_secondary: float | None = None
-    cost_usd_24h: float | None = None
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
 

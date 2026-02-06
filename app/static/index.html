@@ -186,7 +186,8 @@
 
 
                 <div class="multi-select" x-data="{ open: false }" @click.outside="open = false">
-                  <button type="button" class="filter-select multi-select-trigger" @click="open = !open"
+                  <button type="button" class="filter-select multi-select-trigger"
+                    @click="ensureRequestLogOptions(); open = !open"
                     :aria-expanded="open" :disabled="requestLogOptions.isLoading">
                     <span
                       x-text="multiSelectSummary(filtersDraft.accountIds, 'All accounts', 'account', 'accounts')"></span>
@@ -209,7 +210,8 @@
                 </div>
 
                 <div class="multi-select" x-data="{ open: false }" @click.outside="open = false">
-                  <button type="button" class="filter-select multi-select-trigger" @click="open = !open"
+                  <button type="button" class="filter-select multi-select-trigger"
+                    @click="ensureRequestLogOptions(); open = !open"
                     :aria-expanded="open" :disabled="requestLogOptions.isLoading">
                     <span
                       x-text="multiSelectSummary(filtersDraft.modelOptions, 'All models', 'model', 'models')"></span>
@@ -513,7 +515,9 @@
             <p class="text-muted">Toggle routing features. When both options are off, accounts are selected by
               balancing usage evenly.</p>
 
-            <fieldset class="settings-fieldset">
+            <p class="text-muted" x-show="settings.isLoading" x-transition.opacity>Loading settings…</p>
+
+            <fieldset class="settings-fieldset" :disabled="settings.isLoading || settings.isSaving || !settings.hasLoaded">
               <legend>Sticky threads</legend>
               <input id="sticky-threads-toggle" type="checkbox" x-model="settings.stickyThreadsEnabled"
                 aria-describedby="sticky-threads-help">
@@ -525,7 +529,7 @@
               </div>
             </fieldset>
 
-            <fieldset class="settings-fieldset">
+            <fieldset class="settings-fieldset" :disabled="settings.isLoading || settings.isSaving || !settings.hasLoaded">
               <legend>Reset priority</legend>
               <input id="reset-priority-toggle" type="checkbox" x-model="settings.preferEarlierResetAccounts"
                 aria-describedby="reset-priority-help">
@@ -537,7 +541,7 @@
             </fieldset>
 
             <div class="inline-actions" style="margin-top: 12px">
-              <button type="button" @click="saveSettings" :disabled="settings.isSaving">
+              <button type="button" @click="saveSettings" :disabled="settings.isLoading || settings.isSaving || !settings.hasLoaded">
                 <span>Save</span>
               </button>
             </div>

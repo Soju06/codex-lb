@@ -9,7 +9,6 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -28,11 +27,6 @@ def _make_account(account_id: str, email: str, plan_type: str = "plus") -> Accou
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
-
-
-def _cost(input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> float:
-    billable = input_tokens - cached_tokens
-    return (billable / 1_000_000) * 1.25 + (cached_tokens / 1_000_000) * 0.125 + (output_tokens / 1_000_000) * 10.0
 
 
 @pytest.mark.asyncio
@@ -71,7 +65,6 @@ async def test_usage_history_aggregates_per_account(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
-        logs_repo = RequestLogsRepository(session)
         usage_repo = UsageRepository(session)
 
         await accounts_repo.upsert(_make_account("acc_a", "a@example.com"))
@@ -79,41 +72,6 @@ async def test_usage_history_aggregates_per_account(async_client, db_setup):
 
         await usage_repo.add_entry("acc_a", 10.0, recorded_at=now - timedelta(hours=3))
         await usage_repo.add_entry("acc_a", 30.0, recorded_at=now - timedelta(hours=2))
-
-        await logs_repo.add_log(
-            account_id="acc_a",
-            request_id="req_usage_hist_1",
-            model="gpt-5.1",
-            input_tokens=1000,
-            output_tokens=500,
-            cached_input_tokens=200,
-            latency_ms=120,
-            status="success",
-            error_code=None,
-            requested_at=now - timedelta(hours=1),
-        )
-        await logs_repo.add_log(
-            account_id="acc_a",
-            request_id="req_usage_hist_2",
-            model="gpt-5.1",
-            input_tokens=200,
-            output_tokens=100,
-            latency_ms=80,
-            status="success",
-            error_code=None,
-            requested_at=now - timedelta(minutes=30),
-        )
-        await logs_repo.add_log(
-            account_id="acc_b",
-            request_id="req_usage_hist_3",
-            model="gpt-5.1",
-            input_tokens=100,
-            output_tokens=50,
-            latency_ms=50,
-            status="success",
-            error_code=None,
-            requested_at=now - timedelta(minutes=10),
-        )
 
     response = await async_client.get("/api/usage/history?hours=24")
     assert response.status_code == 200
@@ -126,16 +84,10 @@ async def test_usage_history_aggregates_per_account(async_client, db_setup):
 
     assert acc_a["remainingPercentAvg"] == pytest.approx(80.0)
     assert acc_a["capacityCredits"] == pytest.approx(225.0)
-    assert acc_a["requestCount"] == 2
-    expected_a = round(_cost(1000, 500, 200) + _cost(200, 100), 6)
-    assert acc_a["costUsd"] == pytest.approx(expected_a)
     assert acc_a["remainingCredits"] == pytest.approx(180.0)
 
     assert acc_b["remainingPercentAvg"] == pytest.approx(100.0)
     assert acc_b["capacityCredits"] == pytest.approx(225.0)
-    assert acc_b["requestCount"] == 1
-    expected_b = round(_cost(100, 50), 6)
-    assert acc_b["costUsd"] == pytest.approx(expected_b)
     assert acc_b["remainingCredits"] == pytest.approx(225.0)
 
 
@@ -144,7 +96,6 @@ async def test_usage_window_secondary_uses_latest_window_minutes(async_client, d
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
-        logs_repo = RequestLogsRepository(session)
         usage_repo = UsageRepository(session)
 
         await accounts_repo.upsert(_make_account("acc_sec", "sec@example.com"))
@@ -156,18 +107,6 @@ async def test_usage_window_secondary_uses_latest_window_minutes(async_client, d
             window_minutes=1440,
             recorded_at=now - timedelta(minutes=5),
         )
-        await logs_repo.add_log(
-            account_id="acc_sec",
-            request_id="req_usage_window_1",
-            model="gpt-5.1",
-            input_tokens=300,
-            output_tokens=100,
-            latency_ms=100,
-            status="success",
-            error_code=None,
-            requested_at=now - timedelta(minutes=10),
-        )
-
     response = await async_client.get("/api/usage/window?window=secondary")
     assert response.status_code == 200
     payload = response.json()
@@ -179,7 +118,6 @@ async def test_usage_window_secondary_uses_latest_window_minutes(async_client, d
     assert entry["remainingPercentAvg"] == pytest.approx(60.0)
     assert entry["capacityCredits"] == pytest.approx(7560.0)
     assert entry["remainingCredits"] == pytest.approx(4536.0)
-    assert entry["requestCount"] == 1
 
 
 @pytest.mark.asyncio

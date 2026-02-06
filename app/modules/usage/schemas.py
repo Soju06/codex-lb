@@ -48,8 +48,6 @@ class UsageHistoryItem(DashboardModel):
     remaining_percent_avg: float
     capacity_credits: float
     remaining_credits: float
-    request_count: int
-    cost_usd: float
 
 
 class UsageHistoryResponse(DashboardModel):

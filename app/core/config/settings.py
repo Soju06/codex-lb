@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     usage_fetch_timeout_seconds: float = 10.0
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
-    usage_refresh_interval_seconds: int = 60
+    usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
     log_proxy_request_shape: bool = False

@@ -269,9 +269,26 @@ def _normalize_sse_data_line(line: str) -> str:
 
 
 def _normalize_sse_event_block(event_block: str) -> str:
-    lines = event_block.splitlines()
+    if not event_block:
+        return event_block
+
+    if event_block.endswith("\r\n\r\n"):
+        line_separator = "\r\n"
+        terminator = "\r\n\r\n"
+        body = event_block[: -len(terminator)]
+    elif event_block.endswith("\n\n"):
+        line_separator = "\n"
+        terminator = "\n\n"
+        body = event_block[: -len(terminator)]
+    else:
+        line_separator = "\r\n" if "\r\n" in event_block else "\n"
+        terminator = ""
+        body = event_block
+
+    lines = body.splitlines()
     if not lines:
         return event_block
+
     normalized_lines: list[str] = []
     changed = False
     for line in lines:
@@ -281,7 +298,11 @@ def _normalize_sse_event_block(event_block: str) -> str:
         normalized_lines.append(normalized_line)
     if not changed:
         return event_block
-    return "\n".join(normalized_lines) + "\n\n"
+
+    normalized = line_separator.join(normalized_lines)
+    if terminator:
+        return normalized + terminator
+    return normalized
 
 
 async def _inline_input_image_urls(

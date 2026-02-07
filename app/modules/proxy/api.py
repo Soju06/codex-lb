@@ -315,7 +315,6 @@ def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
 
 
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
-    response_payload: OpenAIResponsePayload | None = None
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
@@ -328,8 +327,7 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIRespon
             if isinstance(response, dict):
                 parsed = parse_response_payload(response)
                 if parsed is not None:
-                    response_payload = parsed
-                    continue
+                    return parsed
                 if event_type == "response.failed":
                     error_value = response.get("error")
                     if isinstance(error_value, dict):
@@ -337,8 +335,7 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIRespon
                             return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
                         except ValidationError:
                             return _default_error_envelope()
-    if response_payload is not None:
-        return response_payload
+            return _default_error_envelope()
     return _default_error_envelope()
 
 

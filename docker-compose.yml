@@ -33,4 +33,3 @@ services:
 volumes:
   codex-lb-data:
     name: codex-lb-data
-    external: true

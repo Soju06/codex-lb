@@ -189,11 +189,6 @@ class ResponsesRequest(BaseModel):
     def _normalize_tool_choice_field(cls, value: JsonValue | None) -> JsonValue | None:
         return normalize_tool_choice(value)
 
-    @field_validator("tool_choice")
-    @classmethod
-    def _normalize_tool_choice(cls, value: JsonValue | None) -> JsonValue | None:
-        return normalize_tool_choice(value)
-
     @model_validator(mode="after")
     def _validate_conversation(self) -> "ResponsesRequest":
         if self.conversation and self.previous_response_id:

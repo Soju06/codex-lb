@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
+from app.core.openai.models_catalog import ModelEntry
 from app.core.types import JsonValue
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
@@ -83,3 +84,20 @@ class RateLimitStatusPayload(BaseModel):
             rate_limit=RateLimitStatusDetails.from_data(data.rate_limit) if data.rate_limit else None,
             credits=CreditStatusDetails.from_data(data.credits) if data.credits else None,
         )
+
+
+class ModelListItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str
+    metadata: ModelEntry
+
+
+class ModelListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object: str = "list"
+    data: list[ModelListItem]

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
-
 from pydantic import TypeAdapter, ValidationError
 
 from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, OpenAIEvent, OpenAIResponsePayload
+from app.core.types import JsonValue
+from app.core.utils.sse import parse_sse_data_json
 
 _EVENT_ADAPTER = TypeAdapter(OpenAIEvent)
 _ERROR_ADAPTER = TypeAdapter(OpenAIErrorEnvelope)
@@ -12,23 +12,8 @@ _RESPONSE_ADAPTER = TypeAdapter(OpenAIResponsePayload)
 
 
 def parse_sse_event(line: str) -> OpenAIEvent | None:
-    data = None
-    if line.startswith("data:"):
-        data = line[5:].strip()
-    elif "\n" in line:
-        for part in line.splitlines():
-            if part.startswith("data:"):
-                data = part[5:].strip()
-                break
-    if data is None:
-        return None
-    if not data or data == "[DONE]":
-        return None
-    try:
-        payload = json.loads(data)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
+    payload = parse_sse_data_json(line)
+    if payload is None:
         return None
     try:
         return _EVENT_ADAPTER.validate_python(payload)
@@ -36,7 +21,7 @@ def parse_sse_event(line: str) -> OpenAIEvent | None:
         return None
 
 
-def parse_error_payload(payload: object) -> OpenAIError | None:
+def parse_error_payload(payload: JsonValue) -> OpenAIError | None:
     if not isinstance(payload, dict):
         return None
     try:
@@ -46,7 +31,7 @@ def parse_error_payload(payload: object) -> OpenAIError | None:
     return envelope.error
 
 
-def parse_response_payload(payload: object) -> OpenAIResponsePayload | None:
+def parse_response_payload(payload: JsonValue) -> OpenAIResponsePayload | None:
     if not isinstance(payload, dict):
         return None
     try:

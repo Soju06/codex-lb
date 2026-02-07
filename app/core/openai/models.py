@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TypeAlias
+
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -120,3 +122,6 @@ class OpenAIResponsePayload(BaseModel):
             return ResponseUsage.model_validate(value)
         except ValidationError:
             return None
+
+
+OpenAIResponseResult: TypeAlias = OpenAIResponsePayload | OpenAIErrorEnvelope

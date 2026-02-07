@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
-from typing import cast
 
 import pytest
 
-from app.core.openai.chat_responses import collect_chat_completion, iter_chat_chunks, stream_chat_chunks
-from app.core.types import JsonValue
+from app.core.openai.chat_responses import (
+    ChatCompletion,
+    collect_chat_completion,
+    iter_chat_chunks,
+    stream_chat_chunks,
+)
+from app.core.openai.models import OpenAIErrorEnvelope
 
 
 def test_output_text_delta_to_chat_chunk():
@@ -45,6 +49,26 @@ def test_error_event_emits_done_chunk():
     assert chunks[-1].strip() == "data: [DONE]"
 
 
+@pytest.mark.asyncio
+async def test_collect_completion_parses_event_prefixed_sse_block():
+    lines = [
+        (
+            "event: response.failed\n"
+            'data: {"type":"response.failed","response":{"id":"r1","status":"failed","error":'
+            '{"message":"bad","type":"server_error","code":"no_accounts"}}}\n\n'
+        ),
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "no_accounts"
+
+
 def test_tool_call_delta_is_emitted():
     lines = [
         (
@@ -68,6 +92,24 @@ def test_tool_call_delta_is_emitted():
         json.loads(chunk[5:].strip()) for chunk in chunks if chunk.startswith("data: ") and '"finish_reason"' in chunk
     ]
     assert done_chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_response_incomplete_maps_finish_reason_length():
+    lines = [
+        'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+        (
+            'data: {"type":"response.incomplete","response":{"id":"r1",'
+            '"incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
+        ),
+    ]
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+    parsed = [
+        json.loads(chunk[5:].strip())
+        for chunk in chunks
+        if chunk.startswith("data: ") and "chat.completion.chunk" in chunk
+    ]
+    done_chunks = [chunk for chunk in parsed if chunk["choices"][0].get("finish_reason") is not None]
+    assert done_chunks[-1]["choices"][0]["finish_reason"] == "length"
 
 
 @pytest.mark.asyncio
@@ -100,6 +142,30 @@ async def test_stream_chat_chunks_preserves_tool_call_state():
 
 
 @pytest.mark.asyncio
+async def test_stream_chat_chunks_include_usage_chunk():
+    lines = [
+        'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+        (
+            'data: {"type":"response.completed","response":{"id":"r1","usage":'
+            '{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}\n\n'
+        ),
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    chunks = [
+        json.loads(chunk[5:].strip())
+        for chunk in [c async for c in stream_chat_chunks(_stream(), model="gpt-5.2", include_usage=True)]
+        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+    ]
+    assert all("usage" in chunk for chunk in chunks)
+    assert chunks[0]["usage"] is None
+    assert chunks[-1]["usage"]["total_tokens"] == 5
+
+
+@pytest.mark.asyncio
 async def test_collect_completion_merges_tool_call_arguments():
     lines = [
         (
@@ -115,15 +181,16 @@ async def test_collect_completion_merges_tool_call_arguments():
             yield line
 
     result = await collect_chat_completion(_stream(), model="gpt-5.2")
-    choices = cast(list[dict[str, JsonValue]], result.get("choices"))
-    choice = choices[0]
-    assert choice.get("finish_reason") == "tool_calls"
-    message = cast(dict[str, JsonValue], choice.get("message"))
-    tool_calls = cast(list[dict[str, JsonValue]], message.get("tool_calls"))
+    assert isinstance(result, ChatCompletion)
+    choice = result.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    tool_calls = choice.message.tool_calls
+    assert tool_calls is not None
     tool_call = tool_calls[0]
-    assert tool_call["id"] == "call_1"
-    function = cast(dict[str, JsonValue], tool_call.get("function"))
-    assert function.get("arguments") == '{"a":1}'
+    assert tool_call.id == "call_1"
+    function = tool_call.function
+    assert function is not None
+    assert function.arguments == '{"a":1}'
 
 
 @pytest.mark.asyncio
@@ -137,5 +204,26 @@ async def test_collect_completion_returns_error_event():
             yield line
 
     result = await collect_chat_completion(_stream(), model="gpt-5.2")
-    error = cast(dict[str, JsonValue], result.get("error"))
-    assert error.get("code") == "no_accounts"
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_includes_refusal_delta():
+    lines = [
+        'data: {"type":"response.refusal.delta","delta":"no"}\n\n',
+        (
+            'data: {"type":"response.incomplete","response":{"id":"r1",'
+            '"incomplete_details":{"reason":"content_filter"}}}\n\n'
+        ),
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    message = result.choices[0].message
+    assert message.content == "no"

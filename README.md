@@ -33,6 +33,17 @@ docker run -d --name codex-lb \
   ghcr.io/soju06/codex-lb:latest
 ```
 
+If you expect high traffic (60+ requests/min), prefer a Docker volume for the data
+directory to reduce SQLite I/O errors on some hosts.
+
+```bash
+docker volume create codex-lb-data
+docker run -d --name codex-lb \
+  -p 2455:2455 -p 1455:1455 \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
 ### uvx
 
 ```bash

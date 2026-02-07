@@ -23,6 +23,7 @@ from app.core.errors import openai_error, response_failed_event
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event
@@ -347,8 +348,10 @@ class ProxyService:
                     error_payload = _upstream_error_from_openai(error)
                     raise _RetryableStreamError(code, error_payload)
 
-            if event and event.type == "response.completed":
+            if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
+                if event.type == "response.incomplete":
+                    status = "error"
             yield first
 
             async for line in iterator:
@@ -367,8 +370,10 @@ class ProxyService:
                             error.type if error else None,
                         )
                         error_message = error.message if error else None
-                    if event_type == "response.completed":
+                    if event_type in ("response.completed", "response.incomplete"):
                         usage = event.response.usage if event.response else None
+                        if event_type == "response.incomplete":
+                            status = "error"
                 yield line
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -556,15 +561,21 @@ def _hash_identifier(value: str) -> str:
     return f"sha256:{digest[:12]}"
 
 
-def _summarize_input(items: Sequence[object]) -> str:
-    if not items:
+def _summarize_input(items: JsonValue) -> str:
+    if items is None:
         return "0"
-    type_counts: dict[str, int] = {}
-    for item in items:
-        type_name = type(item).__name__
-        type_counts[type_name] = type_counts.get(type_name, 0) + 1
-    summary = ",".join(f"{key}={type_counts[key]}" for key in sorted(type_counts))
-    return f"{len(items)}({summary})"
+    if isinstance(items, str):
+        return "str"
+    if isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
+        if not items:
+            return "0"
+        type_counts: dict[str, int] = {}
+        for item in items:
+            type_name = type(item).__name__
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
+        summary = ",".join(f"{key}={type_counts[key]}" for key in sorted(type_counts))
+        return f"{len(items)}({summary})"
+    return type(items).__name__
 
 
 def _truncate_identifier(value: str, *, max_length: int = 96) -> str:

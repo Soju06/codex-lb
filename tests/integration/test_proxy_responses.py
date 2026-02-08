@@ -407,6 +407,32 @@ async def test_v1_responses_non_streaming_preserves_sse_error_payload(async_clie
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_non_streaming_failed_without_status_returns_error(async_client, monkeypatch):
+    email = "responses-error-no-status@example.com"
+    raw_account_id = "acc_responses_error_no_status"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield (
+            'data: {"type":"response.failed","response":{"error":{"message":"No active accounts available",'
+            '"type":"server_error","code":"no_accounts"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": "hi", "stream": False}
+    resp = await async_client.post("/v1/responses", json=payload)
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error"]["code"] == "no_accounts"
+    assert body["error"]["type"] == "server_error"
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_invalid_messages_returns_openai_400(async_client):
     payload = {
         "model": "gpt-5.2",

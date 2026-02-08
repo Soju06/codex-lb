@@ -5,8 +5,9 @@ import base64
 import ipaddress
 import json
 import socket
+from dataclasses import dataclass
 from typing import AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, cast
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse, urlunparse
 
 import aiohttp
 
@@ -370,78 +371,138 @@ async def _fetch_image_data_url(
     image_url: str,
     connect_timeout: float,
 ) -> str | None:
-    if not await _is_safe_image_fetch_url(image_url, connect_timeout=connect_timeout):
+    target = await _resolve_safe_image_fetch_target(image_url, connect_timeout=connect_timeout)
+    if target is None:
         return None
     timeout = aiohttp.ClientTimeout(
         total=_IMAGE_INLINE_TIMEOUT_SECONDS,
         sock_connect=connect_timeout,
         sock_read=_IMAGE_INLINE_TIMEOUT_SECONDS,
     )
-    try:
-        async with session.get(image_url, timeout=timeout, allow_redirects=False) as resp:
-            if resp.status != 200:
-                return None
-            content_type = resp.headers.get("Content-Type")
-            mime_type = content_type.split(";", 1)[0].strip() if isinstance(content_type, str) else ""
-            if not mime_type:
-                mime_type = "application/octet-stream"
-            data = bytearray()
-            async for chunk in resp.content.iter_chunked(_IMAGE_INLINE_CHUNK_SIZE):
-                if not chunk:
+    headers = {"Host": target.host_header}
+    for request_url in target.request_urls:
+        try:
+            async with session.get(
+                request_url,
+                timeout=timeout,
+                allow_redirects=False,
+                headers=headers,
+                server_hostname=target.server_hostname,
+            ) as resp:
+                if resp.status != 200:
                     continue
-                data.extend(chunk)
-                if len(data) > _IMAGE_INLINE_MAX_BYTES:
-                    return None
-            if not data:
-                return None
-            encoded = base64.b64encode(data).decode("ascii")
-            return f"data:{mime_type};base64,{encoded}"
-    except aiohttp.ClientError:
-        return None
-    except asyncio.TimeoutError:
-        return None
+                content_type = resp.headers.get("Content-Type")
+                mime_type = content_type.split(";", 1)[0].strip() if isinstance(content_type, str) else ""
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+                data = bytearray()
+                async for chunk in resp.content.iter_chunked(_IMAGE_INLINE_CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    data.extend(chunk)
+                    if len(data) > _IMAGE_INLINE_MAX_BYTES:
+                        return None
+                if not data:
+                    continue
+                encoded = base64.b64encode(data).decode("ascii")
+                return f"data:{mime_type};base64,{encoded}"
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            continue
+    return None
 
 
-async def _is_safe_image_fetch_url(url: str, *, connect_timeout: float) -> bool:
+@dataclass(slots=True, frozen=True)
+class SafeImageFetchTarget:
+    request_urls: tuple[str, ...]
+    host_header: str
+    server_hostname: str
+
+
+def _build_pinned_request_url(parsed: ParseResult, resolved_ip: str) -> str:
+    path = parsed.path or "/"
+    ip_host = f"[{resolved_ip}]" if ":" in resolved_ip else resolved_ip
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        parsed_port = None
+    netloc = f"{ip_host}:{parsed_port}" if parsed_port is not None else ip_host
+    return urlunparse((parsed.scheme, netloc, path, parsed.params, parsed.query, parsed.fragment))
+
+
+async def _resolve_safe_image_fetch_target(
+    url: str,
+    *,
+    connect_timeout: float,
+) -> SafeImageFetchTarget | None:
     settings = get_settings()
     if not settings.image_inline_fetch_enabled:
-        return False
+        return None
 
     parsed = urlparse(url)
     if parsed.scheme != "https":
-        return False
+        return None
     if parsed.username or parsed.password:
-        return False
+        return None
     hostname = parsed.hostname
     if not hostname:
-        return False
+        return None
     host = hostname.strip().lower().rstrip(".")
     if not host:
-        return False
+        return None
     if host in _BLOCKED_LITERAL_HOSTS:
-        return False
+        return None
 
     allowed_hosts = settings.image_inline_allowed_hosts
     if allowed_hosts and host not in allowed_hosts:
-        return False
+        return None
 
-    if _is_blocked_ip_literal(host):
-        return False
-    resolve_timeout = min(connect_timeout, _IMAGE_INLINE_TIMEOUT_SECONDS)
-    if await _resolves_to_blocked_ip(host, timeout_seconds=resolve_timeout):
-        return False
-    return True
+    literal_ip = _parse_ip_literal(host)
+    if literal_ip is not None:
+        if _is_disallowed_ip(literal_ip):
+            return None
+        resolved_ips = [literal_ip.compressed]
+    else:
+        resolve_timeout = min(connect_timeout, _IMAGE_INLINE_TIMEOUT_SECONDS)
+        resolved_ips = await _resolve_global_ips(host, timeout_seconds=resolve_timeout)
+        if not resolved_ips:
+            return None
+
+    request_urls = tuple(_build_pinned_request_url(parsed, resolved_ip) for resolved_ip in resolved_ips)
+    if not request_urls:
+        return None
+
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    host_header = host if parsed_port in (None, 443) else f"{host}:{parsed_port}"
+    return SafeImageFetchTarget(
+        request_urls=request_urls,
+        host_header=host_header,
+        server_hostname=host,
+    )
+
+
+async def _is_safe_image_fetch_url(url: str, *, connect_timeout: float) -> bool:
+    target = await _resolve_safe_image_fetch_target(url, connect_timeout=connect_timeout)
+    return target is not None
+
+
+def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
 
 
 def _is_blocked_ip_literal(host: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
+    ip = _parse_ip_literal(host)
+    if ip is None:
         return False
     return _is_disallowed_ip(ip)
 
 
-async def _resolves_to_blocked_ip(host: str, *, timeout_seconds: float) -> bool:
+async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str] | None:
     loop = asyncio.get_running_loop()
     try:
         infos = await asyncio.wait_for(
@@ -449,22 +510,33 @@ async def _resolves_to_blocked_ip(host: str, *, timeout_seconds: float) -> bool:
             timeout=timeout_seconds,
         )
     except (OSError, asyncio.TimeoutError):
-        return True
+        return None
     if not infos:
-        return True
+        return None
 
+    resolved_ips: list[str] = []
+    seen: set[str] = set()
     for info in infos:
         sockaddr = info[4]
         if not sockaddr:
-            continue
+            return None
         addr = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            return True
+        ip = _parse_ip_literal(addr)
+        if ip is None:
+            return None
         if _is_disallowed_ip(ip):
-            return True
-    return False
+            return None
+        normalized_ip = ip.compressed
+        if normalized_ip in seen:
+            continue
+        seen.add(normalized_ip)
+        resolved_ips.append(normalized_ip)
+    return resolved_ips or None
+
+
+async def _resolves_to_blocked_ip(host: str, *, timeout_seconds: float) -> bool:
+    resolved_ips = await _resolve_global_ips(host, timeout_seconds=timeout_seconds)
+    return resolved_ips is None
 
 
 def _is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -490,6 +562,8 @@ class ImageFetchSession(Protocol):
         timeout: aiohttp.ClientTimeout,
         *,
         allow_redirects: bool = False,
+        headers: Mapping[str, str] | None = None,
+        server_hostname: str | None = None,
     ) -> AsyncContextManager[ImageFetchResponse]: ...
 
 

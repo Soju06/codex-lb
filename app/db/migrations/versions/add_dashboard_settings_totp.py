@@ -21,7 +21,7 @@ async def run(session: AsyncSession) -> None:
 
     if "totp_required_on_login" not in columns:
         await session.execute(
-            text("ALTER TABLE dashboard_settings ADD COLUMN totp_required_on_login BOOLEAN NOT NULL DEFAULT 0")
+            text("ALTER TABLE dashboard_settings ADD COLUMN totp_required_on_login BOOLEAN NOT NULL DEFAULT FALSE")
         )
 
     if "totp_secret_encrypted" not in columns:

@@ -1,6 +1,6 @@
 (() => {
 	"use strict";
-	const API_ENDPOINTS = {
+		const API_ENDPOINTS = {
 		accounts: "/api/accounts",
 		accountsImport: "/api/accounts/import",
 		accountReactivate: (accountId) =>
@@ -21,10 +21,11 @@
 		dashboardAuthTotpSetupStart: "/api/dashboard-auth/totp/setup/start",
 		dashboardAuthTotpSetupConfirm: "/api/dashboard-auth/totp/setup/confirm",
 		dashboardAuthTotpDisable: "/api/dashboard-auth/totp/disable",
-		dashboardAuthLogout: "/api/dashboard-auth/logout",
-	};
+			dashboardAuthLogout: "/api/dashboard-auth/logout",
+		};
+		const DASHBOARD_SETUP_TOKEN_HEADER = "X-Codex-LB-Setup-Token";
 
-	const PAGES = [
+		const PAGES = [
 		{
 			id: "dashboard",
 			tabId: "tab-dashboard",
@@ -1232,19 +1233,28 @@
 		return payload;
 	};
 
-	const postJson = async (url, payload, label) => {
-		const response = await fetch(url, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(payload || {}),
-		});
-		const responsePayload = await readResponsePayload(response);
-		if (!response.ok) {
-			const message = extractErrorMessage(responsePayload);
-			throw new Error(message || `Failed to ${label} (${response.status})`);
-		}
-		return responsePayload;
-	};
+		const postJson = async (url, payload, label, options = {}) => {
+			const headers = { "Content-Type": "application/json" };
+			if (options?.headers && typeof options.headers === "object") {
+				Object.assign(headers, options.headers);
+			}
+			const response = await fetch(url, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(payload || {}),
+			});
+			const responsePayload = await readResponsePayload(response);
+			if (!response.ok) {
+				const message = extractErrorMessage(responsePayload);
+				const error = new Error(
+					message || `Failed to ${label} (${response.status})`,
+				);
+				error.status = response.status;
+				error.payload = responsePayload;
+				throw error;
+			}
+			return responsePayload;
+		};
 
 	const putJson = async (url, payload, label) => {
 		const response = await fetch(url, {
@@ -1443,15 +1453,16 @@
 				hasLoaded: false,
 			},
 
-				settings: {
-					stickyThreadsEnabled: false,
-					preferEarlierResetAccounts: false,
-					totpRequiredOnLogin: false,
-					totpConfigured: false,
-					totpSetup: {
-						open: false,
-						secret: "",
-						otpauthUri: "",
+					settings: {
+						stickyThreadsEnabled: false,
+						preferEarlierResetAccounts: false,
+						totpRequiredOnLogin: false,
+						totpConfigured: false,
+						setupToken: "",
+						totpSetup: {
+							open: false,
+							secret: "",
+							otpauthUri: "",
 						qrSvgDataUri: "",
 						code: "",
 						isSubmitting: false,
@@ -1745,7 +1756,7 @@
 				this.syncUrl(true);
 				return true;
 			},
-			async verifyTotpWithPrompt() {
+				async verifyTotpWithPrompt() {
 				let lastError = "";
 				while (true) {
 					const promptLines = [
@@ -1776,24 +1787,70 @@
 						lastError = error?.message || "Invalid TOTP code.";
 					}
 				}
-			},
-			async setupTotp() {
-				try {
-					const started = await postJson(
-						API_ENDPOINTS.dashboardAuthTotpSetupStart,
-						{},
-						"start TOTP setup",
+				},
+				setupTokenOptions() {
+					const token = String(this.settings.setupToken || "").trim();
+					if (!token) {
+						return {};
+					}
+					return {
+						headers: {
+							[DASHBOARD_SETUP_TOKEN_HEADER]: token,
+						},
+					};
+				},
+				promptSetupToken() {
+					const rawToken = window.prompt(
+						"Enter dashboard setup token (CODEX_LB_DASHBOARD_SETUP_TOKEN).",
 					);
-					this.settings.totpSetup.open = true;
-					this.settings.totpSetup.secret = started.secret || "";
-					this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
-					this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
-					this.settings.totpSetup.code = "";
-				} catch (error) {
-					this.openMessageBox({
-						tone: "error",
-						title: "TOTP setup failed",
-						message: error.message || "Failed to configure TOTP.",
+					if (rawToken === null) {
+						return "";
+					}
+					const token = String(rawToken || "").trim();
+					this.settings.setupToken = token;
+					return token;
+				},
+				async setupTotp() {
+					try {
+						const started = await postJson(
+							API_ENDPOINTS.dashboardAuthTotpSetupStart,
+							{},
+							"start TOTP setup",
+							this.setupTokenOptions(),
+						);
+						this.settings.totpSetup.open = true;
+						this.settings.totpSetup.secret = started.secret || "";
+						this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
+						this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
+						this.settings.totpSetup.code = "";
+					} catch (error) {
+						const errorCode = String(error?.payload?.error?.code || "");
+						if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
+							const token = this.promptSetupToken();
+							if (token) {
+								try {
+									const started = await postJson(
+										API_ENDPOINTS.dashboardAuthTotpSetupStart,
+										{},
+										"start TOTP setup",
+										this.setupTokenOptions(),
+									);
+									this.settings.totpSetup.open = true;
+									this.settings.totpSetup.secret = started.secret || "";
+									this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
+									this.settings.totpSetup.qrSvgDataUri =
+										started.qrSvgDataUri || "";
+									this.settings.totpSetup.code = "";
+									return;
+								} catch (retryError) {
+									error = retryError;
+								}
+							}
+						}
+						this.openMessageBox({
+							tone: "error",
+							title: "TOTP setup failed",
+							message: error.message || "Failed to configure TOTP.",
 					});
 				}
 			},
@@ -1822,25 +1879,50 @@
 					return;
 				}
 
-				this.settings.totpSetup.isSubmitting = true;
-				try {
-					await postJson(
-						API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
-						{ secret, code },
-						"confirm TOTP setup",
-					);
-					this.settings.totpConfigured = true;
-					this.cancelTotpSetup();
-					this.openMessageBox({
+					this.settings.totpSetup.isSubmitting = true;
+					try {
+						await postJson(
+							API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
+							{ secret, code },
+							"confirm TOTP setup",
+							this.setupTokenOptions(),
+						);
+						this.settings.totpConfigured = true;
+						this.cancelTotpSetup();
+						this.openMessageBox({
 						tone: "success",
 						title: "TOTP enabled",
 						message: "TOTP secret configured successfully.",
-					});
-				} catch (error) {
-					this.openMessageBox({
-						tone: "error",
-						title: "TOTP setup failed",
-						message: error.message || "Failed to confirm TOTP setup.",
+						});
+					} catch (error) {
+						const errorCode = String(error?.payload?.error?.code || "");
+						if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
+							const token = this.promptSetupToken();
+							if (token) {
+								try {
+									await postJson(
+										API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
+										{ secret, code },
+										"confirm TOTP setup",
+										this.setupTokenOptions(),
+									);
+									this.settings.totpConfigured = true;
+									this.cancelTotpSetup();
+									this.openMessageBox({
+										tone: "success",
+										title: "TOTP enabled",
+										message: "TOTP secret configured successfully.",
+									});
+									return;
+								} catch (retryError) {
+									error = retryError;
+								}
+							}
+						}
+						this.openMessageBox({
+							tone: "error",
+							title: "TOTP setup failed",
+							message: error.message || "Failed to confirm TOTP setup.",
 					});
 				} finally {
 					this.settings.totpSetup.isSubmitting = false;
@@ -1853,27 +1935,49 @@
 				const code = String(rawCode || "")
 					.trim()
 					.replace(/\D/g, "");
-				if (!code) {
-					return;
-				}
-				try {
-					await postJson(
-						API_ENDPOINTS.dashboardAuthTotpDisable,
-						{ code },
-						"disable TOTP",
-					);
-					this.settings.totpConfigured = false;
-					this.settings.totpRequiredOnLogin = false;
-					this.openMessageBox({
-						tone: "success",
-						title: "TOTP disabled",
-						message: "TOTP protection has been removed.",
-					});
-				} catch (error) {
-					this.openMessageBox({
-						tone: "error",
-						title: "TOTP disable failed",
-						message: error.message || "Failed to disable TOTP.",
+					if (!code) {
+						return;
+					}
+					const handleDisabled = () => {
+						this.settings.totpConfigured = false;
+						this.settings.totpRequiredOnLogin = false;
+						this.openMessageBox({
+							tone: "success",
+							title: "TOTP disabled",
+							message: "TOTP protection has been removed.",
+						});
+					};
+					try {
+						await postJson(
+							API_ENDPOINTS.dashboardAuthTotpDisable,
+							{ code },
+							"disable TOTP",
+						);
+						handleDisabled();
+					} catch (error) {
+						const errorCode = String(error?.payload?.error?.code || "");
+						if (error?.status === 401 && errorCode === "totp_required") {
+							try {
+								await postJson(
+									API_ENDPOINTS.dashboardAuthTotpVerify,
+									{ code },
+									"verify TOTP",
+								);
+								await postJson(
+									API_ENDPOINTS.dashboardAuthTotpDisable,
+									{ code },
+									"disable TOTP",
+								);
+								handleDisabled();
+								return;
+							} catch (retryError) {
+								error = retryError;
+							}
+						}
+						this.openMessageBox({
+							tone: "error",
+							title: "TOTP disable failed",
+							message: error.message || "Failed to disable TOTP.",
 					});
 				}
 			},

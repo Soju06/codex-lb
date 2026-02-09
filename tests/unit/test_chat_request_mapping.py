@@ -21,11 +21,34 @@ def test_chat_messages_to_responses_mapping():
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
     assert responses.instructions == "sys"
-    assert responses.input == [{"role": "user", "content": "hi"}]
+    assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 def test_chat_messages_require_objects():
     payload = {"model": "gpt-5.2", "messages": ["hi"]}
+    with pytest.raises(ValidationError):
+        ChatCompletionsRequest.model_validate(payload)
+
+
+def test_chat_system_message_rejects_non_text_content():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": [{"type": "image_url", "image_url": {"url": "https://example.com"}}]},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    with pytest.raises(ValidationError):
+        ChatCompletionsRequest.model_validate(payload)
+
+
+def test_chat_user_audio_rejects_invalid_format():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": [{"type": "input_audio", "input_audio": {"format": "flac", "data": "..."}}]},
+        ],
+    }
     with pytest.raises(ValidationError):
         ChatCompletionsRequest.model_validate(payload)
 
@@ -146,3 +169,63 @@ def test_chat_response_format_json_schema_maps_schema_fields():
     assert fmt.get("name") == "output"
     assert fmt.get("schema") == {"type": "object", "properties": {"ok": {"type": "boolean"}}}
     assert fmt.get("strict") is True
+
+
+def test_chat_stream_options_include_obfuscation_passthrough():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream_options": {"include_obfuscation": True, "include_usage": True},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+    assert dumped.get("stream_options") == {"include_obfuscation": True}
+
+
+def test_chat_oversized_image_is_dropped():
+    oversized_data = "A" * (11 * 1024 * 1024)
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{oversized_data}"}},
+                    {"type": "text", "text": "hi"},
+                ],
+            }
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    assert responses.input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+
+
+def test_chat_image_detail_is_preserved_when_mapping_to_input_image():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/a.png", "detail": "high"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.input == [
+        {
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": "https://example.com/a.png", "detail": "high"}],
+        }
+    ]

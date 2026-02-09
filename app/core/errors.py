@@ -33,6 +33,7 @@ class ResponseFailedResponse(TypedDict, total=False):
     created_at: int
     status: str
     error: OpenAIErrorDetail
+    incomplete_details: dict[str, str] | None
 
 
 class ResponseFailedEvent(TypedDict):
@@ -55,6 +56,7 @@ def response_failed_event(
     response_id: str | None = None,
     created_at: int | None = None,
     error_param: str | None = None,
+    incomplete_details: dict[str, str] | None = None,
 ) -> ResponseFailedEvent:
     error = openai_error(code, message, error_type)["error"]
     if error_param:
@@ -66,6 +68,7 @@ def response_failed_event(
         "status": "failed",
         "error": error,
     }
+    response["incomplete_details"] = incomplete_details
     if response_id:
         response["id"] = response_id
     if created_at is not None:

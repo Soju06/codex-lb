@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app.core.errors import openai_error
+from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, ResponseUsage
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.sse import format_sse_data, parse_sse_data_json
 
 
 class ChatToolCallFunction(BaseModel):
@@ -52,6 +52,7 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[ChatChunkChoice]
+    usage: "ChatCompletionUsage | None" = None
 
 
 class ChatMessageToolCall(BaseModel):
@@ -95,6 +96,9 @@ class ChatCompletion(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: ChatCompletionUsage | None = None
+
+
+ChatCompletionResult = ChatCompletion | OpenAIErrorEnvelope
 
 
 @dataclass
@@ -173,17 +177,7 @@ def _build_tool_call_function(name: str | None, arguments: str | None) -> ChatTo
 
 
 def _parse_data(line: str) -> dict[str, JsonValue] | None:
-    if line.startswith("data:"):
-        data = line[5:].strip()
-        if not data or data == "[DONE]":
-            return None
-        try:
-            payload = json.loads(data)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(payload, dict):
-            return cast(dict[str, JsonValue], payload)
-    return None
+    return parse_sse_data_json(line)
 
 
 def iter_chat_chunks(
@@ -192,6 +186,7 @@ def iter_chat_chunks(
     *,
     created: int | None = None,
     state: _ChatChunkState | None = None,
+    include_usage: bool = False,
 ) -> Iterable[str]:
     created = created or int(time.time())
     state = state or _ChatChunkState()
@@ -200,7 +195,7 @@ def iter_chat_chunks(
         if not payload:
             continue
         event_type = payload.get("type")
-        if event_type == "response.output_text.delta":
+        if event_type in ("response.output_text.delta", "response.refusal.delta"):
             delta = payload.get("delta")
             role = None
             if not state.sent_role:
@@ -220,7 +215,7 @@ def iter_chat_chunks(
                     )
                 ],
             )
-            yield _dump_chunk(chunk)
+            yield _dump_chunk(chunk, include_usage=include_usage)
             if role is not None:
                 state.sent_role = True
         tool_delta = _tool_call_delta_from_payload(payload, state.tool_index)
@@ -244,7 +239,7 @@ def iter_chat_chunks(
                     )
                 ],
             )
-            yield _dump_chunk(chunk)
+            yield _dump_chunk(chunk, include_usage=include_usage)
             if role is not None:
                 state.sent_role = True
         if event_type in ("response.failed", "error"):
@@ -264,8 +259,15 @@ def iter_chat_chunks(
                 yield _dump_sse(error_payload)
                 yield "data: [DONE]\n\n"
                 return
-        if event_type == "response.completed":
+        if event_type in ("response.completed", "response.incomplete"):
+            usage = None
+            if include_usage:
+                response = payload.get("response")
+                if isinstance(response, dict):
+                    usage = _map_usage(_parse_usage(response.get("usage")))
             finish_reason = "tool_calls" if state.saw_tool_call else "stop"
+            if event_type == "response.incomplete" and not state.saw_tool_call:
+                finish_reason = _finish_reason_from_incomplete(payload.get("response"))
             done = ChatCompletionChunk(
                 id="chatcmpl_temp",
                 created=created,
@@ -278,26 +280,47 @@ def iter_chat_chunks(
                     )
                 ],
             )
-            yield _dump_chunk(done)
+            yield _dump_chunk(done, include_usage=include_usage)
+            if include_usage:
+                usage_chunk = ChatCompletionChunk(
+                    id="chatcmpl_temp",
+                    created=created,
+                    model=model,
+                    choices=[],
+                    usage=usage,
+                )
+                yield _dump_chunk(usage_chunk, include_usage=include_usage)
             yield "data: [DONE]\n\n"
             return
 
 
-async def stream_chat_chunks(stream: AsyncIterator[str], model: str) -> AsyncIterator[str]:
+async def stream_chat_chunks(
+    stream: AsyncIterator[str],
+    model: str,
+    *,
+    include_usage: bool = False,
+) -> AsyncIterator[str]:
     created = int(time.time())
     state = _ChatChunkState()
     async for line in stream:
-        for chunk in iter_chat_chunks([line], model=model, created=created, state=state):
+        for chunk in iter_chat_chunks(
+            [line],
+            model=model,
+            created=created,
+            state=state,
+            include_usage=include_usage,
+        ):
             yield chunk
             if chunk.strip() == "data: [DONE]":
                 return
 
 
-async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dict[str, JsonValue]:
+async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> ChatCompletionResult:
     created = int(time.time())
     content_parts: list[str] = []
     response_id: str | None = None
-    usage: dict[str, JsonValue] | None = None
+    usage: ResponseUsage | None = None
+    incomplete_reason: str | None = None
     tool_index = ToolCallIndex()
     tool_calls: list[ToolCallState] = []
 
@@ -306,7 +329,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dic
         if not payload:
             continue
         event_type = payload.get("type")
-        if event_type == "response.output_text.delta":
+        if event_type in ("response.output_text.delta", "response.refusal.delta"):
             delta = payload.get("delta")
             if isinstance(delta, str):
                 content_parts.append(delta)
@@ -326,21 +349,22 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dic
                 if isinstance(maybe_error, dict):
                     error = maybe_error
             if error is not None:
-                return {"error": error}
-            return cast(dict[str, JsonValue], openai_error("upstream_error", "Upstream error"))
-        if event_type == "response.completed":
+                return _error_envelope_from_payload(error)
+            return _default_error_envelope()
+        if event_type in ("response.completed", "response.incomplete"):
             response = payload.get("response")
             if isinstance(response, dict):
                 response_id_value = response.get("id")
                 if isinstance(response_id_value, str):
                     response_id = response_id_value
-                usage_value = response.get("usage")
-                if isinstance(usage_value, dict):
-                    usage = usage_value
+                usage = _parse_usage(response.get("usage"))
+                if event_type == "response.incomplete":
+                    incomplete_reason = _finish_reason_from_incomplete(response)
 
     message_content = "".join(content_parts)
     message_tool_calls = _compact_tool_calls(tool_calls)
     has_tool_calls = bool(message_tool_calls)
+    finish_reason = "tool_calls" if has_tool_calls else (incomplete_reason or "stop")
     message = ChatCompletionMessage(
         role="assistant",
         content=message_content if message_content or not has_tool_calls else None,
@@ -349,7 +373,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dic
     choice = ChatCompletionChoice(
         index=0,
         message=message,
-        finish_reason="tool_calls" if has_tool_calls else "stop",
+        finish_reason=finish_reason,
     )
     completion = ChatCompletion(
         id=response_id or "chatcmpl_temp",
@@ -358,21 +382,15 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> dic
         choices=[choice],
         usage=_map_usage(usage),
     )
-    return _dump_completion(completion)
+    return completion
 
 
-def _map_usage(usage: dict[str, JsonValue] | None) -> ChatCompletionUsage | None:
-    if not usage:
+def _map_usage(usage: ResponseUsage | None) -> ChatCompletionUsage | None:
+    if usage is None:
         return None
-    prompt_tokens = usage.get("input_tokens")
-    completion_tokens = usage.get("output_tokens")
-    total_tokens = usage.get("total_tokens")
-    if not isinstance(prompt_tokens, int):
-        prompt_tokens = None
-    if not isinstance(completion_tokens, int):
-        completion_tokens = None
-    if not isinstance(total_tokens, int):
-        total_tokens = None
+    prompt_tokens = usage.input_tokens
+    completion_tokens = usage.output_tokens
+    total_tokens = usage.total_tokens
     if prompt_tokens is None and completion_tokens is None and total_tokens is None:
         return None
     return ChatCompletionUsage(
@@ -382,18 +400,83 @@ def _map_usage(usage: dict[str, JsonValue] | None) -> ChatCompletionUsage | None
     )
 
 
-def _dump_chunk(chunk: ChatCompletionChunk) -> str:
+def _parse_usage(value: JsonValue) -> ResponseUsage | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return ResponseUsage.model_validate(value)
+    except ValidationError:
+        return None
+
+
+def _dump_chunk(chunk: ChatCompletionChunk, *, include_usage: bool = False) -> str:
     payload = chunk.model_dump(mode="json", exclude_none=True)
+    if include_usage and "usage" not in payload:
+        payload["usage"] = None
     return _dump_sse(payload)
 
 
-def _dump_completion(completion: ChatCompletion) -> dict[str, JsonValue]:
-    payload = completion.model_dump(mode="json", exclude_none=True)
-    return cast(dict[str, JsonValue], payload)
-
-
 def _dump_sse(payload: dict[str, JsonValue]) -> str:
-    return f"data: {json.dumps(payload)}\n\n"
+    return format_sse_data(payload)
+
+
+def _finish_reason_from_incomplete(response: JsonValue | None) -> str:
+    if not is_json_mapping(response):
+        return "stop"
+    details = response.get("incomplete_details")
+    if is_json_mapping(details):
+        reason = details.get("reason")
+        if reason == "max_output_tokens":
+            return "length"
+        if reason == "content_filter":
+            return "content_filter"
+    return "stop"
+
+
+def _default_error_envelope() -> OpenAIErrorEnvelope:
+    return OpenAIErrorEnvelope(
+        error=OpenAIError(
+            message="Upstream error",
+            type="server_error",
+            code="upstream_error",
+        )
+    )
+
+
+def _error_envelope_from_payload(payload: Mapping[str, JsonValue]) -> OpenAIErrorEnvelope:
+    normalized = _normalize_error_payload(payload)
+    if not normalized:
+        return _default_error_envelope()
+    try:
+        error = OpenAIError.model_validate(normalized)
+    except ValidationError:
+        return _default_error_envelope()
+    return OpenAIErrorEnvelope(error=error)
+
+
+def _normalize_error_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    normalized: dict[str, JsonValue] = {}
+    for key in ("message", "type", "code", "param", "plan_type"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            normalized[key] = value
+    for key in ("resets_at", "resets_in_seconds"):
+        value = payload.get(key)
+        number = _coerce_number(value)
+        if number is not None:
+            normalized[key] = number
+    return normalized
+
+
+def _coerce_number(value: JsonValue) -> int | float | None:
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def _tool_call_delta_from_payload(payload: Mapping[str, JsonValue], indexer: ToolCallIndex) -> ToolCallDelta | None:
@@ -464,17 +547,21 @@ def _extract_tool_call_fields(
             name = _first_str(function.get("name"))
 
     arguments = None
-    if isinstance(candidate.get("arguments"), str):
-        arguments = cast(str, candidate.get("arguments"))
+    candidate_arguments = candidate.get("arguments")
+    if isinstance(candidate_arguments, str):
+        arguments = candidate_arguments
     if arguments is None and isinstance(delta_text, str):
         arguments = delta_text
     if arguments is None and delta_map is not None:
-        if isinstance(delta_map.get("arguments"), str):
-            arguments = cast(str, delta_map.get("arguments"))
+        delta_arguments = delta_map.get("arguments")
+        if isinstance(delta_arguments, str):
+            arguments = delta_arguments
         else:
             function = _as_mapping(delta_map.get("function"))
-            if function is not None and isinstance(function.get("arguments"), str):
-                arguments = cast(str, function.get("arguments"))
+            if function is not None:
+                function_arguments = function.get("arguments")
+                if isinstance(function_arguments, str):
+                    arguments = function_arguments
 
     tool_type = _first_str(candidate.get("tool_type"), candidate.get("type"))
     if tool_type and tool_type.startswith("response."):
@@ -507,8 +594,8 @@ def _tool_call_key(call_id: str | None, name: str | None) -> str | None:
 
 
 def _as_mapping(value: JsonValue) -> Mapping[str, JsonValue] | None:
-    if isinstance(value, Mapping):
-        return cast(Mapping[str, JsonValue], value)
+    if is_json_mapping(value):
+        return value
     return None
 
 

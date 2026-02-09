@@ -5,6 +5,7 @@ import logging
 
 import pytest
 
+import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
@@ -72,6 +73,81 @@ def test_parse_sse_event_ignores_non_data_lines():
     assert parse_sse_event("event: ping\n") is None
 
 
+def test_parse_sse_event_concats_multiple_data_lines():
+    payload = {"type": "response.completed", "response": {"id": "resp_1"}}
+    raw = json.dumps(payload)
+    first, second = raw[: len(raw) // 2], raw[len(raw) // 2 :]
+    line = f"data: {first}\ndata: {second}\n\n"
+
+    event = parse_sse_event(line)
+
+    assert event is not None
+    assert event.type == "response.completed"
+
+
+def test_normalize_sse_event_block_rewrites_response_text_alias():
+    block = 'data: {"type":"response.text.delta","delta":"hi"}\n\n'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert '"type":"response.output_text.delta"' in normalized
+    assert normalized.endswith("\n\n")
+
+
+def test_find_sse_separator_prefers_earliest_separator():
+    buffer = b"event: one\n\ndata: two\r\n\r\n"
+
+    result = proxy_module._find_sse_separator(buffer)
+
+    assert result == (10, 2)
+
+
+def test_pop_sse_event_returns_first_event_and_mutates_buffer():
+    buffer = bytearray(b"data: one\n\ndata: two\n\n")
+
+    event = proxy_module._pop_sse_event(buffer)
+
+    assert event == b"data: one\n\n"
+    assert bytes(buffer) == b"data: two\n\n"
+
+
+class _DummyContent:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def iter_chunked(self, size: int):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _DummyResponse:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.content = _DummyContent(chunks)
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big():
+    large_data = "A" * (200 * 1024)
+    event = f'data: {{"type":"response.output_text.delta","delta":"{large_data}"}}\n\n'.encode("utf-8")
+    response = _DummyResponse([event[:4096], event[4096:]])
+
+    chunks = [chunk async for chunk in proxy_module._iter_sse_events(response, 1.0, 512 * 1024)]
+
+    assert len(chunks) == 1
+    assert chunks[0].startswith("data: ")
+    assert chunks[0].endswith("\n\n")
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_events_raises_on_event_size_limit():
+    large_data = b"A" * 1024
+    response = _DummyResponse([b"data: ", large_data])
+
+    with pytest.raises(proxy_module.StreamEventTooLargeError):
+        async for _ in proxy_module._iter_sse_events(response, 1.0, 256):
+            pass
+
+
 def test_log_proxy_request_payload(monkeypatch, caplog):
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -93,3 +169,12 @@ def test_log_proxy_request_payload(monkeypatch, caplog):
 
     assert "proxy_request_payload" in caplog.text
     assert '"model":"gpt-5.1"' in caplog.text
+
+
+def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS", "a.example, b.example ,,C.Example")
+    from app.core.config.settings import Settings
+
+    settings = Settings()
+
+    assert settings.image_inline_allowed_hosts == ["a.example", "b.example", "c.example"]

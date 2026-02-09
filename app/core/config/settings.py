@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_connect_timeout_seconds: float = 30.0
     stream_idle_timeout_seconds: float = 300.0
+    max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_scope: str = "openid profile email"
@@ -67,6 +69,8 @@ class Settings(BaseSettings):
     log_proxy_request_shape_raw_cache_key: bool = False
     log_proxy_request_payload: bool = False
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    image_inline_fetch_enabled: bool = True
+    image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     @field_validator("database_url")
     @classmethod
@@ -86,6 +90,24 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
+
+    @field_validator("image_inline_allowed_hosts", mode="before")
+    @classmethod
+    def _normalize_image_inline_allowed_hosts(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            entries = [entry.strip().lower().rstrip(".") for entry in value.split(",")]
+            return [entry for entry in entries if entry]
+        if isinstance(value, list):
+            normalized: list[str] = []
+            for entry in value:
+                if isinstance(entry, str):
+                    host = entry.strip().lower().rstrip(".")
+                    if host:
+                        normalized.append(host)
+            return normalized
+        raise TypeError("image_inline_allowed_hosts must be a list or comma-separated string")
 
 
 @lru_cache(maxsize=1)

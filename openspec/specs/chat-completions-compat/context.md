@@ -16,7 +16,7 @@ See `openspec/specs/chat-completions-compat/spec.md` for normative requirements.
 ## Constraints
 
 - Oversized image data URLs (>8MB) are dropped from user inputs.
-- Audio input is limited to `wav` and `mp3`.
+- Audio input (`input_audio`) is not supported and is rejected.
 - `response_format` is translated to `text.format` with JSON schema validation.
 
 ## Failure Modes

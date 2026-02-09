@@ -16,11 +16,11 @@ The service MUST accept POST requests to `/v1/responses` with a JSON body and MU
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 ### Requirement: Support Responses input types and conversation constraints
-The service MUST accept `input` as either a string or an array of input items. The service MUST reject requests that include both `conversation` and `previous_response_id`, as these are mutually exclusive in the Responses API.
+The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST reject `previous_response_id` with an OpenAI error envelope because upstream does not support it. The service MUST continue to reject requests that include both `conversation` and `previous_response_id`.
 
 #### Scenario: String input
 - **WHEN** the client sends `input` as a string
-- **THEN** the request is accepted and processed as a single text input
+- **THEN** the request is accepted and forwarded as a single `input_text` item
 
 #### Scenario: Array input items
 - **WHEN** the client sends `input` as an array of input items
@@ -29,6 +29,10 @@ The service MUST accept `input` as either a string or an array of input items. T
 #### Scenario: conversation and previous_response_id conflict
 - **WHEN** the client provides both `conversation` and `previous_response_id`
 - **THEN** the service returns a 4xx response with an OpenAI error envelope indicating invalid parameters
+
+#### Scenario: previous_response_id provided
+- **WHEN** the client provides `previous_response_id`
+- **THEN** the service returns a 4xx response with an OpenAI error envelope indicating the unsupported parameter
 
 ### Requirement: Reject input_file file_id in Responses
 The service MUST reject `input_file.file_id` in Responses input items and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
@@ -80,16 +84,34 @@ If the client supplies `include`, the service MUST accept only values documented
 - **WHEN** the client includes an unsupported include value
 - **THEN** the service returns a 4xx OpenAI error envelope indicating the invalid include entry
 
-### Requirement: Truncation behavior on context overflow
-When `truncation` is `disabled` (default), the service MUST return a 400 error if the input exceeds the model context window. When `truncation` is `auto`, the service MUST drop items from the beginning of the conversation to fit within the context window.
+### Requirement: Allow web_search tools and reject unsupported built-ins
+The service MUST accept Responses requests that include tools with type `web_search` or `web_search_preview`. The service MUST normalize `web_search_preview` to `web_search` before forwarding upstream. The service MUST reject other built-in tool types (file_search, code_interpreter, computer_use, computer_use_preview, image_generation) with an OpenAI invalid_request_error.
 
-#### Scenario: truncation disabled overflows context
-- **WHEN** the request exceeds the model context window with `truncation` set to `disabled` or omitted
-- **THEN** the service returns a 400 error with an OpenAI error envelope
+#### Scenario: web_search_preview tool accepted
+- **WHEN** the client sends `tools=[{"type":"web_search_preview"}]`
+- **THEN** the service accepts the request and forwards the tool as `web_search`
 
-#### Scenario: truncation auto drops earlier items
-- **WHEN** the request exceeds the model context window with `truncation` set to `auto`
-- **THEN** the service truncates earlier items and proceeds without error
+#### Scenario: unsupported built-in tool rejected
+- **WHEN** the client sends `tools=[{"type":"code_interpreter"}]`
+- **THEN** the service returns a 4xx response with an OpenAI invalid_request_error indicating the unsupported tool type
+
+### Requirement: Inline input_image URLs when possible
+When a request includes `input_image` parts with HTTP(S) URLs, the service MUST attempt to fetch the image and replace the URL with a data URL if the image is within size limits. If the image cannot be fetched or exceeds size limits, the service MUST preserve the original URL and allow upstream to handle the error.
+
+#### Scenario: input_image URL fetched
+- **WHEN** the request includes an HTTP(S) `input_image` URL that is reachable and within size limits
+- **THEN** the service forwards the request with the image converted to a data URL
+
+#### Scenario: input_image URL fetch fails
+- **WHEN** the request includes an HTTP(S) `input_image` URL that cannot be fetched or exceeds limits
+- **THEN** the service forwards the original URL unchanged
+
+### Requirement: Reject truncation
+The service MUST reject any request that includes `truncation`, returning an OpenAI error envelope indicating the unsupported parameter. The service MUST NOT forward `truncation` to upstream.
+
+#### Scenario: truncation provided
+- **WHEN** the client sends `truncation: "auto"` or `truncation: "disabled"`
+- **THEN** the service returns a 4xx response with an OpenAI error envelope indicating the unsupported parameter
 
 ### Requirement: Tool call events and output items are preserved
 If the upstream model emits tool call deltas or output items, the service MUST forward those events in streaming mode and MUST include tool call items in the final response output for non-streaming mode.
@@ -104,4 +126,3 @@ When usage data is provided by the upstream, the service MUST include `input_tok
 #### Scenario: Usage included
 - **WHEN** the upstream includes usage in `response.completed`
 - **THEN** the service forwards usage fields in the completed event and in the final response object
-

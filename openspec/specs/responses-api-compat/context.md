@@ -10,13 +10,14 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
 - **Strict validation:** Required fields and mutually exclusive fields are enforced up front to match official client expectations.
-- **Upstream-driven truncation:** Context overflow decisions are delegated to upstream to avoid drift in token counting rules.
+- **No truncation support:** Requests that include `truncation` are rejected because upstream does not support it.
 
 ## Constraints
 
 - Upstream limitations determine available modalities, tool output, and overflow handling.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.
+- `previous_response_id` and `truncation` are rejected.
 - `/v1/responses/compact` is supported only when the upstream implements it.
 
 ## Include Allowlist (Reference)

@@ -34,6 +34,7 @@ node_modules/
 # Local
 .local/
 .worktrees/
+certs/
 
 app/static/components
 .codex-lb/

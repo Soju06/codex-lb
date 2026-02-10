@@ -95,6 +95,25 @@ Add the following to `~/.config/opencode/opencode.json`:
 }
 ```
 
+## Configuration
+
+All settings use the `CODEX_LB_` prefix and can be set via environment variables or `.env.local`.
+
+### Dashboard TOTP
+
+Protect the dashboard with TOTP two-factor authentication.
+
+1. Set `CODEX_LB_DASHBOARD_SETUP_TOKEN` to any secret string:
+
+```bash
+CODEX_LB_DASHBOARD_SETUP_TOKEN=my-secret-token
+```
+
+2. Open the dashboard and go to Settings to enable TOTP.
+3. Scan the QR code with your authenticator app and confirm.
+
+Once enabled, the dashboard requires a TOTP code on every login. TOTP can be disabled from Settings while logged in.
+
 ## Data
 
 Data storage locations:

@@ -540,6 +540,45 @@
               </div>
             </fieldset>
 
+            <fieldset class="settings-fieldset">
+              <legend>TOTP access control</legend>
+              <input id="totp-required-toggle" type="checkbox" x-model="settings.totpRequiredOnLogin"
+                :disabled="!settings.totpConfigured" aria-describedby="totp-required-help">
+              <label for="totp-required-toggle">Require TOTP verification on every dashboard login</label>
+              <div id="totp-required-help" class="text-muted" style="margin-top: 6px">
+                Status: <strong x-text="settings.totpConfigured ? 'Configured' : 'Not configured'"></strong>. Configure
+                TOTP first, then enable enforcement.
+              </div>
+              <div class="inline-actions" style="margin-top: 10px">
+                <button type="button" @click="setupTotp" :disabled="settings.totpConfigured">Setup TOTP</button>
+                <button type="button" @click="disableTotp" :disabled="!settings.totpConfigured">Disable TOTP</button>
+              </div>
+
+              <template x-if="settings.totpSetup.open">
+                <div class="panel" style="margin-top: 12px; padding: 12px">
+                  <h4 style="margin: 0 0 8px 0;">TOTP setup</h4>
+                  <p class="text-muted" style="margin: 0 0 8px 0;">Scan QR in authenticator app, then enter current 6-digit code.</p>
+                  <template x-if="settings.totpSetup.qrSvgDataUri">
+                    <img :src="settings.totpSetup.qrSvgDataUri" alt="TOTP QR code"
+                      style="width: 220px; height: 220px; display: block; margin-bottom: 8px; border: 1px solid var(--border-color); background: #fff;">
+                  </template>
+                  <div class="text-muted" style="margin-bottom: 6px;">
+                    Secret: <code x-text="settings.totpSetup.secret"></code>
+                  </div>
+                  <div class="text-muted" style="margin-bottom: 8px;">
+                    URI: <code x-text="settings.totpSetup.otpauthUri"></code>
+                  </div>
+                  <input type="text" inputmode="numeric" maxlength="6" placeholder="123456"
+                    x-model="settings.totpSetup.code" style="width: 160px; margin-bottom: 8px;">
+                  <div class="inline-actions">
+                    <button type="button" class="default" @click="confirmTotpSetup"
+                      :disabled="settings.totpSetup.isSubmitting">Confirm</button>
+                    <button type="button" @click="cancelTotpSetup" :disabled="settings.totpSetup.isSubmitting">Cancel</button>
+                  </div>
+                </div>
+              </template>
+            </fieldset>
+
             <div class="inline-actions" style="margin-top: 12px">
               <button type="button" @click="saveSettings" :disabled="settings.isLoading || settings.isSaving || !settings.hasLoaded">
                 <span>Save</span>

@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    dashboard_setup_token: str | None = None
 
     @field_validator("database_url")
     @classmethod

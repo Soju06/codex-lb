@@ -623,7 +623,7 @@ async def stream_responses(
                 event = parse_sse_event(event_block)
                 if event:
                     event_type = event.type
-                    if event_type in ("response.completed", "response.failed"):
+                    if event_type in ("response.completed", "response.failed", "response.incomplete"):
                         seen_terminal = True
                 yield event_block
     except ProxyResponseError:

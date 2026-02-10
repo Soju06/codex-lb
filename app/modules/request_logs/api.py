@@ -22,7 +22,7 @@ def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
     if not raw:
         return None
     if _MODEL_OPTION_DELIMITER not in raw:
-        return ServiceRequestLogModelOption(model=raw, reasoning_effort="")
+        return ServiceRequestLogModelOption(model=raw, reasoning_effort=None)
     model, effort = raw.split(_MODEL_OPTION_DELIMITER, 1)
     model = model.strip()
     effort = effort.strip()

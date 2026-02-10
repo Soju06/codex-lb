@@ -125,6 +125,25 @@ class _DummyResponse:
         self.content = _DummyContent(chunks)
 
 
+class _DummyPostContext:
+    def __init__(self, response: object) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> object:
+        return self._response
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _DummySession:
+    def __init__(self, response: object) -> None:
+        self._response = response
+
+    def post(self, *args, **kwargs) -> _DummyPostContext:
+        return _DummyPostContext(self._response)
+
+
 @pytest.mark.asyncio
 async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big():
     large_data = "A" * (200 * 1024)
@@ -146,6 +165,49 @@ async def test_iter_sse_events_raises_on_event_size_limit():
     with pytest.raises(proxy_module.StreamEventTooLargeError):
         async for _ in proxy_module._iter_sse_events(response, 1.0, 256):
             pass
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_does_not_emit_stream_incomplete_after_response_incomplete(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        stream_idle_timeout_seconds = 1.0
+        max_sse_event_bytes = 1024 * 1024
+        image_inline_fetch_enabled = False
+
+    class Response:
+        status = 200
+
+    async def fake_iter_events(*args, **kwargs):
+        yield (
+            'data: {"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete"}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_iter_sse_events", fake_iter_events)
+
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in proxy_module.stream_responses(
+            request,
+            headers={},
+            access_token="token",
+            account_id=None,
+            session=_DummySession(Response()),
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert '"type":"response.incomplete"' in chunks[0]
+    assert "stream_incomplete" not in "".join(chunks)
 
 
 def test_log_proxy_request_payload(monkeypatch, caplog):

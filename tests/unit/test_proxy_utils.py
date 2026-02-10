@@ -182,9 +182,7 @@ async def test_stream_responses_does_not_emit_stream_incomplete_after_response_i
         status = 200
 
     async def fake_iter_events(*args, **kwargs):
-        yield (
-            'data: {"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete"}}\n\n'
-        )
+        yield ('data: {"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete"}}\n\n')
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_iter_sse_events", fake_iter_events)

@@ -9,6 +9,7 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.usage.types import UsageEntryWrite
 from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.unit
@@ -33,36 +34,24 @@ class StubUsageRepository:
     def __init__(self) -> None:
         self.entries: list[UsageEntry] = []
 
-    async def add_entry(
-        self,
-        account_id: str,
-        used_percent: float,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
-        recorded_at: datetime | None = None,
-        window: str | None = None,
-        reset_at: int | None = None,
-        window_minutes: int | None = None,
-        credits_has: bool | None = None,
-        credits_unlimited: bool | None = None,
-        credits_balance: float | None = None,
-    ) -> UsageHistory | None:
-        self.entries.append(
-            UsageEntry(
-                account_id=account_id,
-                used_percent=used_percent,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                recorded_at=recorded_at,
-                window=window,
-                reset_at=reset_at,
-                window_minutes=window_minutes,
-                credits_has=credits_has,
-                credits_unlimited=credits_unlimited,
-                credits_balance=credits_balance,
+    async def add_entries(self, entries: list[UsageEntryWrite]) -> list[UsageHistory]:
+        for entry in entries:
+            self.entries.append(
+                UsageEntry(
+                    account_id=entry.account_id,
+                    used_percent=entry.used_percent,
+                    input_tokens=entry.input_tokens,
+                    output_tokens=entry.output_tokens,
+                    recorded_at=entry.recorded_at,
+                    window=entry.window,
+                    reset_at=entry.reset_at,
+                    window_minutes=entry.window_minutes,
+                    credits_has=entry.credits_has,
+                    credits_unlimited=entry.credits_unlimited,
+                    credits_balance=entry.credits_balance,
+                )
             )
-        )
-        return None
+        return []
 
 
 def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@example.com") -> Account:

@@ -24,15 +24,20 @@ def add_dashboard_totp_middleware(app: FastAPI) -> None:
             return await call_next(request)
 
         totp_required = False
+        totp_session_epoch = 0
         async with SessionLocal() as session:
             settings = await SettingsRepository(session).get_or_create()
             totp_required = settings.totp_required_on_login
+            totp_session_epoch = settings.totp_session_epoch
 
         if not totp_required:
             return await call_next(request)
 
         session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-        if get_dashboard_session_store().is_totp_verified(session_id):
+        if get_dashboard_session_store().is_totp_verified(
+            session_id,
+            expected_totp_epoch=totp_session_epoch,
+        ):
             return await call_next(request)
 
         return JSONResponse(

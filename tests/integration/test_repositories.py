@@ -3,15 +3,17 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.types import UsageEntryWrite
 
 pytestmark = pytest.mark.integration
 
@@ -70,6 +72,26 @@ async def test_usage_repository_aggregate(db_setup):
         row_map = {row.account_id: row for row in rows}
         assert row_map["acc1"].used_percent_avg == pytest.approx(20.0)
         assert row_map["acc2"].used_percent_avg == pytest.approx(50.0)
+
+
+@pytest.mark.asyncio
+async def test_usage_repository_add_entries_is_atomic(db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1", "acc1@example.com"))
+        now = utcnow()
+
+        with pytest.raises(IntegrityError):
+            await repo.add_entries(
+                [
+                    UsageEntryWrite(account_id="acc1", used_percent=10.0, recorded_at=now),
+                    UsageEntryWrite(account_id="missing", used_percent=30.0, recorded_at=now),
+                ]
+            )
+
+        count_result = await session.execute(select(func.count(UsageHistory.id)))
+        assert count_result.scalar_one() == 0
 
 
 @pytest.mark.asyncio

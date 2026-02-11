@@ -586,6 +586,67 @@
             </div>
           </div>
         </article>
+
+        <article role="tabpanel" id="tab-firewall" :hidden="view !== 'firewall'">
+          <div class="panel">
+            <h3>API firewall</h3>
+            <p class="text-muted">Firewall applies to API endpoints (`/backend-api/codex/*`, `/v1/*`). Dashboard routes remain open.</p>
+
+            <div class="summary-list" style="margin-top: 12px">
+              <div><span>Mode</span><strong x-text="firewallModeLabel(firewall.mode)"></strong></div>
+              <div><span>Allowed IPs</span><strong x-text="formatNumber(firewall.entries.length)"></strong></div>
+            </div>
+
+            <fieldset class="settings-fieldset" style="margin-top: 12px">
+              <legend>Add IP address</legend>
+              <div class="inline-actions">
+                <input type="text" placeholder="127.0.0.1 or 2001:db8::1" x-model="firewall.ipInput"
+                  @keyup.enter="addFirewallIp" :disabled="firewall.isSaving">
+                <button type="button" class="default" @click="addFirewallIp" :disabled="firewall.isSaving">
+                  Add
+                </button>
+                <button type="button" @click="refreshFirewall" :disabled="firewall.isLoading || firewall.isSaving">
+                  Refresh
+                </button>
+              </div>
+            </fieldset>
+
+            <div class="table-wrap table-wrap--column-lines has-scrollbar" style="margin-top: 12px">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 60%">IP address</th>
+                    <th style="width: 25%">Added at</th>
+                    <th style="width: 15%">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="entry in firewall.entries" :key="entry.ipAddress">
+                    <tr>
+                      <td class="cell-truncate" x-text="entry.ipAddress" :title="entry.ipAddress"></td>
+                      <td>
+                        <div x-text="formatTimeLong(entry.createdAt).time"></div>
+                        <div x-text="formatTimeLong(entry.createdAt).date" class="text-muted" style="font-size: 11px;"></div>
+                      </td>
+                      <td>
+                        <button type="button" @click="removeFirewallIp(entry.ipAddress)" :disabled="firewall.isSaving">
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  </template>
+                  <template x-if="firewall.entries.length === 0">
+                    <tr>
+                      <td colspan="3" class="text-muted" style="text-align: center">
+                        No IP addresses in allowlist. API access is currently open to all clients.
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </article>
       </section>
   </div>
   <div class="status-bar">

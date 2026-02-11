@@ -54,6 +54,25 @@ def test_calculate_cost_from_usage_cached_tokens():
     assert cost == pytest.approx(expected)
 
 
+def test_calculate_cost_from_usage_clamps_cached_tokens_for_usage_tokens():
+    usage = UsageTokens(input_tokens=100.0, output_tokens=10.0, cached_input_tokens=999.0)
+    price = ModelPrice(input_per_1m=2.0, cached_input_per_1m=0.5, output_per_1m=4.0)
+
+    cost = calculate_cost_from_usage(usage, price)
+
+    expected = (0 / 1_000_000) * 2.0 + (100 / 1_000_000) * 0.5 + (10 / 1_000_000) * 4.0
+    assert cost == pytest.approx(expected)
+
+
+def test_calculate_cost_from_usage_rejects_negative_tokens():
+    usage = UsageTokens(input_tokens=-100.0, output_tokens=10.0, cached_input_tokens=0.0)
+    price = ModelPrice(input_per_1m=2.0, cached_input_per_1m=0.5, output_per_1m=4.0)
+
+    cost = calculate_cost_from_usage(usage, price)
+
+    assert cost is None
+
+
 def test_calculate_costs_aggregates_by_model():
     items = [
         CostItem(model="gpt-5.1", usage=UsageTokens(input_tokens=1000.0, output_tokens=1000.0)),

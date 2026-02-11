@@ -54,6 +54,13 @@ class AccountsService:
         account_id = generate_unique_account_id(raw_account_id, email)
         plan_type = coerce_account_plan_type(claims.plan_type, DEFAULT_PLAN)
         last_refresh = to_utc_naive(auth.last_refresh_at) if auth.last_refresh_at else utcnow()
+        existing_status = AccountStatus.ACTIVE
+        existing_reason = None
+        for current in await self._repo.list_accounts():
+            if current.id == account_id or current.email == email:
+                existing_status = current.status
+                existing_reason = current.deactivation_reason
+                break
 
         account = Account(
             id=account_id,
@@ -64,8 +71,8 @@ class AccountsService:
             refresh_token_encrypted=self._encryptor.encrypt(auth.tokens.refresh_token),
             id_token_encrypted=self._encryptor.encrypt(auth.tokens.id_token),
             last_refresh=last_refresh,
-            status=AccountStatus.ACTIVE,
-            deactivation_reason=None,
+            status=existing_status,
+            deactivation_reason=existing_reason,
         )
 
         saved = await self._repo.upsert(account)

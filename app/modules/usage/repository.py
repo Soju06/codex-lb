@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.usage.types import UsageAggregateRow
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
+from app.modules.usage.types import UsageEntryWrite
 
 
 class UsageRepository:
@@ -28,23 +29,37 @@ class UsageRepository:
         credits_unlimited: bool | None = None,
         credits_balance: float | None = None,
     ) -> UsageHistory:
-        entry = UsageHistory(
+        entry = UsageEntryWrite(
             account_id=account_id,
             used_percent=used_percent,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            recorded_at=recorded_at,
             window=window,
             reset_at=reset_at,
             window_minutes=window_minutes,
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,
             credits_balance=credits_balance,
-            recorded_at=recorded_at or utcnow(),
         )
-        self._session.add(entry)
-        await self._session.commit()
-        await self._session.refresh(entry)
-        return entry
+        rows = await self.add_entries([entry])
+        return rows[0]
+
+    async def add_entries(self, entries: list[UsageEntryWrite]) -> list[UsageHistory]:
+        if not entries:
+            return []
+
+        rows = [_usage_history_from_write(entry) for entry in entries]
+        for row in rows:
+            self._session.add(row)
+        try:
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+        for row in rows:
+            await self._session.refresh(row)
+        return rows
 
     async def aggregate_since(
         self,
@@ -111,3 +126,19 @@ class UsageRepository:
         result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None
+
+
+def _usage_history_from_write(entry: UsageEntryWrite) -> UsageHistory:
+    return UsageHistory(
+        account_id=entry.account_id,
+        used_percent=entry.used_percent,
+        input_tokens=entry.input_tokens,
+        output_tokens=entry.output_tokens,
+        window=entry.window,
+        reset_at=entry.reset_at,
+        window_minutes=entry.window_minutes,
+        credits_has=entry.credits_has,
+        credits_unlimited=entry.credits_unlimited,
+        credits_balance=entry.credits_balance,
+        recorded_at=entry.recorded_at or utcnow(),
+    )

@@ -453,30 +453,36 @@ def main() -> int:
         def c_audio_input() -> dict[str, Any]:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Transcribe the audio."},
-                            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": AUDIO_FORMAT}},
-                        ],
-                    }
-                ],
+                messages=cast(
+                    Any,
+                    [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Transcribe the audio."},
+                                {"type": "input_audio", "input_audio": {"data": audio_b64, "format": AUDIO_FORMAT}},
+                            ],
+                        }
+                    ],
+                ),
             )
             return {"id": getattr(resp, "id", None), "content": resp.choices[0].message.content}
 
         def c_file_input() -> dict[str, Any]:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Summarize the file."},
-                            {"type": "file", "file": {"file_url": FILE_URL}},
-                        ],
-                    }
-                ],
+                messages=cast(
+                    Any,
+                    [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Summarize the file."},
+                                {"type": "file", "file": {"file_url": FILE_URL}},
+                            ],
+                        }
+                    ],
+                ),
             )
             return {"id": getattr(resp, "id", None), "content": resp.choices[0].message.content}
 

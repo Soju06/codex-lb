@@ -87,6 +87,61 @@ async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_device_oauth_flow_without_cookie_persistence_still_completes(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="ABCD-EFGH",
+            device_auth_id="dev_cookie_less",
+            interval_seconds=1,
+            expires_in_seconds=30,
+        )
+
+    async def fake_exchange_device_token(**_):
+        payload = {
+            "email": "cookie-less@example.com",
+            "chatgpt_account_id": "acc_cookie_less",
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_async_sleep", fake_sleep)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+    assert start.status_code == 200
+
+    async_client.cookies.clear()
+    complete = await async_client.post("/api/oauth/complete", json={})
+    assert complete.status_code == 200
+    assert complete.json()["status"] == "pending"
+
+    await asyncio.sleep(0)
+
+    payload = None
+    for _ in range(20):
+        async_client.cookies.clear()
+        status = await async_client.get("/api/oauth/status")
+        assert status.status_code == 200
+        payload = status.json()
+        if payload["status"] == "success":
+            break
+        await asyncio.sleep(0.05)
+
+    assert payload and payload["status"] == "success"
+
+
+@pytest.mark.asyncio
 async def test_oauth_start_with_existing_account_marks_success(async_client):
     await oauth_module._OAUTH_STORE.reset()
 

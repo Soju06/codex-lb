@@ -93,7 +93,9 @@ class RequestLogsRepository:
                 base = (model or "").strip()
                 if not base:
                     continue
-                if effort is None:
+                if effort == "":
+                    pair_conditions.append(RequestLog.model == base)
+                elif effort is None:
                     pair_conditions.append(and_(RequestLog.model == base, RequestLog.reasoning_effort.is_(None)))
                 else:
                     pair_conditions.append(and_(RequestLog.model == base, RequestLog.reasoning_effort == effort))

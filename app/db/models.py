@@ -103,6 +103,7 @@ class DashboardSettings(Base):
     totp_required_on_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    totp_session_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -110,6 +111,13 @@ class DashboardSettings(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class ApiFirewallAllowlist(Base):
+    __tablename__ = "api_firewall_allowlist"
+
+    ip_address: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)

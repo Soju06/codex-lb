@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, ResponseUsage
 from app.core.types import JsonValue
-from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.sse import format_sse_data, parse_sse_data_json
 
 
@@ -105,14 +105,30 @@ ChatCompletionResult = ChatCompletion | OpenAIErrorEnvelope
 class ToolCallIndex:
     indexes: dict[str, int] = field(default_factory=dict)
     next_index: int = 0
+    pending_anonymous_index: int | None = None
 
-    def index_for(self, call_id: str | None, name: str | None) -> int:
+    def index_for(self, call_id: str | None, name: str | None, index_hint: int | None = None) -> int:
+        if isinstance(index_hint, int) and index_hint >= 0:
+            if index_hint >= self.next_index:
+                self.next_index = index_hint + 1
+            key = _tool_call_key(call_id, name)
+            if key is not None:
+                self.indexes[key] = index_hint
+            return index_hint
+
         key = _tool_call_key(call_id, name)
         if key is None:
-            return 0
+            if self.pending_anonymous_index is None:
+                self.pending_anonymous_index = self.next_index
+                self.next_index += 1
+            return self.pending_anonymous_index
         if key not in self.indexes:
-            self.indexes[key] = self.next_index
-            self.next_index += 1
+            if self.pending_anonymous_index is not None:
+                self.indexes[key] = self.pending_anonymous_index
+                self.pending_anonymous_index = None
+            else:
+                self.indexes[key] = self.next_index
+                self.next_index += 1
         return self.indexes[key]
 
 
@@ -218,8 +234,7 @@ def iter_chat_chunks(
             yield _dump_chunk(chunk, include_usage=include_usage)
             if role is not None:
                 state.sent_role = True
-        tool_delta = _tool_call_delta_from_payload(payload, state.tool_index)
-        if tool_delta is not None:
+        for tool_delta in _tool_call_deltas_from_payload(payload, state.tool_index):
             state.saw_tool_call = True
             role = None
             if not state.sent_role:
@@ -266,8 +281,10 @@ def iter_chat_chunks(
                 if isinstance(response, dict):
                     usage = _map_usage(_parse_usage(response.get("usage")))
             finish_reason = "tool_calls" if state.saw_tool_call else "stop"
-            if event_type == "response.incomplete" and not state.saw_tool_call:
-                finish_reason = _finish_reason_from_incomplete(payload.get("response"))
+            if event_type == "response.incomplete":
+                incomplete_reason = _finish_reason_from_incomplete(payload.get("response"))
+                if incomplete_reason is not None:
+                    finish_reason = incomplete_reason
             done = ChatCompletionChunk(
                 id="chatcmpl_temp",
                 created=created,
@@ -303,6 +320,8 @@ async def stream_chat_chunks(
     created = int(time.time())
     state = _ChatChunkState()
     async for line in stream:
+        if line.strip() == "data: [DONE]":
+            return
         for chunk in iter_chat_chunks(
             [line],
             model=model,
@@ -325,6 +344,8 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
     tool_calls: list[ToolCallState] = []
 
     async for line in stream:
+        if line.strip() == "data: [DONE]":
+            break
         payload = _parse_data(line)
         if not payload:
             continue
@@ -333,8 +354,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
             delta = payload.get("delta")
             if isinstance(delta, str):
                 content_parts.append(delta)
-        tool_delta = _tool_call_delta_from_payload(payload, tool_index)
-        if tool_delta is not None:
+        for tool_delta in _tool_call_deltas_from_payload(payload, tool_index):
             _merge_tool_call_delta(tool_calls, tool_delta)
         if event_type in ("response.failed", "error"):
             error = None
@@ -360,11 +380,17 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
                 usage = _parse_usage(response.get("usage"))
                 if event_type == "response.incomplete":
                     incomplete_reason = _finish_reason_from_incomplete(response)
+            break
 
     message_content = "".join(content_parts)
     message_tool_calls = _compact_tool_calls(tool_calls)
     has_tool_calls = bool(message_tool_calls)
-    finish_reason = "tool_calls" if has_tool_calls else (incomplete_reason or "stop")
+    if incomplete_reason is not None:
+        finish_reason = incomplete_reason
+    elif has_tool_calls:
+        finish_reason = "tool_calls"
+    else:
+        finish_reason = "stop"
     message = ChatCompletionMessage(
         role="assistant",
         content=message_content if message_content or not has_tool_calls else None,
@@ -420,9 +446,9 @@ def _dump_sse(payload: dict[str, JsonValue]) -> str:
     return format_sse_data(payload)
 
 
-def _finish_reason_from_incomplete(response: JsonValue | None) -> str:
+def _finish_reason_from_incomplete(response: JsonValue | None) -> str | None:
     if not is_json_mapping(response):
-        return "stop"
+        return None
     details = response.get("incomplete_details")
     if is_json_mapping(details):
         reason = details.get("reason")
@@ -430,7 +456,7 @@ def _finish_reason_from_incomplete(response: JsonValue | None) -> str:
             return "length"
         if reason == "content_filter":
             return "content_filter"
-    return "stop"
+    return None
 
 
 def _default_error_envelope() -> OpenAIErrorEnvelope:
@@ -480,28 +506,43 @@ def _coerce_number(value: JsonValue) -> int | float | None:
 
 
 def _tool_call_delta_from_payload(payload: Mapping[str, JsonValue], indexer: ToolCallIndex) -> ToolCallDelta | None:
+    deltas = _tool_call_deltas_from_payload(payload, indexer)
+    return deltas[0] if deltas else None
+
+
+def _tool_call_deltas_from_payload(payload: Mapping[str, JsonValue], indexer: ToolCallIndex) -> list[ToolCallDelta]:
     if not _is_tool_call_event(payload):
-        return None
-    fields = _extract_tool_call_fields(payload)
-    if fields is None:
-        return None
-    call_id, name, arguments, tool_type = fields
-    index = indexer.index_for(call_id, name)
-    return ToolCallDelta(
-        index=index,
-        call_id=call_id,
-        name=name,
-        arguments=arguments,
-        tool_type=tool_type,
-    )
+        return []
+
+    deltas: list[ToolCallDelta] = []
+    for candidate in _tool_call_candidates(payload):
+        fields = _extract_tool_call_fields(candidate)
+        if fields is None:
+            continue
+        call_id, name, arguments, tool_type, index_hint = fields
+        index = indexer.index_for(call_id, name, index_hint=index_hint)
+        deltas.append(
+            ToolCallDelta(
+                index=index,
+                call_id=call_id,
+                name=name,
+                arguments=arguments,
+                tool_type=tool_type,
+            )
+        )
+    return deltas
 
 
 def _is_tool_call_event(payload: Mapping[str, JsonValue]) -> bool:
     event_type = payload.get("type")
     if isinstance(event_type, str) and ("tool_call" in event_type or "function_call" in event_type):
         return True
+    if is_json_list(payload.get("tool_calls")):
+        return True
     item = _as_mapping(payload.get("item"))
     if item is not None:
+        if is_json_list(item.get("tool_calls")):
+            return True
         item_type = item.get("type")
         if isinstance(item_type, str) and ("tool" in item_type or "function" in item_type):
             return True
@@ -516,7 +557,7 @@ def _is_tool_call_event(payload: Mapping[str, JsonValue]) -> bool:
 
 def _extract_tool_call_fields(
     payload: Mapping[str, JsonValue],
-) -> tuple[str | None, str | None, str | None, str | None] | None:
+) -> tuple[str | None, str | None, str | None, str | None, int | None] | None:
     candidate = _select_tool_call_candidate(payload)
     delta = candidate.get("delta")
     delta_map = _as_mapping(delta)
@@ -569,9 +610,34 @@ def _extract_tool_call_fields(
     if tool_type in ("tool_call", "function_call"):
         tool_type = "function"
 
+    index_hint = _coerce_int(candidate.get("index"))
+    if index_hint is None and delta_map is not None:
+        index_hint = _coerce_int(delta_map.get("index"))
+
     if call_id is None and name is None and arguments is None:
         return None
-    return call_id, name, arguments, tool_type
+    return call_id, name, arguments, tool_type, index_hint
+
+
+def _tool_call_candidates(payload: Mapping[str, JsonValue]) -> list[Mapping[str, JsonValue]]:
+    candidates: list[Mapping[str, JsonValue]] = []
+    payload_tool_calls = payload.get("tool_calls")
+    if is_json_list(payload_tool_calls):
+        for item in payload_tool_calls:
+            candidate = _as_mapping(item)
+            if candidate is not None:
+                candidates.append(candidate)
+    item = _as_mapping(payload.get("item"))
+    if item is not None:
+        item_tool_calls = item.get("tool_calls")
+        if is_json_list(item_tool_calls):
+            for call in item_tool_calls:
+                candidate = _as_mapping(call)
+                if candidate is not None:
+                    candidates.append(candidate)
+    if candidates:
+        return candidates
+    return [payload]
 
 
 def _select_tool_call_candidate(payload: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
@@ -603,6 +669,18 @@ def _first_str(*values: object) -> str | None:
     for value in values:
         if isinstance(value, str) and value:
             return value
+    return None
+
+
+def _coerce_int(value: JsonValue) -> int | None:
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
     return None
 
 

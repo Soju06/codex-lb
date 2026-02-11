@@ -71,7 +71,7 @@ def _ensure_text_only_content(content: JsonValue, role: str) -> None:
                 continue
             if is_json_dict(part):
                 part_type = part.get("type")
-                if part_type not in (None, "text"):
+                if part_type not in (None, "text", "input_text"):
                     raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
                 text = part.get("text")
                 if isinstance(text, str):
@@ -80,7 +80,7 @@ def _ensure_text_only_content(content: JsonValue, role: str) -> None:
         return
     if is_json_dict(content):
         part_type = content.get("type")
-        if part_type not in (None, "text"):
+        if part_type not in (None, "text", "input_text"):
             raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
         text = content.get("text")
         if isinstance(text, str):
@@ -153,7 +153,10 @@ def _normalize_content_part(part: dict[str, JsonValue]) -> JsonValue:
             return {"type": "input_file", "file_url": data_url}
         return part
     if part_type == "file":
-        return _file_part_to_input_file(part.get("file"))
+        file_info = part.get("file")
+        if not is_json_dict(file_info):
+            file_info = part
+        return _file_part_to_input_file(file_info)
     return part
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Account, AccountStatus, RequestLog, StickySession, UsageHistory
@@ -33,9 +34,23 @@ class AccountsRepository:
             return existing_by_email
 
         self._session.add(account)
-        await self._session.commit()
-        await self._session.refresh(account)
-        return account
+        try:
+            await self._session.commit()
+            await self._session.refresh(account)
+            return account
+        except IntegrityError:
+            await self._session.rollback()
+            # Retry once by selecting an existing row by id/email and applying updates.
+            existing = await self._session.get(Account, account.id)
+            if existing is None:
+                result = await self._session.execute(select(Account).where(Account.email == account.email))
+                existing = result.scalar_one_or_none()
+            if existing is None:
+                raise
+            _apply_account_updates(existing, account)
+            await self._session.commit()
+            await self._session.refresh(existing)
+            return existing
 
     async def update_status(
         self,

@@ -20,7 +20,6 @@ from app.modules.dashboard_auth.service import (
     TotpInvalidCodeError,
     TotpInvalidSetupError,
     TotpNotConfiguredError,
-    get_dashboard_session_store,
     get_totp_rate_limiter,
 )
 
@@ -170,7 +169,7 @@ async def disable_totp(
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-    if not get_dashboard_session_store().is_totp_verified(session_id):
+    if not await context.service.is_session_totp_verified(session_id):
         return JSONResponse(
             status_code=401,
             content=dashboard_error("totp_required", "TOTP verification is required to perform this action"),

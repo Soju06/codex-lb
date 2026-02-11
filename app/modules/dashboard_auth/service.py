@@ -40,20 +40,23 @@ class TotpInvalidSetupError(ValueError):
 class DashboardSessionState:
     expires_at: int
     totp_verified: bool
+    totp_epoch: int
 
 
 class DashboardSessionStore:
     def __init__(self) -> None:
         self._encryptor: TokenEncryptor | None = None
+        self._revoked: dict[str, int] = {}
 
     def _get_encryptor(self) -> TokenEncryptor:
         if self._encryptor is None:
             self._encryptor = TokenEncryptor()
         return self._encryptor
 
-    def create(self, *, totp_verified: bool) -> str:
+    def create(self, *, totp_verified: bool, totp_epoch: int) -> str:
+        self._prune_revoked()
         expires_at = int(time()) + _SESSION_TTL_SECONDS
-        payload = json.dumps({"exp": expires_at, "tv": totp_verified}, separators=(",", ":"))
+        payload = json.dumps({"exp": expires_at, "tv": totp_verified, "te": totp_epoch}, separators=(",", ":"))
         return self._get_encryptor().encrypt(payload).decode("ascii")
 
     def get(self, session_id: str | None) -> DashboardSessionState | None:
@@ -61,6 +64,11 @@ class DashboardSessionStore:
             return None
         token = session_id.strip()
         if not token:
+            return None
+        now_epoch = int(time())
+        self._prune_revoked(now_epoch)
+        revoked_until = self._revoked.get(token)
+        if revoked_until is not None and revoked_until >= now_epoch:
             return None
         try:
             raw = self._get_encryptor().decrypt(token.encode("ascii"))
@@ -72,21 +80,40 @@ class DashboardSessionStore:
             return None
         exp = data.get("exp")
         tv = data.get("tv")
-        if not isinstance(exp, int) or not isinstance(tv, bool):
+        te = data.get("te")
+        if not isinstance(exp, int) or not isinstance(tv, bool) or not isinstance(te, int):
             return None
-        if exp < int(time()):
+        if exp < now_epoch:
             return None
-        return DashboardSessionState(expires_at=exp, totp_verified=tv)
+        return DashboardSessionState(expires_at=exp, totp_verified=tv, totp_epoch=te)
 
-    def is_totp_verified(self, session_id: str | None) -> bool:
+    def is_totp_verified(self, session_id: str | None, *, expected_totp_epoch: int | None = None) -> bool:
         state = self.get(session_id)
         if state is None:
             return False
-        return state.totp_verified
+        if not state.totp_verified:
+            return False
+        if expected_totp_epoch is not None and state.totp_epoch != expected_totp_epoch:
+            return False
+        return True
 
     def delete(self, session_id: str | None) -> None:
-        # Stateless: deletion is handled by clearing the cookie client-side.
-        return
+        state = self.get(session_id)
+        if state is None or not session_id:
+            return
+        token = session_id.strip()
+        if not token:
+            return
+        self._revoked[token] = state.expires_at
+        self._prune_revoked()
+
+    def _prune_revoked(self, now_epoch: int | None = None) -> None:
+        if not self._revoked:
+            return
+        current = int(time()) if now_epoch is None else now_epoch
+        expired = [token for token, until in self._revoked.items() if until < current]
+        for token in expired:
+            self._revoked.pop(token, None)
 
 
 class TotpRateLimiter:
@@ -139,11 +166,21 @@ class DashboardAuthService:
         totp_configured = settings.totp_secret_encrypted is not None
         authenticated = True
         if totp_required:
-            authenticated = self._session_store.is_totp_verified(session_id)
+            authenticated = self._session_store.is_totp_verified(
+                session_id,
+                expected_totp_epoch=settings.totp_session_epoch,
+            )
         return DashboardAuthSessionResponse(
             authenticated=authenticated,
             totp_required_on_login=totp_required,
             totp_configured=totp_configured,
+        )
+
+    async def is_session_totp_verified(self, session_id: str | None) -> bool:
+        settings = await self._repository.get_settings()
+        return self._session_store.is_totp_verified(
+            session_id,
+            expected_totp_epoch=settings.totp_session_epoch,
         )
 
     async def start_totp_setup(self) -> TotpSetupStartResponse:
@@ -187,7 +224,10 @@ class DashboardAuthService:
         updated = await self._repository.try_advance_totp_last_verified_step(verification.matched_step)
         if not updated:
             raise TotpInvalidCodeError("Invalid TOTP code")
-        return self._session_store.create(totp_verified=True)
+        return self._session_store.create(
+            totp_verified=True,
+            totp_epoch=settings.totp_session_epoch,
+        )
 
     async def disable_totp(self, code: str) -> None:
         settings = await self._repository.get_settings()

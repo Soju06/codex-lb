@@ -18,6 +18,7 @@ PERMANENT_FAILURE_CODES = {
 
 SECONDS_PER_DAY = 60 * 60 * 24
 UNKNOWN_RESET_BUCKET_DAYS = 10_000
+MIN_REMAINING_PERCENT = 20.0
 
 
 @dataclass
@@ -105,9 +106,14 @@ def select_account(
             return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
         return SelectionResult(None, "No available accounts")
 
+    if not prefer_earlier_reset:
+        candidates_with_buffer = [state for state in available if _remaining_percent(state) > MIN_REMAINING_PERCENT]
+        if candidates_with_buffer:
+            available = candidates_with_buffer
+
     def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
-        primary_used = state.used_percent if state.used_percent is not None else 0.0
-        secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+        primary_used = _primary_used_percent(state)
+        secondary_used = _secondary_used_percent(state)
         last_selected = state.last_selected_at or 0.0
         return secondary_used, primary_used, last_selected, state.account_id
 
@@ -168,3 +174,20 @@ def _extract_reset_at(error: UpstreamError) -> int | None:
     if reset_in is not None:
         return int(time.time() + float(reset_in))
     return None
+
+
+def _primary_used_percent(state: AccountState) -> float:
+    if state.used_percent is None:
+        return 0.0
+    return float(state.used_percent)
+
+
+def _secondary_used_percent(state: AccountState) -> float:
+    if state.secondary_used_percent is None:
+        return _primary_used_percent(state)
+    return float(state.secondary_used_percent)
+
+
+def _remaining_percent(state: AccountState) -> float:
+    used_percent = max(0.0, min(100.0, _secondary_used_percent(state)))
+    return 100.0 - used_percent

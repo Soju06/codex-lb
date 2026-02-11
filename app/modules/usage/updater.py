@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import timezone
 from typing import Mapping, Protocol
 
 from app.core.auth.refresh import RefreshError
@@ -14,25 +14,13 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.usage.types import UsageEntryWrite
 
 logger = logging.getLogger(__name__)
 
 
 class UsageRepositoryPort(Protocol):
-    async def add_entry(
-        self,
-        account_id: str,
-        used_percent: float,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
-        recorded_at: datetime | None = None,
-        window: str | None = None,
-        reset_at: int | None = None,
-        window_minutes: int | None = None,
-        credits_has: bool | None = None,
-        credits_unlimited: bool | None = None,
-        credits_balance: float | None = None,
-    ) -> UsageHistory | None: ...
+    async def add_entries(self, entries: list[UsageEntryWrite]) -> list[UsageHistory] | None: ...
 
 
 class UsageUpdater:
@@ -57,7 +45,7 @@ class UsageUpdater:
         now = utcnow()
         interval = settings.usage_refresh_interval_seconds
         for account in accounts:
-            if account.status == AccountStatus.DEACTIVATED:
+            if account.status in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED):
                 continue
             latest = latest_usage.get(account.id)
             if latest and (now - latest.recorded_at).total_seconds() < interval:
@@ -118,31 +106,39 @@ class UsageUpdater:
         secondary = rate_limit.secondary_window
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         now_epoch = _now_epoch()
+        entries: list[UsageEntryWrite] = []
 
         if primary and primary.used_percent is not None:
-            await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(primary.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="primary",
-                reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(primary.limit_window_seconds),
-                credits_has=credits_has,
-                credits_unlimited=credits_unlimited,
-                credits_balance=credits_balance,
+            entries.append(
+                UsageEntryWrite(
+                    account_id=account.id,
+                    used_percent=float(primary.used_percent),
+                    input_tokens=None,
+                    output_tokens=None,
+                    window="primary",
+                    reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(primary.limit_window_seconds),
+                    credits_has=credits_has,
+                    credits_unlimited=credits_unlimited,
+                    credits_balance=credits_balance,
+                )
             )
 
         if secondary and secondary.used_percent is not None:
-            await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(secondary.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="secondary",
-                reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(secondary.limit_window_seconds),
+            entries.append(
+                UsageEntryWrite(
+                    account_id=account.id,
+                    used_percent=float(secondary.used_percent),
+                    input_tokens=None,
+                    output_tokens=None,
+                    window="secondary",
+                    reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(secondary.limit_window_seconds),
+                )
             )
+
+        if entries:
+            await self._usage_repo.add_entries(entries)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:

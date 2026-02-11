@@ -21,6 +21,7 @@ class DashboardAuthRepository:
         row = await self._settings_repository.get_or_create()
         row.totp_secret_encrypted = secret_encrypted
         row.totp_last_verified_step = None
+        row.totp_session_epoch += 1
         if secret_encrypted is None:
             row.totp_required_on_login = False
         await self._settings_repository.commit_refresh(row)
@@ -40,4 +41,5 @@ class DashboardAuthRepository:
             .values(totp_last_verified_step=step)
         )
         await self._session.commit()
-        return bool(result.rowcount and result.rowcount > 0)
+        rowcount_value = getattr(result, "rowcount", None)
+        return isinstance(rowcount_value, int) and rowcount_value > 0

@@ -28,7 +28,7 @@ async def test_cannot_enable_totp_requirement_without_configured_secret(async_cl
 
 @pytest.mark.asyncio
 async def test_setup_start_requires_token_when_not_configured(async_client, monkeypatch):
-    monkeypatch.delenv("CODEX_LB_DASHBOARD_SETUP_TOKEN", raising=False)
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_SETUP_TOKEN", "")
     from app.core.config.settings import get_settings
 
     get_settings.cache_clear()
@@ -167,6 +167,45 @@ async def test_dashboard_totp_flow_enforces_auth_per_login(async_client, monkeyp
 
     allowed_again = await async_client.get("/api/settings")
     assert allowed_again.status_code == 200
+
+    start_new = await async_client.post(
+        "/api/dashboard-auth/totp/setup/start",
+        json={},
+        headers={_SETUP_TOKEN_HEADER: "test-setup-token"},
+    )
+    assert start_new.status_code == 200
+    new_secret = start_new.json()["secret"]
+
+    confirm_new = await async_client.post(
+        "/api/dashboard-auth/totp/setup/confirm",
+        json={"secret": new_secret, "code": generate_totp_code(new_secret)},
+        headers={_SETUP_TOKEN_HEADER: "test-setup-token"},
+    )
+    assert confirm_new.status_code == 200
+
+    reenable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": True,
+        },
+    )
+    assert reenable.status_code == 200
+
+    blocked_after_reenable = await async_client.get("/api/settings")
+    assert blocked_after_reenable.status_code == 401
+    blocked_after_reenable_payload = blocked_after_reenable.json()
+    assert blocked_after_reenable_payload["error"]["code"] == "totp_required"
+
+    verify_new = await async_client.post(
+        "/api/dashboard-auth/totp/verify",
+        json={"code": generate_totp_code(new_secret)},
+    )
+    assert verify_new.status_code == 200
+
+    allowed_after_reverify = await async_client.get("/api/settings")
+    assert allowed_after_reverify.status_code == 200
 
 
 @pytest.mark.asyncio

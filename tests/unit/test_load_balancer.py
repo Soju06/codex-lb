@@ -286,6 +286,25 @@ def test_apply_usage_quota_respects_runtime_reset_for_rate_limited(monkeypatch):
     assert reset_at == future
 
 
+def test_apply_usage_quota_keeps_rate_limited_until_primary_reset_when_runtime_missing(monkeypatch):
+    now = 1_700_000_000.0
+    primary_reset = int(now + 600)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.RATE_LIMITED,
+        primary_used=50.0,
+        primary_reset=primary_reset,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=None,
+        secondary_reset=None,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 50.0
+    assert reset_at == float(primary_reset)
+
+
 def test_apply_usage_quota_resets_to_active_if_runtime_reset_expired(monkeypatch):
     now = 1_700_000_000.0
     past = now - 3600.0

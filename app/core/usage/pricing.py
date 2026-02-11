@@ -37,7 +37,19 @@ def _as_number(value: object) -> float | None:
 
 def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens | None:
     if isinstance(usage, UsageTokens):
-        return usage
+        input_tokens = _as_number(usage.input_tokens)
+        output_tokens = _as_number(usage.output_tokens)
+        cached_tokens = _as_number(usage.cached_input_tokens) or 0.0
+        if input_tokens is None or output_tokens is None:
+            return None
+        if input_tokens < 0.0 or output_tokens < 0.0:
+            return None
+        cached_tokens = max(0.0, min(cached_tokens, input_tokens))
+        return UsageTokens(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_tokens,
+        )
     if not usage:
         return None
     input_tokens = _as_number(usage.input_tokens)
@@ -45,6 +57,8 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
     if output_tokens is None and usage.output_tokens_details is not None:
         output_tokens = _as_number(usage.output_tokens_details.reasoning_tokens)
     if input_tokens is None or output_tokens is None:
+        return None
+    if input_tokens < 0.0 or output_tokens < 0.0:
         return None
     cached_tokens = 0.0
     if usage.input_tokens_details is not None:

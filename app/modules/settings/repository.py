@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DashboardSettings
@@ -16,18 +17,18 @@ class SettingsRepository:
         if existing is not None:
             return existing
 
-        row = DashboardSettings(
-            id=_SETTINGS_ID,
-            sticky_threads_enabled=False,
-            prefer_earlier_reset_accounts=False,
-            totp_required_on_login=False,
-            totp_secret_encrypted=None,
-            totp_last_verified_step=None,
-        )
+        row = DashboardSettings(id=_SETTINGS_ID)
         self._session.add(row)
-        await self._session.commit()
-        await self._session.refresh(row)
-        return row
+        try:
+            await self._session.commit()
+            await self._session.refresh(row)
+            return row
+        except IntegrityError:
+            await self._session.rollback()
+            existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
+            if existing is None:
+                raise
+            return existing
 
     async def update(
         self,

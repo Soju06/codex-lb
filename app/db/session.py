@@ -9,6 +9,7 @@ import anyio
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool, StaticPool
 
 from app.core.config.settings import get_settings
 from app.db.migrations import run_migrations
@@ -50,15 +51,14 @@ if _is_sqlite_url(_settings.database_url):
         engine = create_async_engine(
             _settings.database_url,
             echo=False,
+            poolclass=StaticPool,
             connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
         )
     else:
         engine = create_async_engine(
             _settings.database_url,
             echo=False,
-            pool_size=_settings.database_pool_size,
-            max_overflow=_settings.database_max_overflow,
-            pool_timeout=_settings.database_pool_timeout_seconds,
+            poolclass=NullPool,
             connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
         )
     _configure_sqlite_engine(engine.sync_engine, enable_wal=not is_sqlite_memory)

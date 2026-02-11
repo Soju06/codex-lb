@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_mapping
 
 
 def test_chat_messages_to_responses_mapping():
@@ -88,7 +89,9 @@ def test_chat_reasoning_effort_maps_to_responses_reasoning():
     responses = req.to_responses_request()
     dumped = responses.to_payload()
     assert "reasoning_effort" not in dumped
-    assert dumped.get("reasoning", {}).get("effort") == "high"
+    reasoning = dumped.get("reasoning")
+    assert is_json_mapping(reasoning)
+    assert reasoning.get("effort") == "high"
 
 
 def test_chat_tools_are_normalized():

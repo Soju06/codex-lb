@@ -3,13 +3,14 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.handlers import add_exception_handlers
 from app.core.middleware import (
+    add_api_firewall_middleware,
     add_api_unhandled_error_middleware,
     add_dashboard_totp_middleware,
     add_request_decompression_middleware,
@@ -20,6 +21,7 @@ from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
+from app.modules.firewall import api as firewall_api
 from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
@@ -30,18 +32,23 @@ from app.modules.usage import api as usage_api
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await init_db()
-    await init_http_client()
-    scheduler = build_usage_refresh_scheduler()
-    await scheduler.start()
-
+    scheduler = None
+    db_ready = False
+    http_ready = False
     try:
+        await init_db()
+        db_ready = True
+        await init_http_client()
+        http_ready = True
+        scheduler = build_usage_refresh_scheduler()
+        await scheduler.start()
         yield
     finally:
-        await scheduler.stop()
-        try:
+        if scheduler is not None:
+            await scheduler.stop()
+        if http_ready:
             await close_http_client()
-        finally:
+        if db_ready:
             await close_db()
 
 
@@ -50,6 +57,7 @@ def create_app() -> FastAPI:
 
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
+    add_api_firewall_middleware(app)
     add_dashboard_totp_middleware(app)
     add_api_unhandled_error_middleware(app)
     add_exception_handlers(app)
@@ -63,25 +71,35 @@ def create_app() -> FastAPI:
     app.include_router(request_logs_api.router)
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
+    app.include_router(firewall_api.router)
     app.include_router(settings_api.router)
     app.include_router(health_api.router)
 
     static_dir = Path(__file__).parent / "static"
     index_html = static_dir / "index.html"
+    has_spa_assets = static_dir.is_dir() and index_html.is_file()
 
     @app.get("/", include_in_schema=False)
     async def root_redirect():
+        if not has_spa_assets:
+            raise HTTPException(status_code=404, detail="Dashboard assets are not available")
         return RedirectResponse(url="/dashboard", status_code=302)
 
-    @app.get("/accounts", include_in_schema=False)
-    async def spa_accounts():
-        return FileResponse(index_html, media_type="text/html")
+    if has_spa_assets:
 
-    @app.get("/settings", include_in_schema=False)
-    async def spa_settings():
-        return FileResponse(index_html, media_type="text/html")
+        @app.get("/accounts", include_in_schema=False)
+        async def spa_accounts():
+            return FileResponse(index_html, media_type="text/html")
 
-    app.mount("/dashboard", StaticFiles(directory=static_dir, html=True), name="dashboard")
+        @app.get("/settings", include_in_schema=False)
+        async def spa_settings():
+            return FileResponse(index_html, media_type="text/html")
+
+        @app.get("/firewall", include_in_schema=False)
+        async def spa_firewall():
+            return FileResponse(index_html, media_type="text/html")
+
+        app.mount("/dashboard", StaticFiles(directory=static_dir, html=True), name="dashboard")
 
     return app
 

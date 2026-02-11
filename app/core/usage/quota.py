@@ -18,6 +18,7 @@ def apply_usage_quota(
 ) -> tuple[AccountStatus, float | None, float | None]:
     used_percent = primary_used
     reset_at = runtime_reset
+    now = time.time()
 
     if status in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED):
         return status, used_percent, reset_at
@@ -30,7 +31,7 @@ def apply_usage_quota(
                 reset_at = secondary_reset
             return status, used_percent, reset_at
         if status == AccountStatus.QUOTA_EXCEEDED:
-            if runtime_reset and runtime_reset > time.time():
+            if runtime_reset and runtime_reset > now:
                 reset_at = runtime_reset
             else:
                 status = AccountStatus.ACTIVE
@@ -48,8 +49,9 @@ def apply_usage_quota(
                 reset_at = _fallback_primary_reset(primary_window_minutes) or reset_at
             return status, used_percent, reset_at
         if status == AccountStatus.RATE_LIMITED:
-            if runtime_reset and runtime_reset > time.time():
-                reset_at = runtime_reset
+            primary_limit_reset = _pending_reset(runtime_reset, primary_reset, now)
+            if primary_limit_reset is not None:
+                reset_at = primary_limit_reset
             else:
                 status = AccountStatus.ACTIVE
                 reset_at = None
@@ -62,3 +64,11 @@ def _fallback_primary_reset(primary_window_minutes: int | None) -> float | None:
     if not window_minutes:
         return None
     return time.time() + float(window_minutes) * 60.0
+
+
+def _pending_reset(runtime_reset: float | None, window_reset: int | None, now: float) -> float | None:
+    if runtime_reset is not None and runtime_reset > now:
+        return runtime_reset
+    if window_reset is not None and float(window_reset) > now:
+        return float(window_reset)
+    return None

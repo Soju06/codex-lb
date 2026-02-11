@@ -123,6 +123,7 @@ class LoadBalancer:
             else:
                 pinned_result = select_account([pinned], prefer_earlier_reset=prefer_earlier_reset_accounts)
                 if pinned_result.account is not None:
+                    await sticky_repo.upsert(sticky_key, pinned_result.account.account_id)
                     return pinned_result
 
         chosen = select_account(states, prefer_earlier_reset=prefer_earlier_reset_accounts)

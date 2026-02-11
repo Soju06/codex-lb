@@ -24,6 +24,7 @@ class RequestLogStatusFilter:
     include_error_other: bool
     error_codes_in: list[str] | None
     error_codes_excluding: list[str] | None
+    force_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +51,8 @@ class RequestLogsService:
         status: list[str] | None = None,
     ) -> list[RequestLogEntry]:
         status_filter = _map_status_filter(status)
+        if status_filter.force_empty:
+            return []
         logs = await self._repo.list_recent(
             limit=limit,
             offset=offset,
@@ -76,6 +79,8 @@ class RequestLogsService:
         status: list[str] | None = None,
     ) -> RequestLogFilterOptions:
         status_filter = _map_status_filter(status)
+        if status_filter.force_empty:
+            return RequestLogFilterOptions(account_ids=[], model_options=[])
         account_ids, model_options = await self._repo.list_filter_options(
             since=since,
             until=until,
@@ -100,6 +105,7 @@ def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
+            force_empty=False,
         )
     normalized = {value.lower() for value in status if value}
     if not normalized or "all" in normalized:
@@ -108,12 +114,23 @@ def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
+            force_empty=False,
         )
 
     include_success = "ok" in normalized
     include_rate_limit = "rate_limit" in normalized
     include_quota = "quota" in normalized
     include_error_other = "error" in normalized
+    recognized = {"ok", "rate_limit", "quota", "error"}
+    has_recognized = any(value in recognized for value in normalized)
+    if not has_recognized:
+        return RequestLogStatusFilter(
+            include_success=False,
+            include_error_other=False,
+            error_codes_in=None,
+            error_codes_excluding=None,
+            force_empty=True,
+        )
 
     error_codes_in: set[str] = set()
     if include_rate_limit:
@@ -126,4 +143,5 @@ def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
         include_error_other=include_error_other,
         error_codes_in=sorted(error_codes_in) if error_codes_in else None,
         error_codes_excluding=sorted(RATE_LIMIT_CODES | QUOTA_CODES) if include_error_other else None,
+        force_empty=False,
     )

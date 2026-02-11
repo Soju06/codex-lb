@@ -244,9 +244,36 @@ class ProxyService:
                         if refresh_exc.is_permanent:
                             await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                         continue
-                    async for line in self._stream_once(account, payload, headers, request_id, False):
-                        yield line
-                    return
+                    try:
+                        async for line in self._stream_once(account, payload, headers, request_id, False):
+                            yield line
+                        return
+                    except _RetryableStreamError as retry_exc:
+                        await self._handle_stream_error(account, retry_exc.error, retry_exc.code)
+                        continue
+                    except ProxyResponseError as retry_exc:
+                        error = _parse_openai_error(retry_exc.payload)
+                        error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                        error_message = error.message if error else None
+                        error_type = error.type if error else None
+                        error_param = error.param if error else None
+                        await self._handle_stream_error(
+                            account,
+                            _upstream_error_from_openai(error),
+                            error_code,
+                        )
+                        if propagate_http_errors:
+                            raise
+                        event = response_failed_event(
+                            error_code,
+                            error_message or "Upstream error",
+                            error_type=error_type or "server_error",
+                            response_id=request_id,
+                            error_param=error_param,
+                        )
+                        _apply_error_metadata(event["response"]["error"], error)
+                        yield format_sse_event(event)
+                        return
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 error_message = error.message if error else None

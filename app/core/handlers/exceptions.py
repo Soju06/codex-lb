@@ -10,6 +10,21 @@ from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.errors import dashboard_error, openai_error
+from app.core.utils.json_guards import is_json_mapping
+
+
+def _detail_text(detail: object) -> str:
+    if isinstance(detail, str):
+        stripped = detail.strip()
+        return stripped or "Request failed"
+    if is_json_mapping(detail):
+        message = detail.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        error = detail.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+    return "Request failed"
 
 
 def add_exception_handlers(app: FastAPI) -> None:
@@ -41,13 +56,14 @@ def add_exception_handlers(app: FastAPI) -> None:
         exc: StarletteHTTPException,
     ) -> Response:
         if request.url.path.startswith("/api/"):
-            detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+            detail = _detail_text(exc.detail)
             return JSONResponse(
                 status_code=exc.status_code,
                 content=dashboard_error(f"http_{exc.status_code}", detail),
+                headers=exc.headers,
             )
         if request.url.path.startswith("/v1/"):
-            detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+            detail = _detail_text(exc.detail)
             error_type = "invalid_request_error"
             code = "invalid_request_error"
             if exc.status_code == 401:
@@ -65,5 +81,9 @@ def add_exception_handlers(app: FastAPI) -> None:
             elif exc.status_code >= 500:
                 error_type = "server_error"
                 code = "server_error"
-            return JSONResponse(status_code=exc.status_code, content=openai_error(code, detail, error_type=error_type))
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=openai_error(code, detail, error_type=error_type),
+                headers=exc.headers,
+            )
         return await http_exception_handler(request, exc)

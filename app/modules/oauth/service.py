@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import secrets
 import time
 from contextlib import AbstractAsyncContextManager
@@ -42,6 +43,7 @@ from app.modules.oauth.schemas import (
 
 _async_sleep = asyncio.sleep
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
+OAUTH_SCOPE_COOKIE = "codex_lb_oauth_scope"
 
 
 @dataclass
@@ -62,28 +64,54 @@ class OAuthState:
 class OAuthStateStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._state = OAuthState(status="idle")
+        self._states: dict[str, OAuthState] = {}
+        self._state_token_index: dict[str, str] = {}
 
     @property
     def lock(self) -> asyncio.Lock:
         return self._lock
 
-    @property
-    def state(self) -> OAuthState:
-        return self._state
+    def state(self, scope_key: str) -> OAuthState:
+        key = scope_key.strip() or "global"
+        state = self._states.get(key)
+        if state is None:
+            state = OAuthState(status="idle")
+            self._states[key] = state
+        return state
 
-    async def reset(self) -> None:
+    async def reset(self, scope_key: str | None = None) -> None:
         async with self._lock:
-            await self._cleanup_locked()
-            self._state = OAuthState(status="idle")
+            if scope_key is None:
+                for key in list(self._states.keys()):
+                    await self._cleanup_locked(key)
+                self._states.clear()
+                self._state_token_index.clear()
+                return
+            await self._cleanup_locked(scope_key)
+            self._states[scope_key] = OAuthState(status="idle")
 
-    async def _cleanup_locked(self) -> None:
-        task = self._state.poll_task
+    def scope_for_state_token(self, state_token: str | None) -> str | None:
+        if not state_token:
+            return None
+        return self._state_token_index.get(state_token)
+
+    def set_state_token(self, scope_key: str, state_token: str | None) -> None:
+        if not state_token:
+            return
+        self._state_token_index[state_token] = scope_key
+
+    async def _cleanup_locked(self, scope_key: str) -> None:
+        state = self._states.get(scope_key)
+        if state is None:
+            return
+        task = state.poll_task
         if task and not task.done():
             task.cancel()
-        server = self._state.callback_server
+        server = state.callback_server
         if server:
             await server.stop()
+        if state.state_token:
+            self._state_token_index.pop(state.state_token, None)
 
 
 class OAuthCallbackServer:
@@ -127,38 +155,48 @@ class OauthService:
         self._encryptor = TokenEncryptor()
         self._store = _OAUTH_STORE
         self._repo_factory = repo_factory
+        self._active_scope_key: str | None = None
 
-    async def start_oauth(self, request: OauthStartRequest) -> OauthStartResponse:
-        force_method = (request.force_method or "").lower()
-        if not force_method:
-            accounts = await self._accounts_repo.list_accounts()
-            if accounts:
-                async with self._store.lock:
-                    await self._store._cleanup_locked()
-                    self._store._state = OAuthState(status="success")
-                return OauthStartResponse(method="browser")
-
-        if force_method == "device":
-            return await self._start_device_flow()
-
+    async def start_oauth(self, request: OauthStartRequest, *, scope_key: str) -> OauthStartResponse:
+        self._active_scope_key = scope_key
         try:
-            return await self._start_browser_flow()
-        except OSError:
-            return await self._start_device_flow()
+            force_method = (request.force_method or "").lower()
+            if not force_method:
+                accounts = await self._accounts_repo.list_accounts()
+                if accounts:
+                    async with self._store.lock:
+                        await self._store._cleanup_locked(scope_key)
+                        self._store._states[scope_key] = OAuthState(status="success")
+                    return OauthStartResponse(method="browser")
 
-    async def oauth_status(self) -> OauthStatusResponse:
+            if force_method == "device":
+                return await self._start_device_flow()
+
+            try:
+                return await self._start_browser_flow()
+            except OSError:
+                return await self._start_device_flow()
+        finally:
+            self._active_scope_key = None
+
+    async def oauth_status(self, *, scope_key: str) -> OauthStatusResponse:
         async with self._store.lock:
-            state = self._store.state
+            state = self._store.state(scope_key)
             status = state.status if state.status != "idle" else "pending"
             return OauthStatusResponse(status=status, error_message=state.error_message)
 
-    async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
+    async def complete_oauth(
+        self,
+        request: OauthCompleteRequest | None = None,
+        *,
+        scope_key: str,
+    ) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
         async with self._store.lock:
-            state = self._store.state
-            if payload.device_auth_id:
+            state = self._store.state(scope_key)
+            if payload.device_auth_id and state.device_auth_id is None:
                 state.device_auth_id = payload.device_auth_id
-            if payload.user_code:
+            if payload.user_code and state.user_code is None:
                 state.user_code = payload.user_code
             if state.status == "success":
                 return OauthCompleteResponse(status="success")
@@ -174,6 +212,7 @@ class OauthService:
             interval = state.interval_seconds if state.interval_seconds is not None else 0
             interval = max(interval, 0)
             poll_context = DevicePollContext(
+                scope_key=scope_key,
                 device_auth_id=state.device_auth_id,
                 user_code=state.user_code,
                 interval_seconds=interval,
@@ -182,20 +221,29 @@ class OauthService:
             state.poll_task = asyncio.create_task(self._poll_device_tokens(poll_context))
             return OauthCompleteResponse(status="pending")
 
-    async def _start_browser_flow(self) -> OauthStartResponse:
-        await self._store.reset()
+    def _resolve_scope_key(self, scope_key: str | None = None) -> str:
+        if scope_key and scope_key.strip():
+            return scope_key
+        if self._active_scope_key and self._active_scope_key.strip():
+            return self._active_scope_key
+        return "global"
+
+    async def _start_browser_flow(self, scope_key: str | None = None) -> OauthStartResponse:
+        scope_key = self._resolve_scope_key(scope_key)
+        await self._store.reset(scope_key)
         code_verifier, code_challenge = generate_pkce_pair()
         state_token = secrets.token_urlsafe(16)
         authorization_url = build_authorization_url(state=state_token, code_challenge=code_challenge)
         settings = get_settings()
 
         async with self._store.lock:
-            state = self._store.state
+            state = self._store.state(scope_key)
             state.status = "pending"
             state.method = "browser"
             state.state_token = state_token
             state.code_verifier = code_verifier
             state.error_message = None
+            self._store.set_state_token(scope_key, state_token)
 
         callback_server = OAuthCallbackServer(
             self._handle_callback,
@@ -205,7 +253,7 @@ class OauthService:
         await callback_server.start()
 
         async with self._store.lock:
-            self._store.state.callback_server = callback_server
+            self._store.state(scope_key).callback_server = callback_server
 
         return OauthStartResponse(
             method="browser",
@@ -213,16 +261,17 @@ class OauthService:
             callback_url=settings.oauth_redirect_uri,
         )
 
-    async def _start_device_flow(self) -> OauthStartResponse:
-        await self._store.reset()
+    async def _start_device_flow(self, scope_key: str | None = None) -> OauthStartResponse:
+        scope_key = self._resolve_scope_key(scope_key)
+        await self._store.reset(scope_key)
         try:
             device = await request_device_code()
         except OAuthError as exc:
-            await self._set_error(exc.message)
+            await self._set_error(scope_key, exc.message)
             raise
 
         async with self._store.lock:
-            state = self._store.state
+            state = self._store.state(scope_key)
             state.status = "pending"
             state.method = "device"
             state.device_auth_id = device.device_auth_id
@@ -245,29 +294,31 @@ class OauthService:
         error = params.get("error")
         code = params.get("code")
         state = params.get("state")
+        scope_key = self._store.scope_for_state_token(state) or request.cookies.get(OAUTH_SCOPE_COOKIE) or "global"
 
         if error:
-            await self._set_error(f"OAuth error: {error}")
+            await self._set_error(scope_key, f"OAuth error: {error}")
             return self._html_response(_error_html("Authorization failed."))
 
         async with self._store.lock:
-            expected_state = self._store.state.state_token
-            verifier = self._store.state.code_verifier
+            current_state = self._store.state(scope_key)
+            expected_state = current_state.state_token
+            verifier = current_state.code_verifier
 
         if not code or not state or state != expected_state or not verifier:
-            await self._set_error("Invalid OAuth callback state.")
+            await self._set_error(scope_key, "Invalid OAuth callback state.")
             return self._html_response(_error_html("Invalid OAuth callback."))
 
         try:
             tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
             await self._persist_tokens(tokens)
-            await self._set_success()
+            await self._set_success(scope_key)
             html = _success_html()
         except OAuthError as exc:
-            await self._set_error(exc.message)
+            await self._set_error(scope_key, exc.message)
             html = _error_html(exc.message)
 
-        asyncio.create_task(self._stop_callback_server())
+        asyncio.create_task(self._stop_callback_server(scope_key))
         return self._html_response(html)
 
     async def _poll_device_tokens(self, context: "DevicePollContext") -> None:
@@ -279,17 +330,18 @@ class OauthService:
                 )
                 if tokens:
                     await self._persist_tokens(tokens)
-                    await self._set_success()
+                    await self._set_success(context.scope_key)
                     return
                 await _async_sleep(context.interval_seconds)
-            await self._set_error("Device code expired.")
+            await self._set_error(context.scope_key, "Device code expired.")
         except OAuthError as exc:
-            await self._set_error(exc.message)
+            await self._set_error(context.scope_key, exc.message)
         finally:
             async with self._store.lock:
                 current = asyncio.current_task()
-                if self._store.state.poll_task is current:
-                    self._store.state.poll_task = None
+                scoped_state = self._store.state(context.scope_key)
+                if scoped_state.poll_task is current:
+                    scoped_state.poll_task = None
 
     async def _persist_tokens(self, tokens: OAuthTokens) -> None:
         claims = extract_id_token_claims(tokens.id_token)
@@ -320,20 +372,23 @@ class OauthService:
         else:
             await self._accounts_repo.upsert(account)
 
-    async def _set_success(self) -> None:
+    async def _set_success(self, scope_key: str) -> None:
         async with self._store.lock:
-            self._store.state.status = "success"
-            self._store.state.error_message = None
+            state = self._store.state(scope_key)
+            state.status = "success"
+            state.error_message = None
 
-    async def _set_error(self, message: str) -> None:
+    async def _set_error(self, scope_key: str, message: str) -> None:
         async with self._store.lock:
-            self._store.state.status = "error"
-            self._store.state.error_message = message
+            state = self._store.state(scope_key)
+            state.status = "error"
+            state.error_message = message
 
-    async def _stop_callback_server(self) -> None:
+    async def _stop_callback_server(self, scope_key: str) -> None:
         async with self._store.lock:
-            server = self._store.state.callback_server
-            self._store.state.callback_server = None
+            state = self._store.state(scope_key)
+            server = state.callback_server
+            state.callback_server = None
         if server:
             await server.stop()
 
@@ -344,6 +399,7 @@ class OauthService:
 
 @dataclass(frozen=True)
 class DevicePollContext:
+    scope_key: str
     device_auth_id: str
     user_code: str
     interval_seconds: int
@@ -358,4 +414,5 @@ def _success_html() -> str:
 
 
 def _error_html(message: str) -> str:
-    return f"<html><body><h1>Login failed</h1><p>{message}</p></body></html>"
+    safe_message = html.escape(message, quote=True)
+    return f"<html><body><h1>Login failed</h1><p>{safe_message}</p></body></html>"

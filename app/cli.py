@@ -19,8 +19,8 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
-        raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
+    if args.ssl_keyfile and not args.ssl_certfile:
+        raise SystemExit("--ssl-keyfile requires --ssl-certfile.")
 
     uvicorn.run(
         "app.main:app",

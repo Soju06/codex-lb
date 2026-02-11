@@ -1,6 +1,6 @@
 (() => {
 	"use strict";
-		const API_ENDPOINTS = {
+	const API_ENDPOINTS = {
 		accounts: "/api/accounts",
 		accountsImport: "/api/accounts/import",
 		accountReactivate: (accountId) =>
@@ -9,23 +9,27 @@
 			`/api/accounts/${encodeURIComponent(accountId)}/pause`,
 		accountDelete: (accountId) =>
 			`/api/accounts/${encodeURIComponent(accountId)}`,
-		dashboardOverview: "/api/dashboard/overview",
+		usageSummary: "/api/usage/summary",
+		usageWindow: (window) =>
+			`/api/usage/window?window=${encodeURIComponent(window)}`,
 		requestLogs: "/api/request-logs",
 		requestLogOptions: "/api/request-logs/options",
 		oauthStart: "/api/oauth/start",
 		oauthStatus: "/api/oauth/status",
 		oauthComplete: "/api/oauth/complete",
 		settings: "/api/settings",
+		firewallIps: "/api/firewall/ips",
+		firewallIpDelete: (ipAddress) =>
+			`/api/firewall/ips/${encodeURIComponent(ipAddress)}`,
 		dashboardAuthSession: "/api/dashboard-auth/session",
 		dashboardAuthTotpVerify: "/api/dashboard-auth/totp/verify",
 		dashboardAuthTotpSetupStart: "/api/dashboard-auth/totp/setup/start",
 		dashboardAuthTotpSetupConfirm: "/api/dashboard-auth/totp/setup/confirm",
 		dashboardAuthTotpDisable: "/api/dashboard-auth/totp/disable",
-			dashboardAuthLogout: "/api/dashboard-auth/logout",
-		};
-		const DASHBOARD_SETUP_TOKEN_HEADER = "X-Codex-LB-Setup-Token";
+		dashboardAuthLogout: "/api/dashboard-auth/logout",
+	};
 
-		const PAGES = [
+	const PAGES = [
 		{
 			id: "dashboard",
 			tabId: "tab-dashboard",
@@ -46,6 +50,13 @@
 			label: "Settings",
 			title: "Codex Load Balancer - Settings",
 			path: "/settings",
+		},
+		{
+			id: "firewall",
+			tabId: "tab-firewall",
+			label: "Firewall",
+			title: "Codex Load Balancer - Firewall",
+			path: "/firewall",
 		},
 	];
 
@@ -89,6 +100,7 @@
 	};
 
 	const MODEL_OPTION_DELIMITER = ":::";
+	const DASHBOARD_SETUP_TOKEN_HEADER = "X-Codex-LB-Setup-Token";
 
 	const createDefaultRequestFilters = () => ({
 		search: "",
@@ -636,28 +648,22 @@
 	};
 
 	const normalizeAccountsPayload = (payload) => {
-		const accounts = Array.isArray(payload) ? payload : payload?.accounts;
-		if (!Array.isArray(accounts)) {
-			return [];
-		}
-		return accounts.map(normalizeAccount);
+		return payload.accounts.map(normalizeAccount);
 	};
 
 	const normalizeUsageEntry = (entry) => {
 		return {
 			accountId: entry.accountId,
+			requestCount: entry.requestCount ?? 0,
 			remainingPercentAvg: toNumber(entry.remainingPercentAvg),
 			capacityCredits: toNumber(entry.capacityCredits) ?? 0,
 			remainingCredits: toNumber(entry.remainingCredits) ?? 0,
+			costUsd: toNumber(entry.costUsd) ?? 0,
 		};
 	};
 
 	const normalizeUsagePayload = (payload) => {
-		const accounts = Array.isArray(payload) ? payload : payload?.accounts;
-		if (!Array.isArray(accounts)) {
-			return [];
-		}
-		return accounts.map(normalizeUsageEntry);
+		return payload.accounts.map(normalizeUsageEntry);
 	};
 
 	const normalizeRequestLog = (entry) => {
@@ -677,11 +683,7 @@
 	};
 
 	const normalizeRequestLogsPayload = (payload) => {
-		const requests = Array.isArray(payload) ? payload : payload?.requests;
-		if (!Array.isArray(requests)) {
-			return [];
-		}
-		return requests.map(normalizeRequestLog);
+		return payload.requests.map(normalizeRequestLog);
 	};
 
 	const buildUsageIndex = (entries) =>
@@ -762,7 +764,6 @@
 		primaryUsage,
 		secondaryUsage,
 		requestLogs,
-		lastSyncAt,
 	}) => {
 		const metrics = summary?.metrics || {};
 		const requests7d = toNumber(metrics.requests7d) ?? 0;
@@ -771,7 +772,7 @@
 		const errorRate7d = toNumber(metrics.errorRate7d);
 		const topError = metrics.topError || "";
 		return {
-			lastSyncAt: lastSyncAt || new Date().toISOString(),
+			lastSyncAt: new Date().toISOString(),
 			routing: {
 				strategy: "usage_weighted",
 				rotationEnabled: true,
@@ -1233,28 +1234,28 @@
 		return payload;
 	};
 
-		const postJson = async (url, payload, label, options = {}) => {
-			const headers = { "Content-Type": "application/json" };
-			if (options?.headers && typeof options.headers === "object") {
-				Object.assign(headers, options.headers);
-			}
-			const response = await fetch(url, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(payload || {}),
-			});
-			const responsePayload = await readResponsePayload(response);
-			if (!response.ok) {
-				const message = extractErrorMessage(responsePayload);
-				const error = new Error(
-					message || `Failed to ${label} (${response.status})`,
-				);
-				error.status = response.status;
-				error.payload = responsePayload;
-				throw error;
-			}
-			return responsePayload;
-		};
+	const postJson = async (url, payload, label, options = {}) => {
+		const headers = { "Content-Type": "application/json" };
+		if (options?.headers && typeof options.headers === "object") {
+			Object.assign(headers, options.headers);
+		}
+		const response = await fetch(url, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(payload || {}),
+		});
+		const responsePayload = await readResponsePayload(response);
+		if (!response.ok) {
+			const message = extractErrorMessage(responsePayload);
+			const error = new Error(
+				message || `Failed to ${label} (${response.status})`,
+			);
+			error.status = response.status;
+			error.payload = responsePayload;
+			throw error;
+		}
+		return responsePayload;
+	};
 
 	const putJson = async (url, payload, label) => {
 		const response = await fetch(url, {
@@ -1280,15 +1281,16 @@
 		return responsePayload;
 	};
 
-	const fetchDashboardOverview = async (params) => {
-		const query = buildQueryString(params);
-		return fetchJson(
-			query
-				? `${API_ENDPOINTS.dashboardOverview}?${query}`
-				: API_ENDPOINTS.dashboardOverview,
-			"dashboard overview",
-		);
+	const fetchAccounts = async () => {
+		const payload = await fetchJson(API_ENDPOINTS.accounts, "accounts");
+		return normalizeAccountsPayload(payload);
 	};
+
+	const fetchUsageSummary = async () =>
+		fetchJson(API_ENDPOINTS.usageSummary, "usage summary");
+
+	const fetchUsageWindow = async (window) =>
+		fetchJson(API_ENDPOINTS.usageWindow(window), `usage window (${window})`);
 
 	const parseMinCostUsd = (value) => {
 		if (value === null || value === undefined) {
@@ -1338,28 +1340,6 @@
 			params.since = since;
 		}
 		return params;
-	};
-
-	const hasServerSideRequestFilters = (filters) => {
-		if (!filters) {
-			return false;
-		}
-		if (filters.search) {
-			return true;
-		}
-		if (filters.timeframe && filters.timeframe !== "all") {
-			return true;
-		}
-		if (Array.isArray(filters.accountIds) && filters.accountIds.length) {
-			return true;
-		}
-		if (Array.isArray(filters.modelOptions) && filters.modelOptions.length) {
-			return true;
-		}
-		if (Array.isArray(filters.statuses) && filters.statuses.length) {
-			return true;
-		}
-		return false;
 	};
 
 	const applyClientSideRequestFilters = (requests, filters) => {
@@ -1421,9 +1401,26 @@
 		totpConfigured: Boolean(payload?.totpConfigured),
 	});
 
+	const normalizeFirewallPayload = (payload) => ({
+		mode: payload?.mode === "allowlist_active" ? "allowlist_active" : "allow_all",
+		entries: Array.isArray(payload?.entries)
+			? payload.entries
+				.map((entry) => ({
+					ipAddress: String(entry?.ipAddress ?? "").trim(),
+					createdAt: entry?.createdAt ?? null,
+				}))
+				.filter((entry) => entry.ipAddress)
+			: [],
+	});
+
 	const fetchSettings = async () => {
 		const payload = await fetchJson(API_ENDPOINTS.settings, "settings");
 		return normalizeSettingsPayload(payload);
+	};
+
+	const fetchFirewallIps = async () => {
+		const payload = await fetchJson(API_ENDPOINTS.firewallIps, "firewall IPs");
+		return normalizeFirewallPayload(payload);
 	};
 
 	const registerApp = () => {
@@ -1450,27 +1447,33 @@
 				modelOptions: [],
 				isLoading: false,
 				error: "",
-				hasLoaded: false,
 			},
 
-					settings: {
-						stickyThreadsEnabled: false,
-						preferEarlierResetAccounts: false,
-						totpRequiredOnLogin: false,
-						totpConfigured: false,
-						setupToken: "",
-						totpSetup: {
-							open: false,
-							secret: "",
-							otpauthUri: "",
-						qrSvgDataUri: "",
-						code: "",
-						isSubmitting: false,
-					},
-					isLoading: false,
-					isSaving: false,
-					hasLoaded: false,
+			settings: {
+				stickyThreadsEnabled: false,
+				preferEarlierResetAccounts: false,
+				totpRequiredOnLogin: false,
+				totpConfigured: false,
+				setupToken: "",
+				isLoading: false,
+				hasLoaded: false,
+				totpSetup: {
+					open: false,
+					secret: "",
+					otpauthUri: "",
+					qrSvgDataUri: "",
+					code: "",
+					isSubmitting: false,
 				},
+				isSaving: false,
+			},
+			firewall: {
+				mode: "allow_all",
+				entries: [],
+				ipInput: "",
+				isLoading: false,
+				isSaving: false,
+			},
 			accounts: {
 				selectedId: "",
 				rows: [],
@@ -1513,7 +1516,6 @@
 			isLoading: true,
 			hasInitialized: false,
 			refreshPromise: null,
-			settingsLoadPromise: null,
 
 			async init() {
 				if (this.hasInitialized) {
@@ -1542,17 +1544,11 @@
 					return;
 				}
 				await this.loadData();
-				if (this.view === "settings") {
-					this.ensureSettingsLoaded();
-				}
 				this.syncTitle();
 				this.syncUrl(true);
-				this.$watch("view", (value) => {
+				this.$watch("view", () => {
 					this.syncTitle();
 					this.syncUrl(false);
-					if (value === "settings") {
-						this.ensureSettingsLoaded();
-					}
 				});
 				this.$watch("accounts.searchQuery", () => {
 					this.syncAccountSearchSelection();
@@ -1593,70 +1589,6 @@
 				}
 			},
 
-			async loadRequestLogOptions() {
-				if (this.requestLogOptions.isLoading) {
-					return;
-				}
-				this.requestLogOptions.isLoading = true;
-				this.requestLogOptions.error = "";
-				try {
-					const payload = await fetchRequestLogOptions({});
-					this.requestLogOptions.accountIds = Array.isArray(payload?.accountIds)
-						? payload.accountIds
-						: [];
-					this.requestLogOptions.modelOptions = Array.isArray(payload?.modelOptions)
-						? payload.modelOptions
-						: [];
-					this.requestLogOptions.hasLoaded = true;
-				} catch (err) {
-					this.requestLogOptions.error =
-						err?.message || "Failed to load request log options.";
-				} finally {
-					this.requestLogOptions.isLoading = false;
-				}
-			},
-
-			ensureRequestLogOptions() {
-				if (this.requestLogOptions.hasLoaded || this.requestLogOptions.isLoading) {
-					return;
-				}
-				this.loadRequestLogOptions();
-			},
-
-			async ensureSettingsLoaded() {
-				if (this.settings.hasLoaded) {
-					return;
-				}
-				if (this.settingsLoadPromise) {
-					return this.settingsLoadPromise;
-				}
-				this.settings.isLoading = true;
-				this.settingsLoadPromise = (async () => {
-					try {
-						const settings = await fetchSettings();
-						this.settings.stickyThreadsEnabled = settings.stickyThreadsEnabled;
-						this.settings.preferEarlierResetAccounts =
-							settings.preferEarlierResetAccounts;
-						this.settings.totpRequiredOnLogin = settings.totpRequiredOnLogin;
-						this.settings.totpConfigured = settings.totpConfigured;
-						this.settings.hasLoaded = true;
-					} catch (err) {
-						console.error("Failed to load settings:", err);
-						this.openMessageBox({
-							tone: "error",
-							title: "Settings load failed",
-							message: err?.message || "Failed to load settings.",
-						});
-					}
-				})();
-				try {
-					await this.settingsLoadPromise;
-				} finally {
-					this.settingsLoadPromise = null;
-					this.settings.isLoading = false;
-				}
-			},
-
 			applyFilters() {
 				this.pagination.offset = 0;
 				const accountIds = Array.isArray(this.filtersDraft.accountIds)
@@ -1676,6 +1608,36 @@
 					statuses,
 				};
 				this.refreshRequests();
+			},
+
+			async ensureRequestLogOptions() {
+				if (this.requestLogOptions.isLoading) {
+					return;
+				}
+				if (
+					Array.isArray(this.requestLogOptions.accountIds) &&
+					this.requestLogOptions.accountIds.length > 0 &&
+					Array.isArray(this.requestLogOptions.modelOptions) &&
+					this.requestLogOptions.modelOptions.length > 0
+				) {
+					return;
+				}
+				this.requestLogOptions.isLoading = true;
+				this.requestLogOptions.error = "";
+				try {
+					const payload = await fetchRequestLogOptions({});
+					this.requestLogOptions.accountIds = Array.isArray(payload?.accountIds)
+						? payload.accountIds
+						: [];
+					this.requestLogOptions.modelOptions = Array.isArray(payload?.modelOptions)
+						? payload.modelOptions
+						: [];
+				} catch (error) {
+					this.requestLogOptions.error =
+						error?.message || "Failed to load request log options.";
+				} finally {
+					this.requestLogOptions.isLoading = false;
+				}
 			},
 
 			resetFilters() {
@@ -1758,7 +1720,7 @@
 				this.syncUrl(true);
 				return true;
 			},
-				async verifyTotpWithPrompt() {
+			async verifyTotpWithPrompt() {
 				let lastError = "";
 				while (true) {
 					const promptLines = [
@@ -1789,70 +1751,69 @@
 						lastError = error?.message || "Invalid TOTP code.";
 					}
 				}
-				},
-				setupTokenOptions() {
-					const token = String(this.settings.setupToken || "").trim();
-					if (!token) {
-						return {};
-					}
-					return {
-						headers: {
-							[DASHBOARD_SETUP_TOKEN_HEADER]: token,
-						},
-					};
-				},
-				promptSetupToken() {
-					const rawToken = window.prompt(
-						"Enter dashboard setup token (CODEX_LB_DASHBOARD_SETUP_TOKEN).",
+			},
+			setupTokenOptions() {
+				const token = String(this.settings.setupToken || "").trim();
+				if (!token) {
+					return {};
+				}
+				return {
+					headers: {
+						[DASHBOARD_SETUP_TOKEN_HEADER]: token,
+					},
+				};
+			},
+			promptSetupToken() {
+				const rawToken = window.prompt(
+					"Enter dashboard setup token (CODEX_LB_DASHBOARD_SETUP_TOKEN).",
+				);
+				if (rawToken === null) {
+					return "";
+				}
+				const token = String(rawToken || "").trim();
+				this.settings.setupToken = token;
+				return token;
+			},
+			async setupTotp() {
+				try {
+					const started = await postJson(
+						API_ENDPOINTS.dashboardAuthTotpSetupStart,
+						{},
+						"start TOTP setup",
+						this.setupTokenOptions(),
 					);
-					if (rawToken === null) {
-						return "";
-					}
-					const token = String(rawToken || "").trim();
-					this.settings.setupToken = token;
-					return token;
-				},
-				async setupTotp() {
-					try {
-						const started = await postJson(
-							API_ENDPOINTS.dashboardAuthTotpSetupStart,
-							{},
-							"start TOTP setup",
-							this.setupTokenOptions(),
-						);
-						this.settings.totpSetup.open = true;
-						this.settings.totpSetup.secret = started.secret || "";
-						this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
-						this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
-						this.settings.totpSetup.code = "";
-					} catch (error) {
-						const errorCode = String(error?.payload?.error?.code || "");
-						if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
-							const token = this.promptSetupToken();
-							if (token) {
-								try {
-									const started = await postJson(
-										API_ENDPOINTS.dashboardAuthTotpSetupStart,
-										{},
-										"start TOTP setup",
-										this.setupTokenOptions(),
-									);
-									this.settings.totpSetup.open = true;
-									this.settings.totpSetup.secret = started.secret || "";
-									this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
-									this.settings.totpSetup.qrSvgDataUri =
-										started.qrSvgDataUri || "";
-									this.settings.totpSetup.code = "";
-									return;
-								} catch (retryError) {
-									error = retryError;
-								}
+					this.settings.totpSetup.open = true;
+					this.settings.totpSetup.secret = started.secret || "";
+					this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
+					this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
+					this.settings.totpSetup.code = "";
+				} catch (error) {
+					const errorCode = String(error?.payload?.error?.code || "");
+					if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
+						const token = this.promptSetupToken();
+						if (token) {
+							try {
+								const started = await postJson(
+									API_ENDPOINTS.dashboardAuthTotpSetupStart,
+									{},
+									"start TOTP setup",
+									this.setupTokenOptions(),
+								);
+								this.settings.totpSetup.open = true;
+								this.settings.totpSetup.secret = started.secret || "";
+								this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
+								this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
+								this.settings.totpSetup.code = "";
+								return;
+							} catch (retryError) {
+								error = retryError;
 							}
 						}
-						this.openMessageBox({
-							tone: "error",
-							title: "TOTP setup failed",
-							message: error.message || "Failed to configure TOTP.",
+					}
+					this.openMessageBox({
+						tone: "error",
+						title: "TOTP setup failed",
+						message: error.message || "Failed to configure TOTP.",
 					});
 				}
 			},
@@ -1881,50 +1842,50 @@
 					return;
 				}
 
-					this.settings.totpSetup.isSubmitting = true;
-					try {
-						await postJson(
-							API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
-							{ secret, code },
-							"confirm TOTP setup",
-							this.setupTokenOptions(),
-						);
-						this.settings.totpConfigured = true;
-						this.cancelTotpSetup();
-						this.openMessageBox({
+				this.settings.totpSetup.isSubmitting = true;
+				try {
+					await postJson(
+						API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
+						{ secret, code },
+						"confirm TOTP setup",
+						this.setupTokenOptions(),
+					);
+					this.settings.totpConfigured = true;
+					this.cancelTotpSetup();
+					this.openMessageBox({
 						tone: "success",
 						title: "TOTP enabled",
 						message: "TOTP secret configured successfully.",
-						});
-					} catch (error) {
-						const errorCode = String(error?.payload?.error?.code || "");
-						if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
-							const token = this.promptSetupToken();
-							if (token) {
-								try {
-									await postJson(
-										API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
-										{ secret, code },
-										"confirm TOTP setup",
-										this.setupTokenOptions(),
-									);
-									this.settings.totpConfigured = true;
-									this.cancelTotpSetup();
-									this.openMessageBox({
-										tone: "success",
-										title: "TOTP enabled",
-										message: "TOTP secret configured successfully.",
-									});
-									return;
-								} catch (retryError) {
-									error = retryError;
-								}
+					});
+				} catch (error) {
+					const errorCode = String(error?.payload?.error?.code || "");
+					if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
+						const token = this.promptSetupToken();
+						if (token) {
+							try {
+								await postJson(
+									API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
+									{ secret, code },
+									"confirm TOTP setup",
+									this.setupTokenOptions(),
+								);
+								this.settings.totpConfigured = true;
+								this.cancelTotpSetup();
+								this.openMessageBox({
+									tone: "success",
+									title: "TOTP enabled",
+									message: "TOTP secret configured successfully.",
+								});
+								return;
+							} catch (retryError) {
+								error = retryError;
 							}
 						}
-						this.openMessageBox({
-							tone: "error",
-							title: "TOTP setup failed",
-							message: error.message || "Failed to confirm TOTP setup.",
+					}
+					this.openMessageBox({
+						tone: "error",
+						title: "TOTP setup failed",
+						message: error.message || "Failed to confirm TOTP setup.",
 					});
 				} finally {
 					this.settings.totpSetup.isSubmitting = false;
@@ -1937,49 +1898,27 @@
 				const code = String(rawCode || "")
 					.trim()
 					.replace(/\D/g, "");
-					if (!code) {
-						return;
-					}
-					const handleDisabled = () => {
-						this.settings.totpConfigured = false;
-						this.settings.totpRequiredOnLogin = false;
-						this.openMessageBox({
-							tone: "success",
-							title: "TOTP disabled",
-							message: "TOTP protection has been removed.",
-						});
-					};
-					try {
-						await postJson(
-							API_ENDPOINTS.dashboardAuthTotpDisable,
-							{ code },
-							"disable TOTP",
-						);
-						handleDisabled();
-					} catch (error) {
-						const errorCode = String(error?.payload?.error?.code || "");
-						if (error?.status === 401 && errorCode === "totp_required") {
-							try {
-								await postJson(
-									API_ENDPOINTS.dashboardAuthTotpVerify,
-									{ code },
-									"verify TOTP",
-								);
-								await postJson(
-									API_ENDPOINTS.dashboardAuthTotpDisable,
-									{ code },
-									"disable TOTP",
-								);
-								handleDisabled();
-								return;
-							} catch (retryError) {
-								error = retryError;
-							}
-						}
-						this.openMessageBox({
-							tone: "error",
-							title: "TOTP disable failed",
-							message: error.message || "Failed to disable TOTP.",
+				if (!code) {
+					return;
+				}
+				try {
+					await postJson(
+						API_ENDPOINTS.dashboardAuthTotpDisable,
+						{ code },
+						"disable TOTP",
+					);
+					this.settings.totpConfigured = false;
+					this.settings.totpRequiredOnLogin = false;
+					this.openMessageBox({
+						tone: "success",
+						title: "TOTP disabled",
+						message: "TOTP protection has been removed.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "TOTP disable failed",
+						message: error.message || "Failed to disable TOTP.",
 					});
 				}
 			},
@@ -2005,27 +1944,97 @@
 				if (this.refreshPromise) {
 					return this.refreshPromise;
 				}
-				const { preferredId } = options;
+				const { preferredId, silent = false } = options;
+				this.requestLogOptions.isLoading = true;
+				this.requestLogOptions.error = "";
+				this.settings.isLoading = true;
 				this.refreshPromise = (async () => {
-					const overviewParams = {
-						requestLimit: this.pagination.limit,
-						requestOffset: this.pagination.offset,
-					};
-					const overview = await fetchDashboardOverview(overviewParams);
-					const summary = overview?.summary || null;
-					const accounts = normalizeAccountsPayload(overview?.accounts || []);
-					const primaryUsage = normalizeUsagePayload(
-						overview?.windows?.primary || {},
-					);
-					const secondaryUsage = normalizeUsagePayload(
-						overview?.windows?.secondary || {},
-					);
-					const requestLogs = normalizeRequestLogsPayload(
-						overview?.requestLogs || [],
-					);
+					const params = buildRequestLogsQueryParams({
+						filters: this.filtersApplied,
+						pagination: this.pagination,
+					});
+
+					const [
+						accountsResult,
+						summaryResult,
+						primaryResult,
+						secondaryResult,
+						requestLogsResult,
+						requestLogOptionsResult,
+						settingsResult,
+						firewallResult,
+					] = await Promise.allSettled([
+						fetchAccounts(),
+						fetchUsageSummary(),
+						fetchUsageWindow("primary"),
+						fetchUsageWindow("secondary"),
+						fetchRequestLogs(params),
+						fetchRequestLogOptions({}),
+						fetchSettings(),
+						fetchFirewallIps(),
+					]);
+
+					const errors = [];
+					if (accountsResult.status !== "fulfilled") {
+						throw accountsResult.reason;
+					}
+					const summary =
+						summaryResult.status === "fulfilled" ? summaryResult.value : null;
+					if (summaryResult.status === "rejected") {
+						errors.push(summaryResult.reason);
+					}
+					const primaryUsage =
+						primaryResult.status === "fulfilled"
+							? normalizeUsagePayload(primaryResult.value)
+							: [];
+					if (primaryResult.status === "rejected") {
+						errors.push(primaryResult.reason);
+					}
+					const secondaryUsage =
+						secondaryResult.status === "fulfilled"
+							? normalizeUsagePayload(secondaryResult.value)
+							: [];
+					if (secondaryResult.status === "rejected") {
+						errors.push(secondaryResult.reason);
+					}
+					const requestLogs =
+						requestLogsResult.status === "fulfilled"
+							? normalizeRequestLogsPayload(requestLogsResult.value)
+							: [];
+					if (requestLogsResult.status === "rejected") {
+						errors.push(requestLogsResult.reason);
+					}
+
+					if (requestLogOptionsResult.status === "fulfilled") {
+						const payload = requestLogOptionsResult.value;
+						this.requestLogOptions.accountIds = Array.isArray(payload?.accountIds)
+							? payload.accountIds
+							: [];
+						this.requestLogOptions.modelOptions = Array.isArray(payload?.modelOptions)
+							? payload.modelOptions
+							: [];
+					} else {
+						this.requestLogOptions.error =
+							requestLogOptionsResult.reason?.message ||
+							"Failed to load request log options.";
+						errors.push(requestLogOptionsResult.reason);
+					}
+
+					const settings =
+						settingsResult.status === "fulfilled" ? settingsResult.value : null;
+					if (settingsResult.status === "rejected") {
+						errors.push(settingsResult.reason);
+					}
+					this.settings.hasLoaded = settingsResult.status === "fulfilled";
+
+					const firewall =
+						firewallResult.status === "fulfilled" ? firewallResult.value : null;
+					if (firewallResult.status === "rejected") {
+						errors.push(firewallResult.reason);
+					}
 
 					const mergedAccounts = mergeUsageIntoAccounts(
-						accounts,
+						accountsResult.value,
 						primaryUsage,
 						secondaryUsage,
 					);
@@ -2039,21 +2048,30 @@
 								requestLogs,
 								this.filtersApplied,
 							),
-							lastSyncAt: overview?.lastSyncAt || "",
+							settings,
+							firewall,
 						},
 						preferredId,
 					);
 
-					if (hasServerSideRequestFilters(this.filtersApplied)) {
-						await this.refreshRequests();
+					if (errors.length && !silent) {
+						this.openMessageBox({
+							tone: "warning",
+							title: "Partial data loaded",
+							message:
+								"Some usage endpoints failed. Account list loaded, but usage data may be incomplete.",
+							details: errors
+								.map((err) => err?.message || String(err))
+								.join("\n"),
+						});
 					}
-
-					this.ensureRequestLogOptions();
 				})();
 				try {
 					await this.refreshPromise;
 				} finally {
 					this.refreshPromise = null;
+					this.requestLogOptions.isLoading = false;
+					this.settings.isLoading = false;
 				}
 			},
 			applyData(data, preferredId) {
@@ -2073,38 +2091,39 @@
 				} else if (!this.accounts.selectedId && this.accounts.rows.length > 0) {
 					this.accounts.selectedId = this.accounts.rows[0].id;
 				}
-					this.dashboardData = buildDashboardDataFromApi({
-						summary: data.summary,
-						primaryUsage: data.primaryUsage,
-						secondaryUsage: data.secondaryUsage,
-						requestLogs: data.requestLogs,
-						lastSyncAt: data.lastSyncAt,
-					});
-					if (data.settings) {
-						this.settings.stickyThreadsEnabled = Boolean(
-							data.settings.stickyThreadsEnabled,
-						);
-						this.settings.preferEarlierResetAccounts = Boolean(
-							data.settings.preferEarlierResetAccounts,
-						);
-						this.settings.totpRequiredOnLogin = Boolean(
-							data.settings.totpRequiredOnLogin,
-						);
-						this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
-					}
-					this.ui.usageWindows = buildUsageWindowConfig(data.summary);
-					this.dashboard = buildDashboardView(this);
-					this.syncAccountSearchSelection();
-				},
+				this.dashboardData = buildDashboardDataFromApi({
+					summary: data.summary,
+					primaryUsage: data.primaryUsage,
+					secondaryUsage: data.secondaryUsage,
+					requestLogs: data.requestLogs,
+					settings: data.settings,
+				});
+				if (data.settings) {
+					this.settings.stickyThreadsEnabled = Boolean(
+						data.settings.stickyThreadsEnabled,
+					);
+					this.settings.preferEarlierResetAccounts = Boolean(
+						data.settings.preferEarlierResetAccounts,
+					);
+					this.settings.totpRequiredOnLogin = Boolean(
+						data.settings.totpRequiredOnLogin,
+					);
+					this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
+					this.settings.hasLoaded = true;
+				} else {
+					this.settings.hasLoaded = false;
+				}
+				if (data.firewall) {
+					this.firewall.mode = data.firewall.mode;
+					this.firewall.entries = data.firewall.entries;
+				}
+				this.ui.usageWindows = buildUsageWindowConfig(data.summary);
+				this.dashboard = buildDashboardView(this);
+				this.syncAccountSearchSelection();
+			},
 			async saveSettings() {
 				if (this.settings.isSaving) {
 					return;
-				}
-				if (!this.settings.hasLoaded) {
-					await this.ensureSettingsLoaded();
-					if (!this.settings.hasLoaded) {
-						return;
-					}
 				}
 				this.settings.isSaving = true;
 				try {
@@ -2113,33 +2132,145 @@
 						preferEarlierResetAccounts: this.settings.preferEarlierResetAccounts,
 						totpRequiredOnLogin: this.settings.totpRequiredOnLogin,
 					};
-					const updated = await putJson(
-						API_ENDPOINTS.settings,
-						payload,
-						"save settings",
-					);
+					let updated;
+					try {
+						updated = await putJson(
+							API_ENDPOINTS.settings,
+							payload,
+							"save settings",
+						);
+					} catch (error) {
+						this.openMessageBox({
+							tone: "error",
+							title: "Settings save failed",
+							message: error.message || "Failed to save settings.",
+						});
+						return;
+					}
+
 					const normalized = normalizeSettingsPayload(updated);
 					this.settings.stickyThreadsEnabled = normalized.stickyThreadsEnabled;
 					this.settings.preferEarlierResetAccounts =
 						normalized.preferEarlierResetAccounts;
 					this.settings.totpRequiredOnLogin = normalized.totpRequiredOnLogin;
 					this.settings.totpConfigured = normalized.totpConfigured;
+
 					if (this.settings.totpRequiredOnLogin) {
-						await this.ensureDashboardAccess();
+						try {
+							await this.ensureDashboardAccess();
+						} catch (error) {
+							this.openMessageBox({
+								tone: "warning",
+								title: "Settings saved",
+								message:
+									error.message ||
+									"Settings were saved, but dashboard access verification was not completed.",
+							});
+							return;
+						}
 					}
+
 					this.openMessageBox({
 						tone: "success",
 						title: "Settings saved",
 						message: "Settings updated.",
 					});
+				} finally {
+					this.settings.isSaving = false;
+				}
+			},
+			firewallModeLabel(mode) {
+				return mode === "allowlist_active" ? "Allowlist active" : "Allow all";
+			},
+			async refreshFirewall() {
+				if (this.firewall.isLoading) {
+					return;
+				}
+				this.firewall.isLoading = true;
+				try {
+					const payload = await fetchFirewallIps();
+					this.firewall.mode = payload.mode;
+					this.firewall.entries = payload.entries;
 				} catch (error) {
 					this.openMessageBox({
 						tone: "error",
-						title: "Settings save failed",
-						message: error.message || "Failed to save settings.",
+						title: "Firewall load failed",
+						message: error.message || "Failed to load firewall IPs.",
 					});
 				} finally {
-					this.settings.isSaving = false;
+					this.firewall.isLoading = false;
+				}
+			},
+			async addFirewallIp() {
+				if (this.firewall.isSaving) {
+					return;
+				}
+				const ipAddress = String(this.firewall.ipInput || "").trim();
+				if (!ipAddress) {
+					this.openMessageBox({
+						tone: "warning",
+						title: "IP required",
+						message: "Enter an IP address.",
+					});
+					return;
+				}
+				this.firewall.isSaving = true;
+				try {
+					await postJson(
+						API_ENDPOINTS.firewallIps,
+						{ ipAddress },
+						"add firewall IP",
+					);
+					this.firewall.ipInput = "";
+					await this.refreshFirewall();
+					this.openMessageBox({
+						tone: "success",
+						title: "Firewall updated",
+						message: "IP address added.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Add IP failed",
+						message: error.message || "Failed to add IP address.",
+					});
+				} finally {
+					this.firewall.isSaving = false;
+				}
+			},
+			async removeFirewallIp(ipAddress) {
+				if (!ipAddress || this.firewall.isSaving) {
+					return;
+				}
+				const confirmed = await this.openConfirmBox({
+					title: "Remove IP?",
+					message: `Remove ${ipAddress} from firewall allowlist?`,
+					confirmLabel: "Remove",
+					cancelLabel: "Cancel",
+				});
+				if (!confirmed) {
+					return;
+				}
+				this.firewall.isSaving = true;
+				try {
+					await deleteJson(
+						API_ENDPOINTS.firewallIpDelete(ipAddress),
+						"remove firewall IP",
+					);
+					await this.refreshFirewall();
+					this.openMessageBox({
+						tone: "success",
+						title: "Firewall updated",
+						message: "IP address removed.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Remove IP failed",
+						message: error.message || "Failed to remove IP address.",
+					});
+				} finally {
+					this.firewall.isSaving = false;
 				}
 			},
 			focusAccountSearch() {

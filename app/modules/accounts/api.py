@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from app.core.errors import dashboard_error
 from app.dependencies import AccountsContext, get_accounts_context
@@ -30,9 +33,14 @@ async def import_account(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountImportResponse | JSONResponse:
     raw = await auth_json.read()
+    if not raw:
+        return JSONResponse(
+            status_code=400,
+            content=dashboard_error("invalid_auth_json", "Invalid auth.json payload"),
+        )
     try:
         return await context.service.import_account(raw)
-    except Exception:
+    except (json.JSONDecodeError, ValidationError, ValueError):
         return JSONResponse(
             status_code=400,
             content=dashboard_error("invalid_auth_json", "Invalid auth.json payload"),

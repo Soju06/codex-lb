@@ -135,7 +135,13 @@ async def v1_chat_completions(
     except StopAsyncIteration:
         first = None
     except ProxyResponseError as exc:
-        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=rate_limit_headers)
+        error = _parse_error_envelope(exc.payload)
+        status_code = exc.status_code if exc.status_code != 502 else _status_for_error(error.error)
+        return JSONResponse(
+            status_code=status_code,
+            content=error.model_dump(mode="json", exclude_none=True),
+            headers=rate_limit_headers,
+        )
 
     stream_with_first = _prepend_first(first, stream)
     if payload.stream:
@@ -149,9 +155,7 @@ async def v1_chat_completions(
 
     result = await collect_chat_completion(stream_with_first, model=payload.model)
     if isinstance(result, OpenAIErrorEnvelopeModel):
-        error = result.error
-        code = error.code if error else None
-        status_code = 503 if code == "no_accounts" else 502
+        status_code = _status_for_error(result.error)
         return JSONResponse(
             content=result.model_dump(mode="json", exclude_none=True),
             status_code=status_code,
@@ -400,6 +404,28 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
 
 
 def _status_for_error(error_value: OpenAIError | None) -> int:
-    if error_value and error_value.code == "no_accounts":
+    if error_value is None:
+        return 502
+    code = (error_value.code or "").lower()
+    error_type = (error_value.type or "").lower()
+    if code == "no_accounts":
+        return 503
+    if code in {"invalid_api_key"}:
+        return 401
+    if code in {"insufficient_permissions"}:
+        return 403
+    if code in {"not_found"}:
+        return 404
+    if code in {
+        "rate_limit_exceeded",
+        "usage_limit_reached",
+        "insufficient_quota",
+        "usage_not_included",
+        "quota_exceeded",
+    }:
+        return 429
+    if code in {"invalid_request_error"} or error_type == "invalid_request_error":
+        return 400
+    if code in {"upstream_unavailable"}:
         return 503
     return 502

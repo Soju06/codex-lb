@@ -35,11 +35,18 @@ def normalize_tool_type(tool_type: str) -> str:
 
 
 def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
+    if isinstance(choice, str):
+        normalized_type = normalize_tool_type(choice)
+        if normalized_type in UNSUPPORTED_TOOL_TYPES:
+            raise ValueError(f"Unsupported tool type: {normalized_type}")
+        return normalized_type
     if not is_json_mapping(choice):
         return choice
     tool_type = choice.get("type")
     if isinstance(tool_type, str):
         normalized_type = normalize_tool_type(tool_type)
+        if normalized_type in UNSUPPORTED_TOOL_TYPES:
+            raise ValueError(f"Unsupported tool type: {normalized_type}")
         if normalized_type != tool_type:
             updated = dict(choice)
             updated["type"] = normalized_type

@@ -102,22 +102,28 @@ def summarize_usage_window(
     account_map: Mapping[str, Account],
     window: str,
 ) -> UsageWindowSummary:
+    rows_by_account: dict[str, UsageWindowRow] = {}
     total_capacity = 0.0
     total_used = 0.0
     reset_candidates: list[int] = []
     window_minutes: int | None = None
 
     for row in usage_rows:
+        rows_by_account[row.account_id] = row
         if row.reset_at is not None:
             reset_candidates.append(row.reset_at)
         if row.window_minutes is not None and row.window_minutes > 0:
             if window_minutes is None or row.window_minutes > window_minutes:
                 window_minutes = row.window_minutes
-        account = account_map.get(row.account_id)
-        capacity = capacity_for_plan(account.plan_type if account else None, window)
-        if row.used_percent is None or capacity is None:
+
+    for account_id, account in account_map.items():
+        capacity = capacity_for_plan(account.plan_type, window)
+        if capacity is None:
             continue
         total_capacity += capacity
+        row = rows_by_account.get(account_id)
+        if row is None or row.used_percent is None:
+            continue
         total_used += (capacity * float(row.used_percent)) / 100.0
 
     if window_minutes is None:

@@ -35,6 +35,29 @@ class ModelEntry(BaseModel):
 
 
 MODEL_CATALOG: dict[str, ModelEntry] = {
+    "gpt-5.3": ModelEntry(
+        name="GPT 5.3",
+        limit=ModelLimits(context=272000, output=128000),
+        modalities=ModelModalities(input=["text", "image"], output=["text"]),
+        variants={
+            "none": ModelVariant(reasoningEffort="none", reasoningSummary="auto", textVerbosity="medium"),
+            "low": ModelVariant(reasoningEffort="low", reasoningSummary="auto", textVerbosity="medium"),
+            "medium": ModelVariant(reasoningEffort="medium", reasoningSummary="auto", textVerbosity="medium"),
+            "high": ModelVariant(reasoningEffort="high", reasoningSummary="detailed", textVerbosity="medium"),
+            "xhigh": ModelVariant(reasoningEffort="xhigh", reasoningSummary="detailed", textVerbosity="medium"),
+        },
+    ),
+    "gpt-5.3-codex": ModelEntry(
+        name="GPT 5.3 Codex",
+        limit=ModelLimits(context=272000, output=128000),
+        modalities=ModelModalities(input=["text", "image"], output=["text"]),
+        variants={
+            "low": ModelVariant(reasoningEffort="low", reasoningSummary="auto", textVerbosity="medium"),
+            "medium": ModelVariant(reasoningEffort="medium", reasoningSummary="auto", textVerbosity="medium"),
+            "high": ModelVariant(reasoningEffort="high", reasoningSummary="detailed", textVerbosity="medium"),
+            "xhigh": ModelVariant(reasoningEffort="xhigh", reasoningSummary="detailed", textVerbosity="medium"),
+        },
+    ),
     "gpt-5.2": ModelEntry(
         name="GPT 5.2",
         limit=ModelLimits(context=272000, output=128000),

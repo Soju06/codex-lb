@@ -35,6 +35,13 @@ def test_get_pricing_for_model_alias():
     assert price.output_per_1m == 2.0
 
 
+def test_get_pricing_for_model_gpt_5_3_alias():
+    result = get_pricing_for_model("gpt-5.3-codex-2026", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+    assert result is not None
+    model, _ = result
+    assert model == "gpt-5.3"
+
+
 def test_calculate_cost_from_usage_cached_tokens():
     usage = ResponseUsage(
         input_tokens=1000,

@@ -15,6 +15,7 @@ async def test_v1_models_list(async_client):
     assert isinstance(data, list)
     ids = {item["id"] for item in data}
     assert "gpt-5.2" in ids
+    assert "gpt-5.3-codex" in ids
     for item in data:
         assert item["object"] == "model"
         assert item["owned_by"] == "codex-lb"

@@ -57,7 +57,7 @@ Open [localhost:2455](http://localhost:2455) → Add account → Done.
 Add to `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5.2-codex"
+model = "gpt-5.3-codex"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 

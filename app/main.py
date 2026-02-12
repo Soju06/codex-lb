@@ -3,9 +3,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings_cache import get_settings_cache
@@ -72,20 +71,28 @@ def create_app() -> FastAPI:
 
     static_dir = Path(__file__).parent / "static"
     index_html = static_dir / "index.html"
+    static_root = static_dir.resolve()
+    frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
+    excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
 
     @app.get("/", include_in_schema=False)
-    async def root_redirect():
-        return RedirectResponse(url="/dashboard", status_code=302)
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa_fallback(path: str = ""):
+        normalized = path.lstrip("/")
+        if normalized and any(
+            normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in excluded_prefixes
+        ):
+            raise HTTPException(status_code=404, detail="Not found")
 
-    @app.get("/accounts", include_in_schema=False)
-    async def spa_accounts():
+        if normalized:
+            candidate = (static_dir / normalized).resolve()
+            if candidate.is_relative_to(static_root) and candidate.is_file():
+                return FileResponse(candidate)
+
+        if not index_html.is_file():
+            raise HTTPException(status_code=503, detail=frontend_build_hint)
+
         return FileResponse(index_html, media_type="text/html")
-
-    @app.get("/settings", include_in_schema=False)
-    async def spa_settings():
-        return FileResponse(index_html, media_type="text/html")
-
-    app.mount("/dashboard", StaticFiles(directory=static_dir, html=True), name="dashboard")
 
     return app
 

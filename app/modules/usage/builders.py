@@ -21,7 +21,6 @@ from app.core.utils.time import from_epoch_seconds
 from app.db.models import Account, RequestLog
 from app.modules.usage.schemas import (
     UsageCost,
-    UsageCostByModel,
     UsageHistoryItem,
     UsageHistoryResponse,
     UsageMetrics,
@@ -96,7 +95,6 @@ def _build_account_history(
         results.append(
             UsageHistoryItem(
                 account_id=account_id,
-                email=account.email,
                 remaining_percent_avg=remaining_percent,
                 capacity_credits=float(capacity or 0.0),
                 remaining_credits=float(remaining_credits),
@@ -183,7 +181,6 @@ def _cost_summary_to_model(cost: UsageCostSummary) -> UsageCost:
     return UsageCost(
         currency=cost.currency,
         totalUsd7d=cost.total_usd_7d,
-        by_model=[UsageCostByModel(model=item.model, usd=item.usd) for item in cost.by_model],
     )
 
 

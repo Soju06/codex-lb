@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import anyio
-from sqlalchemy import String, and_, cast, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +81,126 @@ class RequestLogsRepository:
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
     ) -> list[RequestLog]:
+        conditions = self._build_filters(
+            search=search,
+            since=since,
+            until=until,
+            account_ids=account_ids,
+            model_options=model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            include_success=include_success,
+            include_error_other=include_error_other,
+            error_codes_in=error_codes_in,
+            error_codes_excluding=error_codes_excluding,
+        )
+
+        stmt = (
+            select(RequestLog)
+            .outerjoin(Account, Account.id == RequestLog.account_id)
+            .order_by(RequestLog.requested_at.desc())
+        )
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+        if offset:
+            stmt = stmt.offset(offset)
+        if limit:
+            stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_recent(
+        self,
+        search: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        account_ids: list[str] | None = None,
+        model_options: list[tuple[str, str | None]] | None = None,
+        models: list[str] | None = None,
+        reasoning_efforts: list[str] | None = None,
+        include_success: bool = True,
+        include_error_other: bool = True,
+        error_codes_in: list[str] | None = None,
+        error_codes_excluding: list[str] | None = None,
+    ) -> int:
+        conditions = self._build_filters(
+            search=search,
+            since=since,
+            until=until,
+            account_ids=account_ids,
+            model_options=model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            include_success=include_success,
+            include_error_other=include_error_other,
+            error_codes_in=error_codes_in,
+            error_codes_excluding=error_codes_excluding,
+        )
+        stmt = select(func.count()).select_from(RequestLog).outerjoin(Account, Account.id == RequestLog.account_id)
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def list_filter_options(
+        self,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        include_success: bool = True,
+        include_error_other: bool = True,
+        error_codes_in: list[str] | None = None,
+        error_codes_excluding: list[str] | None = None,
+    ) -> tuple[list[str], list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+        conditions = self._build_filters(
+            since=since,
+            until=until,
+            include_success=include_success,
+            include_error_other=include_error_other,
+            error_codes_in=error_codes_in,
+            error_codes_excluding=error_codes_excluding,
+        )
+
+        account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
+        model_stmt = (
+            select(RequestLog.model, RequestLog.reasoning_effort)
+            .distinct()
+            .order_by(RequestLog.model.asc(), RequestLog.reasoning_effort.asc())
+        )
+        status_stmt = (
+            select(RequestLog.status, RequestLog.error_code)
+            .distinct()
+            .order_by(RequestLog.status.asc(), RequestLog.error_code.asc())
+        )
+        if conditions:
+            clause = and_(*conditions)
+            account_stmt = account_stmt.where(clause)
+            model_stmt = model_stmt.where(clause)
+            status_stmt = status_stmt.where(clause)
+
+        account_rows = await self._session.execute(account_stmt)
+        model_rows = await self._session.execute(model_stmt)
+        status_rows = await self._session.execute(status_stmt)
+
+        account_ids = [row[0] for row in account_rows.all() if row[0]]
+        model_options = [(row[0], row[1]) for row in model_rows.all() if row[0]]
+        status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
+        return account_ids, model_options, status_values
+
+    def _build_filters(
+        self,
+        *,
+        search: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        account_ids: list[str] | None = None,
+        model_options: list[tuple[str, str | None]] | None = None,
+        models: list[str] | None = None,
+        reasoning_efforts: list[str] | None = None,
+        include_success: bool = True,
+        include_error_other: bool = True,
+        error_codes_in: list[str] | None = None,
+        error_codes_excluding: list[str] | None = None,
+    ) -> list:
         conditions = []
         if since is not None:
             conditions.append(RequestLog.requested_at >= since)
@@ -144,70 +264,7 @@ class RequestLogsRepository:
                     cast(RequestLog.latency_ms, String).ilike(search_pattern),
                 )
             )
-
-        stmt = (
-            select(RequestLog)
-            .outerjoin(Account, Account.id == RequestLog.account_id)
-            .order_by(RequestLog.requested_at.desc())
-        )
-        if conditions:
-            stmt = stmt.where(and_(*conditions))
-        if offset:
-            stmt = stmt.offset(offset)
-        if limit:
-            stmt = stmt.limit(limit)
-        result = await self._session.execute(stmt)
-        return list(result.scalars().all())
-
-    async def list_filter_options(
-        self,
-        since: datetime | None = None,
-        until: datetime | None = None,
-        include_success: bool = True,
-        include_error_other: bool = True,
-        error_codes_in: list[str] | None = None,
-        error_codes_excluding: list[str] | None = None,
-    ) -> tuple[list[str], list[tuple[str, str | None]]]:
-        conditions = []
-        if since is not None:
-            conditions.append(RequestLog.requested_at >= since)
-        if until is not None:
-            conditions.append(RequestLog.requested_at <= until)
-        status_conditions = []
-        if include_success:
-            status_conditions.append(RequestLog.status == "success")
-        if error_codes_in:
-            status_conditions.append(and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in)))
-        if include_error_other:
-            error_clause = [RequestLog.status == "error"]
-            if error_codes_excluding:
-                error_clause.append(
-                    or_(
-                        RequestLog.error_code.is_(None),
-                        ~RequestLog.error_code.in_(error_codes_excluding),
-                    )
-                )
-            status_conditions.append(and_(*error_clause))
-        if status_conditions:
-            conditions.append(or_(*status_conditions))
-
-        account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
-        model_stmt = (
-            select(RequestLog.model, RequestLog.reasoning_effort)
-            .distinct()
-            .order_by(RequestLog.model.asc(), RequestLog.reasoning_effort.asc())
-        )
-        if conditions:
-            clause = and_(*conditions)
-            account_stmt = account_stmt.where(clause)
-            model_stmt = model_stmt.where(clause)
-
-        account_rows = await self._session.execute(account_stmt)
-        model_rows = await self._session.execute(model_stmt)
-
-        account_ids = [row[0] for row in account_rows.all() if row[0]]
-        model_options = [(row[0], row[1]) for row in model_rows.all() if row[0]]
-        return account_ids, model_options
+        return conditions
 
 
 async def _safe_rollback(session: AsyncSession) -> None:

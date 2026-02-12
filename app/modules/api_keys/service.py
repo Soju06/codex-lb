@@ -5,11 +5,40 @@ import secrets
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
+from typing import Protocol
 from uuid import uuid4
 
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey
-from app.modules.api_keys.repository import ApiKeysRepository
+
+
+class ApiKeysRepositoryProtocol(Protocol):
+    async def create(self, row: ApiKey) -> ApiKey: ...
+
+    async def get_by_id(self, key_id: str) -> ApiKey | None: ...
+
+    async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
+
+    async def list_all(self) -> list[ApiKey]: ...
+
+    async def update(
+        self,
+        key_id: str,
+        *,
+        name: str | object = ...,
+        allowed_models: str | None | object = ...,
+        weekly_token_limit: int | None | object = ...,
+        expires_at: datetime | None | object = ...,
+        is_active: bool | object = ...,
+        key_hash: str | object = ...,
+        key_prefix: str | object = ...,
+    ) -> ApiKey | None: ...
+
+    async def delete(self, key_id: str) -> bool: ...
+
+    async def increment_weekly_usage(self, key_id: str, token_count: int) -> None: ...
+
+    async def reset_weekly_usage(self, key_id: str, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool: ...
 
 
 class ApiKeyNotFoundError(ValueError):
@@ -69,7 +98,7 @@ class ApiKeyCreatedData(ApiKeyData):
 
 
 class ApiKeysService:
-    def __init__(self, repository: ApiKeysRepository) -> None:
+    def __init__(self, repository: ApiKeysRepositoryProtocol) -> None:
         self._repository = repository
 
     async def create_key(self, payload: ApiKeyCreateData) -> ApiKeyCreatedData:

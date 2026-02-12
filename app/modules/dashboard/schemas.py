@@ -6,7 +6,6 @@ from typing import List
 from pydantic import Field
 
 from app.modules.accounts.schemas import AccountSummary
-from app.modules.request_logs.schemas import RequestLogEntry
 from app.modules.shared.schemas import DashboardModel
 from app.modules.usage.schemas import UsageSummaryResponse, UsageWindowResponse
 
@@ -21,4 +20,3 @@ class DashboardOverviewResponse(DashboardModel):
     accounts: List[AccountSummary] = Field(default_factory=list)
     summary: UsageSummaryResponse
     windows: DashboardUsageWindows
-    request_logs: List[RequestLogEntry] = Field(default_factory=list)

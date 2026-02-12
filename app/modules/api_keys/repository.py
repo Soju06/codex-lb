@@ -97,6 +97,7 @@ class ApiKeysRepository:
             .where(ApiKey.id == key_id)
             .where(ApiKey.weekly_reset_at == expected_reset_at)
             .values(weekly_tokens_used=0, weekly_reset_at=new_reset_at)
+            .returning(ApiKey.id)
         )
         await self._session.commit()
-        return bool(result.rowcount and result.rowcount > 0)
+        return result.scalar_one_or_none() is not None

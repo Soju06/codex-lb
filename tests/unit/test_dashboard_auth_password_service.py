@@ -34,16 +34,30 @@ class _FakeRepository:
     async def get_password_hash(self) -> str | None:
         return self.settings.password_hash
 
-    async def set_password_hash(self, password_hash: str):
+    async def set_password_hash(self, password_hash: str) -> _FakeSettings:
         self.settings.password_hash = password_hash
         return self.settings
 
-    async def clear_password_and_totp(self):
+    async def clear_password_and_totp(self) -> _FakeSettings:
         self.settings.password_hash = None
         self.settings.totp_required_on_login = False
         self.settings.totp_secret_encrypted = None
         self.settings.totp_last_verified_step = None
         return self.settings
+
+    async def set_totp_secret(self, secret_encrypted: bytes | None) -> _FakeSettings:
+        self.settings.totp_secret_encrypted = secret_encrypted
+        self.settings.totp_last_verified_step = None
+        if secret_encrypted is None:
+            self.settings.totp_required_on_login = False
+        return self.settings
+
+    async def try_advance_totp_last_verified_step(self, step: int) -> bool:
+        current = self.settings.totp_last_verified_step
+        if current is not None and current >= step:
+            return False
+        self.settings.totp_last_verified_step = step
+        return True
 
 
 @pytest.mark.asyncio

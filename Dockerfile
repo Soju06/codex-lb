@@ -1,5 +1,16 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.13-slim AS build
+FROM oven/bun:1.3.7-alpine AS frontend-build
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/bun.lock ./
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
+
+COPY frontend ./
+RUN bun run build
+
+FROM python:3.13-slim AS python-build
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -29,8 +40,9 @@ RUN adduser --disabled-password --gecos "" app \
     && mkdir -p /var/lib/codex-lb \
     && chown -R app:app /var/lib/codex-lb
 
-COPY --from=build /opt/venv /opt/venv
+COPY --from=python-build /opt/venv /opt/venv
 COPY app app
+COPY --from=frontend-build /app/app/static app/static
 
 USER app
 EXPOSE 2455 1455

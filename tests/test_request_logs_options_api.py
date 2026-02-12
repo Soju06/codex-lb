@@ -70,6 +70,7 @@ async def test_request_logs_options_returns_distinct_accounts_and_models(async_c
         {"model": "gpt-4o", "reasoningEffort": None},
         {"model": "gpt-5.1", "reasoningEffort": None},
     ]
+    assert payload["statuses"] == ["ok", "rate_limit"]
 
 
 @pytest.mark.asyncio
@@ -109,3 +110,4 @@ async def test_request_logs_options_respects_status_filter(async_client, db_setu
     payload = response.json()
     assert payload["accountIds"] == ["acc_opt_ok"]
     assert payload["modelOptions"] == [{"model": "gpt-5.1", "reasoningEffort": None}]
+    assert payload["statuses"] == ["ok"]

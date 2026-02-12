@@ -19,9 +19,16 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+app/static/assets/
+app/static/vite.svg
+app/static/index.html
+app/static/components
 
 # Node
 node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
 
 # Editors/OS
 .DS_Store
@@ -36,7 +43,6 @@ node_modules/
 .worktrees/
 certs/
 
-app/static/components
 .codex-lb/
 
 .specstory/

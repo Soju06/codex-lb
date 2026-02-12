@@ -6,19 +6,40 @@ from collections import deque
 from dataclasses import dataclass
 from io import BytesIO
 from time import time
+from typing import Protocol
 
 import bcrypt
 import segno
 
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.crypto import TokenEncryptor
-from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_auth.schemas import DashboardAuthSessionResponse, TotpSetupStartResponse
 
 DASHBOARD_SESSION_COOKIE = "codex_lb_dashboard_session"
 _SESSION_TTL_SECONDS = 12 * 60 * 60
 _TOTP_ISSUER = "codex-lb"
 _TOTP_ACCOUNT = "dashboard"
+
+
+class DashboardAuthSettingsProtocol(Protocol):
+    password_hash: str | None
+    totp_required_on_login: bool
+    totp_secret_encrypted: bytes | None
+    totp_last_verified_step: int | None
+
+
+class DashboardAuthRepositoryProtocol(Protocol):
+    async def get_settings(self) -> DashboardAuthSettingsProtocol: ...
+
+    async def get_password_hash(self) -> str | None: ...
+
+    async def set_password_hash(self, password_hash: str) -> DashboardAuthSettingsProtocol: ...
+
+    async def clear_password_and_totp(self) -> DashboardAuthSettingsProtocol: ...
+
+    async def set_totp_secret(self, secret_encrypted: bytes | None) -> DashboardAuthSettingsProtocol: ...
+
+    async def try_advance_totp_last_verified_step(self, step: int) -> bool: ...
 
 
 class TotpAlreadyConfiguredError(ValueError):
@@ -156,7 +177,7 @@ class TotpRateLimiter:
 
 
 class DashboardAuthService:
-    def __init__(self, repository: DashboardAuthRepository, session_store: DashboardSessionStore) -> None:
+    def __init__(self, repository: DashboardAuthRepositoryProtocol, session_store: DashboardSessionStore) -> None:
         self._repository = repository
         self._session_store = session_store
         self._encryptor = TokenEncryptor()

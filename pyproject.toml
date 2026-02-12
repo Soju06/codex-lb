@@ -84,5 +84,8 @@ codex-lb = "app.cli:main"
 requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+artifacts = ["app/static/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

@@ -6,6 +6,7 @@ from datetime import datetime
 from app.modules.request_logs.mappers import (
     QUOTA_CODES,
     RATE_LIMIT_CODES,
+    normalize_log_status,
     to_request_log_entry,
 )
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -30,6 +31,14 @@ class RequestLogStatusFilter:
 class RequestLogFilterOptions:
     account_ids: list[str]
     model_options: list[RequestLogModelOption]
+    statuses: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class RequestLogsPage:
+    requests: list[RequestLogEntry]
+    total: int
+    has_more: bool
 
 
 class RequestLogsService:
@@ -48,8 +57,11 @@ class RequestLogsService:
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         status: list[str] | None = None,
-    ) -> list[RequestLogEntry]:
+    ) -> RequestLogsPage:
         status_filter = _map_status_filter(status)
+        normalized_model_options = (
+            [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
+        )
         logs = await self._repo.list_recent(
             limit=limit,
             offset=offset,
@@ -57,9 +69,7 @@ class RequestLogsService:
             since=since,
             until=until,
             account_ids=account_ids,
-            model_options=(
-                [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
-            ),
+            model_options=normalized_model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=status_filter.include_success,
@@ -67,7 +77,25 @@ class RequestLogsService:
             error_codes_in=status_filter.error_codes_in,
             error_codes_excluding=status_filter.error_codes_excluding,
         )
-        return [to_request_log_entry(log) for log in logs]
+        total = await self._repo.count_recent(
+            search=search,
+            since=since,
+            until=until,
+            account_ids=account_ids,
+            model_options=normalized_model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            include_success=status_filter.include_success,
+            include_error_other=status_filter.include_error_other,
+            error_codes_in=status_filter.error_codes_in,
+            error_codes_excluding=status_filter.error_codes_excluding,
+        )
+        requests = [to_request_log_entry(log) for log in logs]
+        return RequestLogsPage(
+            requests=requests,
+            total=total,
+            has_more=offset + limit < total,
+        )
 
     async def list_filter_options(
         self,
@@ -76,7 +104,7 @@ class RequestLogsService:
         status: list[str] | None = None,
     ) -> RequestLogFilterOptions:
         status_filter = _map_status_filter(status)
-        account_ids, model_options = await self._repo.list_filter_options(
+        account_ids, model_options, status_values = await self._repo.list_filter_options(
             since=since,
             until=until,
             include_success=status_filter.include_success,
@@ -90,6 +118,7 @@ class RequestLogsService:
                 RequestLogModelOption(model=model, reasoning_effort=reasoning_effort)
                 for model, reasoning_effort in model_options
             ],
+            statuses=_normalize_status_values(status_values),
         )
 
 
@@ -127,3 +156,9 @@ def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
         error_codes_in=sorted(error_codes_in) if error_codes_in else None,
         error_codes_excluding=sorted(RATE_LIMIT_CODES | QUOTA_CODES) if include_error_other else None,
     )
+
+
+def _normalize_status_values(values: list[tuple[str, str | None]]) -> list[str]:
+    normalized = {normalize_log_status(status, error_code) for status, error_code in values}
+    ordered = ["ok", "rate_limit", "quota", "error"]
+    return [status for status in ordered if status in normalized]

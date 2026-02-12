@@ -57,6 +57,7 @@ class DashboardAuthRepository:
                 )
             )
             .values(totp_last_verified_step=step)
+            .returning(DashboardSettings.id)
         )
         await self._session.commit()
-        return bool(result.rowcount and result.rowcount > 0)
+        return result.scalar_one_or_none() is not None

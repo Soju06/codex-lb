@@ -38,6 +38,9 @@ async def run(session: AsyncSession) -> None:
     if "totp_required_on_login" in columns:
         insert_columns.append("totp_required_on_login")
         params["totp_required_on_login"] = False
+    if "api_key_auth_enabled" in columns:
+        insert_columns.append("api_key_auth_enabled")
+        params["api_key_auth_enabled"] = False
 
     column_list = ", ".join(insert_columns)
     values_list = ", ".join(f":{name}" for name in insert_columns)

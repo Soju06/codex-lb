@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from time import time
 
+import bcrypt
 import segno
 
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
@@ -36,9 +37,26 @@ class TotpInvalidSetupError(ValueError):
     pass
 
 
+class PasswordAlreadyConfiguredError(ValueError):
+    pass
+
+
+class PasswordNotConfiguredError(ValueError):
+    pass
+
+
+class InvalidCredentialsError(ValueError):
+    pass
+
+
+class PasswordSessionRequiredError(ValueError):
+    pass
+
+
 @dataclass(slots=True)
 class DashboardSessionState:
     expires_at: int
+    password_verified: bool
     totp_verified: bool
 
 
@@ -51,9 +69,12 @@ class DashboardSessionStore:
             self._encryptor = TokenEncryptor()
         return self._encryptor
 
-    def create(self, *, totp_verified: bool) -> str:
+    def create(self, *, password_verified: bool, totp_verified: bool) -> str:
         expires_at = int(time()) + _SESSION_TTL_SECONDS
-        payload = json.dumps({"exp": expires_at, "tv": totp_verified}, separators=(",", ":"))
+        payload = json.dumps(
+            {"exp": expires_at, "pw": password_verified, "tv": totp_verified},
+            separators=(",", ":"),
+        )
         return self._get_encryptor().encrypt(payload).decode("ascii")
 
     def get(self, session_id: str | None) -> DashboardSessionState | None:
@@ -71,12 +92,19 @@ class DashboardSessionStore:
         except Exception:
             return None
         exp = data.get("exp")
+        pw = data.get("pw")
         tv = data.get("tv")
-        if not isinstance(exp, int) or not isinstance(tv, bool):
+        if not isinstance(exp, int) or not isinstance(pw, bool) or not isinstance(tv, bool):
             return None
         if exp < int(time()):
             return None
-        return DashboardSessionState(expires_at=exp, totp_verified=tv)
+        return DashboardSessionState(expires_at=exp, password_verified=pw, totp_verified=tv)
+
+    def is_password_verified(self, session_id: str | None) -> bool:
+        state = self.get(session_id)
+        if state is None:
+            return False
+        return state.password_verified
 
     def is_totp_verified(self, session_id: str | None) -> bool:
         state = self.get(session_id)
@@ -135,16 +163,43 @@ class DashboardAuthService:
 
     async def get_session_state(self, session_id: str | None) -> DashboardAuthSessionResponse:
         settings = await self._repository.get_settings()
-        totp_required = settings.totp_required_on_login
+        password_required = settings.password_hash is not None
+        totp_required = password_required and settings.totp_required_on_login
         totp_configured = settings.totp_secret_encrypted is not None
-        authenticated = True
-        if totp_required:
-            authenticated = self._session_store.is_totp_verified(session_id)
+        if not password_required:
+            authenticated = True
+        else:
+            state = self._session_store.get(session_id)
+            authenticated = bool(state and state.password_verified)
+            if authenticated and totp_required:
+                authenticated = bool(state and state.totp_verified)
         return DashboardAuthSessionResponse(
             authenticated=authenticated,
+            password_required=password_required,
             totp_required_on_login=totp_required,
             totp_configured=totp_configured,
         )
+
+    async def setup_password(self, password: str) -> None:
+        current = await self._repository.get_password_hash()
+        if current is not None:
+            raise PasswordAlreadyConfiguredError("Password is already configured")
+        await self._repository.set_password_hash(_hash_password(password))
+
+    async def verify_password(self, password: str) -> None:
+        current = await self._repository.get_password_hash()
+        if current is None:
+            raise PasswordNotConfiguredError("Password is not configured")
+        if not _check_password(password, current):
+            raise InvalidCredentialsError("Invalid credentials")
+
+    async def change_password(self, current_password: str, new_password: str) -> None:
+        await self.verify_password(current_password)
+        await self._repository.set_password_hash(_hash_password(new_password))
+
+    async def remove_password(self, password: str) -> None:
+        await self.verify_password(password)
+        await self._repository.clear_password_and_totp()
 
     async def start_totp_setup(self) -> TotpSetupStartResponse:
         settings = await self._repository.get_settings()
@@ -170,7 +225,10 @@ class DashboardAuthService:
             raise TotpInvalidCodeError("Invalid TOTP code")
         await self._repository.set_totp_secret(self._encryptor.encrypt(secret))
 
-    async def verify_totp(self, code: str) -> str:
+    async def verify_totp(self, *, session_id: str | None, code: str) -> str:
+        session = self._session_store.get(session_id)
+        if session is None or not session.password_verified:
+            raise PasswordSessionRequiredError("Password-authenticated session is required")
         settings = await self._repository.get_settings()
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
@@ -187,9 +245,12 @@ class DashboardAuthService:
         updated = await self._repository.try_advance_totp_last_verified_step(verification.matched_step)
         if not updated:
             raise TotpInvalidCodeError("Invalid TOTP code")
-        return self._session_store.create(totp_verified=True)
+        return self._session_store.create(password_verified=True, totp_verified=True)
 
-    async def disable_totp(self, code: str) -> None:
+    async def disable_totp(self, *, session_id: str | None, code: str) -> None:
+        session = self._session_store.get(session_id)
+        if session is None or not session.password_verified:
+            raise PasswordSessionRequiredError("Password-authenticated session is required")
         settings = await self._repository.get_settings()
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
@@ -206,6 +267,7 @@ class DashboardAuthService:
 
 _dashboard_session_store = DashboardSessionStore()
 _totp_rate_limiter = TotpRateLimiter(max_failures=8, window_seconds=60)
+_password_rate_limiter = TotpRateLimiter(max_failures=8, window_seconds=60)
 
 
 def get_dashboard_session_store() -> DashboardSessionStore:
@@ -216,9 +278,24 @@ def get_totp_rate_limiter() -> TotpRateLimiter:
     return _totp_rate_limiter
 
 
+def get_password_rate_limiter() -> TotpRateLimiter:
+    return _password_rate_limiter
+
+
 def _qr_svg_data_uri(payload: str) -> str:
     qr = segno.make(payload)
     buffer = BytesIO()
     qr.save(buffer, kind="svg", xmldecl=False, scale=6, border=2)
     raw = buffer.getvalue()
     return f"data:image/svg+xml;base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _check_password(password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except ValueError:
+        return False

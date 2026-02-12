@@ -11,6 +11,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -30,6 +31,7 @@ async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
             settings=SettingsRepository(session),
+            api_keys=ApiKeysRepository(session),
         )
 
 

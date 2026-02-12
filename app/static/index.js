@@ -17,13 +17,19 @@
 		oauthComplete: "/api/oauth/complete",
 		settings: "/api/settings",
 		dashboardAuthSession: "/api/dashboard-auth/session",
+		dashboardAuthPasswordSetup: "/api/dashboard-auth/password/setup",
+		dashboardAuthPasswordLogin: "/api/dashboard-auth/password/login",
+		dashboardAuthPasswordChange: "/api/dashboard-auth/password/change",
+		dashboardAuthPasswordRemove: "/api/dashboard-auth/password",
 		dashboardAuthTotpVerify: "/api/dashboard-auth/totp/verify",
 		dashboardAuthTotpSetupStart: "/api/dashboard-auth/totp/setup/start",
 		dashboardAuthTotpSetupConfirm: "/api/dashboard-auth/totp/setup/confirm",
 		dashboardAuthTotpDisable: "/api/dashboard-auth/totp/disable",
-			dashboardAuthLogout: "/api/dashboard-auth/logout",
+		dashboardAuthLogout: "/api/dashboard-auth/logout",
+		apiKeys: "/api/api-keys/",
+		apiKey: (id) => `/api/api-keys/${encodeURIComponent(id)}`,
+		apiKeyRegenerate: (id) => `/api/api-keys/${encodeURIComponent(id)}/regenerate`,
 		};
-		const DASHBOARD_SETUP_TOKEN_HEADER = "X-Codex-LB-Setup-Token";
 
 		const PAGES = [
 		{
@@ -1270,6 +1276,20 @@
 		return responsePayload;
 	};
 
+	const patchJson = async (url, payload, label) => {
+		const response = await fetch(url, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload || {}),
+		});
+		const responsePayload = await readResponsePayload(response);
+		if (!response.ok) {
+			const message = extractErrorMessage(responsePayload);
+			throw new Error(message || `Failed to ${label} (${response.status})`);
+		}
+		return responsePayload;
+	};
+
 	const deleteJson = async (url, label) => {
 		const response = await fetch(url, { method: "DELETE" });
 		const responsePayload = await readResponsePayload(response);
@@ -1419,11 +1439,17 @@
 		preferEarlierResetAccounts: Boolean(payload?.preferEarlierResetAccounts),
 		totpRequiredOnLogin: Boolean(payload?.totpRequiredOnLogin),
 		totpConfigured: Boolean(payload?.totpConfigured),
+		apiKeyAuthEnabled: Boolean(payload?.apiKeyAuthEnabled),
 	});
 
 	const fetchSettings = async () => {
 		const payload = await fetchJson(API_ENDPOINTS.settings, "settings");
 		return normalizeSettingsPayload(payload);
+	};
+
+	const fetchApiKeys = async () => {
+		const payload = await fetchJson(API_ENDPOINTS.apiKeys, "api keys");
+		return Array.isArray(payload) ? payload : [];
 	};
 
 	const registerApp = () => {
@@ -1453,23 +1479,64 @@
 				hasLoaded: false,
 			},
 
-					settings: {
-						stickyThreadsEnabled: false,
-						preferEarlierResetAccounts: false,
-						totpRequiredOnLogin: false,
-						totpConfigured: false,
-						setupToken: "",
-						totpSetup: {
-							open: false,
-							secret: "",
-							otpauthUri: "",
+				settings: {
+					stickyThreadsEnabled: false,
+					preferEarlierResetAccounts: false,
+					totpRequiredOnLogin: false,
+					totpConfigured: false,
+					apiKeyAuthEnabled: false,
+					totpSetup: {
+						open: false,
+						secret: "",
+						otpauthUri: "",
 						qrSvgDataUri: "",
 						code: "",
 						isSubmitting: false,
 					},
+					password: {
+						setupPassword: "",
+						changeCurrentPassword: "",
+						changeNewPassword: "",
+						removePassword: "",
+						isSubmitting: false,
+					},
+					apiKeys: {
+						rows: [],
+						isLoading: false,
+						isSubmitting: false,
+						createName: "",
+						createAllowedModels: "",
+						createWeeklyTokenLimit: "",
+						createExpiresAt: "",
+						createdPlainKey: "",
+						editOpen: false,
+						editId: "",
+						editName: "",
+						editAllowedModels: "",
+						editWeeklyTokenLimit: "",
+						editExpiresAt: "",
+						editIsActive: true,
+					},
 					isLoading: false,
 					isSaving: false,
 					hasLoaded: false,
+				},
+				auth: {
+					passwordRequired: false,
+					authenticated: true,
+					totpRequiredOnLogin: false,
+					loginPassword: "",
+					loginError: "",
+					isLoginSubmitting: false,
+					totpDialog: {
+						open: false,
+						code: "",
+						error: "",
+						isSubmitting: false,
+						mode: "verify",
+						title: "Verify TOTP",
+						submitLabel: "Verify",
+					},
 				},
 			accounts: {
 				selectedId: "",
@@ -1527,18 +1594,9 @@
 					this.refreshRequests();
 				});
 
-				try {
-					const shouldContinue = await this.ensureDashboardAccess();
-					if (!shouldContinue) {
-						return;
-					}
-				} catch (error) {
+				await this.refreshAuthState();
+				if (this.isAuthLocked()) {
 					this.isLoading = false;
-					this.openMessageBox({
-						tone: "error",
-						title: "Authentication required",
-						message: error?.message || "TOTP verification is required to access the dashboard.",
-					});
 					return;
 				}
 				await this.loadData();
@@ -1623,7 +1681,7 @@
 				this.loadRequestLogOptions();
 			},
 
-			async ensureSettingsLoaded() {
+				async ensureSettingsLoaded() {
 				if (this.settings.hasLoaded) {
 					return;
 				}
@@ -1635,11 +1693,13 @@
 					try {
 						const settings = await fetchSettings();
 						this.settings.stickyThreadsEnabled = settings.stickyThreadsEnabled;
-						this.settings.preferEarlierResetAccounts =
-							settings.preferEarlierResetAccounts;
-						this.settings.totpRequiredOnLogin = settings.totpRequiredOnLogin;
-						this.settings.totpConfigured = settings.totpConfigured;
-						this.settings.hasLoaded = true;
+							this.settings.preferEarlierResetAccounts =
+								settings.preferEarlierResetAccounts;
+							this.settings.totpRequiredOnLogin = settings.totpRequiredOnLogin;
+							this.settings.totpConfigured = settings.totpConfigured;
+							this.settings.apiKeyAuthEnabled = settings.apiKeyAuthEnabled;
+							this.settings.hasLoaded = true;
+							await this.loadApiKeys();
 					} catch (err) {
 						console.error("Failed to load settings:", err);
 						this.openMessageBox({
@@ -1737,80 +1797,303 @@
 				};
 				return labels[value] || "All time";
 			},
-			async ensureDashboardAccess() {
-				const session = await fetchJson(
-					API_ENDPOINTS.dashboardAuthSession,
-					"dashboard auth session",
-				);
-				if (session?.authenticated) {
-					return true;
-				}
-				if (!session?.totpRequiredOnLogin) {
-					return true;
-				}
-				await this.verifyTotpWithPrompt();
-				if (window.location.pathname !== "/dashboard") {
-					window.location.replace("/dashboard");
-					return false;
-				}
-				this.view = "dashboard";
-				this.syncTitle();
-				this.syncUrl(true);
-				return true;
-			},
-				async verifyTotpWithPrompt() {
-				let lastError = "";
-				while (true) {
-					const promptLines = [
-						"Enter the 6-digit TOTP code to access the dashboard.",
-					];
-					if (lastError) {
-						promptLines.push(`Last error: ${lastError}`);
+				isAuthLocked() {
+					return this.auth.passwordRequired && !this.auth.authenticated;
+				},
+				async refreshAuthState() {
+					const session = await fetchJson(
+						API_ENDPOINTS.dashboardAuthSession,
+						"dashboard auth session",
+					);
+					this.auth.passwordRequired = Boolean(session?.passwordRequired);
+					this.auth.authenticated = Boolean(session?.authenticated);
+					this.auth.totpRequiredOnLogin = Boolean(session?.totpRequiredOnLogin);
+				},
+				async submitPasswordLogin() {
+					if (this.auth.isLoginSubmitting) {
+						return;
 					}
-					const rawCode = window.prompt(promptLines.join("\n"));
-					if (rawCode === null) {
-						throw new Error("TOTP verification was cancelled.");
+					const password = String(this.auth.loginPassword || "").trim();
+					if (!password) {
+						this.auth.loginError = "Password is required.";
+						return;
 					}
-					const code = String(rawCode || "")
+					this.auth.isLoginSubmitting = true;
+					this.auth.loginError = "";
+					try {
+						const session = await postJson(
+							API_ENDPOINTS.dashboardAuthPasswordLogin,
+							{ password },
+							"password login",
+						);
+						this.auth.passwordRequired = Boolean(session?.passwordRequired);
+						this.auth.authenticated = Boolean(session?.authenticated);
+						this.auth.totpRequiredOnLogin = Boolean(session?.totpRequiredOnLogin);
+						this.auth.loginPassword = "";
+						if (this.auth.passwordRequired && !this.auth.authenticated && this.auth.totpRequiredOnLogin) {
+							this.openTotpDialog({
+								mode: "verify",
+								title: "Verify TOTP",
+								submitLabel: "Verify",
+							});
+							return;
+						}
+						await this.postAuthenticationLoad();
+					} catch (error) {
+						this.auth.loginError = error?.message || "Login failed.";
+					} finally {
+						this.auth.isLoginSubmitting = false;
+					}
+				},
+				parseModelList(value) {
+					return String(value || "")
+						.split(",")
+						.map((item) => item.trim())
+						.filter(Boolean);
+				},
+				async loadApiKeys() {
+					if (this.settings.apiKeys.isLoading) {
+						return;
+					}
+					this.settings.apiKeys.isLoading = true;
+					try {
+						const rows = await fetchApiKeys();
+						this.settings.apiKeys.rows = rows;
+					} catch (error) {
+						this.openMessageBox({
+							tone: "error",
+							title: "API keys",
+							message: error?.message || "Failed to load API keys.",
+						});
+					} finally {
+						this.settings.apiKeys.isLoading = false;
+					}
+				},
+				async createApiKey() {
+					if (this.settings.apiKeys.isSubmitting) {
+						return;
+					}
+					const name = String(this.settings.apiKeys.createName || "").trim();
+					if (!name) {
+						this.openMessageBox({
+							tone: "warning",
+							title: "API key",
+							message: "Name is required.",
+						});
+						return;
+					}
+					const allowedModels = this.parseModelList(this.settings.apiKeys.createAllowedModels);
+					const weeklyLimitRaw = String(this.settings.apiKeys.createWeeklyTokenLimit || "").trim();
+					const weeklyTokenLimit = weeklyLimitRaw ? Number.parseInt(weeklyLimitRaw, 10) : null;
+					const expiresAtRaw = String(this.settings.apiKeys.createExpiresAt || "").trim();
+					const payload = {
+						name,
+						allowedModels: allowedModels.length ? allowedModels : null,
+						weeklyTokenLimit: Number.isFinite(weeklyTokenLimit) ? weeklyTokenLimit : null,
+						expiresAt: expiresAtRaw ? new Date(expiresAtRaw).toISOString() : null,
+					};
+					this.settings.apiKeys.isSubmitting = true;
+					try {
+						const created = await postJson(API_ENDPOINTS.apiKeys, payload, "create api key");
+						this.settings.apiKeys.createdPlainKey = created.key || "";
+						this.settings.apiKeys.createName = "";
+						this.settings.apiKeys.createAllowedModels = "";
+						this.settings.apiKeys.createWeeklyTokenLimit = "";
+						this.settings.apiKeys.createExpiresAt = "";
+						await this.loadApiKeys();
+					} catch (error) {
+						this.openMessageBox({
+							tone: "error",
+							title: "API key creation failed",
+							message: error?.message || "Failed to create API key.",
+						});
+					} finally {
+						this.settings.apiKeys.isSubmitting = false;
+					}
+				},
+				openEditApiKey(row) {
+					this.settings.apiKeys.editOpen = true;
+					this.settings.apiKeys.editId = row.id;
+					this.settings.apiKeys.editName = row.name || "";
+					this.settings.apiKeys.editAllowedModels = Array.isArray(row.allowedModels)
+						? row.allowedModels.join(", ")
+						: "";
+					this.settings.apiKeys.editWeeklyTokenLimit =
+						row.weeklyTokenLimit === null || row.weeklyTokenLimit === undefined
+							? ""
+							: String(row.weeklyTokenLimit);
+					this.settings.apiKeys.editExpiresAt = row.expiresAt || "";
+					this.settings.apiKeys.editIsActive = Boolean(row.isActive);
+				},
+				closeEditApiKey() {
+					this.settings.apiKeys.editOpen = false;
+					this.settings.apiKeys.editId = "";
+				},
+				async saveApiKeyEdit() {
+					const id = this.settings.apiKeys.editId;
+					if (!id) {
+						return;
+					}
+					const allowedModels = this.parseModelList(this.settings.apiKeys.editAllowedModels);
+					const weeklyLimitRaw = String(this.settings.apiKeys.editWeeklyTokenLimit || "").trim();
+					const weeklyTokenLimit = weeklyLimitRaw ? Number.parseInt(weeklyLimitRaw, 10) : null;
+					const expiresAtRaw = String(this.settings.apiKeys.editExpiresAt || "").trim();
+					const payload = {
+						name: String(this.settings.apiKeys.editName || "").trim(),
+						allowedModels: allowedModels.length ? allowedModels : null,
+						weeklyTokenLimit: Number.isFinite(weeklyTokenLimit) ? weeklyTokenLimit : null,
+						expiresAt: expiresAtRaw ? new Date(expiresAtRaw).toISOString() : null,
+						isActive: Boolean(this.settings.apiKeys.editIsActive),
+					};
+					try {
+						await patchJson(API_ENDPOINTS.apiKey(id), payload, "update api key");
+						this.closeEditApiKey();
+						await this.loadApiKeys();
+					} catch (error) {
+						this.openMessageBox({
+							tone: "error",
+							title: "API key update failed",
+							message: error?.message || "Failed to update API key.",
+						});
+					}
+				},
+				async deleteApiKey(row) {
+					const confirmed = await this.openConfirmBox({
+						title: "Delete API key",
+						message: `Delete API key '${row.name}'?`,
+						confirmLabel: "Delete",
+					});
+					if (!confirmed) {
+						return;
+					}
+				try {
+					await deleteJson(API_ENDPOINTS.apiKey(row.id), "delete api key");
+					await this.loadApiKeys();
+				} catch (error) {
+						this.openMessageBox({
+							tone: "error",
+							title: "API key delete failed",
+							message: error?.message || "Failed to delete API key.",
+						});
+					}
+				},
+				async regenerateApiKey(row) {
+					const confirmed = await this.openConfirmBox({
+						title: "Regenerate API key",
+						message: `Regenerate API key '${row.name}'? The old key will stop working immediately.`,
+						confirmLabel: "Regenerate",
+					});
+					if (!confirmed) {
+						return;
+					}
+					try {
+						const regenerated = await postJson(
+							API_ENDPOINTS.apiKeyRegenerate(row.id),
+							{},
+							"regenerate api key",
+						);
+						this.settings.apiKeys.createdPlainKey = regenerated.key || "";
+						await this.loadApiKeys();
+					} catch (error) {
+						this.openMessageBox({
+							tone: "error",
+							title: "API key regenerate failed",
+							message: error?.message || "Failed to regenerate API key.",
+						});
+					}
+				},
+				openTotpDialog({ mode, title, submitLabel }) {
+					this.auth.totpDialog.mode = mode;
+					this.auth.totpDialog.title = title;
+					this.auth.totpDialog.submitLabel = submitLabel;
+					this.auth.totpDialog.code = "";
+					this.auth.totpDialog.error = "";
+					this.auth.totpDialog.open = true;
+				},
+				closeTotpDialog() {
+					this.auth.totpDialog.open = false;
+					this.auth.totpDialog.code = "";
+					this.auth.totpDialog.error = "";
+					this.auth.totpDialog.isSubmitting = false;
+				},
+				async submitTotpDialog() {
+					if (this.auth.totpDialog.isSubmitting) {
+						return;
+					}
+					const code = String(this.auth.totpDialog.code || "")
 						.trim()
 						.replace(/\D/g, "");
 					if (!code) {
-						lastError = "Code is required.";
-						continue;
-					}
-					try {
-						await postJson(
-							API_ENDPOINTS.dashboardAuthTotpVerify,
-							{ code },
-							"verify TOTP",
-						);
+						this.auth.totpDialog.error = "Enter the 6-digit code.";
 						return;
+					}
+					this.auth.totpDialog.isSubmitting = true;
+					this.auth.totpDialog.error = "";
+					try {
+						if (this.auth.totpDialog.mode === "disable") {
+							await postJson(
+								API_ENDPOINTS.dashboardAuthTotpDisable,
+								{ code },
+								"disable TOTP",
+							);
+							this.settings.totpConfigured = false;
+							this.settings.totpRequiredOnLogin = false;
+						} else {
+							const session = await postJson(
+								API_ENDPOINTS.dashboardAuthTotpVerify,
+								{ code },
+								"verify TOTP",
+							);
+							this.auth.passwordRequired = Boolean(session?.passwordRequired);
+							this.auth.authenticated = Boolean(session?.authenticated);
+							this.auth.totpRequiredOnLogin = Boolean(session?.totpRequiredOnLogin);
+						}
+						this.closeTotpDialog();
+						await this.refreshAuthState();
+						if (!this.isAuthLocked()) {
+							await this.postAuthenticationLoad();
+						}
 					} catch (error) {
-						lastError = error?.message || "Invalid TOTP code.";
+						this.auth.totpDialog.error = error?.message || "Invalid TOTP code.";
+					} finally {
+						this.auth.totpDialog.isSubmitting = false;
 					}
-				}
 				},
-				setupTokenOptions() {
-					const token = String(this.settings.setupToken || "").trim();
-					if (!token) {
-						return {};
+				async postAuthenticationLoad() {
+					if (this.isLoading) {
+						await this.loadData();
+						if (this.view === "settings") {
+							await this.ensureSettingsLoaded();
+							await this.loadApiKeys();
+						}
+						return;
 					}
-					return {
-						headers: {
-							[DASHBOARD_SETUP_TOKEN_HEADER]: token,
-						},
-					};
+					if (!this.dashboardData?.accounts?.length) {
+						this.isLoading = true;
+						await this.loadData();
+						return;
+					}
+					await this.refreshAll();
+					if (this.view === "settings") {
+						await this.ensureSettingsLoaded();
+						await this.loadApiKeys();
+					}
 				},
-				promptSetupToken() {
-					const rawToken = window.prompt(
-						"Enter dashboard setup token (CODEX_LB_DASHBOARD_SETUP_TOKEN).",
-					);
-					if (rawToken === null) {
-						return "";
+				async logoutDashboard() {
+					try {
+						await postJson(API_ENDPOINTS.dashboardAuthLogout, {}, "logout");
+					} catch (_error) {
+						// Best effort; continue refreshing state.
 					}
-					const token = String(rawToken || "").trim();
-					this.settings.setupToken = token;
-					return token;
+					await this.refreshAuthState();
+					this.auth.loginPassword = "";
+					this.auth.loginError = "";
+					this.closeTotpDialog();
+					if (this.isAuthLocked()) {
+						this.view = "dashboard";
+						this.syncTitle();
+						this.syncUrl(true);
+					}
 				},
 				async setupTotp() {
 					try {
@@ -1818,7 +2101,6 @@
 							API_ENDPOINTS.dashboardAuthTotpSetupStart,
 							{},
 							"start TOTP setup",
-							this.setupTokenOptions(),
 						);
 						this.settings.totpSetup.open = true;
 						this.settings.totpSetup.secret = started.secret || "";
@@ -1826,36 +2108,13 @@
 						this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
 						this.settings.totpSetup.code = "";
 					} catch (error) {
-						const errorCode = String(error?.payload?.error?.code || "");
-						if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
-							const token = this.promptSetupToken();
-							if (token) {
-								try {
-									const started = await postJson(
-										API_ENDPOINTS.dashboardAuthTotpSetupStart,
-										{},
-										"start TOTP setup",
-										this.setupTokenOptions(),
-									);
-									this.settings.totpSetup.open = true;
-									this.settings.totpSetup.secret = started.secret || "";
-									this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
-									this.settings.totpSetup.qrSvgDataUri =
-										started.qrSvgDataUri || "";
-									this.settings.totpSetup.code = "";
-									return;
-								} catch (retryError) {
-									error = retryError;
-								}
-							}
-						}
 						this.openMessageBox({
 							tone: "error",
 							title: "TOTP setup failed",
 							message: error.message || "Failed to configure TOTP.",
-					});
-				}
-			},
+						});
+					}
+				},
 			cancelTotpSetup() {
 				this.settings.totpSetup.open = false;
 				this.settings.totpSetup.secret = "";
@@ -1887,102 +2146,31 @@
 							API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
 							{ secret, code },
 							"confirm TOTP setup",
-							this.setupTokenOptions(),
 						);
 						this.settings.totpConfigured = true;
 						this.cancelTotpSetup();
 						this.openMessageBox({
-						tone: "success",
-						title: "TOTP enabled",
-						message: "TOTP secret configured successfully.",
+							tone: "success",
+							title: "TOTP enabled",
+							message: "TOTP secret configured successfully.",
 						});
 					} catch (error) {
-						const errorCode = String(error?.payload?.error?.code || "");
-						if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
-							const token = this.promptSetupToken();
-							if (token) {
-								try {
-									await postJson(
-										API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
-										{ secret, code },
-										"confirm TOTP setup",
-										this.setupTokenOptions(),
-									);
-									this.settings.totpConfigured = true;
-									this.cancelTotpSetup();
-									this.openMessageBox({
-										tone: "success",
-										title: "TOTP enabled",
-										message: "TOTP secret configured successfully.",
-									});
-									return;
-								} catch (retryError) {
-									error = retryError;
-								}
-							}
-						}
 						this.openMessageBox({
 							tone: "error",
 							title: "TOTP setup failed",
 							message: error.message || "Failed to confirm TOTP setup.",
-					});
-				} finally {
-					this.settings.totpSetup.isSubmitting = false;
-				}
-			},
-			async disableTotp() {
-				const rawCode = window.prompt(
-					"Enter the current 6-digit TOTP code to disable TOTP.",
-				);
-				const code = String(rawCode || "")
-					.trim()
-					.replace(/\D/g, "");
-					if (!code) {
-						return;
-					}
-					const handleDisabled = () => {
-						this.settings.totpConfigured = false;
-						this.settings.totpRequiredOnLogin = false;
-						this.openMessageBox({
-							tone: "success",
-							title: "TOTP disabled",
-							message: "TOTP protection has been removed.",
 						});
-					};
-					try {
-						await postJson(
-							API_ENDPOINTS.dashboardAuthTotpDisable,
-							{ code },
-							"disable TOTP",
-						);
-						handleDisabled();
-					} catch (error) {
-						const errorCode = String(error?.payload?.error?.code || "");
-						if (error?.status === 401 && errorCode === "totp_required") {
-							try {
-								await postJson(
-									API_ENDPOINTS.dashboardAuthTotpVerify,
-									{ code },
-									"verify TOTP",
-								);
-								await postJson(
-									API_ENDPOINTS.dashboardAuthTotpDisable,
-									{ code },
-									"disable TOTP",
-								);
-								handleDisabled();
-								return;
-							} catch (retryError) {
-								error = retryError;
-							}
-						}
-						this.openMessageBox({
-							tone: "error",
-							title: "TOTP disable failed",
-							message: error.message || "Failed to disable TOTP.",
+					} finally {
+						this.settings.totpSetup.isSubmitting = false;
+					}
+				},
+				async disableTotp() {
+					this.openTotpDialog({
+						mode: "disable",
+						title: "Disable TOTP",
+						submitLabel: "Disable",
 					});
-				}
-			},
+				},
 
 			async loadData() {
 				try {
@@ -2091,12 +2279,13 @@
 							data.settings.totpRequiredOnLogin,
 						);
 						this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
+						this.settings.apiKeyAuthEnabled = Boolean(data.settings.apiKeyAuthEnabled);
 					}
 					this.ui.usageWindows = buildUsageWindowConfig(data.summary);
 					this.dashboard = buildDashboardView(this);
 					this.syncAccountSearchSelection();
 				},
-			async saveSettings() {
+				async saveSettings() {
 				if (this.settings.isSaving) {
 					return;
 				}
@@ -2112,6 +2301,7 @@
 						stickyThreadsEnabled: this.settings.stickyThreadsEnabled,
 						preferEarlierResetAccounts: this.settings.preferEarlierResetAccounts,
 						totpRequiredOnLogin: this.settings.totpRequiredOnLogin,
+						apiKeyAuthEnabled: this.settings.apiKeyAuthEnabled,
 					};
 					const updated = await putJson(
 						API_ENDPOINTS.settings,
@@ -2124,9 +2314,7 @@
 						normalized.preferEarlierResetAccounts;
 					this.settings.totpRequiredOnLogin = normalized.totpRequiredOnLogin;
 					this.settings.totpConfigured = normalized.totpConfigured;
-					if (this.settings.totpRequiredOnLogin) {
-						await this.ensureDashboardAccess();
-					}
+					this.settings.apiKeyAuthEnabled = normalized.apiKeyAuthEnabled;
 					this.openMessageBox({
 						tone: "success",
 						title: "Settings saved",
@@ -2140,6 +2328,138 @@
 					});
 				} finally {
 					this.settings.isSaving = false;
+				}
+			},
+			async setupPassword() {
+				if (this.settings.password.isSubmitting) {
+					return;
+				}
+				const password = String(this.settings.password.setupPassword || "").trim();
+				if (password.length < 8) {
+					this.openMessageBox({
+						tone: "warning",
+						title: "Password setup",
+						message: "Password must be at least 8 characters.",
+					});
+					return;
+				}
+				this.settings.password.isSubmitting = true;
+				try {
+					const session = await postJson(
+						API_ENDPOINTS.dashboardAuthPasswordSetup,
+						{ password },
+						"setup password",
+					);
+					this.settings.password.setupPassword = "";
+					this.auth.passwordRequired = Boolean(session?.passwordRequired);
+					this.auth.authenticated = Boolean(session?.authenticated);
+					this.auth.totpRequiredOnLogin = Boolean(session?.totpRequiredOnLogin);
+					await this.ensureSettingsLoaded();
+					await this.refreshAuthState();
+					this.openMessageBox({
+						tone: "success",
+						title: "Password enabled",
+						message: "Dashboard password has been configured.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Password setup failed",
+						message: error?.message || "Failed to setup password.",
+					});
+				} finally {
+					this.settings.password.isSubmitting = false;
+				}
+			},
+			async changePassword() {
+				if (this.settings.password.isSubmitting) {
+					return;
+				}
+				const currentPassword = String(this.settings.password.changeCurrentPassword || "").trim();
+				const newPassword = String(this.settings.password.changeNewPassword || "").trim();
+				if (!currentPassword || newPassword.length < 8) {
+					this.openMessageBox({
+						tone: "warning",
+						title: "Change password",
+						message: "Enter current password and a new password with at least 8 characters.",
+					});
+					return;
+				}
+				this.settings.password.isSubmitting = true;
+				try {
+					await postJson(
+						API_ENDPOINTS.dashboardAuthPasswordChange,
+						{ currentPassword, newPassword },
+						"change password",
+					);
+					this.settings.password.changeCurrentPassword = "";
+					this.settings.password.changeNewPassword = "";
+					this.openMessageBox({
+						tone: "success",
+						title: "Password changed",
+						message: "Password updated successfully.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Password change failed",
+						message: error?.message || "Failed to change password.",
+					});
+				} finally {
+					this.settings.password.isSubmitting = false;
+				}
+			},
+			async removePassword() {
+				if (this.settings.password.isSubmitting) {
+					return;
+				}
+				const password = String(this.settings.password.removePassword || "").trim();
+				if (!password) {
+					this.openMessageBox({
+						tone: "warning",
+						title: "Remove password",
+						message: "Enter current password to remove it.",
+					});
+					return;
+				}
+				const confirmed = await this.openConfirmBox({
+					title: "Remove password",
+					message: "Remove dashboard password and disable TOTP?",
+					confirmLabel: "Remove",
+				});
+				if (!confirmed) {
+					return;
+				}
+				this.settings.password.isSubmitting = true;
+				try {
+					const response = await fetch(API_ENDPOINTS.dashboardAuthPasswordRemove, {
+						method: "DELETE",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ password }),
+					});
+					if (!response.ok) {
+						const payload = await readResponsePayload(response);
+						const message = extractErrorMessage(payload);
+						throw new Error(message || `Request failed (${response.status})`);
+					}
+					this.settings.password.removePassword = "";
+					await this.refreshAuthState();
+					await this.ensureSettingsLoaded();
+					this.settings.totpConfigured = false;
+					this.settings.totpRequiredOnLogin = false;
+					this.openMessageBox({
+						tone: "success",
+						title: "Password removed",
+						message: "Dashboard authentication has been disabled.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Remove password failed",
+						message: error?.message || "Failed to remove password.",
+					});
+				} finally {
+					this.settings.password.isSubmitting = false;
 				}
 			},
 			focusAccountSearch() {

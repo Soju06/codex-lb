@@ -30,6 +30,7 @@ from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
@@ -65,6 +66,7 @@ class ProxyService:
         headers: Mapping[str, str],
         *,
         propagate_http_errors: bool = False,
+        api_key: ApiKeyData | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         _maybe_log_proxy_request_shape("stream", payload, headers)
@@ -73,12 +75,15 @@ class ProxyService:
             payload,
             filtered,
             propagate_http_errors=propagate_http_errors,
+            api_key=api_key,
         )
 
     async def compact_responses(
         self,
         payload: ResponsesCompactRequest,
         headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None = None,
     ) -> OpenAIResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
@@ -198,6 +203,7 @@ class ProxyService:
         headers: Mapping[str, str],
         *,
         propagate_http_errors: bool,
+        api_key: ApiKeyData | None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         async with self._repo_factory() as repos:
@@ -230,6 +236,7 @@ class ProxyService:
                     headers,
                     request_id,
                     attempt < max_attempts - 1,
+                    api_key=api_key,
                 ):
                     yield line
                 return
@@ -244,7 +251,14 @@ class ProxyService:
                         if refresh_exc.is_permanent:
                             await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                         continue
-                    async for line in self._stream_once(account, payload, headers, request_id, False):
+                    async for line in self._stream_once(
+                        account,
+                        payload,
+                        headers,
+                        request_id,
+                        False,
+                        api_key=api_key,
+                    ):
                         yield line
                     return
                 error = _parse_openai_error(exc.payload)
@@ -305,6 +319,8 @@ class ProxyService:
         headers: Mapping[str, str],
         request_id: str,
         allow_retry: bool,
+        *,
+        api_key: ApiKeyData | None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -399,6 +415,7 @@ class ProxyService:
                     async with self._repo_factory() as repos:
                         await repos.request_logs.add_log(
                             account_id=account_id_value,
+                            api_key_id=api_key.id if api_key else None,
                             request_id=request_id,
                             model=model,
                             input_tokens=input_tokens,
@@ -411,6 +428,11 @@ class ProxyService:
                             error_code=error_code,
                             error_message=error_message,
                         )
+                        if api_key is not None and input_tokens is not None and output_tokens is not None:
+                            await repos.api_keys.increment_weekly_usage(
+                                api_key.id,
+                                input_tokens + output_tokens,
+                            )
                 except Exception:
                     logger.warning(
                         "Failed to persist request log account_id=%s request_id=%s",

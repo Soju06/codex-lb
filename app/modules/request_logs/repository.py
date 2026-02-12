@@ -35,10 +35,12 @@ class RequestLogsRepository:
         cached_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        api_key_id: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         log = RequestLog(
             account_id=account_id,
+            api_key_id=api_key_id,
             request_id=resolved_request_id,
             model=model,
             input_tokens=input_tokens,

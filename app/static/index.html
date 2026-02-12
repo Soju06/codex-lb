@@ -18,6 +18,7 @@
       <div class="header-content">
         <h1 class="app-logo">Codex Load Balancer</h1>
         <div class="header-actions">
+          <button type="button" x-show="auth.passwordRequired" @click="logoutDashboard">Logout</button>
           <button class="theme-toggle" @click="toggleTheme" aria-label="Toggle theme">
             <svg x-show="theme === 'dark'" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -47,7 +48,18 @@
           <div>Loading Dashboard...</div>
         </div>
       </div>
-      <section class="tabs" aria-label="Codex FE tabs">
+      <section class="panel" x-show="!isLoading && auth.passwordRequired && !auth.authenticated">
+        <h3>Admin login</h3>
+        <p class="text-muted">Enter your dashboard password. If TOTP is enabled, a second step appears after login.</p>
+        <div class="inline-actions" style="margin-top: 10px">
+          <input type="password" placeholder="Password" x-model="auth.loginPassword"
+            @keydown.enter.prevent="submitPasswordLogin()" style="width: 260px;">
+          <button type="button" class="default" @click="submitPasswordLogin"
+            :disabled="auth.isLoginSubmitting">Login</button>
+        </div>
+        <p class="text-muted" x-show="auth.loginError" x-text="auth.loginError" style="margin-top: 8px;"></p>
+      </section>
+      <section class="tabs" aria-label="Codex FE tabs" x-show="!auth.passwordRequired || auth.authenticated">
         <menu role="tablist" aria-label="Codex FE tabs">
           <template x-for="page in pages" :key="page.id">
             <button role="tab" type="button" :aria-controls="page.tabId" :aria-selected="view === page.id"
@@ -541,17 +553,50 @@
             </fieldset>
 
             <fieldset class="settings-fieldset">
+              <legend>Password management</legend>
+              <template x-if="!auth.passwordRequired">
+                <div>
+                  <p class="text-muted" style="margin-top: 0;">Set a password to protect dashboard APIs and settings.</p>
+                  <div class="inline-actions">
+                    <input type="password" placeholder="New password (min 8 chars)"
+                      x-model="settings.password.setupPassword" style="width: 260px;">
+                    <button type="button" class="default" @click="setupPassword"
+                      :disabled="settings.password.isSubmitting">Set password</button>
+                  </div>
+                </div>
+              </template>
+              <template x-if="auth.passwordRequired">
+                <div>
+                  <div class="inline-actions" style="margin-bottom: 8px">
+                    <input type="password" placeholder="Current password"
+                      x-model="settings.password.changeCurrentPassword" style="width: 220px;">
+                    <input type="password" placeholder="New password (min 8 chars)"
+                      x-model="settings.password.changeNewPassword" style="width: 220px;">
+                    <button type="button" class="default" @click="changePassword"
+                      :disabled="settings.password.isSubmitting">Change</button>
+                  </div>
+                  <div class="inline-actions">
+                    <input type="password" placeholder="Current password"
+                      x-model="settings.password.removePassword" style="width: 220px;">
+                    <button type="button" @click="removePassword"
+                      :disabled="settings.password.isSubmitting">Remove password</button>
+                  </div>
+                </div>
+              </template>
+            </fieldset>
+
+            <fieldset class="settings-fieldset">
               <legend>TOTP access control</legend>
               <input id="totp-required-toggle" type="checkbox" x-model="settings.totpRequiredOnLogin"
-                :disabled="!settings.totpConfigured" aria-describedby="totp-required-help">
+                :disabled="!settings.totpConfigured || !auth.passwordRequired" aria-describedby="totp-required-help">
               <label for="totp-required-toggle">Require TOTP verification on every dashboard login</label>
               <div id="totp-required-help" class="text-muted" style="margin-top: 6px">
-                Status: <strong x-text="settings.totpConfigured ? 'Configured' : 'Not configured'"></strong>. Configure
-                TOTP first, then enable enforcement.
+                Status: <strong x-text="settings.totpConfigured ? 'Configured' : 'Not configured'"></strong>.
+                Configure a password first, then setup TOTP.
               </div>
               <div class="inline-actions" style="margin-top: 10px">
-                <button type="button" @click="setupTotp" :disabled="settings.totpConfigured">Setup TOTP</button>
-                <button type="button" @click="disableTotp" :disabled="!settings.totpConfigured">Disable TOTP</button>
+                <button type="button" @click="setupTotp" :disabled="settings.totpConfigured || !auth.passwordRequired">Setup TOTP</button>
+                <button type="button" @click="disableTotp" :disabled="!settings.totpConfigured || !auth.passwordRequired">Disable TOTP</button>
               </div>
 
               <template x-if="settings.totpSetup.open">
@@ -579,16 +624,111 @@
               </template>
             </fieldset>
 
+            <fieldset class="settings-fieldset">
+              <legend>Proxy API key auth</legend>
+              <input id="api-key-auth-toggle" type="checkbox" x-model="settings.apiKeyAuthEnabled">
+              <label for="api-key-auth-toggle">Require API keys for proxy endpoints</label>
+              <div class="text-muted" style="margin-top: 6px">
+                When enabled, requests to <code>/v1/*</code>, <code>/backend-api/codex/*</code>, and
+                <code>/api/codex/*</code> require a Bearer API key.
+              </div>
+            </fieldset>
+
             <div class="inline-actions" style="margin-top: 12px">
               <button type="button" @click="saveSettings" :disabled="settings.isLoading || settings.isSaving || !settings.hasLoaded">
                 <span>Save</span>
               </button>
             </div>
+
+            <fieldset class="settings-fieldset" style="margin-top: 14px">
+              <legend>API keys</legend>
+              <div class="inline-actions" style="margin-bottom: 10px">
+                <input type="text" placeholder="Name" x-model="settings.apiKeys.createName" style="width: 150px;">
+                <input type="text" placeholder="Allowed models (comma-separated)"
+                  x-model="settings.apiKeys.createAllowedModels" style="width: 260px;">
+                <input type="number" placeholder="Weekly token limit"
+                  x-model="settings.apiKeys.createWeeklyTokenLimit" style="width: 160px;">
+                <input type="datetime-local" x-model="settings.apiKeys.createExpiresAt" style="width: 220px;">
+                <button type="button" class="default" @click="createApiKey"
+                  :disabled="settings.apiKeys.isSubmitting">Create key</button>
+              </div>
+
+              <template x-if="settings.apiKeys.createdPlainKey">
+                <div class="panel" style="padding: 10px; margin-bottom: 10px">
+                  <p style="margin: 0 0 6px 0;"><strong>New API key (shown once)</strong></p>
+                  <p class="text-muted" style="margin: 0 0 6px 0;">Copy this key now. It will not be shown again.</p>
+                  <div class="inline-actions">
+                    <code x-text="settings.apiKeys.createdPlainKey"></code>
+                    <button type="button"
+                      @click="copyToClipboard(settings.apiKeys.createdPlainKey, 'API key', $event)">Copy</button>
+                  </div>
+                </div>
+              </template>
+
+              <div class="table-wrap table-wrap--column-lines has-scrollbar">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Prefix</th>
+                      <th>Models</th>
+                      <th>Weekly usage</th>
+                      <th>Expiry</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in settings.apiKeys.rows" :key="row.id">
+                      <tr>
+                        <td x-text="row.name"></td>
+                        <td><code x-text="row.keyPrefix"></code></td>
+                        <td x-text="Array.isArray(row.allowedModels) && row.allowedModels.length ? row.allowedModels.join(', ') : 'All'"></td>
+                        <td x-text="`${row.weeklyTokensUsed}/${row.weeklyTokenLimit ?? '∞'}`"></td>
+                        <td x-text="row.expiresAt || 'Never'"></td>
+                        <td x-text="row.isActive ? 'Active' : 'Inactive'"></td>
+                        <td>
+                          <div class="inline-actions">
+                            <button type="button" @click="openEditApiKey(row)">Edit</button>
+                            <button type="button" @click="regenerateApiKey(row)">Regenerate</button>
+                            <button type="button" @click="deleteApiKey(row)">Delete</button>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                    <template x-if="!settings.apiKeys.rows.length">
+                      <tr>
+                        <td colspan="7" class="text-muted" style="text-align: center">No API keys created.</td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+
+              <template x-if="settings.apiKeys.editOpen">
+                <div class="panel" style="padding: 10px; margin-top: 10px">
+                  <h4 style="margin-top: 0;">Edit API key</h4>
+                  <div class="inline-actions" style="margin-bottom: 8px">
+                    <input type="text" placeholder="Name" x-model="settings.apiKeys.editName" style="width: 180px;">
+                    <input type="text" placeholder="Allowed models (comma-separated)"
+                      x-model="settings.apiKeys.editAllowedModels" style="width: 260px;">
+                    <input type="number" placeholder="Weekly token limit"
+                      x-model="settings.apiKeys.editWeeklyTokenLimit" style="width: 160px;">
+                    <input type="datetime-local" x-model="settings.apiKeys.editExpiresAt" style="width: 220px;">
+                    <label><input type="checkbox" x-model="settings.apiKeys.editIsActive"> Active</label>
+                  </div>
+                  <div class="inline-actions">
+                    <button type="button" class="default" @click="saveApiKeyEdit">Save</button>
+                    <button type="button" @click="closeEditApiKey">Cancel</button>
+                  </div>
+                </div>
+              </template>
+            </fieldset>
           </div>
         </article>
       </section>
   </div>
-  <div class="status-bar">
+  <div class="status-bar" x-show="!auth.passwordRequired || auth.authenticated">
     <template x-for="item in statusItems" :key="item">
       <p class="status-bar-field" x-text="item"></p>
     </template>
@@ -716,6 +856,30 @@
         <button type="button" @click="resetAuthDialogState">Try again</button>
         <button type="button" class="default" @click="closeAddAccountDialog">Close</button>
       </div>
+    </footer>
+  </div>
+  <div class="dialog-backdrop" :class="{ 'is-open': auth.totpDialog.open }"
+    :aria-hidden="!auth.totpDialog.open"></div>
+  <div class="window active is-bright message-dialog" role="dialog" aria-modal="true"
+    :aria-hidden="!auth.totpDialog.open" :class="{ 'is-open': auth.totpDialog.open }">
+    <div class="title-bar">
+      <div class="title-bar-text" x-text="auth.totpDialog.title"></div>
+      <div class="title-bar-controls">
+        <button aria-label="Close" @click="closeTotpDialog"></button>
+      </div>
+    </div>
+    <div class="window-body has-space">
+      <p class="text-muted">Enter the 6-digit authenticator code.</p>
+      <input type="text" inputmode="numeric" maxlength="6" placeholder="123456"
+        x-model="auth.totpDialog.code" @keydown.enter.prevent="submitTotpDialog()"
+        style="width: 180px; letter-spacing: 0.3em;">
+      <p class="text-muted" x-show="auth.totpDialog.error" x-text="auth.totpDialog.error"
+        style="margin-top: 8px;"></p>
+    </div>
+    <footer class="message-dialog__actions">
+      <button type="button" @click="closeTotpDialog">Cancel</button>
+      <button type="button" class="default" @click="submitTotpDialog"
+        :disabled="auth.totpDialog.isSubmitting" x-text="auth.totpDialog.submitLabel"></button>
     </footer>
   </div>
   <div class="dialog-backdrop" :class="{ 'is-open': messageBox.open }" :aria-hidden="!messageBox.open"

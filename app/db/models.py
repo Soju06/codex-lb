@@ -66,6 +66,7 @@ class RequestLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
@@ -101,6 +102,8 @@ class DashboardSettings(Base):
     sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     totp_required_on_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_key_auth_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -112,7 +115,25 @@ class DashboardSettings(Base):
     )
 
 
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    key_prefix: Mapped[str] = mapped_column(String, nullable=False)
+    allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    weekly_token_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weekly_tokens_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    weekly_reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_sticky_account", StickySession.account_id)
+Index("idx_api_keys_hash", ApiKey.key_hash)

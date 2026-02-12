@@ -8,16 +8,18 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.clients.http import close_http_client, init_http_client
+from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
 from app.core.middleware import (
+    add_auth_middleware,
     add_api_unhandled_error_middleware,
-    add_dashboard_totp_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
 )
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.api_keys import api as api_keys_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.health import api as health_api
@@ -30,6 +32,7 @@ from app.modules.usage import api as usage_api
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    await get_settings_cache().invalidate()
     await init_db()
     await init_http_client()
     scheduler = build_usage_refresh_scheduler()
@@ -50,7 +53,7 @@ def create_app() -> FastAPI:
 
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
-    add_dashboard_totp_middleware(app)
+    add_auth_middleware(app)
     add_api_unhandled_error_middleware(app)
     add_exception_handlers(app)
 
@@ -64,6 +67,7 @@ def create_app() -> FastAPI:
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)
+    app.include_router(api_keys_api.router)
     app.include_router(health_api.router)
 
     static_dir = Path(__file__).parent / "static"

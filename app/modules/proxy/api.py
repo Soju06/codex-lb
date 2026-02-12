@@ -28,6 +28,7 @@ from app.core.types import JsonValue
 from app.core.utils.sse import parse_sse_data_json
 from app.dependencies import ProxyContext, get_proxy_context
 from app.modules.proxy.schemas import ModelListItem, ModelListResponse, RateLimitStatusPayload
+from app.modules.api_keys.service import ApiKeyData
 
 router = APIRouter(prefix="/backend-api/codex", tags=["proxy"])
 v1_router = APIRouter(prefix="/v1", tags=["proxy"])
@@ -86,7 +87,9 @@ async def v1_responses(
 
 
 @v1_router.get("/models", response_model=ModelListResponse)
-async def v1_models() -> ModelListResponse:
+async def v1_models(request: Request) -> ModelListResponse:
+    api_key = _request_api_key(request)
+    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     created = int(time.time())
     items = [
         ModelListItem(
@@ -96,6 +99,7 @@ async def v1_models() -> ModelListResponse:
             metadata=entry,
         )
         for model_id, entry in MODEL_CATALOG.items()
+        if allowed_models is None or model_id in allowed_models
     ]
     return ModelListResponse(data=items)
 
@@ -118,6 +122,10 @@ async def v1_chat_completions(
     payload: ChatCompletionsRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
 ) -> Response:
+    blocked = _validate_model_access(request, payload.model)
+    if blocked is not None:
+        return blocked
+
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
         responses_payload = payload.to_responses_request()
@@ -129,6 +137,7 @@ async def v1_chat_completions(
         responses_payload,
         request.headers,
         propagate_http_errors=True,
+        api_key=_request_api_key(request),
     )
     try:
         first = await stream.__anext__()
@@ -169,12 +178,17 @@ async def _stream_responses(
     payload: ResponsesRequest,
     context: ProxyContext,
 ) -> Response:
+    blocked = _validate_model_access(request, payload.model)
+    if blocked is not None:
+        return blocked
+
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
     stream = context.service.stream_responses(
         payload,
         request.headers,
         propagate_http_errors=True,
+        api_key=_request_api_key(request),
     )
     try:
         first = await stream.__anext__()
@@ -198,12 +212,17 @@ async def _collect_responses(
     payload: ResponsesRequest,
     context: ProxyContext,
 ) -> Response:
+    blocked = _validate_model_access(request, payload.model)
+    if blocked is not None:
+        return blocked
+
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
     stream = context.service.stream_responses(
         payload,
         request.headers,
         propagate_http_errors=True,
+        api_key=_request_api_key(request),
     )
     try:
         response_payload = await _collect_responses_payload(stream)
@@ -266,9 +285,17 @@ async def _compact_responses(
     payload: ResponsesCompactRequest,
     context: ProxyContext,
 ) -> JSONResponse:
+    blocked = _validate_model_access(request, payload.model)
+    if blocked is not None:
+        return blocked
+
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
-        result = await context.service.compact_responses(payload, request.headers)
+        result = await context.service.compact_responses(
+            payload,
+            request.headers,
+            api_key=_request_api_key(request),
+        )
     except NotImplementedError:
         error = OpenAIErrorEnvelopeModel(
             error=OpenAIError(
@@ -312,6 +339,32 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
 
 def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
     return parse_sse_data_json(line)
+
+
+def _request_api_key(request: Request) -> ApiKeyData | None:
+    value = getattr(request.state, "api_key", None)
+    if isinstance(value, ApiKeyData):
+        return value
+    return None
+
+
+def _validate_model_access(request: Request, model: str | None) -> JSONResponse | None:
+    api_key = _request_api_key(request)
+    if api_key is None:
+        return None
+    allowed_models = api_key.allowed_models
+    if not allowed_models:
+        return None
+    if model is None or model in allowed_models:
+        return None
+    return JSONResponse(
+        status_code=403,
+        content=openai_error(
+            "model_not_allowed",
+            f"This API key does not have access to model '{model}'",
+            error_type="permission_error",
+        ),
+    )
 
 
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:

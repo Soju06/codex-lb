@@ -27,8 +27,8 @@ from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRe
 from app.core.types import JsonValue
 from app.core.utils.sse import parse_sse_data_json
 from app.dependencies import ProxyContext, get_proxy_context
-from app.modules.proxy.schemas import ModelListItem, ModelListResponse, RateLimitStatusPayload
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy.schemas import ModelListItem, ModelListResponse, RateLimitStatusPayload
 
 router = APIRouter(prefix="/backend-api/codex", tags=["proxy"])
 v1_router = APIRouter(prefix="/v1", tags=["proxy"])

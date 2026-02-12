@@ -83,10 +83,7 @@ async def _validate_proxy_api_key(request: Request) -> JSONResponse | None:
         try:
             api_key = await service.validate_key(token)
         except ApiKeyRateLimitExceededError as exc:
-            message = (
-                "API key weekly token limit exceeded. "
-                f"Usage resets at {exc.weekly_reset_at.isoformat()}Z."
-            )
+            message = f"API key weekly token limit exceeded. Usage resets at {exc.weekly_reset_at.isoformat()}Z."
             return JSONResponse(
                 status_code=429,
                 content=openai_error("rate_limit_exceeded", message, error_type="rate_limit_error"),

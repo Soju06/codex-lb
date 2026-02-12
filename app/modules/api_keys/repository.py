@@ -5,8 +5,8 @@ from datetime import datetime
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ApiKey
 from app.core.utils.time import utcnow
+from app.db.models import ApiKey
 
 _UNSET = object()
 

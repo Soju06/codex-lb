@@ -11,8 +11,8 @@ from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
 from app.core.middleware import (
-    add_auth_middleware,
     add_api_unhandled_error_middleware,
+    add_auth_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
 )

@@ -82,7 +82,7 @@ def create_app() -> FastAPI:
         if normalized and any(
             normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in excluded_prefixes
         ):
-            raise HTTPException(status_code=404, detail="Not found")
+            raise HTTPException(status_code=404, detail="Not Found")
 
         if normalized:
             candidate = (static_dir / normalized).resolve()

@@ -49,7 +49,7 @@ async def list_request_logs(
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
-    logs = await context.service.list_recent(
+    page = await context.service.list_recent(
         limit=limit,
         offset=offset,
         search=search,
@@ -61,7 +61,11 @@ async def list_request_logs(
         reasoning_efforts=reasoning_effort,
         status=status,
     )
-    return RequestLogsResponse(requests=logs)
+    return RequestLogsResponse(
+        requests=page.requests,
+        total=page.total,
+        has_more=page.has_more,
+    )
 
 
 @router.get("/options", response_model=RequestLogFilterOptionsResponse)
@@ -82,4 +86,5 @@ async def list_request_log_filter_options(
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options
         ],
+        statuses=options.statuses,
     )

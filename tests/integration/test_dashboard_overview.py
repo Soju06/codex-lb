@@ -66,7 +66,7 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
             requested_at=now - timedelta(minutes=1),
         )
 
-    response = await async_client.get("/api/dashboard/overview?requestLimit=10&requestOffset=0")
+    response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     payload = response.json()
 
@@ -74,5 +74,5 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     assert payload["summary"]["primaryWindow"]["capacityCredits"] == pytest.approx(225.0)
     assert payload["windows"]["primary"]["windowKey"] == "primary"
     assert payload["windows"]["secondary"]["windowKey"] == "secondary"
-    assert len(payload["requestLogs"]) == 1
+    assert "requestLogs" not in payload
     assert payload["lastSyncAt"] == secondary_time.isoformat() + "Z"

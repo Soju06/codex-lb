@@ -10,7 +10,6 @@ from app.db.models import UsageHistory
 from app.modules.accounts.mappers import build_account_summaries
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import DashboardOverviewResponse, DashboardUsageWindows
-from app.modules.request_logs.mappers import to_request_log_entry
 from app.modules.usage.builders import (
     build_usage_summary_response,
     build_usage_window_response,
@@ -22,7 +21,7 @@ class DashboardService:
         self._repo = repo
         self._encryptor = TokenEncryptor()
 
-    async def get_overview(self, *, request_limit: int, request_offset: int) -> DashboardOverviewResponse:
+    async def get_overview(self) -> DashboardOverviewResponse:
         now = utcnow()
         accounts = await self._repo.list_accounts()
         primary_usage = await self._repo.latest_usage_by_account("primary")
@@ -71,15 +70,11 @@ class DashboardService:
             ),
         )
 
-        recent_logs = await self._repo.list_recent_logs(limit=request_limit, offset=request_offset)
-        request_logs = [to_request_log_entry(log) for log in recent_logs]
-
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage),
             accounts=account_summaries,
             summary=summary,
             windows=windows,
-            request_logs=request_logs,
         )
 
 

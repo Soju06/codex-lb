@@ -6,9 +6,18 @@ import os
 import struct
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import openai
+from openai.types.chat import (
+    ChatCompletionContentPartInputAudioParam,
+    ChatCompletionContentPartParam,
+    ChatCompletionContentPartTextParam,
+    ChatCompletionMessageParam,
+    ChatCompletionUserMessageParam,
+)
 
 BASE_URL = os.environ.get("CODEX_BASE_URL", "http://localhost:2455/v1")
 API_KEY = os.environ.get("CODEX_API_KEY", "sk-local")
@@ -29,6 +38,8 @@ IMAGE_URL = os.environ.get(
 AUDIO_B64 = os.environ.get("CODEX_TEST_AUDIO_B64")
 AUDIO_FORMAT = os.environ.get("CODEX_TEST_AUDIO_FORMAT", "wav")
 CHAT_FILE_ID = os.environ.get("CODEX_TEST_CHAT_FILE_ID", "file-unknown")
+CHAT_FILE_DATA_B64 = os.environ.get("CODEX_TEST_CHAT_FILE_DATA_B64")
+CHAT_FILE_NAME = os.environ.get("CODEX_TEST_CHAT_FILE_NAME", "input.bin")
 
 RUN_RESPONSES = os.environ.get("CODEX_RUN_RESPONSES", "1") != "0"
 RUN_CHAT = os.environ.get("CODEX_RUN_CHAT", "1") != "0"
@@ -91,6 +102,41 @@ def _error_detail(exc: Exception) -> dict[str, Any]:
             except Exception:
                 pass
     return detail
+
+
+def _chat_user_message(content: str | list[ChatCompletionContentPartParam]) -> ChatCompletionMessageParam:
+    return ChatCompletionUserMessageParam(role="user", content=content)
+
+
+def _chat_text_part(text: str) -> ChatCompletionContentPartTextParam:
+    return {"type": "text", "text": text}
+
+
+def _chat_image_part(url: str) -> ChatCompletionContentPartParam:
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _chat_audio_format(value: str) -> Literal["wav", "mp3"]:
+    normalized = value.strip().lower()
+    if normalized in ("wav", "mp3"):
+        return cast(Literal["wav", "mp3"], normalized)
+    raise CaseSkipped("C.audio_input requires CODEX_TEST_AUDIO_FORMAT to be wav or mp3")
+
+
+def _chat_audio_part(data_b64: str, audio_format: Literal["wav", "mp3"]) -> ChatCompletionContentPartInputAudioParam:
+    return {"type": "input_audio", "input_audio": {"data": data_b64, "format": audio_format}}
+
+
+def _chat_file_part_from_data(*, file_data_b64: str, filename: str) -> ChatCompletionContentPartParam:
+    return {"type": "file", "file": {"file_data": file_data_b64, "filename": filename}}
+
+
+def _chat_file_data_from_url(file_url: str) -> tuple[str, str]:
+    parsed = urlparse(file_url)
+    filename = parsed.path.rsplit("/", 1)[-1] or "input.bin"
+    with urlopen(file_url, timeout=15) as response:  # nosec B310
+        payload = response.read()
+    return base64.b64encode(payload).decode("ascii"), filename
 
 
 def run_case(name: str, fn: Callable[[], Any]) -> CaseResult:
@@ -429,54 +475,67 @@ def main() -> int:
     if RUN_CHAT:
 
         def c_text() -> dict[str, Any]:
+            messages: list[ChatCompletionMessageParam] = [
+                _chat_user_message(DEFAULT_TEXT),
+            ]
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": DEFAULT_TEXT}],
+                messages=messages,
             )
             return {"id": getattr(resp, "id", None), "content": resp.choices[0].message.content}
 
         def c_image_url() -> dict[str, Any]:
+            messages: list[ChatCompletionMessageParam] = [
+                _chat_user_message(
+                    [
+                        _chat_text_part("Describe the image."),
+                        _chat_image_part(IMAGE_URL),
+                    ]
+                )
+            ]
             resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Describe the image."},
-                            {"type": "image_url", "image_url": {"url": IMAGE_URL}},
-                        ],
-                    }
-                ],
+                messages=messages,
             )
             return {"id": getattr(resp, "id", None), "content": resp.choices[0].message.content}
 
         def c_audio_input() -> dict[str, Any]:
+            audio_format = _chat_audio_format(AUDIO_FORMAT)
+            messages: list[ChatCompletionMessageParam] = [
+                _chat_user_message(
+                    [
+                        _chat_text_part("Transcribe the audio."),
+                        _chat_audio_part(audio_b64, audio_format),
+                    ]
+                )
+            ]
             resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Transcribe the audio."},
-                            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": AUDIO_FORMAT}},
-                        ],
-                    }
-                ],
+                messages=messages,
             )
             return {"id": getattr(resp, "id", None), "content": resp.choices[0].message.content}
 
         def c_file_input() -> dict[str, Any]:
+            try:
+                if CHAT_FILE_DATA_B64:
+                    file_data_b64 = CHAT_FILE_DATA_B64
+                    filename = CHAT_FILE_NAME
+                else:
+                    file_data_b64, filename = _chat_file_data_from_url(FILE_URL)
+            except Exception as exc:
+                raise CaseSkipped(f"C.file_input could not prepare file payload: {exc}") from exc
+
+            messages: list[ChatCompletionMessageParam] = [
+                _chat_user_message(
+                    [
+                        _chat_text_part("Summarize the file."),
+                        _chat_file_part_from_data(file_data_b64=file_data_b64, filename=filename),
+                    ]
+                )
+            ]
             resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Summarize the file."},
-                            {"type": "file", "file": {"file_url": FILE_URL}},
-                        ],
-                    }
-                ],
+                messages=messages,
             )
             return {"id": getattr(resp, "id", None), "content": resp.choices[0].message.content}
 

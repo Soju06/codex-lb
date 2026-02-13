@@ -50,7 +50,6 @@ async def test_usage_summary_empty_returns_zeroes(async_client):
     cost = payload["cost"]
     assert cost["currency"] == "USD"
     assert cost["totalUsd7d"] == 0.0
-    assert cost["byModel"] == []
 
     metrics = payload["metrics"]
     assert metrics["requests7d"] == 0

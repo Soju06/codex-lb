@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from app.core.openai.models_catalog import ModelEntry
 from app.core.types import JsonValue
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
@@ -86,6 +85,32 @@ class RateLimitStatusPayload(BaseModel):
         )
 
 
+class ReasoningLevelSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    effort: str
+    description: str
+
+
+class ModelMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str
+    description: str
+    context_window: int
+    input_modalities: list[str]
+    supported_reasoning_levels: list[ReasoningLevelSchema]
+    default_reasoning_level: str | None = None
+    supports_reasoning_summaries: bool = False
+    support_verbosity: bool = False
+    default_verbosity: str | None = None
+    prefer_websockets: bool = False
+    supports_parallel_tool_calls: bool = False
+    supported_in_api: bool = True
+    minimal_client_version: str | None = None
+    priority: int = 0
+
+
 class ModelListItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -93,7 +118,7 @@ class ModelListItem(BaseModel):
     object: str = "model"
     created: int
     owned_by: str
-    metadata: ModelEntry
+    metadata: ModelMetadata | None = None
 
 
 class ModelListResponse(BaseModel):

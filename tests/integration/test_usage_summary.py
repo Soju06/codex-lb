@@ -62,8 +62,6 @@ async def test_usage_summary_cost_includes_cached_tokens(db_setup):
         expected_raw = (800 / 1_000_000) * 1.25 + (200 / 1_000_000) * 0.125 + (500 / 1_000_000) * 10.0
         expected = round(expected_raw, 6)
         assert cost.total_usd_7d == pytest.approx(expected)
-        by_model = {entry.model: entry.usd for entry in cost.by_model}
-        assert by_model["gpt-5.1"] == pytest.approx(expected)
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,17 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.7"
+
+      - name: Install frontend dependencies
+        run: cd frontend && bun install --frozen-lockfile
+
+      - name: Build frontend assets
+        run: cd frontend && bun run build
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -67,6 +78,31 @@ jobs:
 
       - name: Build sdist + wheel
         run: uvx --from build python -m build
+
+      - name: Verify wheel contains frontend assets
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob("dist/*.whl")
+          if not wheels:
+              raise SystemExit("no wheel found in dist/")
+
+          wheel = wheels[0]
+          with zipfile.ZipFile(wheel) as zf:
+              names = set(zf.namelist())
+              has_index = "app/static/index.html" in names
+              has_js = any(name.startswith("app/static/assets/") and name.endswith(".js") for name in names)
+              has_css = any(name.startswith("app/static/assets/") and name.endswith(".css") for name in names)
+
+          if not (has_index and has_js and has_css):
+              raise SystemExit(
+                  f"frontend assets missing in wheel: index={has_index} js={has_js} css={has_css}"
+              )
+          print(f"frontend assets verified in wheel: {wheel}")
+          PY
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4

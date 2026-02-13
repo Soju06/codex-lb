@@ -5,6 +5,7 @@ from app.modules.shared.schemas import DashboardModel
 
 class DashboardAuthSessionResponse(DashboardModel):
     authenticated: bool
+    password_required: bool
     totp_required_on_login: bool
     totp_configured: bool
 
@@ -22,3 +23,20 @@ class TotpSetupConfirmRequest(DashboardModel):
 
 class TotpVerifyRequest(DashboardModel):
     code: str
+
+
+class PasswordSetupRequest(DashboardModel):
+    password: str
+
+
+class PasswordLoginRequest(DashboardModel):
+    password: str
+
+
+class PasswordChangeRequest(DashboardModel):
+    current_password: str
+    new_password: str
+
+
+class PasswordRemoveRequest(DashboardModel):
+    password: str

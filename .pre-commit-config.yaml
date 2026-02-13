@@ -12,3 +12,22 @@ repos:
         entry: .venv/bin/python -m ty check
         language: system
         pass_filenames: false
+      - id: frontend-lint
+        name: frontend lint
+        entry: /bin/zsh -lc "cd frontend && bun run lint"
+        language: system
+        pass_filenames: false
+        files: ^frontend/
+      - id: frontend-typecheck
+        name: frontend typecheck
+        entry: /bin/zsh -lc "cd frontend && bun run typecheck"
+        language: system
+        pass_filenames: false
+        files: ^frontend/
+      - id: frontend-test
+        name: frontend test
+        entry: /bin/zsh -lc "cd frontend && bun run test"
+        language: system
+        pass_filenames: false
+        files: ^frontend/
+        stages: [pre-push]

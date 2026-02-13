@@ -13,6 +13,7 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.balancer.types import UpstreamError
+from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
@@ -47,15 +48,24 @@ class LoadBalancer:
         *,
         reallocate_sticky: bool = False,
         prefer_earlier_reset_accounts: bool = False,
+        model: str | None = None,
     ) -> AccountSelection:
         selected_snapshot: Account | None = None
         error_message: str | None = None
         async with self._repo_factory() as repos:
             accounts = await repos.accounts.list_accounts()
+            if model:
+                accounts = _filter_accounts_for_model(accounts, model)
+                if not accounts:
+                    return AccountSelection(
+                        account=None,
+                        error_message=f"No accounts with a plan supporting model '{model}'",
+                    )
             latest_primary = await repos.usage.latest_by_account()
             updater = UsageUpdater(repos.usage, repos.accounts)
-            await updater.refresh_accounts(accounts, latest_primary)
-            latest_primary = await repos.usage.latest_by_account()
+            refreshed = await updater.refresh_accounts(accounts, latest_primary)
+            if refreshed:
+                latest_primary = await repos.usage.latest_by_account()
             latest_secondary = await repos.usage.latest_by_account(window="secondary")
 
             states, account_map = _build_states(
@@ -263,6 +273,13 @@ def _state_from_account(
         error_count=runtime.error_count,
         deactivation_reason=account.deactivation_reason,
     )
+
+
+def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
+    allowed_plans = get_model_registry().plan_types_for_model(model)
+    if allowed_plans is None:
+        return accounts
+    return [a for a in accounts if a.plan_type in allowed_plans]
 
 
 def _clone_account(account: Account) -> Account:

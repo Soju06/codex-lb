@@ -10,14 +10,18 @@ RATE_LIMIT_CODES = {"rate_limit_exceeded", "usage_limit_reached"}
 QUOTA_CODES = {"insufficient_quota", "usage_not_included", "quota_exceeded"}
 
 
-def log_status(log: RequestLog) -> str:
-    if log.status == "success":
+def normalize_log_status(status: str, error_code: str | None) -> str:
+    if status == "success":
         return "ok"
-    if log.error_code in RATE_LIMIT_CODES:
+    if error_code in RATE_LIMIT_CODES:
         return "rate_limit"
-    if log.error_code in QUOTA_CODES:
+    if error_code in QUOTA_CODES:
         return "quota"
     return "error"
+
+
+def log_status(log: RequestLog) -> str:
+    return normalize_log_status(log.status, log.error_code)
 
 
 def to_request_log_entry(log: RequestLog) -> RequestLogEntry:

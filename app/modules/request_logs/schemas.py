@@ -24,6 +24,8 @@ class RequestLogEntry(DashboardModel):
 
 class RequestLogsResponse(DashboardModel):
     requests: list[RequestLogEntry] = Field(default_factory=list)
+    total: int
+    has_more: bool
 
 
 class RequestLogModelOption(DashboardModel):
@@ -34,3 +36,4 @@ class RequestLogModelOption(DashboardModel):
 class RequestLogFilterOptionsResponse(DashboardModel):
     account_ids: list[str] = Field(default_factory=list)
     model_options: list[RequestLogModelOption] = Field(default_factory=list)
+    statuses: list[str] = Field(default_factory=list)

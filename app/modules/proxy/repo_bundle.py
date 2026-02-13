@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from typing import AsyncContextManager
 
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import UsageRepository
 
 
@@ -17,7 +17,7 @@ class ProxyRepositories:
     usage: UsageRepository
     request_logs: RequestLogsRepository
     sticky_sessions: StickySessionsRepository
-    settings: SettingsRepository
+    api_keys: ApiKeysRepository
 
 
 ProxyRepoFactory = Callable[[], AsyncContextManager[ProxyRepositories]]

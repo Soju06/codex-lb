@@ -27,6 +27,3 @@ class DashboardRepository:
 
     async def list_logs_since(self, since: datetime) -> list[RequestLog]:
         return await self._logs_repo.list_since(since)
-
-    async def list_recent_logs(self, limit: int, offset: int) -> list[RequestLog]:
-        return await self._logs_repo.list_recent(limit=limit, offset=offset)

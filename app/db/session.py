@@ -3,16 +3,19 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, TypeVar
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Protocol, TypeVar
 
 import anyio
+from anyio import to_thread
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config.settings import get_settings
-from app.db.migrations import run_migrations
 from app.db.sqlite_utils import check_sqlite_integrity, sqlite_db_path_from_url
+
+if TYPE_CHECKING:
+    from app.db.migrate import MigrationRunResult, MigrationState
 
 _settings = get_settings()
 
@@ -76,6 +79,10 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 _T = TypeVar("_T")
 
 
+class _SqliteBackupCreator(Protocol):
+    def __call__(self, source: Path, *, max_files: int) -> Path: ...
+
+
 def _ensure_sqlite_dir(url: str) -> None:
     if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
         return
@@ -118,6 +125,21 @@ async def _safe_close(session: AsyncSession) -> None:
         return
 
 
+def _load_migration_entrypoints() -> tuple[
+    Callable[[str], "MigrationState"],
+    Callable[[str], Awaitable["MigrationRunResult"]],
+]:
+    from app.db.migrate import inspect_migration_state, run_startup_migrations
+
+    return inspect_migration_state, run_startup_migrations
+
+
+def _load_sqlite_backup_creator() -> _SqliteBackupCreator:
+    from app.db.backup import create_sqlite_pre_migration_backup
+
+    return create_sqlite_pre_migration_backup
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     session = SessionLocal()
     try:
@@ -132,8 +154,6 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 
 async def init_db() -> None:
-    from app.db.models import Base
-
     _ensure_sqlite_dir(_settings.database_url)
     sqlite_path = sqlite_db_path_from_url(_settings.database_url)
     if sqlite_path is not None:
@@ -156,18 +176,60 @@ async def init_db() -> None:
                 )
             raise RuntimeError(message)
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    if not _settings.database_migrate_on_startup:
+        logger.info("Startup database migration is disabled")
+        return
 
-    async with SessionLocal() as session:
-        try:
-            updated = await run_migrations(session)
-            if updated:
-                logger.info("Applied database migrations count=%s", updated)
-        except Exception:
-            logger.exception("Failed to apply database migrations")
-            if get_settings().database_migrations_fail_fast:
-                raise
+    try:
+        inspect_migration_state, run_startup_migrations = _load_migration_entrypoints()
+    except ModuleNotFoundError as exc:
+        if exc.name != "app.db.migrate":
+            raise
+        logger.exception("Failed to import migration entrypoint module=app.db.migrate")
+        raise RuntimeError("Database migration entrypoint app.db.migrate is unavailable") from exc
+    except ImportError as exc:
+        logger.exception("Failed to import database migration entrypoints from app.db.migrate")
+        raise RuntimeError("Database migration entrypoint app.db.migrate is invalid") from exc
+
+    if sqlite_path is not None and _settings.database_sqlite_pre_migrate_backup_enabled and sqlite_path.exists():
+        migration_state = await to_thread.run_sync(
+            lambda: inspect_migration_state(_settings.database_url),
+        )
+        if migration_state.needs_upgrade:
+            try:
+                create_sqlite_pre_migration_backup = _load_sqlite_backup_creator()
+            except ModuleNotFoundError as exc:
+                if exc.name != "app.db.backup":
+                    raise
+                logger.exception("Failed to import SQLite backup module=app.db.backup")
+                raise RuntimeError("SQLite backup module app.db.backup is unavailable") from exc
+
+            backup_path = await to_thread.run_sync(
+                lambda: create_sqlite_pre_migration_backup(
+                    sqlite_path,
+                    max_files=_settings.database_sqlite_pre_migrate_backup_max_files,
+                ),
+            )
+            logger.info(
+                "Created SQLite pre-migration backup path=%s target_revision=%s",
+                backup_path,
+                migration_state.head_revision,
+            )
+
+    try:
+        result = await run_startup_migrations(_settings.database_url)
+        if result.bootstrap.stamped_revision is not None:
+            logger.info(
+                "Bootstrapped legacy migrations stamped_revision=%s legacy_rows=%s",
+                result.bootstrap.stamped_revision,
+                result.bootstrap.legacy_row_count,
+            )
+        if result.current_revision is not None:
+            logger.info("Database migration complete revision=%s", result.current_revision)
+    except Exception:
+        logger.exception("Failed to apply database migrations")
+        if _settings.database_migrations_fail_fast:
+            raise
 
 
 async def close_db() -> None:

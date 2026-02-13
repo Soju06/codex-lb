@@ -43,16 +43,6 @@ def _account_to_summary(
     secondary_remaining_percent = usage_core.remaining_percent_from_used(secondary_used_percent) or 0.0
     reset_at_primary = from_epoch_seconds(primary_usage.reset_at) if primary_usage is not None else None
     reset_at_secondary = from_epoch_seconds(secondary_usage.reset_at) if secondary_usage is not None else None
-    capacity_primary = usage_core.capacity_for_plan(plan_type, "primary")
-    capacity_secondary = usage_core.capacity_for_plan(plan_type, "secondary")
-    remaining_credits_primary = usage_core.remaining_credits_from_percent(
-        primary_used_percent,
-        capacity_primary,
-    )
-    remaining_credits_secondary = usage_core.remaining_credits_from_percent(
-        secondary_used_percent,
-        capacity_secondary,
-    )
     return AccountSummary(
         account_id=account.id,
         email=account.email,
@@ -65,12 +55,6 @@ def _account_to_summary(
         ),
         reset_at_primary=reset_at_primary,
         reset_at_secondary=reset_at_secondary,
-        last_refresh_at=account.last_refresh,
-        capacity_credits_primary=capacity_primary,
-        remaining_credits_primary=remaining_credits_primary,
-        capacity_credits_secondary=capacity_secondary,
-        remaining_credits_secondary=remaining_credits_secondary,
-        deactivation_reason=account.deactivation_reason,
         auth=auth_status,
     )
 

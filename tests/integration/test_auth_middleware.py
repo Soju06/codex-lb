@@ -99,3 +99,31 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
     over_limit = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
     assert over_limit.status_code == 429
     assert over_limit.json()["error"]["code"] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_uses_dashboard_session_auth(async_client):
+    setup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup.status_code == 200
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    authenticated = await async_client.get("/api/codex/usage")
+    assert authenticated.status_code == 200
+
+    await async_client.post("/api/dashboard-auth/logout", json={})
+    blocked = await async_client.get("/api/codex/usage")
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "authentication_required"

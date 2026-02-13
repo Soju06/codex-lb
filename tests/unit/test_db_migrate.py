@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
 from app.db.migrate import check_schema_drift, inspect_migration_state, run_upgrade
 from app.db.migration_url import to_sync_database_url
+from app.db.models import Base
 
 
 def _db_url(path: Path) -> str:
@@ -34,6 +35,19 @@ def test_inspect_migration_state_no_upgrade_after_head(tmp_path: Path) -> None:
     assert state.needs_upgrade is False
     assert state.current_revision == state.head_revision
     assert state.has_alembic_version_table is True
+
+
+def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "base.db"
+    url = _db_url(db_path)
+
+    def _raise_create_all(*_: object, **__: object) -> None:
+        raise AssertionError("base revision must not call Base.metadata.create_all")
+
+    monkeypatch.setattr(Base.metadata, "create_all", _raise_create_all)
+
+    result = run_upgrade(url, "000_base_schema", bootstrap_legacy=False)
+    assert result.current_revision == "000_base_schema"
 
 
 def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:

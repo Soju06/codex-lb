@@ -14,7 +14,7 @@ from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_das
 
 PUBLIC_PATHS = {"/health"}
 PUBLIC_PREFIXES = ("/api/dashboard-auth/",)
-PROXY_PREFIXES = ("/v1/", "/backend-api/codex/", "/api/codex/")
+PROXY_PREFIXES = ("/v1/", "/backend-api/codex/")
 
 
 def add_auth_middleware(app: FastAPI) -> None:

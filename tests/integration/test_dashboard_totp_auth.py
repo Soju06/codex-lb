@@ -123,6 +123,82 @@ async def test_dashboard_password_and_totp_flow(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_password_management_requires_totp_when_totp_required(async_client, monkeypatch):
+    current_epoch = {"value": 1_700_000_000}
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as dashboard_auth_service_module
+
+    monkeypatch.setattr(totp_module, "time", lambda: current_epoch["value"])
+    monkeypatch.setattr(dashboard_auth_service_module, "time", lambda: current_epoch["value"])
+
+    setup_password = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup_password.status_code == 200
+
+    start = await async_client.post("/api/dashboard-auth/totp/setup/start", json={})
+    assert start.status_code == 200
+    secret = start.json()["secret"]
+
+    setup_code = pyotp.TOTP(secret).at(current_epoch["value"])
+    confirm = await async_client.post(
+        "/api/dashboard-auth/totp/setup/confirm",
+        json={"secret": secret, "code": setup_code},
+    )
+    assert confirm.status_code == 200
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": True,
+            "apiKeyAuthEnabled": False,
+        },
+    )
+    assert enable.status_code == 200
+
+    logout = await async_client.post("/api/dashboard-auth/logout", json={})
+    assert logout.status_code == 200
+
+    login = await async_client.post(
+        "/api/dashboard-auth/password/login",
+        json={"password": "password123"},
+    )
+    assert login.status_code == 200
+
+    blocked_change = await async_client.post(
+        "/api/dashboard-auth/password/change",
+        json={"currentPassword": "password123", "newPassword": "new-password-456"},
+    )
+    assert blocked_change.status_code == 401
+    assert blocked_change.json()["error"]["code"] == "totp_required"
+
+    blocked_remove = await async_client.request(
+        "DELETE",
+        "/api/dashboard-auth/password",
+        json={"password": "password123"},
+    )
+    assert blocked_remove.status_code == 401
+    assert blocked_remove.json()["error"]["code"] == "totp_required"
+
+    verify_code = pyotp.TOTP(secret).at(current_epoch["value"])
+    verify = await async_client.post(
+        "/api/dashboard-auth/totp/verify",
+        json={"code": verify_code},
+    )
+    assert verify.status_code == 200
+
+    allowed_change = await async_client.post(
+        "/api/dashboard-auth/password/change",
+        json={"currentPassword": "password123", "newPassword": "new-password-456"},
+    )
+    assert allowed_change.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_verify_rejects_one_of_concurrent_replays(async_client, monkeypatch):
     current_epoch = {"value": 1_700_000_000}
 

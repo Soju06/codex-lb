@@ -43,6 +43,24 @@ def _has_password_session(request: Request) -> bool:
     return get_dashboard_session_store().is_password_verified(session_id)
 
 
+async def _validate_password_management_session(request: Request) -> JSONResponse | None:
+    session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
+    session_state = get_dashboard_session_store().get(session_id)
+    if session_state is None or not session_state.password_verified:
+        return JSONResponse(
+            status_code=401,
+            content=dashboard_error("authentication_required", "Authentication is required"),
+        )
+
+    settings = await get_settings_cache().get()
+    if settings.totp_required_on_login and not session_state.totp_verified:
+        return JSONResponse(
+            status_code=401,
+            content=dashboard_error("totp_required", "TOTP verification is required for dashboard access"),
+        )
+    return None
+
+
 @router.get("/session", response_model=DashboardAuthSessionResponse)
 async def get_dashboard_auth_session(
     request: Request,
@@ -124,11 +142,9 @@ async def change_password(
     payload: PasswordChangeRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
-    if not _has_password_session(request):
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", "Authentication is required"),
-        )
+    blocked = await _validate_password_management_session(request)
+    if blocked is not None:
+        return blocked
 
     new_password = payload.new_password.strip()
     if len(new_password) < 8:
@@ -160,11 +176,9 @@ async def remove_password(
     payload: PasswordRemoveRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
-    if not _has_password_session(request):
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", "Authentication is required"),
-        )
+    blocked = await _validate_password_management_session(request)
+    if blocked is not None:
+        return blocked
 
     try:
         await context.service.remove_password(payload.password)

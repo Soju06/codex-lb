@@ -43,7 +43,7 @@ The system SHALL authenticate the admin via `POST /api/dashboard-auth/password/l
 
 ### Requirement: Password change
 
-The system SHALL allow the admin to change the password via `POST /api/dashboard-auth/password/change` by providing both the current password and the new password. The request MUST be authenticated with a valid session.
+The system SHALL allow the admin to change the password via `POST /api/dashboard-auth/password/change` by providing both the current password and the new password. The request MUST be authenticated with a valid session. When `totp_required_on_login` is true, the session MUST include `pw=true` and `tv=true`.
 
 #### Scenario: Successful password change
 
@@ -55,9 +55,14 @@ The system SHALL allow the admin to change the password via `POST /api/dashboard
 - **WHEN** admin submits an incorrect `current_password`
 - **THEN** the system returns 401 with error code `invalid_credentials`
 
+#### Scenario: Password change blocked until TOTP verification
+
+- **WHEN** `totp_required_on_login` is true and the session has `pw=true, tv=false`
+- **THEN** `POST /api/dashboard-auth/password/change` returns 401 with error code `totp_required`
+
 ### Requirement: Password removal
 
-The system SHALL allow the admin to remove the password via `DELETE /api/dashboard-auth/password` by providing the current password in the request body. Removing the password MUST also disable TOTP (`totp_required_on_login = false`) and clear the TOTP secret to return the system to unauthenticated mode.
+The system SHALL allow the admin to remove the password via `DELETE /api/dashboard-auth/password` by providing the current password in the request body. Removing the password MUST also disable TOTP (`totp_required_on_login = false`) and clear the TOTP secret to return the system to unauthenticated mode. When `totp_required_on_login` is true, the session MUST include `pw=true` and `tv=true`.
 
 #### Scenario: Successful password removal
 
@@ -68,6 +73,11 @@ The system SHALL allow the admin to remove the password via `DELETE /api/dashboa
 
 - **WHEN** admin submits an incorrect password for removal
 - **THEN** the system returns 401 with error code `invalid_credentials`
+
+#### Scenario: Password removal blocked until TOTP verification
+
+- **WHEN** `totp_required_on_login` is true and the session has `pw=true, tv=false`
+- **THEN** `DELETE /api/dashboard-auth/password` returns 401 with error code `totp_required`
 
 ### Requirement: Session authentication middleware
 
@@ -200,4 +210,3 @@ The SPA SHALL check `GET /api/dashboard-auth/session` on load. When `passwordReq
 
 - **WHEN** the SPA loads and the session endpoint returns `passwordRequired: false`
 - **THEN** the full dashboard UI is shown immediately
-

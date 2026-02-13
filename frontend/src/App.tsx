@@ -1,15 +1,30 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 
 import { AppHeader } from "@/components/layout/app-header";
 import { StatusBar } from "@/components/layout/status-bar";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
-import { SettingsPage } from "@/features/settings/components/settings-page";
 import { useThemeStore } from "@/hooks/use-theme";
+
+const DashboardPage = lazy(async () => {
+  const module = await import("@/features/dashboard/components/dashboard-page");
+  return { default: module.DashboardPage };
+});
+const AccountsPage = lazy(async () => {
+  const module = await import("@/features/accounts/components/accounts-page");
+  return { default: module.AccountsPage };
+});
+const SettingsPage = lazy(async () => {
+  const module = await import("@/features/settings/components/settings-page");
+  return { default: module.SettingsPage };
+});
+
+function RouteLoadingFallback() {
+  return <div className="py-6 text-sm text-muted-foreground">Loading...</div>;
+}
 
 function AppLayout() {
   const theme = useThemeStore((state) => state.theme);
@@ -41,9 +56,30 @@ export default function App() {
         <Routes>
           <Route element={<AppLayout />}>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<DashboardPage />} />
-            <Route path="/accounts" element={<AccountsPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route
+              path="/dashboard"
+              element={
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <DashboardPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/accounts"
+              element={
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <AccountsPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <SettingsPage />
+                </Suspense>
+              }
+            />
           </Route>
         </Routes>
       </AuthGate>

@@ -146,6 +146,32 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+  migration-check:
+    name: Migration check (alembic)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev --frozen
+
+      - name: Validate migration drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP_DB="$(mktemp -u /tmp/codex-lb-ci-migrate-XXXXXX.db)"
+          DB_URL="sqlite+aiosqlite:///${TMP_DB}"
+          uv run python -m app.db.migrate --db-url "${DB_URL}" upgrade head
+          uv run python -m app.db.migrate --db-url "${DB_URL}" check
+
   package:
     name: Package (build)
     runs-on: ubuntu-24.04

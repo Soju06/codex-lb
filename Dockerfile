@@ -42,9 +42,12 @@ RUN adduser --disabled-password --gecos "" app \
 
 COPY --from=python-build /opt/venv /opt/venv
 COPY app app
+COPY scripts scripts
 COPY --from=frontend-build /app/app/static app/static
+
+RUN chmod +x /app/scripts/docker-entrypoint.sh
 
 USER app
 EXPOSE 2455 1455
 
-CMD ["fastapi", "run", "--host", "0.0.0.0", "--port", "2455"]
+CMD ["/app/scripts/docker-entrypoint.sh"]

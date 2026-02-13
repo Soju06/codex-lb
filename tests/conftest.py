@@ -26,6 +26,7 @@ from app.main import create_app  # noqa: E402
 async def app_instance():
     app = create_app()
     async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
         await conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
@@ -41,6 +42,7 @@ async def dispose_engine():
 @pytest_asyncio.fixture
 async def db_setup():
     async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
         await conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)

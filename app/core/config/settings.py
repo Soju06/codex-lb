@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
+    database_migrate_on_startup: bool = True
+    database_sqlite_pre_migrate_backup_enabled: bool = True
+    database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_connect_timeout_seconds: float = 30.0
     stream_idle_timeout_seconds: float = 300.0

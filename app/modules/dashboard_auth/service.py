@@ -33,6 +33,8 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def get_password_hash(self) -> str | None: ...
 
+    async def try_set_password_hash(self, password_hash: str) -> bool: ...
+
     async def set_password_hash(self, password_hash: str) -> DashboardAuthSettingsProtocol: ...
 
     async def clear_password_and_totp(self) -> DashboardAuthSettingsProtocol: ...
@@ -206,10 +208,9 @@ class DashboardAuthService:
         )
 
     async def setup_password(self, password: str) -> None:
-        current = await self._repository.get_password_hash()
-        if current is not None:
+        setup_ok = await self._repository.try_set_password_hash(_hash_password(password))
+        if not setup_ok:
             raise PasswordAlreadyConfiguredError("Password is already configured")
-        await self._repository.set_password_hash(_hash_password(password))
 
     async def verify_password(self, password: str) -> None:
         current = await self._repository.get_password_hash()

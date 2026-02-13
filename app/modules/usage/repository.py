@@ -95,13 +95,18 @@ class UsageRepository:
                 conditions = UsageHistory.window == window
         else:
             conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
-        stmt = select(UsageHistory).where(conditions).order_by(UsageHistory.account_id, UsageHistory.recorded_at.desc())
+        subq = (
+            select(
+                UsageHistory.account_id,
+                func.max(UsageHistory.id).label("max_id"),
+            )
+            .where(conditions)
+            .group_by(UsageHistory.account_id)
+            .subquery()
+        )
+        stmt = select(UsageHistory).join(subq, UsageHistory.id == subq.c.max_id)
         result = await self._session.execute(stmt)
-        latest: dict[str, UsageHistory] = {}
-        for entry in result.scalars().all():
-            if entry.account_id not in latest:
-                latest[entry.account_id] = entry
-        return latest
+        return {entry.account_id: entry for entry in result.scalars().all()}
 
     async def latest_window_minutes(self, window: str) -> int | None:
         if window == "primary":

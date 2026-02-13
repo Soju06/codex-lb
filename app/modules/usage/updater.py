@@ -49,11 +49,13 @@ class UsageUpdater:
         self,
         accounts: list[Account],
         latest_usage: Mapping[str, UsageHistory],
-    ) -> None:
+    ) -> bool:
+        """Refresh usage for all accounts. Returns True if any account was actually refreshed."""
         settings = get_settings()
         if not settings.usage_refresh_enabled:
-            return
+            return False
 
+        refreshed = False
         now = utcnow()
         interval = settings.usage_refresh_interval_seconds
         for account in accounts:
@@ -67,6 +69,7 @@ class UsageUpdater:
             # flush-time warnings (SAWarning: Session.add during flush).
             try:
                 await self._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+                refreshed = True
             except Exception as exc:
                 logger.warning(
                     "Usage refresh failed account_id=%s request_id=%s error=%s",
@@ -77,6 +80,7 @@ class UsageUpdater:
                 )
                 # swallow per-account failures so the whole refresh loop keeps going
                 continue
+        return refreshed
 
     async def _refresh_account(self, account: Account, *, usage_account_id: str | None) -> None:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)

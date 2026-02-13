@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from app.core.config.settings import get_settings
 from app.db.session import SessionLocal, _safe_close, _safe_rollback
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
@@ -57,6 +58,7 @@ class UsageRefreshScheduler:
                 accounts = await accounts_repo.list_accounts()
                 updater = UsageUpdater(usage_repo, accounts_repo)
                 await updater.refresh_accounts(accounts, latest_usage)
+                await get_rate_limit_headers_cache().invalidate()
             except Exception:
                 logger.exception("Usage refresh loop failed")
             finally:

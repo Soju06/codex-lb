@@ -24,6 +24,7 @@ from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.usage import api as usage_api
@@ -32,6 +33,7 @@ from app.modules.usage import api as usage_api
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await get_settings_cache().invalidate()
+    await get_rate_limit_headers_cache().invalidate()
     await init_db()
     await init_http_client()
     scheduler = build_usage_refresh_scheduler()

@@ -54,8 +54,9 @@ class LoadBalancer:
             accounts = await repos.accounts.list_accounts()
             latest_primary = await repos.usage.latest_by_account()
             updater = UsageUpdater(repos.usage, repos.accounts)
-            await updater.refresh_accounts(accounts, latest_primary)
-            latest_primary = await repos.usage.latest_by_account()
+            refreshed = await updater.refresh_accounts(accounts, latest_primary)
+            if refreshed:
+                latest_primary = await repos.usage.latest_by_account()
             latest_secondary = await repos.usage.latest_by_account(window="secondary")
 
             states, account_map = _build_states(

@@ -38,6 +38,12 @@ class _FakeRepository:
         self.settings.password_hash = password_hash
         return self.settings
 
+    async def try_set_password_hash(self, password_hash: str) -> bool:
+        if self.settings.password_hash is not None:
+            return False
+        self.settings.password_hash = password_hash
+        return True
+
     async def clear_password_and_totp(self) -> _FakeSettings:
         self.settings.password_hash = None
         self.settings.totp_required_on_login = False
@@ -73,6 +79,16 @@ async def test_setup_password_hashes_and_rejects_duplicate() -> None:
 
     with pytest.raises(PasswordAlreadyConfiguredError):
         await service.setup_password("another-password")
+
+
+@pytest.mark.asyncio
+async def test_setup_password_raises_when_atomic_set_fails() -> None:
+    repository = _FakeRepository()
+    repository.settings.password_hash = "already-set-by-race"
+    service = DashboardAuthService(repository, DashboardSessionStore())
+
+    with pytest.raises(PasswordAlreadyConfiguredError):
+        await service.setup_password("password123")
 
 
 @pytest.mark.asyncio

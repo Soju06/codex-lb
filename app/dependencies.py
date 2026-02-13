@@ -141,7 +141,6 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             usage=UsageRepository(session),
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
-            settings=SettingsRepository(session),
             api_keys=ApiKeysRepository(session),
         )
     except BaseException:

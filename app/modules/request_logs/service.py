@@ -62,22 +62,9 @@ class RequestLogsService:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
         )
-        logs = await self._repo.list_recent(
+        logs, total = await self._repo.list_recent(
             limit=limit,
             offset=offset,
-            search=search,
-            since=since,
-            until=until,
-            account_ids=account_ids,
-            model_options=normalized_model_options,
-            models=models,
-            reasoning_efforts=reasoning_efforts,
-            include_success=status_filter.include_success,
-            include_error_other=status_filter.include_error_other,
-            error_codes_in=status_filter.error_codes_in,
-            error_codes_excluding=status_filter.error_codes_excluding,
-        )
-        total = await self._repo.count_recent(
             search=search,
             since=since,
             until=until,

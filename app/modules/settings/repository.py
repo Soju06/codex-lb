@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DashboardSettings
@@ -27,7 +28,14 @@ class SettingsRepository:
             totp_last_verified_step=None,
         )
         self._session.add(row)
-        await self._session.commit()
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
+            if existing is None:
+                raise
+            return existing
         await self._session.refresh(row)
         return row
 

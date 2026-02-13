@@ -32,6 +32,18 @@ class DashboardAuthRepository:
         await self._settings_repository.commit_refresh(row)
         return row
 
+    async def try_set_password_hash(self, password_hash: str) -> bool:
+        await self._settings_repository.get_or_create()
+        result = await self._session.execute(
+            update(DashboardSettings)
+            .where(DashboardSettings.id == _SETTINGS_ID)
+            .where(DashboardSettings.password_hash.is_(None))
+            .values(password_hash=password_hash)
+            .returning(DashboardSettings.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def get_password_hash(self) -> str | None:
         row = await self._settings_repository.get_or_create()
         return row.password_hash

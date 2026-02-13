@@ -125,6 +125,32 @@ async def test_validate_key_checks_expiry_limit_and_weekly_reset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_key_advances_weekly_reset_strictly_into_future(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="boundary-key",
+            allowed_models=None,
+            weekly_token_limit=10,
+            expires_at=None,
+        )
+    )
+    fixed_now = utcnow()
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: fixed_now)
+
+    row = await repo.get_by_id(created.id)
+    assert row is not None
+    row.weekly_tokens_used = 7
+    row.weekly_reset_at = fixed_now - timedelta(days=14)
+
+    await service.validate_key(created.key)
+
+    assert row.weekly_tokens_used == 0
+    assert row.weekly_reset_at == fixed_now + timedelta(days=7)
+
+
+@pytest.mark.asyncio
 async def test_regenerate_key_rotates_hash_and_prefix() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

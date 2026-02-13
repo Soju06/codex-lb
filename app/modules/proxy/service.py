@@ -18,6 +18,7 @@ from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.clients.proxy import stream_responses as core_stream_responses
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error, response_failed_event
 from app.core.openai.models import OpenAIResponsePayload
@@ -47,6 +48,7 @@ from app.modules.proxy.helpers import (
     _window_snapshot,
 )
 from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.types import RateLimitStatusPayloadData
 from app.modules.usage.updater import UsageUpdater
@@ -88,10 +90,9 @@ class ProxyService:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
-        async with self._repo_factory() as repos:
-            settings = await repos.settings.get_or_create()
-            prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-            sticky_threads_enabled = settings.sticky_threads_enabled
+        settings = await get_settings_cache().get()
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        sticky_threads_enabled = settings.sticky_threads_enabled
         sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
@@ -163,6 +164,9 @@ class ProxyService:
                 )
 
     async def rate_limit_headers(self) -> dict[str, str]:
+        return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
+
+    async def _compute_rate_limit_headers(self) -> dict[str, str]:
         now = utcnow()
         headers: dict[str, str] = {}
         async with self._repo_factory() as repos:
@@ -239,10 +243,9 @@ class ProxyService:
         api_key: ApiKeyData | None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
-        async with self._repo_factory() as repos:
-            settings = await repos.settings.get_or_create()
-            prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-            sticky_threads_enabled = settings.sticky_threads_enabled
+        settings = await get_settings_cache().get()
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        sticky_threads_enabled = settings.sticky_threads_enabled
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
         max_attempts = 3
         for attempt in range(max_attempts):

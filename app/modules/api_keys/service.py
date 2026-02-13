@@ -251,6 +251,6 @@ def _to_api_key_data(row: ApiKey) -> ApiKeyData:
 
 def _advance_weekly_reset(weekly_reset_at: datetime, now: datetime) -> datetime:
     next_reset = weekly_reset_at
-    while next_reset < now:
+    while next_reset <= now:
         next_reset += timedelta(days=7)
     return next_reset

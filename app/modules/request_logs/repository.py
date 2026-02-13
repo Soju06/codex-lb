@@ -110,10 +110,21 @@ class RequestLogsRepository:
         result = await self._session.execute(stmt)
         rows = result.all()
         if not rows:
-            return [], 0
+            return [], await self._count_recent(conditions)
         logs = [row[0] for row in rows]
         total = rows[0][1]
         return logs, total
+
+    async def _count_recent(self, conditions: list) -> int:
+        count_stmt = (
+            select(func.count(RequestLog.id))
+            .select_from(RequestLog)
+            .outerjoin(Account, Account.id == RequestLog.account_id)
+        )
+        if conditions:
+            count_stmt = count_stmt.where(and_(*conditions))
+        result = await self._session.execute(count_stmt)
+        return int(result.scalar_one())
 
     async def list_filter_options(
         self,

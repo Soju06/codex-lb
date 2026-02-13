@@ -91,3 +91,29 @@ async def test_list_recent_empty_returns_zero_total(db_setup):
         logs, total = await repo.list_recent(limit=10)
         assert logs == []
         assert total == 0
+
+
+@pytest.mark.asyncio
+async def test_list_recent_offset_past_end_preserves_total(db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+
+        for i in range(4):
+            await repo.add_log(
+                account_id="acc1",
+                request_id=f"req_offset_{i}",
+                model="gpt-5.1",
+                input_tokens=10,
+                output_tokens=20,
+                latency_ms=100,
+                status="success",
+                error_code=None,
+                requested_at=now - timedelta(minutes=i),
+            )
+
+        logs, total = await repo.list_recent(limit=3, offset=10)
+        assert logs == []
+        assert total == 4

@@ -97,14 +97,18 @@ class UsageRepository:
             conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
         subq = (
             select(
-                UsageHistory.account_id,
-                func.max(UsageHistory.id).label("max_id"),
+                UsageHistory.id.label("usage_id"),
+                func.row_number()
+                .over(
+                    partition_by=UsageHistory.account_id,
+                    order_by=(UsageHistory.recorded_at.desc(), UsageHistory.id.desc()),
+                )
+                .label("row_number"),
             )
             .where(conditions)
-            .group_by(UsageHistory.account_id)
             .subquery()
         )
-        stmt = select(UsageHistory).join(subq, UsageHistory.id == subq.c.max_id)
+        stmt = select(UsageHistory).join(subq, UsageHistory.id == subq.c.usage_id).where(subq.c.row_number == 1)
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 

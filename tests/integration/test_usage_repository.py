@@ -87,3 +87,19 @@ async def test_latest_by_account_default_includes_primary_and_none(db_setup):
         assert set(latest.keys()) == {"acc1", "acc2"}
         assert latest["acc1"].used_percent == 25.0
         assert latest["acc2"].used_percent == 35.0
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_uses_recorded_at_with_deterministic_tie_breaker(db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+
+        await repo.add_entry("acc1", 20.0, window="primary", recorded_at=now)
+        await repo.add_entry("acc1", 30.0, window="primary", recorded_at=now)
+        await repo.add_entry("acc1", 5.0, window="primary", recorded_at=now - timedelta(hours=6))
+
+        latest = await repo.latest_by_account(window="primary")
+        assert latest["acc1"].used_percent == 30.0

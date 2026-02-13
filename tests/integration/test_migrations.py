@@ -90,6 +90,37 @@ async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_missing(db_setup):
+    async with SessionLocal() as session:
+        await session.execute(text("DROP TABLE dashboard_settings"))
+        await session.execute(
+            text(
+                """
+                CREATE TABLE schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+        for index, migration_name in enumerate(LEGACY_MIGRATION_ORDER[:4]):
+            await session.execute(
+                text("INSERT INTO schema_migrations (name, applied_at) VALUES (:name, :applied_at)"),
+                {"name": migration_name, "applied_at": f"2026-02-13T00:00:0{index}Z"},
+            )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+
+    assert result.bootstrap.stamped_revision is None
+    assert result.current_revision == "008_add_api_keys"
+
+    async with SessionLocal() as session:
+        setting_id = await session.execute(text("SELECT id FROM dashboard_settings WHERE id = 1"))
+        assert setting_id.scalar_one() == 1
+
+
+@pytest.mark.asyncio
 async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
     async with SessionLocal() as session:
         await session.execute(

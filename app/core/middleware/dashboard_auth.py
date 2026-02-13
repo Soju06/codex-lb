@@ -18,6 +18,7 @@ PUBLIC_PATHS = {"/health"}
 PUBLIC_PREFIXES = ("/api/dashboard-auth/",)
 PROXY_PREFIXES = ("/v1/", "/backend-api/codex/")
 CODEX_USAGE_PATH = "/api/codex/usage"
+CODEX_USAGE_PATHS = {CODEX_USAGE_PATH, f"{CODEX_USAGE_PATH}/"}
 
 
 def add_auth_middleware(app: FastAPI) -> None:
@@ -30,7 +31,7 @@ def add_auth_middleware(app: FastAPI) -> None:
         if path in PUBLIC_PATHS or any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES):
             return await call_next(request)
 
-        if path == CODEX_USAGE_PATH:
+        if path in CODEX_USAGE_PATHS:
             blocked = await _validate_codex_usage_caller_identity(request)
             if blocked is not None:
                 return blocked

@@ -5,6 +5,8 @@ import asyncio
 import pyotp
 import pytest
 
+from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE
+
 pytestmark = pytest.mark.integration
 
 
@@ -30,6 +32,52 @@ async def test_totp_setup_requires_password_session(async_client):
     assert response.status_code == 401
     payload = response.json()
     assert payload["error"]["code"] == "authentication_required"
+
+
+@pytest.mark.asyncio
+async def test_totp_setup_rejects_stale_password_session_after_password_removal(async_client, monkeypatch):
+    current_epoch = {"value": 1_700_000_000}
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as dashboard_auth_service_module
+
+    monkeypatch.setattr(totp_module, "time", lambda: current_epoch["value"])
+    monkeypatch.setattr(dashboard_auth_service_module, "time", lambda: current_epoch["value"])
+
+    setup_password = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup_password.status_code == 200
+    stale_session = async_client.cookies.get(DASHBOARD_SESSION_COOKIE)
+    assert isinstance(stale_session, str) and stale_session
+
+    remove = await async_client.request(
+        "DELETE",
+        "/api/dashboard-auth/password",
+        json={"password": "password123"},
+    )
+    assert remove.status_code == 200
+    assert async_client.cookies.get(DASHBOARD_SESSION_COOKIE) is None
+
+    async_client.cookies.set(DASHBOARD_SESSION_COOKIE, stale_session)
+
+    start = await async_client.post("/api/dashboard-auth/totp/setup/start", json={})
+    assert start.status_code == 401
+    assert start.json()["error"]["code"] == "authentication_required"
+
+    secret = "JBSWY3DPEHPK3PXP"
+    code = pyotp.TOTP(secret).at(current_epoch["value"])
+    confirm = await async_client.post(
+        "/api/dashboard-auth/totp/setup/confirm",
+        json={"secret": secret, "code": code},
+    )
+    assert confirm.status_code == 401
+    assert confirm.json()["error"]["code"] == "authentication_required"
+
+    settings = await async_client.get("/api/settings")
+    assert settings.status_code == 200
+    assert settings.json()["totpConfigured"] is False
 
 
 @pytest.mark.asyncio

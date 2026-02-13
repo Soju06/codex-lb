@@ -22,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 _ALEMBIC_VERSION_TABLE = "alembic_version"
 _LEGACY_MIGRATIONS_TABLE = "schema_migrations"
+_REQUIRED_TABLES_FOR_LEGACY_STAMP = frozenset(
+    {
+        "accounts",
+        "usage_history",
+        "request_logs",
+        "sticky_sessions",
+        "dashboard_settings",
+    }
+)
 
 LEGACY_MIGRATION_ORDER: tuple[str, ...] = (
     "001_normalize_account_plan_types",
@@ -119,6 +128,10 @@ def _detect_non_contiguous_entries(applied: set[str], contiguous_prefix_count: i
     return any(name in applied for name in trailing)
 
 
+def _missing_required_legacy_tables_for_stamp(tables: set[str]) -> tuple[str, ...]:
+    return tuple(sorted(table for table in _REQUIRED_TABLES_FOR_LEGACY_STAMP if table not in tables))
+
+
 def _bootstrap_legacy_history(config: Config) -> LegacyBootstrapResult:
     sync_database_url = _required_sqlalchemy_url(config)
 
@@ -162,7 +175,12 @@ def _bootstrap_legacy_history(config: Config) -> LegacyBootstrapResult:
             had_non_contiguous_entries=has_non_contiguous,
         )
 
-    if "accounts" not in tables:
+    missing_required_tables = _missing_required_legacy_tables_for_stamp(tables)
+    if missing_required_tables:
+        logger.warning(
+            "Skipping legacy bootstrap stamp due to missing required tables tables=%s",
+            missing_required_tables,
+        )
         return LegacyBootstrapResult(
             stamped_revision=None,
             legacy_row_count=len(applied),

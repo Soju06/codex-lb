@@ -227,8 +227,17 @@ class DashboardAuthService:
         await self.verify_password(password)
         await self._repository.clear_password_and_totp()
 
-    async def start_totp_setup(self) -> TotpSetupStartResponse:
+    async def _require_active_password_session(self, session_id: str | None) -> DashboardAuthSettingsProtocol:
         settings = await self._repository.get_settings()
+        if settings.password_hash is None:
+            raise PasswordSessionRequiredError("Password-authenticated session is required")
+        session = self._session_store.get(session_id)
+        if session is None or not session.password_verified:
+            raise PasswordSessionRequiredError("Password-authenticated session is required")
+        return settings
+
+    async def start_totp_setup(self, *, session_id: str | None) -> TotpSetupStartResponse:
+        settings = await self._require_active_password_session(session_id)
         if settings.totp_secret_encrypted is not None:
             raise TotpAlreadyConfiguredError("TOTP is already configured. Disable it before setting a new secret")
         secret = generate_totp_secret()
@@ -239,8 +248,8 @@ class DashboardAuthService:
             qr_svg_data_uri=_qr_svg_data_uri(otpauth_uri),
         )
 
-    async def confirm_totp_setup(self, secret: str, code: str) -> None:
-        current = await self._repository.get_settings()
+    async def confirm_totp_setup(self, *, session_id: str | None, secret: str, code: str) -> None:
+        current = await self._require_active_password_session(session_id)
         if current.totp_secret_encrypted is not None:
             raise TotpAlreadyConfiguredError("TOTP is already configured. Disable it before setting a new secret")
         try:
@@ -252,10 +261,7 @@ class DashboardAuthService:
         await self._repository.set_totp_secret(self._encryptor.encrypt(secret))
 
     async def verify_totp(self, *, session_id: str | None, code: str) -> str:
-        session = self._session_store.get(session_id)
-        if session is None or not session.password_verified:
-            raise PasswordSessionRequiredError("Password-authenticated session is required")
-        settings = await self._repository.get_settings()
+        settings = await self._require_active_password_session(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
             raise TotpNotConfiguredError("TOTP is not configured")
@@ -274,10 +280,7 @@ class DashboardAuthService:
         return self._session_store.create(password_verified=True, totp_verified=True)
 
     async def disable_totp(self, *, session_id: str | None, code: str) -> None:
-        session = self._session_store.get(session_id)
-        if session is None or not session.password_verified:
-            raise PasswordSessionRequiredError("Password-authenticated session is required")
-        settings = await self._repository.get_settings()
+        settings = await self._require_active_password_session(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
             raise TotpNotConfiguredError("TOTP is not configured")

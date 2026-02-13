@@ -38,7 +38,10 @@ def _session_client_key(request: Request, *, prefix: str) -> str:
     return f"{prefix}:{request.client.host if request.client else 'unknown'}"
 
 
-def _has_password_session(request: Request) -> bool:
+async def _has_active_password_session(request: Request, context: DashboardAuthContext) -> bool:
+    settings = await context.repository.get_settings()
+    if settings.password_hash is None:
+        return False
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     return get_dashboard_session_store().is_password_verified(session_id)
 
@@ -204,13 +207,19 @@ async def start_totp_setup(
     request: Request,
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> TotpSetupStartResponse | JSONResponse:
-    if not _has_password_session(request):
+    if not await _has_active_password_session(request, context):
         return JSONResponse(
             status_code=401,
             content=dashboard_error("authentication_required", "Authentication is required"),
         )
+    session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     try:
-        return await context.service.start_totp_setup()
+        return await context.service.start_totp_setup(session_id=session_id)
+    except PasswordSessionRequiredError as exc:
+        return JSONResponse(
+            status_code=401,
+            content=dashboard_error("authentication_required", str(exc)),
+        )
     except TotpAlreadyConfiguredError as exc:
         return JSONResponse(
             status_code=400,
@@ -224,7 +233,7 @@ async def confirm_totp_setup(
     payload: TotpSetupConfirmRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
-    if not _has_password_session(request):
+    if not await _has_active_password_session(request, context):
         return JSONResponse(
             status_code=401,
             content=dashboard_error("authentication_required", "Authentication is required"),
@@ -241,8 +250,14 @@ async def confirm_totp_setup(
         )
 
     try:
-        await context.service.confirm_totp_setup(payload.secret, payload.code)
+        session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
+        await context.service.confirm_totp_setup(session_id=session_id, secret=payload.secret, code=payload.code)
         limiter.reset(rate_key)
+    except PasswordSessionRequiredError as exc:
+        return JSONResponse(
+            status_code=401,
+            content=dashboard_error("authentication_required", str(exc)),
+        )
     except TotpInvalidCodeError as exc:
         limiter.record_failure(rate_key)
         return JSONResponse(

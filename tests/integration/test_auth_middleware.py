@@ -135,6 +135,20 @@ async def test_codex_usage_does_not_allow_dashboard_session_without_caller_ident
 
 
 @pytest.mark.asyncio
+async def test_codex_usage_trailing_slash_uses_caller_identity_validation(async_client):
+    setup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup.status_code == 200
+
+    await async_client.post("/api/dashboard-auth/logout", json={})
+    blocked = await async_client.get("/api/codex/usage/")
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
 async def test_codex_usage_allows_registered_chatgpt_account_id_with_bearer(async_client, monkeypatch):
     setup = await async_client.post(
         "/api/dashboard-auth/password/setup",

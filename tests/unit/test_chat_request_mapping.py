@@ -88,7 +88,10 @@ def test_chat_reasoning_effort_maps_to_responses_reasoning():
     responses = req.to_responses_request()
     dumped = responses.to_payload()
     assert "reasoning_effort" not in dumped
-    assert dumped.get("reasoning", {}).get("effort") == "high"
+    reasoning = dumped.get("reasoning")
+    assert isinstance(reasoning, Mapping)
+    reasoning_map = cast(Mapping[str, JsonValue], reasoning)
+    assert reasoning_map.get("effort") == "high"
 
 
 def test_chat_tools_are_normalized():

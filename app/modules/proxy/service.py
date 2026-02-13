@@ -112,7 +112,9 @@ class ProxyService:
             return await core_compact_responses(payload, filtered, access_token, account_id)
 
         try:
-            return await _call_compact(account)
+            response = await _call_compact(account)
+            await self._record_compact_api_key_usage(api_key=api_key, response=response)
+            return response
         except ProxyResponseError as exc:
             if exc.status_code != 401:
                 await self._handle_proxy_error(account, exc)
@@ -124,10 +126,41 @@ class ProxyService:
                     await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                 raise exc
             try:
-                return await _call_compact(account)
+                response = await _call_compact(account)
+                await self._record_compact_api_key_usage(api_key=api_key, response=response)
+                return response
             except ProxyResponseError as exc:
                 await self._handle_proxy_error(account, exc)
                 raise
+
+    async def _record_compact_api_key_usage(
+        self,
+        *,
+        api_key: ApiKeyData | None,
+        response: OpenAIResponsePayload,
+    ) -> None:
+        if api_key is None:
+            return
+        usage = response.usage
+        input_tokens = usage.input_tokens if usage else None
+        output_tokens = usage.output_tokens if usage else None
+        if input_tokens is None or output_tokens is None:
+            return
+
+        with anyio.CancelScope(shield=True):
+            try:
+                async with self._repo_factory() as repos:
+                    await repos.api_keys.increment_weekly_usage(
+                        api_key.id,
+                        input_tokens + output_tokens,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to increment compact API key usage key_id=%s request_id=%s",
+                    api_key.id,
+                    get_request_id(),
+                    exc_info=True,
+                )
 
     async def rate_limit_headers(self) -> dict[str, str]:
         now = utcnow()

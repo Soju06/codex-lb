@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.models_catalog import MODEL_CATALOG
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
@@ -192,3 +193,79 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
         latest_log = result.scalars().first()
         assert latest_log is not None
         assert latest_log.api_key_id == key_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
+async def test_api_key_weekly_limit_applies_to_compact_responses(async_client, monkeypatch, endpoint):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-usage-limit",
+            "weeklyTokenLimit": 10,
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_compact_usage_key", "compact-usage-key@example.com")
+
+    seen = {"calls": 0}
+
+    async def fake_compact(_payload, _headers, _access_token, _account_id):
+        seen["calls"] += 1
+        return OpenAIResponsePayload.model_validate(
+            {
+                "id": "resp_compact_1",
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 5,
+                    "total_tokens": 12,
+                },
+                "output": [],
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    request_payload = {
+        "model": sorted(MODEL_CATALOG.keys())[0],
+        "instructions": "hi",
+        "input": [],
+    }
+
+    first = await async_client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {key}"},
+        json=request_payload,
+    )
+    assert first.status_code == 200
+
+    blocked = await async_client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {key}"},
+        json=request_payload,
+    )
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "rate_limit_exceeded"
+    assert seen["calls"] == 1
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        row = await repo.get_by_id(key_id)
+        assert row is not None
+        assert row.weekly_tokens_used == 12

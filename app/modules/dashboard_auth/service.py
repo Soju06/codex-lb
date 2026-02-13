@@ -187,17 +187,21 @@ class DashboardAuthService:
         password_required = settings.password_hash is not None
         totp_required = password_required and settings.totp_required_on_login
         totp_configured = settings.totp_secret_encrypted is not None
+        state = self._session_store.get(session_id) if password_required else None
+        password_authenticated = bool(state and state.password_verified)
         if not password_required:
             authenticated = True
+        elif totp_required:
+            authenticated = bool(state and state.password_verified and state.totp_verified)
         else:
-            state = self._session_store.get(session_id)
-            authenticated = bool(state and state.password_verified)
-            if authenticated and totp_required:
-                authenticated = bool(state and state.totp_verified)
+            authenticated = password_authenticated
+
+        # Surface the TOTP prompt only for password-authenticated sessions.
+        totp_required_on_login = bool(totp_required and password_authenticated)
         return DashboardAuthSessionResponse(
             authenticated=authenticated,
             password_required=password_required,
-            totp_required_on_login=totp_required,
+            totp_required_on_login=totp_required_on_login,
             totp_configured=totp_configured,
         )
 

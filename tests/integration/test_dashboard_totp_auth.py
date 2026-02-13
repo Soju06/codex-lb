@@ -80,6 +80,13 @@ async def test_dashboard_password_and_totp_flow(async_client, monkeypatch):
     logout = await async_client.post("/api/dashboard-auth/logout", json={})
     assert logout.status_code == 200
 
+    session = await async_client.get("/api/dashboard-auth/session")
+    assert session.status_code == 200
+    session_payload = session.json()
+    assert session_payload["authenticated"] is False
+    assert session_payload["passwordRequired"] is True
+    assert session_payload["totpRequiredOnLogin"] is False
+
     blocked = await async_client.get("/api/settings")
     assert blocked.status_code == 401
     blocked_payload = blocked.json()

@@ -4,12 +4,32 @@ from datetime import timedelta
 
 import pytest
 
+from app.core.crypto import TokenEncryptor
+from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 
 pytestmark = pytest.mark.integration
+
+
+def _make_account(account_id: str, chatgpt_account_id: str, email: str) -> Account:
+    encryptor = TokenEncryptor()
+    return Account(
+        id=account_id,
+        chatgpt_account_id=chatgpt_account_id,
+        email=email,
+        plan_type="team",
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -102,28 +122,76 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
 
 
 @pytest.mark.asyncio
-async def test_codex_usage_uses_dashboard_session_auth(async_client):
+async def test_codex_usage_does_not_allow_dashboard_session_without_caller_identity(async_client):
     setup = await async_client.post(
         "/api/dashboard-auth/password/setup",
         json={"password": "password123"},
     )
     assert setup.status_code == 200
 
-    enable = await async_client.put(
-        "/api/settings",
-        json={
-            "stickyThreadsEnabled": False,
-            "preferEarlierResetAccounts": False,
-            "totpRequiredOnLogin": False,
-            "apiKeyAuthEnabled": True,
-        },
-    )
-    assert enable.status_code == 200
-
-    authenticated = await async_client.get("/api/codex/usage")
-    assert authenticated.status_code == 200
-
-    await async_client.post("/api/dashboard-auth/logout", json={})
     blocked = await async_client.get("/api/codex/usage")
     assert blocked.status_code == 401
-    assert blocked.json()["error"]["code"] == "authentication_required"
+    assert blocked.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_allows_registered_chatgpt_account_id_with_bearer(async_client, monkeypatch):
+    setup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup.status_code == 200
+
+    raw_chatgpt_account_id = "workspace_shared"
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        # account.id can be extended while caller auth uses raw chatgpt_account_id.
+        await repo.upsert(
+            _make_account(
+                "workspace_shared_a1b2c3d4",
+                raw_chatgpt_account_id,
+                "team-user@example.com",
+            )
+        )
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "chatgpt-token"
+        assert account_id == raw_chatgpt_account_id
+        return UsagePayload.model_validate({"plan_type": "team"})
+
+    monkeypatch.setattr("app.core.middleware.dashboard_auth.fetch_usage", stub_fetch_usage)
+
+    await async_client.post("/api/dashboard-auth/logout", json={})
+    allowed = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+    )
+    assert allowed.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_blocks_unregistered_chatgpt_account_id(async_client, monkeypatch):
+    setup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup.status_code == 200
+
+    async def should_not_call_fetch_usage(**_: object) -> UsagePayload:
+        raise AssertionError("fetch_usage should not be called for unknown chatgpt-account-id")
+
+    monkeypatch.setattr("app.core.middleware.dashboard_auth.fetch_usage", should_not_call_fetch_usage)
+
+    await async_client.post("/api/dashboard-auth/logout", json={})
+    blocked = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_missing",
+        },
+    )
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "invalid_api_key"

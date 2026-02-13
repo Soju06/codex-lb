@@ -16,6 +16,15 @@ class AccountsRepository:
         result = await self._session.execute(select(Account).order_by(Account.email))
         return list(result.scalars().all())
 
+    async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
+        result = await self._session.execute(
+            select(Account.id)
+            .where(Account.chatgpt_account_id == chatgpt_account_id)
+            .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def upsert(self, account: Account) -> Account:
         existing = await self._session.get(Account, account.id)
         if existing:

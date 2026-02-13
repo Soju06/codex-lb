@@ -16,6 +16,7 @@ TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
 os.environ["CODEX_LB_DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
+os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
@@ -65,3 +66,13 @@ def temp_key_file(monkeypatch):
 
     get_settings.cache_clear()
     return key_path
+
+
+@pytest.fixture(autouse=True)
+def _reset_model_registry():
+    from app.core.openai.model_registry import get_model_registry
+
+    registry = get_model_registry()
+    registry._snapshot = None
+    yield
+    registry._snapshot = None

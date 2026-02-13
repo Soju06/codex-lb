@@ -15,6 +15,7 @@ from app.core.middleware import (
     add_request_decompression_middleware,
     add_request_id_middleware,
 )
+from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
@@ -36,13 +37,16 @@ async def lifespan(_: FastAPI):
     await get_rate_limit_headers_cache().invalidate()
     await init_db()
     await init_http_client()
-    scheduler = build_usage_refresh_scheduler()
-    await scheduler.start()
+    usage_scheduler = build_usage_refresh_scheduler()
+    model_scheduler = build_model_refresh_scheduler()
+    await usage_scheduler.start()
+    await model_scheduler.start()
 
     try:
         yield
     finally:
-        await scheduler.stop()
+        await model_scheduler.stop()
+        await usage_scheduler.stop()
         try:
             await close_http_client()
         finally:

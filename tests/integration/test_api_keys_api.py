@@ -8,13 +8,43 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
-from app.core.openai.models_catalog import MODEL_CATALOG
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 
 pytestmark = pytest.mark.integration
+
+_TEST_MODELS = ["model-alpha", "model-beta"]
+
+
+def _make_upstream_model(slug: str) -> UpstreamModel:
+    return UpstreamModel(
+        slug=slug,
+        display_name=slug,
+        description=f"Test model {slug}",
+        context_window=128000,
+        input_modalities=("text",),
+        supported_reasoning_levels=(ReasoningLevel(effort="medium", description="default"),),
+        default_reasoning_level="medium",
+        supports_reasoning_summaries=False,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=False,
+        supports_parallel_tool_calls=True,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"plus", "pro"}),
+        raw={},
+    )
+
+
+def _populate_test_registry() -> None:
+    registry = get_model_registry()
+    models = [_make_upstream_model(slug) for slug in _TEST_MODELS]
+    registry.update({"plus": models, "pro": models})
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -100,7 +130,8 @@ async def test_api_keys_crud_and_regenerate(async_client):
 
 @pytest.mark.asyncio
 async def test_api_key_model_restriction_and_models_filter(async_client):
-    model_ids = sorted(MODEL_CATALOG.keys())
+    _populate_test_registry()
+    model_ids = sorted(_TEST_MODELS)
     assert len(model_ids) >= 2
     allowed_model = model_ids[0]
     blocked_model = model_ids[1]
@@ -173,7 +204,7 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
         "/backend-api/codex/responses",
         headers={"Authorization": f"Bearer {key}"},
         json={
-            "model": sorted(MODEL_CATALOG.keys())[0],
+            "model": _TEST_MODELS[0],
             "instructions": "hi",
             "input": [],
             "stream": True,
@@ -243,7 +274,7 @@ async def test_api_key_weekly_limit_applies_to_compact_responses(async_client, m
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
     request_payload = {
-        "model": sorted(MODEL_CATALOG.keys())[0],
+        "model": _TEST_MODELS[0],
         "instructions": "hi",
         "input": [],
     }

@@ -98,6 +98,7 @@ class ProxyService:
             sticky_key=sticky_key,
             reallocate_sticky=sticky_key is not None,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
+            model=payload.model,
         )
         account = selection.account
         if not account:
@@ -252,6 +253,7 @@ class ProxyService:
             selection = await self._load_balancer.select_account(
                 sticky_key=sticky_key,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
+                model=payload.model,
             )
             account = selection.account
             if not account:

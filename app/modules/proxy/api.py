@@ -12,6 +12,7 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.model_registry import UpstreamModel, get_model_registry
 from app.core.openai.models import (
     OpenAIError,
     OpenAIResponsePayload,
@@ -20,7 +21,6 @@ from app.core.openai.models import (
 from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
 )
-from app.core.openai.models_catalog import MODEL_CATALOG
 from app.core.openai.parsing import parse_response_payload
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
@@ -28,7 +28,13 @@ from app.core.types import JsonValue
 from app.core.utils.sse import parse_sse_data_json
 from app.dependencies import ProxyContext, get_proxy_context
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy.schemas import ModelListItem, ModelListResponse, RateLimitStatusPayload
+from app.modules.proxy.schemas import (
+    ModelListItem,
+    ModelListResponse,
+    ModelMetadata,
+    RateLimitStatusPayload,
+    ReasoningLevelSchema,
+)
 
 router = APIRouter(prefix="/backend-api/codex", tags=["proxy"])
 v1_router = APIRouter(prefix="/v1", tags=["proxy"])
@@ -91,17 +97,48 @@ async def v1_models(request: Request) -> ModelListResponse:
     api_key = _request_api_key(request)
     allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     created = int(time.time())
-    items = [
-        ModelListItem(
-            id=model_id,
-            created=created,
-            owned_by="codex-lb",
-            metadata=entry,
+
+    registry = get_model_registry()
+    snapshot = registry.get_snapshot()
+
+    if snapshot is None:
+        return ModelListResponse(data=[])
+
+    items: list[ModelListItem] = []
+    for slug, model in snapshot.models.items():
+        if allowed_models is not None and slug not in allowed_models:
+            continue
+        items.append(
+            ModelListItem(
+                id=slug,
+                created=created,
+                owned_by="codex-lb",
+                metadata=_to_model_metadata(model),
+            )
         )
-        for model_id, entry in MODEL_CATALOG.items()
-        if allowed_models is None or model_id in allowed_models
-    ]
     return ModelListResponse(data=items)
+
+
+def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
+    return ModelMetadata(
+        display_name=model.display_name,
+        description=model.description,
+        context_window=model.context_window,
+        input_modalities=list(model.input_modalities),
+        supported_reasoning_levels=[
+            ReasoningLevelSchema(effort=rl.effort, description=rl.description)
+            for rl in model.supported_reasoning_levels
+        ],
+        default_reasoning_level=model.default_reasoning_level,
+        supports_reasoning_summaries=model.supports_reasoning_summaries,
+        support_verbosity=model.support_verbosity,
+        default_verbosity=model.default_verbosity,
+        prefer_websockets=model.prefer_websockets,
+        supports_parallel_tool_calls=model.supports_parallel_tool_calls,
+        supported_in_api=model.supported_in_api,
+        minimal_client_version=model.minimal_client_version,
+        priority=model.priority,
+    )
 
 
 @v1_router.post(

@@ -75,6 +75,12 @@ def create_app() -> FastAPI:
     frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
     excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
 
+    def _is_static_asset_path(path: str) -> bool:
+        if path.startswith("assets/"):
+            return True
+        last_segment = path.rsplit("/", maxsplit=1)[-1]
+        return "." in last_segment
+
     @app.get("/", include_in_schema=False)
     @app.get("/{path:path}", include_in_schema=False)
     async def spa_fallback(path: str = ""):
@@ -88,6 +94,8 @@ def create_app() -> FastAPI:
             candidate = (static_dir / normalized).resolve()
             if candidate.is_relative_to(static_root) and candidate.is_file():
                 return FileResponse(candidate)
+            if _is_static_asset_path(normalized):
+                raise HTTPException(status_code=404, detail="Not Found")
 
         if not index_html.is_file():
             raise HTTPException(status_code=503, detail=frontend_build_hint)

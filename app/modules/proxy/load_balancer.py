@@ -47,6 +47,7 @@ class LoadBalancer:
         *,
         reallocate_sticky: bool = False,
         prefer_earlier_reset_accounts: bool = False,
+        exclude_account_ids: set[str] | None = None,
     ) -> AccountSelection:
         selected_snapshot: Account | None = None
         error_message: str | None = None
@@ -72,6 +73,7 @@ class LoadBalancer:
                 reallocate_sticky=reallocate_sticky,
                 prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                 sticky_repo=repos.sticky_sessions,
+                exclude_account_ids=exclude_account_ids,
             )
             for state in states:
                 account = account_map.get(state.account_id)
@@ -105,27 +107,34 @@ class LoadBalancer:
         reallocate_sticky: bool,
         prefer_earlier_reset_accounts: bool,
         sticky_repo: StickySessionsRepository | None,
+        exclude_account_ids: set[str] | None = None,
     ) -> SelectionResult:
+        excluded = exclude_account_ids or set()
+        candidate_states = [state for state in states if state.account_id not in excluded]
+
         if not sticky_key or not sticky_repo:
-            return select_account(states, prefer_earlier_reset=prefer_earlier_reset_accounts)
+            return select_account(candidate_states, prefer_earlier_reset=prefer_earlier_reset_accounts)
 
         if reallocate_sticky:
-            chosen = select_account(states, prefer_earlier_reset=prefer_earlier_reset_accounts)
+            chosen = select_account(candidate_states, prefer_earlier_reset=prefer_earlier_reset_accounts)
             if chosen.account is not None and chosen.account.account_id in account_map:
                 await sticky_repo.upsert(sticky_key, chosen.account.account_id)
             return chosen
 
         existing = await sticky_repo.get_account_id(sticky_key)
         if existing:
-            pinned = next((state for state in states if state.account_id == existing), None)
-            if pinned is None:
-                await sticky_repo.delete(sticky_key)
+            if existing in excluded:
+                existing = None
             else:
-                pinned_result = select_account([pinned], prefer_earlier_reset=prefer_earlier_reset_accounts)
-                if pinned_result.account is not None:
-                    return pinned_result
+                pinned = next((state for state in candidate_states if state.account_id == existing), None)
+                if pinned is None:
+                    await sticky_repo.delete(sticky_key)
+                else:
+                    pinned_result = select_account([pinned], prefer_earlier_reset=prefer_earlier_reset_accounts)
+                    if pinned_result.account is not None:
+                        return pinned_result
 
-        chosen = select_account(states, prefer_earlier_reset=prefer_earlier_reset_accounts)
+        chosen = select_account(candidate_states, prefer_earlier_reset=prefer_earlier_reset_accounts)
         if chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id)
         return chosen

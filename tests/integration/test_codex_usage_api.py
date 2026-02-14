@@ -70,6 +70,38 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             reset_at=0,
             window_minutes=10080,
         )
+        await usage_repo.add_entry(
+            "acc_a",
+            20.0,
+            window="spark_primary",
+            window_label="gpt-5-codex-spark_window",
+            reset_at=0,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_b",
+            40.0,
+            window="spark_primary",
+            window_label="gpt-5-codex-spark_window",
+            reset_at=0,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_a",
+            25.0,
+            window="spark_secondary",
+            window_label="gpt-5-codex-spark_window",
+            reset_at=0,
+            window_minutes=10080,
+        )
+        await usage_repo.add_entry(
+            "acc_b",
+            35.0,
+            window="spark_secondary",
+            window_label="gpt-5-codex-spark_window",
+            reset_at=0,
+            window_minutes=10080,
+        )
 
     response = await async_client.get("/api/codex/usage")
     assert response.status_code == 200
@@ -91,6 +123,19 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
     assert secondary["limit_window_seconds"] == 604800
     assert secondary["reset_after_seconds"] == 0
     assert secondary["reset_at"] == 0
+
+    spark_primary = rate_limit["spark_primary_window"]
+    assert spark_primary["used_percent"] == 30
+    assert spark_primary["limit_window_seconds"] == 18000
+    assert spark_primary["reset_after_seconds"] == 0
+    assert spark_primary["reset_at"] == 0
+
+    spark_secondary = rate_limit["spark_secondary_window"]
+    assert spark_secondary["used_percent"] == 30
+    assert spark_secondary["limit_window_seconds"] == 604800
+    assert spark_secondary["reset_after_seconds"] == 0
+    assert spark_secondary["reset_at"] == 0
+    assert rate_limit["spark_window_label"] == "Gpt 5 Codex Spark"
 
     credits = payload["credits"]
     assert credits["has_credits"] is True

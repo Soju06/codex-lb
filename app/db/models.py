@@ -51,6 +51,7 @@ class UsageHistory(Base):
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     window: Mapped[str | None] = mapped_column(String, nullable=True)
+    window_label: Mapped[str | None] = mapped_column(String, nullable=True)
     used_percent: Mapped[float] = mapped_column(Float, nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

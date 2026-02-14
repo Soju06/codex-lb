@@ -87,42 +87,87 @@ class ProxyService:
             settings = await repos.settings.get_or_create()
             prefer_earlier_reset = settings.prefer_earlier_reset_accounts
             sticky_threads_enabled = settings.sticky_threads_enabled
-        sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
-        selection = await self._load_balancer.select_account(
-            sticky_key=sticky_key,
-            reallocate_sticky=sticky_key is not None,
-            prefer_earlier_reset_accounts=prefer_earlier_reset,
+        is_spark_request = _is_spark_model(payload.model)
+        sticky_key = (
+            _sticky_key_from_compact_payload(payload, is_spark=is_spark_request)
+            if sticky_threads_enabled
+            else None
         )
-        account = selection.account
-        if not account:
-            raise ProxyResponseError(
-                503,
-                openai_error("no_accounts", selection.error_message or "No active accounts available"),
-            )
-        account = await self._ensure_fresh(account)
-        account_id = _header_account_id(account.chatgpt_account_id)
+        excluded_account_ids: set[str] = set()
+        max_attempts = 3
 
         async def _call_compact(target: Account) -> OpenAIResponsePayload:
             access_token = self._encryptor.decrypt(target.access_token_encrypted)
+            account_id = _header_account_id(target.chatgpt_account_id)
             return await core_compact_responses(payload, filtered, access_token, account_id)
+        for attempt in range(max_attempts):
+            account: Account | None = None
+            try:
+                selection = await self._load_balancer.select_account(
+                    sticky_key=sticky_key,
+                    reallocate_sticky=sticky_key is not None,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    exclude_account_ids=excluded_account_ids if is_spark_request else None,
+                )
+                account = selection.account
+                if not account:
+                    raise ProxyResponseError(
+                        503,
+                        openai_error("no_accounts", selection.error_message or "No active accounts available"),
+                    )
 
-        try:
-            return await _call_compact(account)
-        except ProxyResponseError as exc:
-            if exc.status_code != 401:
-                await self._handle_proxy_error(account, exc)
-                raise
-            try:
-                account = await self._ensure_fresh(account, force=True)
-            except RefreshError as refresh_exc:
-                if refresh_exc.is_permanent:
-                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                raise exc
-            try:
+                account = await self._ensure_fresh(account)
                 return await _call_compact(account)
             except ProxyResponseError as exc:
-                await self._handle_proxy_error(account, exc)
+                if account is not None:
+                    if exc.status_code == 401:
+                        try:
+                            account = await self._ensure_fresh(account, force=True)
+                        except RefreshError as refresh_exc:
+                            if refresh_exc.is_permanent:
+                                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            raise exc
+                        try:
+                            return await _call_compact(account)
+                        except ProxyResponseError as refreshed_exc:
+                            await self._handle_proxy_error(account, refreshed_exc)
+                            if (
+                                is_spark_request
+                                and _is_spark_unsupported_error(
+                                    code=None,
+                                    error_type=None,
+                                    message=_error_message_from_payload(refreshed_exc.payload),
+                                    payload=refreshed_exc.payload,
+                                )
+                            ):
+                                excluded_account_ids.add(account.id)
+                                if attempt < max_attempts - 1:
+                                    continue
+                            raise
+                    await self._handle_proxy_error(account, exc)
+                    if (
+                        is_spark_request
+                        and _is_spark_unsupported_error(
+                            code=None,
+                            error_type=None,
+                            message=_error_message_from_payload(exc.payload),
+                            payload=exc.payload,
+                        )
+                    ):
+                        excluded_account_ids.add(account.id)
+                        if attempt < max_attempts - 1:
+                            continue
                 raise
+            except RefreshError as exc:
+                if account is not None and exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, exc.code)
+                if is_spark_request and account is not None:
+                    excluded_account_ids.add(account.id)
+                if attempt < max_attempts - 1:
+                    continue
+                raise
+
+        raise ProxyResponseError(503, openai_error("no_accounts", "No available accounts after retries"))
 
     async def rate_limit_headers(self) -> dict[str, str]:
         now = utcnow()
@@ -178,17 +223,40 @@ class ProxyService:
             account_map = {account.id: account for account in selected_accounts}
             primary_rows = await self._latest_usage_rows(repos, account_map, "primary")
             secondary_rows = await self._latest_usage_rows(repos, account_map, "secondary")
+            spark_primary_rows = await self._latest_usage_rows(repos, account_map, "spark_primary")
+            spark_secondary_rows = await self._latest_usage_rows(repos, account_map, "spark_secondary")
 
             primary_summary = _summarize_window(primary_rows, account_map, "primary")
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
+            spark_primary_summary = _summarize_window(spark_primary_rows, account_map, "spark_primary")
+            spark_secondary_summary = _summarize_window(spark_secondary_rows, account_map, "spark_secondary")
 
             now_epoch = int(time.time())
             primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
             secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
+            spark_primary_window = _window_snapshot(
+                spark_primary_summary,
+                spark_primary_rows,
+                "spark_primary",
+                now_epoch,
+            )
+            spark_secondary_window = _window_snapshot(
+                spark_secondary_summary,
+                spark_secondary_rows,
+                "spark_secondary",
+                now_epoch,
+            )
+            spark_window_label = await self._spark_window_label(repos, account_map)
 
             return RateLimitStatusPayloadData(
                 plan_type=_plan_type_for_accounts(selected_accounts),
-                rate_limit=_rate_limit_details(primary_window, secondary_window),
+                rate_limit=_rate_limit_details(
+                    primary_window,
+                    secondary_window,
+                    spark_primary_window,
+                    spark_secondary_window,
+                    spark_window_label,
+                ),
                 credits=_credits_snapshot(await self._latest_usage_entries(repos, account_map)),
             )
 
@@ -204,12 +272,19 @@ class ProxyService:
             settings = await repos.settings.get_or_create()
             prefer_earlier_reset = settings.prefer_earlier_reset_accounts
             sticky_threads_enabled = settings.sticky_threads_enabled
-        sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
+        is_spark_request = _is_spark_model(payload.model)
+        sticky_key = (
+            _sticky_key_from_payload(payload, is_spark=is_spark_request)
+            if sticky_threads_enabled
+            else None
+        )
+        excluded_account_ids: set[str] = set()
         max_attempts = 3
         for attempt in range(max_attempts):
             selection = await self._load_balancer.select_account(
                 sticky_key=sticky_key,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
+                exclude_account_ids=excluded_account_ids if is_spark_request else None,
             )
             account = selection.account
             if not account:
@@ -235,6 +310,13 @@ class ProxyService:
                 return
             except _RetryableStreamError as exc:
                 await self._handle_stream_error(account, exc.error, exc.code)
+                if is_spark_request and _is_spark_unsupported_error(
+                    code=exc.code,
+                    error_type=None,
+                    message=exc.error.get("message"),
+                    payload=None,
+                ):
+                    excluded_account_ids.add(account.id)
                 continue
             except ProxyResponseError as exc:
                 if exc.status_code == 401:
@@ -243,10 +325,40 @@ class ProxyService:
                     except RefreshError as refresh_exc:
                         if refresh_exc.is_permanent:
                             await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        if is_spark_request:
+                            excluded_account_ids.add(account.id)
                         continue
-                    async for line in self._stream_once(account, payload, headers, request_id, False):
-                        yield line
-                    return
+                    try:
+                        async for line in self._stream_once(account, payload, headers, request_id, False):
+                            yield line
+                        return
+                    except _RetryableStreamError as refreshed_exc:
+                        await self._handle_stream_error(account, refreshed_exc.error, refreshed_exc.code)
+                        if is_spark_request and _is_spark_unsupported_error(
+                            code=refreshed_exc.code,
+                            error_type=None,
+                            message=refreshed_exc.error.get("message"),
+                            payload=None,
+                        ):
+                            excluded_account_ids.add(account.id)
+                        continue
+                    except ProxyResponseError as refreshed_exc:
+                        error = _parse_openai_error(refreshed_exc.payload)
+                        error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                        await self._handle_stream_error(
+                            account,
+                            _upstream_error_from_openai(error),
+                            error_code,
+                        )
+                        if is_spark_request and _is_spark_unsupported_error(
+                            code=error_code,
+                            error_type=error.type if error else None,
+                            message=error.message if error else None,
+                            payload=refreshed_exc.payload,
+                        ):
+                            excluded_account_ids.add(account.id)
+                            continue
+                        raise
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 error_message = error.message if error else None
@@ -257,6 +369,15 @@ class ProxyService:
                     _upstream_error_from_openai(error),
                     error_code,
                 )
+                if is_spark_request and _is_spark_unsupported_error(
+                    code=error_code,
+                    error_type=error_type,
+                    message=error_message,
+                    payload=exc.payload,
+                ):
+                    excluded_account_ids.add(account.id)
+                    if attempt < max_attempts - 1:
+                        continue
                 if propagate_http_errors:
                     raise
                 event = response_failed_event(
@@ -272,6 +393,8 @@ class ProxyService:
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
+                if is_spark_request:
+                    excluded_account_ids.add(account.id)
                 continue
             except Exception:
                 try:
@@ -454,6 +577,28 @@ class ProxyService:
         latest = await repos.usage.latest_by_account()
         return [entry for entry in latest.values() if entry.account_id in account_map]
 
+    async def _spark_window_label(
+        self,
+        repos: ProxyRepositories,
+        account_map: dict[str, Account],
+    ) -> str | None:
+        if not account_map:
+            return None
+        spark_primary_latest = await repos.usage.latest_by_account(window="spark_primary")
+        spark_secondary_latest = await repos.usage.latest_by_account(window="spark_secondary")
+        entries = [
+            entry
+            for entry in [*spark_primary_latest.values(), *spark_secondary_latest.values()]
+            if entry.account_id in account_map
+        ]
+        if not entries:
+            return None
+        for entry in entries:
+            label = (entry.window_label or "").strip()
+            if label:
+                return usage_core.normalize_spark_window_label(label)
+        return usage_core.normalize_spark_window_label(None)
+
     async def _ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
         async with self._repo_factory() as repos:
             auth_manager = AuthManager(repos.accounts)
@@ -600,19 +745,92 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
     return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})
 
 
-def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
+def _is_spark_model(model: str | None) -> bool:
+    if not model:
+        return False
+    return "spark" in model.lower()
+
+
+def _error_message_from_payload(payload: dict[str, JsonValue]) -> str | None:
+    error = _parse_openai_error(payload)
+    if error and isinstance(error.message, str):
+        return error.message
+    return None
+
+
+def _is_spark_unsupported_error(
+    *,
+    code: str | None,
+    error_type: str | None,
+    message: str | None,
+    payload: dict[str, JsonValue] | None,
+) -> bool:
+    parsed_code = (code or "").strip().lower()
+    parsed_type = (error_type or "").strip().lower()
+    parsed_message = (message or "").strip()
+
+    if payload:
+        parsed = _parse_openai_error(payload)
+        if parsed:
+            if not parsed_code and parsed.code:
+                parsed_code = parsed.code.lower()
+            if not parsed_type and parsed.type:
+                parsed_type = parsed.type.lower()
+            if not parsed_message and parsed.message:
+                parsed_message = parsed.message
+
+    if parsed_code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota", "quota_exceeded"}:
+        return False
+
+    text = " ".join(part for part in [parsed_code, parsed_type, parsed_message.lower()] if part)
+    if "spark" not in text:
+        return False
+
+    unsupported_signals = (
+        "not supported",
+        "unsupported",
+        "not available",
+        "isn't available",
+        "does not support",
+        "not enabled",
+        "not included",
+        "unavailable",
+        "cannot access",
+        "can't access",
+    )
+    if any(signal in text for signal in unsupported_signals):
+        return True
+
+    model_error_codes = {
+        "model_not_found",
+        "unsupported_model",
+        "invalid_model",
+        "invalid_request_error",
+        "not_found_error",
+    }
+    if parsed_code in model_error_codes or parsed_type in model_error_codes:
+        return True
+
+    return False
+
+
+def _sticky_key_from_payload(payload: ResponsesRequest, *, is_spark: bool) -> str | None:
     value = payload.prompt_cache_key
     if not value:
         return None
     stripped = value.strip()
-    return stripped or None
+    if not stripped:
+        return None
+    return f"spark::{stripped}" if is_spark else stripped
 
 
-def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
+def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest, *, is_spark: bool) -> str | None:
     if not payload.model_extra:
         return None
     value = payload.model_extra.get("prompt_cache_key")
     if not isinstance(value, str):
         return None
     stripped = value.strip()
-    return stripped or None
+    if not stripped:
+        return None
+    return f"spark::{stripped}" if is_spark else stripped

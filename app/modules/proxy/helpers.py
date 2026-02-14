@@ -108,16 +108,22 @@ def _percent_to_int(value: float) -> int:
 def _rate_limit_details(
     primary: RateLimitWindowSnapshotData | None,
     secondary: RateLimitWindowSnapshotData | None,
+    spark_primary: RateLimitWindowSnapshotData | None = None,
+    spark_secondary: RateLimitWindowSnapshotData | None = None,
+    spark_window_label: str | None = None,
 ) -> RateLimitStatusDetailsData | None:
-    if not primary and not secondary:
+    if not primary and not secondary and not spark_primary and not spark_secondary:
         return None
-    used_percents = [window.used_percent for window in (primary, secondary) if window]
+    used_percents = [window.used_percent for window in (primary, secondary, spark_primary, spark_secondary) if window]
     limit_reached = any(used >= 100 for used in used_percents)
     return RateLimitStatusDetailsData(
         allowed=not limit_reached,
         limit_reached=limit_reached,
         primary_window=primary,
         secondary_window=secondary,
+        spark_primary_window=spark_primary,
+        spark_secondary_window=spark_secondary,
+        spark_window_label=spark_window_label,
     )
 
 

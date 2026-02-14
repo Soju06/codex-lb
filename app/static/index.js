@@ -237,6 +237,9 @@
 				windowMinutes: null,
 				byAccount: [],
 			},
+			sparkPrimary: null,
+			sparkSecondary: null,
+			sparkWindowLabel: null,
 		},
 		recentRequests: [],
 	});
@@ -342,13 +345,18 @@
 		if (formatted !== "--") {
 			return formatted;
 		}
-		if (key === "secondary") {
+		if (key === "secondary" || key === "sparkSecondary") {
 			return "7d";
 		}
-		if (key === "primary") {
+		if (key === "primary" || key === "sparkPrimary") {
 			return "5h";
 		}
 		return "--";
+	};
+
+	const formatSparkWindowLabel = (value) => {
+		const raw = String(value || "").trim();
+		return raw || "Spark";
 	};
 
 	const formatPercentValue = (value) => {
@@ -448,8 +456,13 @@
 		return `Quota reset (${windowSecondary}) · ${labelSecondary}`;
 	};
 
-	const buildUsageWindowTitle = (key, minutes) =>
-		`Remaining quota by account (${formatWindowLabel(key, minutes)})`;
+	const buildUsageWindowTitle = (key, minutes, sparkLabel = null) => {
+		const range = formatWindowLabel(key, minutes);
+		if (key === "sparkPrimary" || key === "sparkSecondary") {
+			return `Remaining quota by account (${range} · ${formatSparkWindowLabel(sparkLabel)})`;
+		}
+		return `Remaining quota by account (${range})`;
+	};
 
 	const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -493,7 +506,7 @@
 	const buildUsageWindowConfig = (summary) => {
 		const primaryMinutes = toNumber(summary?.primaryWindow?.windowMinutes);
 		const secondaryMinutes = toNumber(summary?.secondaryWindow?.windowMinutes);
-		return [
+		const windows = [
 			{
 				key: "primary",
 				title: buildUsageWindowTitle("primary", primaryMinutes),
@@ -507,6 +520,30 @@
 				windowMinutes: secondaryMinutes ?? null,
 			},
 		];
+		const sparkLabel = formatSparkWindowLabel(summary?.sparkWindowLabel);
+		const hasSparkPrimary = summary?.sparkPrimaryWindow;
+		const hasSparkSecondary = summary?.sparkSecondaryWindow;
+		if (hasSparkPrimary) {
+			const sparkPrimaryMinutes = toNumber(summary?.sparkPrimaryWindow?.windowMinutes);
+			windows.push({
+				key: "sparkPrimary",
+				title: buildUsageWindowTitle("sparkPrimary", sparkPrimaryMinutes, sparkLabel),
+				range: formatWindowLabel("sparkPrimary", sparkPrimaryMinutes),
+				windowMinutes: sparkPrimaryMinutes ?? null,
+				label: sparkLabel,
+			});
+		}
+		if (hasSparkSecondary) {
+			const sparkSecondaryMinutes = toNumber(summary?.sparkSecondaryWindow?.windowMinutes);
+			windows.push({
+				key: "sparkSecondary",
+				title: buildUsageWindowTitle("sparkSecondary", sparkSecondaryMinutes, sparkLabel),
+				range: formatWindowLabel("sparkSecondary", sparkSecondaryMinutes),
+				windowMinutes: sparkSecondaryMinutes ?? null,
+				label: sparkLabel,
+			});
+		}
+		return windows;
 	};
 
 	const statusBadgeText = (status) =>
@@ -619,9 +656,16 @@
 				primaryRemainingPercent: toNumber(usage.primaryRemainingPercent) ?? 0,
 				secondaryRemainingPercent:
 					toNumber(usage.secondaryRemainingPercent) ?? 0,
+				sparkPrimaryRemainingPercent:
+					toNumber(usage.sparkPrimaryRemainingPercent),
+				sparkSecondaryRemainingPercent:
+					toNumber(usage.sparkSecondaryRemainingPercent),
 			},
 			resetAtPrimary: account.resetAtPrimary ?? null,
 			resetAtSecondary: account.resetAtSecondary ?? null,
+			resetAtSparkPrimary: account.resetAtSparkPrimary ?? null,
+			resetAtSparkSecondary: account.resetAtSparkSecondary ?? null,
+			sparkWindowLabel: account.sparkWindowLabel ?? null,
 			auth: account.auth ?? {},
 			displayName: email,
 		};
@@ -692,15 +736,31 @@
 			return acc;
 		}, {});
 
-	const mergeUsageIntoAccounts = (accounts, primaryUsage, secondaryUsage) => {
+	const mergeUsageIntoAccounts = (
+		accounts,
+		primaryUsage,
+		secondaryUsage,
+		sparkPrimaryUsage,
+		sparkSecondaryUsage,
+	) => {
 		const primaryMap = buildUsageIndex(primaryUsage || []);
 		const secondaryMap = buildUsageIndex(secondaryUsage || []);
+		const sparkPrimaryMap = buildUsageIndex(sparkPrimaryUsage || []);
+		const sparkSecondaryMap = buildUsageIndex(sparkSecondaryUsage || []);
 		return accounts.map((account) => {
 			const primaryRow = primaryMap[account.id];
 			const secondaryRow = secondaryMap[account.id];
+			const sparkPrimaryRow = sparkPrimaryMap[account.id];
+			const sparkSecondaryRow = sparkSecondaryMap[account.id];
 			const primaryRemainingPercent = toNumber(primaryRow?.remainingPercentAvg);
 			const secondaryRemainingPercent = toNumber(
 				secondaryRow?.remainingPercentAvg,
+			);
+			const sparkPrimaryRemainingPercent = toNumber(
+				sparkPrimaryRow?.remainingPercentAvg,
+			);
+			const sparkSecondaryRemainingPercent = toNumber(
+				sparkSecondaryRow?.remainingPercentAvg,
 			);
 			const mergedSecondaryRemaining =
 				secondaryRemainingPercent ??
@@ -717,9 +777,20 @@
 				usage: {
 					primaryRemainingPercent: effectivePrimaryRemaining,
 					secondaryRemainingPercent: mergedSecondaryRemaining,
+					sparkPrimaryRemainingPercent:
+						sparkPrimaryRemainingPercent ??
+						account.usage?.sparkPrimaryRemainingPercent ??
+						null,
+					sparkSecondaryRemainingPercent:
+						sparkSecondaryRemainingPercent ??
+						account.usage?.sparkSecondaryRemainingPercent ??
+						null,
 				},
 				resetAtPrimary: account.resetAtPrimary ?? null,
 				resetAtSecondary: account.resetAtSecondary ?? null,
+				resetAtSparkPrimary: account.resetAtSparkPrimary ?? null,
+				resetAtSparkSecondary: account.resetAtSparkSecondary ?? null,
+				sparkWindowLabel: account.sparkWindowLabel ?? null,
 			};
 		});
 	};
@@ -761,6 +832,8 @@
 		summary,
 		primaryUsage,
 		secondaryUsage,
+		sparkPrimaryUsage,
+		sparkSecondaryUsage,
 		requestLogs,
 		lastSyncAt,
 	}) => {
@@ -790,6 +863,19 @@
 					secondaryUsage || [],
 					summary?.secondaryWindow,
 				),
+				sparkPrimary: summary?.sparkPrimaryWindow
+					? buildUsageWindow(
+						sparkPrimaryUsage || [],
+						summary?.sparkPrimaryWindow,
+					)
+					: null,
+				sparkSecondary: summary?.sparkSecondaryWindow
+					? buildUsageWindow(
+						sparkSecondaryUsage || [],
+						summary?.sparkSecondaryWindow,
+					)
+					: null,
+				sparkWindowLabel: summary?.sparkWindowLabel || null,
 			},
 			recentRequests: requestLogs,
 		};
@@ -828,6 +914,10 @@
 					? toNumber(account?.usage?.primaryRemainingPercent)
 					: windowKey === "secondary"
 						? toNumber(account?.usage?.secondaryRemainingPercent)
+						: windowKey === "sparkPrimary"
+							? toNumber(account?.usage?.sparkPrimaryRemainingPercent)
+							: windowKey === "sparkSecondary"
+								? toNumber(account?.usage?.sparkSecondaryRemainingPercent)
 						: null;
 			const entryCapacity = toNumber(entry.capacityCredits) || 0;
 			const denominator = entryCapacity > 0 ? entryCapacity : capacity;
@@ -939,6 +1029,11 @@
 		const statusCounts = countByStatus(accounts);
 		const secondaryWindowMinutes =
 			state.dashboardData.usage?.secondary?.windowMinutes ?? null;
+		const sparkSecondaryWindowMinutes =
+			state.dashboardData.usage?.sparkSecondary?.windowMinutes ?? null;
+		const sparkWindowLabel = formatSparkWindowLabel(
+			state.dashboardData.usage?.sparkWindowLabel,
+		);
 		const secondaryExhaustedAccounts = buildSecondaryExhaustedIndex(accounts);
 
 		const badges = ["active", "paused", "limited", "exceeded", "deactivated"]
@@ -1066,6 +1161,15 @@
 		const accountCards = accounts.map((account) => {
 			const secondaryRemaining =
 				toNumber(account.usage?.secondaryRemainingPercent) || 0;
+			const sparkSecondaryRemaining = toNumber(
+				account.usage?.sparkSecondaryRemainingPercent,
+			);
+			const hasSparkSecondaryRemaining = sparkSecondaryRemaining !== null;
+			const sparkResetLabel = formatQuotaResetLabel(account.resetAtSparkSecondary);
+			const sparkMeta =
+				hasSparkSecondaryRemaining
+					? `${sparkWindowLabel} reset (${formatWindowLabel("sparkSecondary", sparkSecondaryWindowMinutes)}) · ${sparkResetLabel}`
+					: null;
 			const remainingRounded = formatPercentValue(secondaryRemaining);
 			return {
 				email: account.email,
@@ -1083,6 +1187,12 @@
 					account.resetAtSecondary,
 					secondaryWindowMinutes,
 				),
+				sparkMeta,
+				sparkSecondaryRemaining,
+				sparkSecondaryRemainingText:
+					hasSparkSecondaryRemaining
+						? formatPercent(sparkSecondaryRemaining)
+						: null,
 				actions: buildAccountActions(account),
 			};
 		});
@@ -2020,6 +2130,12 @@
 					const secondaryUsage = normalizeUsagePayload(
 						overview?.windows?.secondary || {},
 					);
+					const sparkPrimaryUsage = normalizeUsagePayload(
+						overview?.windows?.sparkPrimary || {},
+					);
+					const sparkSecondaryUsage = normalizeUsagePayload(
+						overview?.windows?.sparkSecondary || {},
+					);
 					const requestLogs = normalizeRequestLogsPayload(
 						overview?.requestLogs || [],
 					);
@@ -2028,6 +2144,8 @@
 						accounts,
 						primaryUsage,
 						secondaryUsage,
+						sparkPrimaryUsage,
+						sparkSecondaryUsage,
 					);
 					this.applyData(
 						{
@@ -2035,6 +2153,8 @@
 							summary,
 							primaryUsage,
 							secondaryUsage,
+							sparkPrimaryUsage,
+							sparkSecondaryUsage,
 							requestLogs: applyClientSideRequestFilters(
 								requestLogs,
 								this.filtersApplied,
@@ -2077,6 +2197,8 @@
 						summary: data.summary,
 						primaryUsage: data.primaryUsage,
 						secondaryUsage: data.secondaryUsage,
+						sparkPrimaryUsage: data.sparkPrimaryUsage,
+						sparkSecondaryUsage: data.sparkSecondaryUsage,
 						requestLogs: data.requestLogs,
 						lastSyncAt: data.lastSyncAt,
 					});
@@ -2384,6 +2506,20 @@
 			},
 			calculateProgressTextClass(status, remainingPercent) {
 				return calculateProgressTextClass(status, remainingPercent);
+			},
+			sparkWindowLabel(account = null) {
+				const fromAccount = account?.sparkWindowLabel;
+				const fromSummary = this.dashboardData?.usage?.sparkWindowLabel;
+				return formatSparkWindowLabel(fromAccount || fromSummary);
+			},
+			hasSparkUsage(account = null) {
+				const target = account || this.selectedAccount || {};
+				const usage = target?.usage || {};
+				const sparkPrimary = toNumber(usage.sparkPrimaryRemainingPercent);
+				const sparkSecondary = toNumber(usage.sparkSecondaryRemainingPercent);
+				const hasReset =
+					Boolean(target?.resetAtSparkPrimary) || Boolean(target?.resetAtSparkSecondary);
+				return sparkPrimary !== null || sparkSecondary !== null || hasReset;
 			},
 			async copyToClipboard(value, label, e) {
 				if (!value) return;

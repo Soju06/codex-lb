@@ -16,6 +16,8 @@ def build_account_summaries(
     accounts: list[Account],
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
+    spark_primary_usage: dict[str, UsageHistory],
+    spark_secondary_usage: dict[str, UsageHistory],
     encryptor: TokenEncryptor,
 ) -> list[AccountSummary]:
     return [
@@ -23,6 +25,8 @@ def build_account_summaries(
             account,
             primary_usage.get(account.id),
             secondary_usage.get(account.id),
+            spark_primary_usage.get(account.id),
+            spark_secondary_usage.get(account.id),
             encryptor,
         )
         for account in accounts
@@ -33,16 +37,38 @@ def _account_to_summary(
     account: Account,
     primary_usage: UsageHistory | None,
     secondary_usage: UsageHistory | None,
+    spark_primary_usage: UsageHistory | None,
+    spark_secondary_usage: UsageHistory | None,
     encryptor: TokenEncryptor,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor)
     primary_used_percent = _normalize_used_percent(primary_usage) or 0.0
     secondary_used_percent = _normalize_used_percent(secondary_usage) or 0.0
+    spark_primary_used_percent = _normalize_used_percent(spark_primary_usage)
+    spark_secondary_used_percent = _normalize_used_percent(spark_secondary_usage)
     primary_remaining_percent = usage_core.remaining_percent_from_used(primary_used_percent) or 0.0
     secondary_remaining_percent = usage_core.remaining_percent_from_used(secondary_used_percent) or 0.0
+    spark_primary_remaining_percent = usage_core.remaining_percent_from_used(spark_primary_used_percent)
+    spark_secondary_remaining_percent = usage_core.remaining_percent_from_used(spark_secondary_used_percent)
     reset_at_primary = from_epoch_seconds(primary_usage.reset_at) if primary_usage is not None else None
     reset_at_secondary = from_epoch_seconds(secondary_usage.reset_at) if secondary_usage is not None else None
+    reset_at_spark_primary = (
+        from_epoch_seconds(spark_primary_usage.reset_at) if spark_primary_usage is not None else None
+    )
+    reset_at_spark_secondary = (
+        from_epoch_seconds(spark_secondary_usage.reset_at) if spark_secondary_usage is not None else None
+    )
+    spark_window_label_raw = (
+        spark_primary_usage.window_label if spark_primary_usage and spark_primary_usage.window_label else None
+    )
+    if spark_window_label_raw is None and spark_secondary_usage and spark_secondary_usage.window_label:
+        spark_window_label_raw = spark_secondary_usage.window_label
+    spark_window_label = (
+        usage_core.normalize_spark_window_label(spark_window_label_raw)
+        if spark_primary_usage is not None or spark_secondary_usage is not None
+        else None
+    )
     capacity_primary = usage_core.capacity_for_plan(plan_type, "primary")
     capacity_secondary = usage_core.capacity_for_plan(plan_type, "secondary")
     remaining_credits_primary = usage_core.remaining_credits_from_percent(
@@ -62,9 +88,14 @@ def _account_to_summary(
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,
+            spark_primary_remaining_percent=spark_primary_remaining_percent,
+            spark_secondary_remaining_percent=spark_secondary_remaining_percent,
         ),
         reset_at_primary=reset_at_primary,
         reset_at_secondary=reset_at_secondary,
+        reset_at_spark_primary=reset_at_spark_primary,
+        reset_at_spark_secondary=reset_at_spark_secondary,
+        spark_window_label=spark_window_label,
         last_refresh_at=account.last_refresh,
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,

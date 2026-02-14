@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import inspect
 
 from app.core.auth import DEFAULT_PLAN
 from app.core.crypto import TokenEncryptor
@@ -28,6 +29,11 @@ def _make_account(account_id: str, email: str, plan_type: str) -> Account:
     )
 
 
+def _usage_history_columns(sync_session) -> set[str]:
+    connection = sync_session.connection()
+    return {column["name"] for column in inspect(connection).get_columns("usage_history")}
+
+
 @pytest.mark.asyncio
 async def test_run_migrations_preserves_unknown_plan_types(db_setup):
     async with SessionLocal() as session:
@@ -39,6 +45,8 @@ async def test_run_migrations_preserves_unknown_plan_types(db_setup):
     async with SessionLocal() as session:
         applied = await run_migrations(session)
         assert applied == len(MIGRATIONS)
+        columns = await session.run_sync(_usage_history_columns)
+        assert "window_label" in columns
 
     async with SessionLocal() as session:
         acc_one = await session.get(Account, "acc_one")

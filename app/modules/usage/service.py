@@ -5,6 +5,7 @@ from datetime import timedelta
 from app.core import usage as usage_core
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
+from app.db.models import UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.builders import (
@@ -37,6 +38,9 @@ class UsageService:
 
         primary_rows = await self._latest_usage_rows("primary")
         secondary_rows = await self._latest_usage_rows("secondary")
+        spark_primary_rows = await self._latest_usage_rows("spark_primary")
+        spark_secondary_rows = await self._latest_usage_rows("spark_secondary")
+        spark_window_label = await self._spark_window_label()
 
         secondary_minutes = await self._usage_repo.latest_window_minutes("secondary")
         if secondary_minutes is None:
@@ -48,6 +52,9 @@ class UsageService:
             accounts=accounts,
             primary_rows=primary_rows,
             secondary_rows=secondary_rows,
+            spark_primary_rows=spark_primary_rows,
+            spark_secondary_rows=spark_secondary_rows,
+            spark_window_label=spark_window_label,
             logs_secondary=logs_secondary,
         )
 
@@ -91,3 +98,25 @@ class UsageService:
             )
             for entry in latest.values()
         ]
+
+    async def _spark_window_label(self) -> str | None:
+        spark_primary_latest = await self._usage_repo.latest_by_account(window="spark_primary")
+        spark_secondary_latest = await self._usage_repo.latest_by_account(window="spark_secondary")
+        return _spark_window_label_from_entries(
+            list(spark_primary_latest.values()),
+            list(spark_secondary_latest.values()),
+        )
+
+
+def _spark_window_label_from_entries(
+    spark_primary_entries: list[UsageHistory],
+    spark_secondary_entries: list[UsageHistory],
+) -> str | None:
+    entries = [*spark_primary_entries, *spark_secondary_entries]
+    if not entries:
+        return None
+    for entry in entries:
+        label = (entry.window_label or "").strip()
+        if label:
+            return usage_core.normalize_spark_window_label(label)
+    return usage_core.normalize_spark_window_label(None)

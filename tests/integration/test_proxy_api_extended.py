@@ -9,8 +9,10 @@ from sqlalchemy import select
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -217,3 +219,63 @@ async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeyp
         acc = await session.get(Account, expected_account_id)
         assert acc is not None
         assert acc.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_spark_unsupported_fails_over_account(async_client, monkeypatch):
+    account_1 = await _import_account(async_client, "acc_stream_spark_1", "stream-spark-1@example.com")
+    account_2 = await _import_account(async_client, "acc_stream_spark_2", "stream-spark-2@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=account_1,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=account_2,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen.append(account_id or "")
+        if account_id == "acc_stream_spark_1":
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "unsupported_model",
+                            "message": "spark is not supported for this account",
+                        }
+                    },
+                }
+            )
+            return
+        yield _sse_event({"type": "response.completed", "response": {"id": "resp_stream_spark"}})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5-spark", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen[:2] == ["acc_stream_spark_1", "acc_stream_spark_2"]

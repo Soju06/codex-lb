@@ -77,6 +77,9 @@ class UsageSummaryPayload:
     primary_window: UsageWindowSnapshot
     secondary_window: UsageWindowSnapshot | None
     cost: UsageCostSummary
+    spark_primary_window: UsageWindowSnapshot | None = None
+    spark_secondary_window: UsageWindowSnapshot | None = None
+    spark_window_label: str | None = None
     metrics: UsageMetricsSummary | None = None
 
 

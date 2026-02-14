@@ -46,6 +46,9 @@ async def test_usage_summary_empty_returns_zeroes(async_client):
     assert secondary["capacityCredits"] == 0.0
     assert secondary["remainingCredits"] == 0.0
     assert secondary["windowMinutes"] == 10080
+    assert payload["sparkPrimaryWindow"] is None
+    assert payload["sparkSecondaryWindow"] is None
+    assert payload["sparkWindowLabel"] is None
 
     cost = payload["cost"]
     assert cost["currency"] == "USD"

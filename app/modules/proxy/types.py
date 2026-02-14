@@ -19,6 +19,9 @@ class RateLimitStatusDetailsData:
     limit_reached: bool
     primary_window: RateLimitWindowSnapshotData | None = None
     secondary_window: RateLimitWindowSnapshotData | None = None
+    spark_primary_window: RateLimitWindowSnapshotData | None = None
+    spark_secondary_window: RateLimitWindowSnapshotData | None = None
+    spark_window_label: str | None = None
 
 
 @dataclass(frozen=True)

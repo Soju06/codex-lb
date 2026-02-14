@@ -38,10 +38,18 @@ class AccountsService:
             return []
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
+        spark_primary_usage = (
+            await self._usage_repo.latest_by_account(window="spark_primary") if self._usage_repo else {}
+        )
+        spark_secondary_usage = (
+            await self._usage_repo.latest_by_account(window="spark_secondary") if self._usage_repo else {}
+        )
         return build_account_summaries(
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
+            spark_primary_usage=spark_primary_usage,
+            spark_secondary_usage=spark_secondary_usage,
             encryptor=self._encryptor,
         )
 

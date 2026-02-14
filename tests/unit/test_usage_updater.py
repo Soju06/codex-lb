@@ -22,6 +22,7 @@ class UsageEntry:
     output_tokens: int | None
     recorded_at: datetime | None
     window: str | None
+    window_label: str | None
     reset_at: int | None
     window_minutes: int | None
     credits_has: bool | None
@@ -41,6 +42,7 @@ class StubUsageRepository:
         output_tokens: int | None = None,
         recorded_at: datetime | None = None,
         window: str | None = None,
+        window_label: str | None = None,
         reset_at: int | None = None,
         window_minutes: int | None = None,
         credits_has: bool | None = None,
@@ -55,6 +57,7 @@ class StubUsageRepository:
                 output_tokens=output_tokens,
                 recorded_at=recorded_at,
                 window=window,
+                window_label=window_label,
                 reset_at=reset_at,
                 window_minutes=window_minutes,
                 credits_has=credits_has,
@@ -341,3 +344,108 @@ async def test_usage_updater_computes_reset_at_from_reset_after_seconds(monkeypa
     entry = usage_repo.entries[0]
     assert entry.window == "primary"
     assert entry.reset_at == 1120
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_persists_spark_windows_from_additional_rate_limits(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 1.0,
+                        "reset_after_seconds": 120,
+                        "limit_window_seconds": 60,
+                    }
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "gpt-5-codex-spark_window",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12.0,
+                                "reset_after_seconds": 300,
+                                "limit_window_seconds": 18000,
+                            },
+                            "secondary_window": {
+                                "used_percent": 45.0,
+                                "reset_after_seconds": 3600,
+                                "limit_window_seconds": 604800,
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.usage.updater._now_epoch", lambda: 1000)
+
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_spark", "workspace_spark", email="spark@example.com")
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    by_window = {entry.window: entry for entry in usage_repo.entries}
+    assert by_window["spark_primary"].used_percent == 12.0
+    assert by_window["spark_primary"].window_minutes == 300
+    assert by_window["spark_primary"].reset_at == 1300
+    assert by_window["spark_primary"].window_label == "gpt-5-codex-spark_window"
+    assert by_window["spark_secondary"].used_percent == 45.0
+    assert by_window["spark_secondary"].window_minutes == 10080
+    assert by_window["spark_secondary"].reset_at == 4600
+    assert by_window["spark_secondary"].window_label == "gpt-5-codex-spark_window"
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_prefers_inline_spark_rate_limit_over_additional(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {"used_percent": 1.0, "limit_window_seconds": 60},
+                    "gpt5_spark_window": {
+                        "used_percent": 33.0,
+                        "reset_after_seconds": 120,
+                        "limit_window_seconds": 18000,
+                    },
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "some_other_spark",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 88.0,
+                                "reset_after_seconds": 500,
+                                "limit_window_seconds": 18000,
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.usage.updater._now_epoch", lambda: 2000)
+
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_spark_inline", "workspace_spark_inline", email="spark-inline@example.com")
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    spark_entries = [entry for entry in usage_repo.entries if entry.window == "spark_primary"]
+    assert len(spark_entries) == 1
+    assert spark_entries[0].used_percent == 33.0
+    assert spark_entries[0].window_label == "gpt5_spark_window"

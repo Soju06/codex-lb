@@ -130,3 +130,63 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
         account = await session.get(Account, expected_account_id)
         assert account is not None
         assert account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_spark_unsupported_fails_over_account(async_client, monkeypatch):
+    email_a = "spark-a@example.com"
+    email_b = "spark-b@example.com"
+    raw_a = "acc_spark_a"
+    raw_b = "acc_spark_b"
+
+    files_a = {"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_a, email_a)), "application/json")}
+    files_b = {"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_b, email_b)), "application/json")}
+    response_a = await async_client.post("/api/accounts/import", files=files_a)
+    response_b = await async_client.post("/api/accounts/import", files=files_b)
+    assert response_a.status_code == 200
+    assert response_b.status_code == 200
+
+    expected_account_id_a = generate_unique_account_id(raw_a, email_a)
+    expected_account_id_b = generate_unique_account_id(raw_b, email_b)
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=expected_account_id_a,
+            used_percent=10.0,
+            window="primary",
+            reset_at=1735689600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=expected_account_id_b,
+            used_percent=20.0,
+            window="primary",
+            reset_at=1735689600,
+            window_minutes=300,
+        )
+
+    seen: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        seen.append(account_id or "")
+        if account_id == raw_a:
+            raise ProxyResponseError(
+                400,
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "unsupported_model",
+                        "message": "Spark model is not supported for this account",
+                    }
+                },
+            )
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5-spark", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.json()["output"] == []
+    assert seen == [raw_a, raw_b]

@@ -14,6 +14,7 @@ from app.db.migrations.versions import (
     add_dashboard_settings,
     add_dashboard_settings_totp,
     add_request_logs_reasoning_effort,
+    add_usage_history_window_label,
     normalize_account_plan_types,
 )
 
@@ -45,6 +46,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("004_add_accounts_chatgpt_account_id", add_accounts_chatgpt_account_id.run),
     Migration("005_add_dashboard_settings", add_dashboard_settings.run),
     Migration("006_add_dashboard_settings_totp", add_dashboard_settings_totp.run),
+    Migration("007_add_usage_history_window_label", add_usage_history_window_label.run),
 )
 
 

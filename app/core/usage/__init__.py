@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Iterable, Mapping
 
 from app.core.plan_types import normalize_account_plan_type
@@ -38,6 +39,10 @@ def _normalize_window_key(window: str | None) -> str:
         return "primary"
     if normalized in {"secondary", "7d"}:
         return "secondary"
+    if normalized in {"spark_primary", "spark-primary", "spark 5h", "spark5h"}:
+        return "spark_primary"
+    if normalized in {"spark_secondary", "spark-secondary", "spark 7d", "spark7d", "spark_weekly"}:
+        return "spark_secondary"
     return normalized
 
 
@@ -141,18 +146,18 @@ def capacity_for_plan(plan_type: str | None, window: str) -> float | None:
     if not normalized:
         return None
     window_key = _normalize_window_key(window)
-    if window_key == "primary":
+    if window_key in {"primary", "spark_primary"}:
         return PLAN_CAPACITY_CREDITS_PRIMARY.get(normalized)
-    if window_key == "secondary":
+    if window_key in {"secondary", "spark_secondary"}:
         return PLAN_CAPACITY_CREDITS_SECONDARY.get(normalized)
     return None
 
 
 def default_window_minutes(window: str) -> int | None:
     window_key = _normalize_window_key(window)
-    if window_key == "primary":
+    if window_key in {"primary", "spark_primary"}:
         return DEFAULT_WINDOW_MINUTES_PRIMARY
-    if window_key == "secondary":
+    if window_key in {"secondary", "spark_secondary"}:
         return DEFAULT_WINDOW_MINUTES_SECONDARY
     return None
 
@@ -162,14 +167,26 @@ def parse_usage_summary(
     secondary_window: UsageWindowSummary | None,
     cost: UsageCostSummary,
     metrics: UsageMetricsSummary | None = None,
+    spark_primary_window: UsageWindowSummary | None = None,
+    spark_secondary_window: UsageWindowSummary | None = None,
+    spark_window_label: str | None = None,
 ) -> UsageSummaryPayload:
     primary = normalize_usage_window(primary_window)
     secondary = None
     if secondary_window is not None:
         secondary = normalize_usage_window(secondary_window)
+    spark_primary = None
+    if spark_primary_window is not None:
+        spark_primary = normalize_usage_window(spark_primary_window)
+    spark_secondary = None
+    if spark_secondary_window is not None:
+        spark_secondary = normalize_usage_window(spark_secondary_window)
     return UsageSummaryPayload(
         primary_window=primary,
         secondary_window=secondary,
+        spark_primary_window=spark_primary,
+        spark_secondary_window=spark_secondary,
+        spark_window_label=spark_window_label,
         cost=cost,
         metrics=metrics,
     )
@@ -179,6 +196,9 @@ async def usage_summary() -> UsageSummaryPayload:
     return UsageSummaryPayload(
         primary_window=_empty_window(window_minutes=None),
         secondary_window=None,
+        spark_primary_window=None,
+        spark_secondary_window=None,
+        spark_window_label=None,
         cost=_empty_cost(),
         metrics=None,
     )
@@ -186,3 +206,17 @@ async def usage_summary() -> UsageSummaryPayload:
 
 async def usage_history(hours: int) -> UsageHistoryPayload:
     return UsageHistoryPayload(window_hours=hours, accounts=[])
+
+
+def normalize_spark_window_label(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "Spark"
+    normalized = re.sub(r"_window$", "", raw, flags=re.IGNORECASE)
+    normalized = normalized.replace("-", " ").replace("_", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return "Spark"
+    if normalized.islower():
+        return normalized.title()
+    return normalized

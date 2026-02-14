@@ -38,6 +38,9 @@ class UsageMetrics(DashboardModel):
 class UsageSummaryResponse(DashboardModel):
     primary_window: UsageWindow
     secondary_window: UsageWindow | None = None
+    spark_primary_window: UsageWindow | None = None
+    spark_secondary_window: UsageWindow | None = None
+    spark_window_label: str | None = None
     cost: UsageCost
     metrics: UsageMetrics | None = None
 

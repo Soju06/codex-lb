@@ -96,8 +96,25 @@ def usage_server() -> tuple[str, StubRetryClient, UsageClientState]:
                         "reset_at": 1735689600,
                         "limit_window_seconds": 60,
                         "reset_after_seconds": 30,
-                    }
+                    },
+                    "gpt5_spark_window": {
+                        "used_percent": 22.5,
+                        "reset_after_seconds": 45,
+                        "limit_window_seconds": 18000,
+                    },
                 },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "gpt-5-codex-spark_window",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12.0,
+                                "reset_after_seconds": 10,
+                                "limit_window_seconds": 18000,
+                            }
+                        },
+                    }
+                ],
             },
             "",
         ),
@@ -126,6 +143,10 @@ async def test_fetch_usage_retries_and_returns_payload(usage_server):
         client=client,
     )
     assert data.plan_type == "plus"
+    assert data.rate_limit is not None
+    assert data.rate_limit.spark_windows()[0][0] == "gpt5_spark_window"
+    assert data.additional_rate_limits is not None
+    assert data.additional_rate_limits[0].limit_name == "gpt-5-codex-spark_window"
     assert state.calls == 2
     assert state.auth == "Bearer access-token"
     assert state.account == "acc_test"

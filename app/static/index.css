@@ -517,6 +517,16 @@ body[data-theme="light"] {
   margin-top: 24px;
 }
 
+.split-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.split-stack .progress-row+.progress-row {
+  margin-top: 0;
+}
+
 .progress-row label {
   font-size: 13px;
   color: var(--text-muted);

@@ -136,7 +136,26 @@
                     </template>
                     <span class="text-muted" x-text="card.remainingText"></span>
                   </div>
+                  <template x-if="card.sparkSecondaryRemaining !== null">
+                    <div class="progress-row">
+                      <label
+                        x-text="`${sparkWindowLabel()} remaining (${formatWindowLabel('sparkSecondary', dashboardData.usage.sparkSecondary?.windowMinutes)})`"></label>
+                      <template x-if="card.marquee">
+                        <div role="progressbar" class="marquee"></div>
+                      </template>
+                      <template x-if="!card.marquee">
+                        <div role="progressbar" :class="card.progressClass" aria-valuemin="0"
+                          aria-valuemax="100" :aria-valuenow="formatPercentValue(card.sparkSecondaryRemaining)">
+                          <div :style="{ width: `${formatPercentValue(card.sparkSecondaryRemaining)}%` }"></div>
+                        </div>
+                      </template>
+                      <span class="text-muted" x-text="card.sparkSecondaryRemainingText"></span>
+                    </div>
+                  </template>
                   <div class="text-muted" x-text="card.meta"></div>
+                  <template x-if="card.sparkMeta">
+                    <div class="text-muted" x-text="card.sparkMeta"></div>
+                  </template>
                   <div class="account-actions">
                     <template x-for="action in card.actions" :key="action.label">
                       <button x-text="action.label" @click="handleAccountAction(action, card)"></button>
@@ -390,6 +409,10 @@
                           <span style="font-weight: normal; font-size: 0.9em; color: var(--text-muted)"
                             x-text="`(${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`">
                           </span>
+                          <span style="font-weight: normal; font-size: 0.85em; color: var(--text-muted)"
+                            x-show="dashboardData.usage.sparkSecondary"
+                            x-text="`+ ${sparkWindowLabel()} (${formatWindowLabel('sparkSecondary', dashboardData.usage.sparkSecondary?.windowMinutes)})`">
+                          </span>
                         </span>
                       </th>
                       <th style="text-align: center; width: 13%">
@@ -397,6 +420,10 @@
                           <span style="white-space: nowrap">Quota reset</span>
                           <span style="font-weight: normal; font-size: 0.9em; color: var(--text-muted)"
                             x-text="`(${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`">
+                          </span>
+                          <span style="font-weight: normal; font-size: 0.85em; color: var(--text-muted)"
+                            x-show="dashboardData.usage.sparkSecondary"
+                            x-text="`+ ${sparkWindowLabel()} (${formatWindowLabel('sparkSecondary', dashboardData.usage.sparkSecondary?.windowMinutes)})`">
                           </span>
                         </span>
                       </th>
@@ -413,10 +440,24 @@
                             x-text="statusLabel(account.status)"></span>
                         </td>
                         <td style="text-align: center"
-                          :class="calculateTextUsageTextClass(account.status, account.usage?.secondaryRemainingPercent)"
-                          x-text="formatPercent(account.usage?.secondaryRemainingPercent)">
+                          :class="calculateTextUsageTextClass(account.status, account.usage?.secondaryRemainingPercent)">
+                          <div x-text="formatPercent(account.usage?.secondaryRemainingPercent)"></div>
+                          <template
+                            x-if="account.usage?.sparkSecondaryRemainingPercent !== null && account.usage?.sparkSecondaryRemainingPercent !== undefined">
+                            <div class="text-muted"
+                              :class="calculateTextUsageTextClass(account.status, account.usage?.sparkSecondaryRemainingPercent)"
+                              x-text="`${sparkWindowLabel(account)} ${formatPercent(account.usage?.sparkSecondaryRemainingPercent)}`">
+                            </div>
+                          </template>
                         </td>
-                        <td style="text-align: center" x-text="formatQuotaResetLabel(account.resetAtSecondary)"></td>
+                        <td style="text-align: center">
+                          <div x-text="formatQuotaResetLabel(account.resetAtSecondary)"></div>
+                          <template x-if="account.resetAtSparkSecondary || account.resetAtSparkPrimary">
+                            <div class="text-muted"
+                              x-text="`${sparkWindowLabel(account)} ${formatQuotaResetLabel(account.resetAtSparkSecondary || account.resetAtSparkPrimary)}`">
+                            </div>
+                          </template>
+                        </td>
                       </tr>
                     </template>
                     <template x-if="filteredAccounts.length === 0">
@@ -451,6 +492,16 @@
                 <div><span
                     x-text="`Quota reset (${formatWindowLabel('secondary', dashboardData.usage.secondary.windowMinutes)})`"></span><strong
                     x-text="formatQuotaResetLabel(selectedAccount.resetAtSecondary)"></strong></div>
+                <template x-if="selectedAccount.resetAtSparkPrimary">
+                  <div><span
+                      x-text="`${sparkWindowLabel(selectedAccount)} reset (${formatWindowLabel('sparkPrimary', dashboardData.usage.sparkPrimary?.windowMinutes)})`"></span><strong
+                      x-text="formatQuotaResetLabel(selectedAccount.resetAtSparkPrimary)"></strong></div>
+                </template>
+                <template x-if="selectedAccount.resetAtSparkSecondary">
+                  <div><span
+                      x-text="`${sparkWindowLabel(selectedAccount)} reset (${formatWindowLabel('sparkSecondary', dashboardData.usage.sparkSecondary?.windowMinutes)})`"></span><strong
+                      x-text="formatQuotaResetLabel(selectedAccount.resetAtSparkSecondary)"></strong></div>
+                </template>
               </div>
 
               <div class="split-stack" style="margin-top: 12px">
@@ -480,6 +531,38 @@
                     :class="calculateTextUsageTextClass(selectedAccount.status, selectedAccount.usage?.secondaryRemainingPercent)"
                     x-text="formatPercent(selectedAccount.usage?.secondaryRemainingPercent)"></span>
                 </div>
+                <template x-if="selectedAccount.usage?.sparkPrimaryRemainingPercent !== null && selectedAccount.usage?.sparkPrimaryRemainingPercent !== undefined">
+                  <div class="progress-row">
+                    <label
+                      x-text="`${sparkWindowLabel(selectedAccount)} remaining (${formatWindowLabel('sparkPrimary', dashboardData.usage.sparkPrimary?.windowMinutes)})`"></label>
+                    <div role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                      :class="calculateProgressClass(selectedAccount.status, selectedAccount.usage?.sparkPrimaryRemainingPercent)"
+                      :aria-valuenow="formatPercentValue(selectedAccount.usage?.sparkPrimaryRemainingPercent)">
+                      <div
+                        :style="{ width: `${formatPercentValue(selectedAccount.usage?.sparkPrimaryRemainingPercent)}%` }">
+                      </div>
+                    </div>
+                    <span
+                      :class="calculateTextUsageTextClass(selectedAccount.status, selectedAccount.usage?.sparkPrimaryRemainingPercent)"
+                      x-text="formatPercent(selectedAccount.usage?.sparkPrimaryRemainingPercent)"></span>
+                  </div>
+                </template>
+                <template x-if="selectedAccount.usage?.sparkSecondaryRemainingPercent !== null && selectedAccount.usage?.sparkSecondaryRemainingPercent !== undefined">
+                  <div class="progress-row">
+                    <label
+                      x-text="`${sparkWindowLabel(selectedAccount)} remaining (${formatWindowLabel('sparkSecondary', dashboardData.usage.sparkSecondary?.windowMinutes)})`"></label>
+                    <div role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                      :class="calculateProgressClass(selectedAccount.status, selectedAccount.usage?.sparkSecondaryRemainingPercent)"
+                      :aria-valuenow="formatPercentValue(selectedAccount.usage?.sparkSecondaryRemainingPercent)">
+                      <div
+                        :style="{ width: `${formatPercentValue(selectedAccount.usage?.sparkSecondaryRemainingPercent)}%` }">
+                      </div>
+                    </div>
+                    <span
+                      :class="calculateTextUsageTextClass(selectedAccount.status, selectedAccount.usage?.sparkSecondaryRemainingPercent)"
+                      x-text="formatPercent(selectedAccount.usage?.sparkSecondaryRemainingPercent)"></span>
+                  </div>
+                </template>
               </div>
 
               <fieldset class="token-fieldset">

@@ -14,6 +14,8 @@ from app.modules.usage.schemas import UsageSummaryResponse, UsageWindowResponse
 class DashboardUsageWindows(DashboardModel):
     primary: UsageWindowResponse
     secondary: UsageWindowResponse | None = None
+    spark_primary: UsageWindowResponse | None = None
+    spark_secondary: UsageWindowResponse | None = None
 
 
 class DashboardOverviewResponse(DashboardModel):

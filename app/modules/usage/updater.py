@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
@@ -9,7 +11,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.core.usage.models import UsagePayload
+from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -27,6 +29,7 @@ class UsageRepositoryPort(Protocol):
         output_tokens: int | None = None,
         recorded_at: datetime | None = None,
         window: str | None = None,
+        window_label: str | None = None,
         reset_at: int | None = None,
         window_minutes: int | None = None,
         credits_has: bool | None = None,
@@ -144,6 +147,39 @@ class UsageUpdater:
                 window_minutes=_window_minutes(secondary.limit_window_seconds),
             )
 
+        spark_windows = _extract_spark_windows(payload)
+        if spark_windows.primary and spark_windows.primary.used_percent is not None:
+            await self._usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=float(spark_windows.primary.used_percent),
+                input_tokens=None,
+                output_tokens=None,
+                window="spark_primary",
+                window_label=spark_windows.window_label,
+                reset_at=_reset_at(
+                    spark_windows.primary.reset_at,
+                    spark_windows.primary.reset_after_seconds,
+                    now_epoch,
+                ),
+                window_minutes=_window_minutes(spark_windows.primary.limit_window_seconds),
+            )
+
+        if spark_windows.secondary and spark_windows.secondary.used_percent is not None:
+            await self._usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=float(spark_windows.secondary.used_percent),
+                input_tokens=None,
+                output_tokens=None,
+                window="spark_secondary",
+                window_label=spark_windows.window_label,
+                reset_at=_reset_at(
+                    spark_windows.secondary.reset_at,
+                    spark_windows.secondary.reset_after_seconds,
+                    now_epoch,
+                ),
+                window_minutes=_window_minutes(spark_windows.secondary.limit_window_seconds),
+            )
+
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
             return
@@ -206,3 +242,124 @@ _DEACTIVATING_USAGE_STATUS_CODES = {402, 403, 404}
 
 def _should_deactivate_for_usage_error(status_code: int) -> bool:
     return status_code in _DEACTIVATING_USAGE_STATUS_CODES
+
+
+@dataclass(frozen=True, slots=True)
+class UsageWindowPayload:
+    used_percent: float | None
+    reset_at: int | None
+    limit_window_seconds: int | None
+    reset_after_seconds: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SparkWindows:
+    primary: UsageWindowPayload | None
+    secondary: UsageWindowPayload | None
+    window_label: str | None
+
+
+def _extract_spark_windows(payload: UsagePayload) -> SparkWindows:
+    rate_limit = payload.rate_limit
+    if rate_limit is None:
+        return SparkWindows(primary=None, secondary=None, window_label=None)
+
+    inline_primary, inline_secondary, inline_label = _extract_inline_spark_windows(rate_limit)
+    if inline_primary is not None or inline_secondary is not None:
+        return SparkWindows(
+            primary=inline_primary,
+            secondary=inline_secondary,
+            window_label=inline_label,
+        )
+
+    additional_limits = payload.additional_rate_limits or []
+    for limit in additional_limits:
+        limit_name = (limit.limit_name or "").strip()
+        if "spark" not in limit_name.lower():
+            continue
+        spark_rate_limit = limit.rate_limit
+        if spark_rate_limit is None:
+            continue
+        return SparkWindows(
+            primary=_to_window_payload(spark_rate_limit.primary_window),
+            secondary=_to_window_payload(spark_rate_limit.secondary_window),
+            window_label=limit.limit_name,
+        )
+
+    return SparkWindows(primary=None, secondary=None, window_label=None)
+
+
+def _extract_inline_spark_windows(
+    rate_limit: RateLimitPayload,
+) -> tuple[UsageWindowPayload | None, UsageWindowPayload | None, str | None]:
+    spark_windows = [(key, _to_window_payload(window)) for key, window in rate_limit.spark_windows()]
+    spark_windows = [(key, window) for key, window in spark_windows if window is not None]
+    if not spark_windows:
+        return None, None, None
+
+    primary: UsageWindowPayload | None = None
+    secondary: UsageWindowPayload | None = None
+    fallback: list[UsageWindowPayload] = []
+    for key, window in spark_windows:
+        key_lower = key.lower()
+        if primary is None and _is_primary_hint(key_lower):
+            primary = window
+            continue
+        if secondary is None and _is_secondary_hint(key_lower):
+            secondary = window
+            continue
+        fallback.append(window)
+
+    for window in fallback:
+        if primary is None:
+            primary = window
+            continue
+        if secondary is None:
+            secondary = window
+            continue
+        break
+
+    return primary, secondary, spark_windows[0][0]
+
+
+def _to_window_payload(window: UsageWindow | None) -> UsageWindowPayload | None:
+    if window is None:
+        return None
+    return UsageWindowPayload(
+        used_percent=_float_or_none(window.used_percent),
+        reset_at=_int_or_none(window.reset_at),
+        limit_window_seconds=_int_or_none(window.limit_window_seconds),
+        reset_after_seconds=_int_or_none(window.reset_after_seconds),
+    )
+
+
+def _float_or_none(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except ValueError:
+            return None
+    return None
+
+
+def _is_primary_hint(value: str) -> bool:
+    return bool(re.search(r"(primary|5h|hour)", value))
+
+
+def _is_secondary_hint(value: str) -> bool:
+    return bool(re.search(r"(secondary|7d|week)", value))

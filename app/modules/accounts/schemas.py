@@ -11,6 +11,8 @@ from app.modules.shared.schemas import DashboardModel
 class AccountUsage(DashboardModel):
     primary_remaining_percent: float | None = None
     secondary_remaining_percent: float | None = None
+    spark_primary_remaining_percent: float | None = None
+    spark_secondary_remaining_percent: float | None = None
 
 
 class AccountTokenStatus(DashboardModel):
@@ -33,6 +35,9 @@ class AccountSummary(DashboardModel):
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
+    reset_at_spark_primary: datetime | None = None
+    reset_at_spark_secondary: datetime | None = None
+    spark_window_label: str | None = None
     last_refresh_at: datetime | None = None
     capacity_credits_primary: float | None = None
     remaining_credits_primary: float | None = None

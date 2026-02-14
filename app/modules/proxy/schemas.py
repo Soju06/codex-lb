@@ -37,6 +37,9 @@ class RateLimitStatusDetails(BaseModel):
     limit_reached: bool
     primary_window: RateLimitWindowSnapshot | None = None
     secondary_window: RateLimitWindowSnapshot | None = None
+    spark_primary_window: RateLimitWindowSnapshot | None = None
+    spark_secondary_window: RateLimitWindowSnapshot | None = None
+    spark_window_label: str | None = None
 
     @classmethod
     def from_data(cls, data: RateLimitStatusDetailsData) -> "RateLimitStatusDetails":
@@ -47,6 +50,13 @@ class RateLimitStatusDetails(BaseModel):
             secondary_window=RateLimitWindowSnapshot.from_data(data.secondary_window)
             if data.secondary_window
             else None,
+            spark_primary_window=RateLimitWindowSnapshot.from_data(data.spark_primary_window)
+            if data.spark_primary_window
+            else None,
+            spark_secondary_window=RateLimitWindowSnapshot.from_data(data.spark_secondary_window)
+            if data.spark_secondary_window
+            else None,
+            spark_window_label=data.spark_window_label,
         )
 
 

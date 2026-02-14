@@ -36,17 +36,40 @@ def build_usage_summary_response(
     accounts: list[Account],
     primary_rows: list[UsageWindowRow],
     secondary_rows: list[UsageWindowRow],
+    spark_primary_rows: list[UsageWindowRow],
+    spark_secondary_rows: list[UsageWindowRow],
+    spark_window_label: str | None,
     logs_secondary: list[RequestLog],
 ) -> UsageSummaryResponse:
     account_map = {account.id: account for account in accounts}
     primary_window = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
     secondary_window = usage_core.summarize_usage_window(secondary_rows, account_map, "secondary")
+    spark_primary_window = usage_core.summarize_usage_window(
+        spark_primary_rows,
+        account_map,
+        "spark_primary",
+    )
+    spark_secondary_window = usage_core.summarize_usage_window(
+        spark_secondary_rows,
+        account_map,
+        "spark_secondary",
+    )
 
     cost_items = [item for item in (_log_to_cost_item(log) for log in logs_secondary) if item]
     cost = calculate_costs(cost_items)
     metrics = _usage_metrics(logs_secondary)
 
-    payload = usage_core.parse_usage_summary(primary_window, secondary_window, cost, metrics)
+    payload = usage_core.parse_usage_summary(
+        primary_window,
+        secondary_window,
+        cost,
+        metrics,
+        spark_primary_window=spark_primary_window if spark_primary_rows else None,
+        spark_secondary_window=spark_secondary_window if spark_secondary_rows else None,
+        spark_window_label=usage_core.normalize_spark_window_label(spark_window_label)
+        if spark_primary_rows or spark_secondary_rows
+        else None,
+    )
     return _summary_payload_to_response(payload)
 
 
@@ -83,11 +106,17 @@ def _build_account_history(
     account_map: dict[str, Account],
     window: str,
 ) -> list[UsageHistoryItem]:
+    # Spark windows should only include accounts that actually reported Spark usage.
+    # Otherwise Spark-ineligible accounts are rendered as 100% remaining.
+    spark_window = window.startswith("spark_")
     usage_by_account = {row.account_id: row for row in usage_rows}
 
     results: list[UsageHistoryItem] = []
     for account_id, account in account_map.items():
         usage = usage_by_account.get(account_id)
+        if spark_window and usage is None:
+            continue
+
         used_percent = usage.used_percent if usage else None
         used_percent_value = float(used_percent) if used_percent is not None else 0.0
         remaining_percent = usage_core.remaining_percent_from_used(used_percent_value) or 0.0
@@ -161,6 +190,13 @@ def _summary_payload_to_response(payload: UsageSummaryPayload) -> UsageSummaryRe
     return UsageSummaryResponse(
         primary_window=_window_snapshot_to_model(payload.primary_window),
         secondary_window=_window_snapshot_to_model(payload.secondary_window) if payload.secondary_window else None,
+        spark_primary_window=_window_snapshot_to_model(payload.spark_primary_window)
+        if payload.spark_primary_window
+        else None,
+        spark_secondary_window=_window_snapshot_to_model(payload.spark_secondary_window)
+        if payload.spark_secondary_window
+        else None,
+        spark_window_label=payload.spark_window_label,
         cost=_cost_summary_to_model(payload.cost),
         metrics=_metrics_summary_to_model(payload.metrics) if payload.metrics else None,
     )

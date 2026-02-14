@@ -296,3 +296,84 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
     assert response.status_code == 200
     assert stream_seen == ["acc_c1", "acc_c2"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_sticky_partitions_spark_and_non_spark_keys(async_client, monkeypatch):
+    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    acc_a_id = await _import_account(async_client, "acc_ns_a", "ns-a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_ns_b", "ns-b@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen: list[tuple[str, str]] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen.append((payload.model, account_id))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    shared_key = "thread_shared"
+    non_spark_payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "prompt_cache_key": shared_key,
+    }
+    spark_payload = {
+        "model": "gpt-5-spark",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "prompt_cache_key": shared_key,
+    }
+
+    first = await async_client.post("/backend-api/codex/responses", json=non_spark_payload)
+    assert first.status_code == 200
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=95.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    spark = await async_client.post("/backend-api/codex/responses", json=spark_payload)
+    assert spark.status_code == 200
+
+    second = await async_client.post("/backend-api/codex/responses", json=non_spark_payload)
+    assert second.status_code == 200
+
+    assert seen[0] == ("gpt-5.1", "acc_ns_a")
+    assert seen[1] == ("gpt-5-spark", "acc_ns_b")
+    assert seen[2] == ("gpt-5.1", "acc_ns_a")

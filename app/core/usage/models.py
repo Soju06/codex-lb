@@ -13,10 +13,31 @@ class UsageWindow(BaseModel):
 
 
 class RateLimitPayload(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     primary_window: UsageWindow | None = None
     secondary_window: UsageWindow | None = None
+
+    def spark_windows(self) -> list[tuple[str, UsageWindow]]:
+        extras = self.model_extra or {}
+        windows: list[tuple[str, UsageWindow]] = []
+        for key, value in extras.items():
+            if "spark" not in key.lower():
+                continue
+            try:
+                window = UsageWindow.model_validate(value)
+            except Exception:
+                continue
+            windows.append((key, window))
+        windows.sort(key=lambda item: item[0].lower())
+        return windows
+
+
+class AdditionalRateLimitPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    limit_name: str | None = None
+    rate_limit: RateLimitPayload | None = None
 
 
 class CreditsPayload(BaseModel):
@@ -32,4 +53,5 @@ class UsagePayload(BaseModel):
 
     plan_type: str | None = None
     rate_limit: RateLimitPayload | None = None
+    additional_rate_limits: list[AdditionalRateLimitPayload] | None = None
     credits: CreditsPayload | None = None

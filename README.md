@@ -99,6 +99,20 @@ Add the following to `~/.config/opencode/opencode.json`:
 
 All settings use the `CODEX_LB_` prefix and can be set via environment variables or `.env.local`.
 
+### Database Backend
+
+SQLite is the default backend:
+
+```bash
+CODEX_LB_DATABASE_URL=sqlite+aiosqlite:///~/.codex-lb/store.db
+```
+
+PostgreSQL is optional:
+
+```bash
+CODEX_LB_DATABASE_URL=postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
+```
+
 ### Dashboard TOTP
 
 Protect the dashboard with TOTP two-factor authentication.
@@ -127,6 +141,8 @@ Files:
 - `encryption.key` – encrypts tokens (auto-generated)
 
 Backup this directory to preserve your accounts.
+
+If you use PostgreSQL, back up your PostgreSQL data instead of `store.db`.
 
 ## Contributors ✨
 

@@ -21,3 +21,20 @@ def test_import_session_with_sqlite_memory_url_does_not_error() -> None:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_import_session_with_postgres_url_does_not_error() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["CODEX_LB_DATABASE_URL"] = "postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb"
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.db.session"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout

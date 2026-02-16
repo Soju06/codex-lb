@@ -36,12 +36,14 @@ class DashboardService:
             include_auth=False,
         )
 
-        primary_rows = _rows_from_latest(primary_usage)
-        secondary_rows = _rows_from_latest(secondary_usage)
+        primary_rows_raw = _rows_from_latest(primary_usage)
+        secondary_rows_raw = _rows_from_latest(secondary_usage)
+        primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
+            primary_rows_raw,
+            secondary_rows_raw,
+        )
 
-        secondary_minutes = await self._repo.latest_window_minutes("secondary")
-        if secondary_minutes is None:
-            secondary_minutes = usage_core.default_window_minutes("secondary")
+        secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)
 
         # Use bucket aggregation instead of loading all logs
         bucket_since = now - timedelta(minutes=secondary_minutes) if secondary_minutes else now - timedelta(days=7)
@@ -57,9 +59,7 @@ class DashboardService:
             cost_override=bucket_cost,
         )
 
-        primary_window_minutes = await self._repo.latest_window_minutes("primary")
-        if primary_window_minutes is None:
-            primary_window_minutes = usage_core.default_window_minutes("primary")
+        primary_window_minutes = usage_core.resolve_window_minutes("primary", primary_rows)
 
         windows = DashboardUsageWindows(
             primary=build_usage_window_response(

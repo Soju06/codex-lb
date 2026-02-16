@@ -48,12 +48,47 @@ def _account_to_summary(
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
-    primary_used_percent = _normalize_used_percent(primary_usage) or 0.0
-    secondary_used_percent = _normalize_used_percent(secondary_usage) or 0.0
-    primary_remaining_percent = usage_core.remaining_percent_from_used(primary_used_percent) or 0.0
-    secondary_remaining_percent = usage_core.remaining_percent_from_used(secondary_used_percent) or 0.0
-    reset_at_primary = from_epoch_seconds(primary_usage.reset_at) if primary_usage is not None else None
-    reset_at_secondary = from_epoch_seconds(secondary_usage.reset_at) if secondary_usage is not None else None
+    weekly_only_usage = _is_weekly_only_usage(primary_usage, secondary_usage)
+    # Keep account payload aligned with UI semantics: weekly-only plans expose
+    # their quota as secondary/7d and omit primary/5h fields.
+    effective_primary_usage = None if weekly_only_usage else primary_usage
+    effective_secondary_usage = (
+        secondary_usage if secondary_usage is not None else primary_usage if weekly_only_usage else None
+    )
+
+    primary_used_percent = _normalize_used_percent(effective_primary_usage)
+    secondary_used_percent = _normalize_used_percent(effective_secondary_usage)
+    primary_remaining_percent = usage_core.remaining_percent_from_used(primary_used_percent)
+    secondary_remaining_percent = usage_core.remaining_percent_from_used(secondary_used_percent)
+
+    if primary_remaining_percent is None and not weekly_only_usage:
+        primary_remaining_percent = 100.0
+    reset_at_primary = (
+        from_epoch_seconds(effective_primary_usage.reset_at)
+        if effective_primary_usage is not None
+        else None
+    )
+    reset_at_secondary = (
+        from_epoch_seconds(effective_secondary_usage.reset_at)
+        if effective_secondary_usage is not None
+        else None
+    )
+    window_minutes_primary = (
+        effective_primary_usage.window_minutes if effective_primary_usage is not None else None
+    )
+    window_minutes_secondary = (
+        effective_secondary_usage.window_minutes if effective_secondary_usage is not None else None
+    )
+    capacity_primary = usage_core.capacity_for_plan(plan_type, "primary")
+    capacity_secondary = usage_core.capacity_for_plan(plan_type, "secondary")
+    remaining_credits_primary = usage_core.remaining_credits_from_percent(
+        primary_used_percent,
+        capacity_primary,
+    )
+    remaining_credits_secondary = usage_core.remaining_credits_from_percent(
+        secondary_used_percent,
+        capacity_secondary,
+    )
     return AccountSummary(
         account_id=account.id,
         email=account.email,
@@ -66,8 +101,25 @@ def _account_to_summary(
         ),
         reset_at_primary=reset_at_primary,
         reset_at_secondary=reset_at_secondary,
+        window_minutes_primary=window_minutes_primary,
+        window_minutes_secondary=window_minutes_secondary,
+        last_refresh_at=account.last_refresh,
+        capacity_credits_primary=capacity_primary,
+        remaining_credits_primary=remaining_credits_primary,
+        capacity_credits_secondary=capacity_secondary,
+        remaining_credits_secondary=remaining_credits_secondary,
+        deactivation_reason=account.deactivation_reason,
         auth=auth_status,
     )
+
+
+def _is_weekly_only_usage(
+    primary_usage: UsageHistory | None,
+    secondary_usage: UsageHistory | None,
+) -> bool:
+    if primary_usage is None or secondary_usage is not None:
+        return False
+    return usage_core.is_weekly_window_minutes(primary_usage.window_minutes)
 
 
 def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAuthStatus:

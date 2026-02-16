@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
+from app.core import usage as usage_core
 from app.core.balancer import (
     AccountState,
     SelectionResult,
@@ -242,8 +243,14 @@ def _state_from_account(
     primary_used = primary_entry.used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
-    secondary_used = secondary_entry.used_percent if secondary_entry else None
-    secondary_reset = secondary_entry.reset_at if secondary_entry else None
+    effective_secondary_entry = secondary_entry
+    # Weekly-only accounts may not emit a dedicated secondary row; treat the
+    # weekly primary row as quota-window input for balancer decisions.
+    if effective_secondary_entry is None and usage_core.is_weekly_window_minutes(primary_window_minutes):
+        effective_secondary_entry = primary_entry
+
+    secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
+    secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
 
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # This survives across requests since LoadBalancer is instantiated per-request

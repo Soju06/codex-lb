@@ -298,8 +298,12 @@ class ProxyService:
                 return RateLimitStatusPayloadData(plan_type="guest")
 
             account_map = {account.id: account for account in selected_accounts}
-            primary_rows = await self._latest_usage_rows(repos, account_map, "primary")
-            secondary_rows = await self._latest_usage_rows(repos, account_map, "secondary")
+            primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
+            secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
+            primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
+                primary_rows_raw,
+                secondary_rows_raw,
+            )
 
             primary_summary = _summarize_window(primary_rows, account_map, "primary")
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")

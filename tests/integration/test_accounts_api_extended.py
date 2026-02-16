@@ -135,24 +135,28 @@ async def test_accounts_list_includes_per_account_reset_times(async_client, db_s
             10.0,
             window="primary",
             reset_at=primary_a,
+            window_minutes=300,
         )
         await usage_repo.add_entry(
             "acc_reset_b",
             20.0,
             window="primary",
             reset_at=primary_b,
+            window_minutes=300,
         )
         await usage_repo.add_entry(
             "acc_reset_a",
             30.0,
             window="secondary",
             reset_at=secondary_a,
+            window_minutes=10080,
         )
         await usage_repo.add_entry(
             "acc_reset_b",
             40.0,
             window="secondary",
             reset_at=secondary_b,
+            window_minutes=10080,
         )
 
     response = await async_client.get("/api/accounts")
@@ -164,3 +168,33 @@ async def test_accounts_list_includes_per_account_reset_times(async_client, db_s
     assert accounts["acc_reset_b"]["resetAtPrimary"] == _iso_utc(primary_b)
     assert accounts["acc_reset_a"]["resetAtSecondary"] == _iso_utc(secondary_a)
     assert accounts["acc_reset_b"]["resetAtSecondary"] == _iso_utc(secondary_b)
+    assert accounts["acc_reset_a"]["windowMinutesPrimary"] == 300
+    assert accounts["acc_reset_b"]["windowMinutesPrimary"] == 300
+    assert accounts["acc_reset_a"]["windowMinutesSecondary"] == 10080
+    assert accounts["acc_reset_b"]["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_free_like", "free@example.com", plan_type="free"))
+        await usage_repo.add_entry(
+            "acc_free_like",
+            24.0,
+            window="primary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_free_like"]
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] == 10080

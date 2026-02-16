@@ -120,6 +120,74 @@ async def test_usage_window_secondary_uses_latest_window_minutes(async_client, d
 
 
 @pytest.mark.asyncio
+async def test_usage_window_primary_excludes_weekly_only_accounts(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_plus", "plus@example.com", plan_type="plus"))
+        await accounts_repo.upsert(_make_account("acc_free", "free@example.com", plan_type="free"))
+        await usage_repo.add_entry(
+            "acc_plus",
+            20.0,
+            window="primary",
+            window_minutes=300,
+            recorded_at=now - timedelta(minutes=2),
+        )
+        await usage_repo.add_entry(
+            "acc_free",
+            20.0,
+            window="primary",
+            window_minutes=10080,
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/usage/window?window=primary")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["windowKey"] == "primary"
+    assert payload["windowMinutes"] == 300
+
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+    assert accounts["acc_free"]["remainingPercentAvg"] is None
+
+
+@pytest.mark.asyncio
+async def test_usage_window_secondary_includes_weekly_only_primary_entries(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_with_secondary", "with-secondary@example.com", plan_type="plus"))
+        await accounts_repo.upsert(_make_account("acc_weekly_only", "weekly-only@example.com", plan_type="free"))
+
+        await usage_repo.add_entry(
+            "acc_with_secondary",
+            40.0,
+            window="secondary",
+            window_minutes=10080,
+            recorded_at=now - timedelta(minutes=1),
+        )
+        await usage_repo.add_entry(
+            "acc_weekly_only",
+            60.0,
+            window="primary",
+            window_minutes=10080,
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/usage/window?window=secondary")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    assert accounts["acc_with_secondary"]["remainingPercentAvg"] == pytest.approx(60.0)
+    assert accounts["acc_weekly_only"]["remainingPercentAvg"] == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
 async def test_usage_history_team_plan_has_capacity(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

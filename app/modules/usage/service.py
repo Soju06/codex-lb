@@ -35,12 +35,14 @@ class UsageService:
         now = utcnow()
         accounts = await self._accounts_repo.list_accounts()
 
-        primary_rows = await self._latest_usage_rows("primary")
-        secondary_rows = await self._latest_usage_rows("secondary")
+        primary_rows_raw = await self._latest_usage_rows("primary")
+        secondary_rows_raw = await self._latest_usage_rows("secondary")
+        primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
+            primary_rows_raw,
+            secondary_rows_raw,
+        )
 
-        secondary_minutes = await self._usage_repo.latest_window_minutes("secondary")
-        if secondary_minutes is None:
-            secondary_minutes = usage_core.default_window_minutes("secondary")
+        secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)
         logs_secondary = []
         if secondary_minutes:
             logs_secondary = await self._logs_repo.list_since(now - timedelta(minutes=secondary_minutes))
@@ -69,10 +71,14 @@ class UsageService:
         if window_key not in {"primary", "secondary"}:
             raise ValueError("window must be 'primary' or 'secondary'")
         accounts = await self._accounts_repo.list_accounts()
-        usage_rows = await self._latest_usage_rows(window_key)
-        window_minutes = await self._usage_repo.latest_window_minutes(window_key)
-        if window_minutes is None:
-            window_minutes = usage_core.default_window_minutes(window_key)
+        primary_rows_raw = await self._latest_usage_rows("primary")
+        secondary_rows_raw = await self._latest_usage_rows("secondary")
+        primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
+            primary_rows_raw,
+            secondary_rows_raw,
+        )
+        usage_rows = primary_rows if window_key == "primary" else secondary_rows
+        window_minutes = usage_core.resolve_window_minutes(window_key, usage_rows)
         return build_usage_window_response(
             window_key=window_key,
             window_minutes=window_minutes,

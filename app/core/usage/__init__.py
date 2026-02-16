@@ -105,14 +105,13 @@ def summarize_usage_window(
     total_capacity = 0.0
     total_used = 0.0
     reset_candidates: list[int] = []
-    window_minutes: int | None = None
+    window_minutes_values: set[int] = set()
 
     for row in usage_rows:
         if row.reset_at is not None:
             reset_candidates.append(row.reset_at)
         if row.window_minutes is not None and row.window_minutes > 0:
-            if window_minutes is None or row.window_minutes > window_minutes:
-                window_minutes = row.window_minutes
+            window_minutes_values.add(row.window_minutes)
         account = account_map.get(row.account_id)
         capacity = capacity_for_plan(account.plan_type if account else None, window)
         if row.used_percent is None or capacity is None:
@@ -120,8 +119,7 @@ def summarize_usage_window(
         total_capacity += capacity
         total_used += (capacity * float(row.used_percent)) / 100.0
 
-    if window_minutes is None:
-        window_minutes = default_window_minutes(window)
+    window_minutes = _resolve_window_minutes(window, window_minutes_values)
 
     overall = None
     if total_capacity > 0:
@@ -155,6 +153,60 @@ def default_window_minutes(window: str) -> int | None:
     if window_key == "secondary":
         return DEFAULT_WINDOW_MINUTES_SECONDARY
     return None
+
+
+def resolve_window_minutes(window: str, rows: Iterable[UsageWindowRow]) -> int | None:
+    values = {
+        row.window_minutes
+        for row in rows
+        if row.window_minutes is not None and row.window_minutes > 0
+    }
+    return _resolve_window_minutes(window, values)
+
+
+def is_weekly_window_minutes(window_minutes: int | None) -> bool:
+    if window_minutes is None:
+        return False
+    secondary_default = default_window_minutes("secondary")
+    if secondary_default is None:
+        return False
+    return window_minutes == secondary_default
+
+
+def normalize_weekly_only_rows(
+    primary_rows: Iterable[UsageWindowRow],
+    secondary_rows: Iterable[UsageWindowRow],
+) -> tuple[list[UsageWindowRow], list[UsageWindowRow]]:
+    # Some plans (notably free) can report only one weekly window in the
+    # primary slot. Re-map those rows into secondary so downstream 5h/7d
+    # consumers operate on consistent semantics.
+    primary_by_account = {row.account_id: row for row in primary_rows}
+    secondary_by_account = {row.account_id: row for row in secondary_rows}
+
+    normalized_primary: list[UsageWindowRow] = []
+    normalized_secondary = list(secondary_by_account.values())
+
+    for account_id, primary_row in primary_by_account.items():
+        if account_id in secondary_by_account:
+            normalized_primary.append(primary_row)
+            continue
+        if is_weekly_window_minutes(primary_row.window_minutes):
+            normalized_secondary.append(primary_row)
+            continue
+        normalized_primary.append(primary_row)
+
+    return normalized_primary, normalized_secondary
+
+
+def _resolve_window_minutes(window: str, values: set[int]) -> int | None:
+    if not values:
+        return default_window_minutes(window)
+    if len(values) == 1:
+        return next(iter(values))
+    default = default_window_minutes(window)
+    if default is not None:
+        return default
+    return min(values)
 
 
 def parse_usage_summary(

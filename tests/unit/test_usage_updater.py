@@ -147,6 +147,7 @@ async def test_usage_updater_includes_chatgpt_account_id_even_when_shared(monkey
 class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []
+        self.token_updates: list[dict[str, Any]] = []
 
     async def update_status(
         self,
@@ -165,6 +166,8 @@ class StubAccountsRepository:
         return True
 
     async def update_tokens(self, *args: Any, **kwargs: Any) -> bool:
+        account_id = args[0] if args else kwargs.get("account_id")
+        self.token_updates.append({"account_id": account_id, **kwargs})
         return True
 
 
@@ -325,6 +328,34 @@ async def test_usage_updater_persists_primary_and_secondary_usage(monkeypatch) -
     assert secondary.credits_has is None
     assert secondary.credits_unlimited is None
     assert secondary.credits_balance is None
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_syncs_plan_type_from_usage_payload(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    acc = _make_account("acc_plan_sync", "workspace_plan_sync", email="plan@example.com")
+    acc.plan_type = "free"
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert acc.plan_type == "plus"
+    assert len(accounts_repo.token_updates) == 1
+    token_update = accounts_repo.token_updates[0]
+    assert token_update["account_id"] == "acc_plan_sync"
+    assert token_update["plan_type"] == "plus"
+    assert usage_repo.entries == []
 
 
 @pytest.mark.asyncio

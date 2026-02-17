@@ -7,7 +7,6 @@ import pytest
 from app.core.usage.types import BucketModelAggregate
 from app.modules.usage.builders import build_trends_from_buckets
 
-
 BUCKET_SECONDS = 21600  # 6 hours
 SINCE = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
 SINCE_EPOCH = int(SINCE.timestamp())

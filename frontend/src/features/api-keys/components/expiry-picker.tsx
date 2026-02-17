@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { addDays, format } from "date-fns";
-import { CalendarIcon, ChevronDown, Infinity } from "lucide-react";
+import { CalendarIcon, ChevronDown, Infinity as InfinityIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -73,7 +73,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
           )}
         >
           <span className="flex items-center gap-2">
-            {value ? <CalendarIcon className="size-4" /> : <Infinity className="size-4" />}
+            {value ? <CalendarIcon className="size-4" /> : <InfinityIcon className="size-4" />}
             {getTriggerLabel()}
           </span>
           <ChevronDown className="size-4 opacity-50" />
@@ -106,7 +106,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               active={value === null}
               onClick={handleNever}
             >
-              <Infinity className="size-4" />
+              <InfinityIcon className="size-4" />
               No expiration
             </OptionItem>
 

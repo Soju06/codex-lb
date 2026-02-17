@@ -165,8 +165,8 @@ async def test_create_key_with_limits() -> None:
     )
 
     assert len(created.limits) == 2
-    token_limit = next(l for l in created.limits if l.limit_type == "total_tokens")
-    cost_limit = next(l for l in created.limits if l.limit_type == "cost_usd")
+    token_limit = next(lim for lim in created.limits if lim.limit_type == "total_tokens")
+    cost_limit = next(lim for lim in created.limits if lim.limit_type == "cost_usd")
     assert token_limit.max_value == 1_000_000
     assert token_limit.limit_window == "weekly"
     assert token_limit.current_value == 0
@@ -279,8 +279,8 @@ async def test_validate_key_multi_limit_all_must_pass() -> None:
     )
 
     limits = await repo.get_limits_by_key(created.id)
-    token_limit = next(l for l in limits if l.limit_type == LimitType.TOTAL_TOKENS)
-    cost_limit = next(l for l in limits if l.limit_type == LimitType.COST_USD)
+    token_limit = next(lim for lim in limits if lim.limit_type == LimitType.TOTAL_TOKENS)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
 
     # Token within range, cost exceeded → should fail
     token_limit.current_value = 50
@@ -341,9 +341,9 @@ async def test_record_usage_increments_matching_limits() -> None:
     )
 
     limits = await repo.get_limits_by_key(created.id)
-    total_limit = next(l for l in limits if l.limit_type == LimitType.TOTAL_TOKENS)
-    input_limit = next(l for l in limits if l.limit_type == LimitType.INPUT_TOKENS)
-    output_limit = next(l for l in limits if l.limit_type == LimitType.OUTPUT_TOKENS)
+    total_limit = next(lim for lim in limits if lim.limit_type == LimitType.TOTAL_TOKENS)
+    input_limit = next(lim for lim in limits if lim.limit_type == LimitType.INPUT_TOKENS)
+    output_limit = next(lim for lim in limits if lim.limit_type == LimitType.OUTPUT_TOKENS)
 
     assert total_limit.current_value == 150  # input + output
     assert input_limit.current_value == 100
@@ -375,8 +375,8 @@ async def test_record_usage_model_filter_matching() -> None:
     )
 
     limits = await repo.get_limits_by_key(created.id)
-    global_limit = next(l for l in limits if l.model_filter is None)
-    model_limit = next(l for l in limits if l.model_filter == "gpt-5.1")
+    global_limit = next(lim for lim in limits if lim.model_filter is None)
+    model_limit = next(lim for lim in limits if lim.model_filter == "gpt-5.1")
     assert global_limit.current_value == 150
     assert model_limit.current_value == 150
 
@@ -389,7 +389,7 @@ async def test_record_usage_model_filter_matching() -> None:
     )
 
     limits = await repo.get_limits_by_key(created.id)
-    global_limit = next(l for l in limits if l.model_filter is None)
-    model_limit = next(l for l in limits if l.model_filter == "gpt-5.1")
+    global_limit = next(lim for lim in limits if lim.model_filter is None)
+    model_limit = next(lim for lim in limits if lim.model_filter == "gpt-5.1")
     assert global_limit.current_value == 450  # 150 + 300
     assert model_limit.current_value == 150   # unchanged

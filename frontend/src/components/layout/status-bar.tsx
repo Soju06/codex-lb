@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Activity, ArrowRightLeft } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
@@ -27,7 +28,15 @@ export function StatusBar() {
 
   const lastSyncAt = overview?.lastSyncAt ?? null;
   const lastSync = formatTimeLong(lastSyncAt);
-  const isLive = lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() < 60_000 : false;
+  const [isLive, setIsLive] = useState(false);
+  useEffect(() => {
+    function check() {
+      setIsLive(lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() < 60_000 : false);
+    }
+    check();
+    const id = setInterval(check, 10_000);
+    return () => clearInterval(id);
+  }, [lastSyncAt]);
 
   const routingLabel = settings
     ? getRoutingLabel(settings.stickyThreadsEnabled, settings.preferEarlierResetAccounts)

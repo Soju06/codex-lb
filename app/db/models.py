@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, func, text
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -160,7 +160,7 @@ class ApiKeyLimit(Base):
         SqlEnum(LimitWindow, name="limit_window", validate_strings=True), nullable=False,
     )
     max_value: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    current_value: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    current_value: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     model_filter: Mapped[str | None] = mapped_column(String, nullable=True)
     reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 

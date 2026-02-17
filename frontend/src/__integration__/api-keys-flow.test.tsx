@@ -11,6 +11,11 @@ function getParentRow(cell: HTMLElement): HTMLElement {
   return row;
 }
 
+async function openRowActions(user: ReturnType<typeof userEvent.setup>, row: HTMLElement) {
+  const actionsButton = within(row).getByRole("button", { name: "Actions" });
+  await user.click(actionsButton);
+}
+
 describe("api keys flow integration", () => {
   it("creates, shows plain key dialog, edits, and deletes an api key", async () => {
     const user = userEvent.setup();
@@ -20,7 +25,7 @@ describe("api keys flow integration", () => {
     window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Settings/ })).toBeInTheDocument();
     expect(await screen.findByText("API Keys")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Create key" }));
@@ -39,7 +44,8 @@ describe("api keys flow integration", () => {
 
     const createdRow = getParentRow(await screen.findByText(createdName));
 
-    await user.click(within(createdRow).getByRole("button", { name: "Edit" }));
+    await openRowActions(user, createdRow);
+    await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
     const nameInput = await screen.findByLabelText("Name");
     await user.clear(nameInput);
     await user.type(nameInput, updatedName);
@@ -47,7 +53,8 @@ describe("api keys flow integration", () => {
 
     const updatedRow = getParentRow(await screen.findByText(updatedName));
 
-    await user.click(within(updatedRow).getByRole("button", { name: "Delete" }));
+    await openRowActions(user, updatedRow);
+    await user.click(await screen.findByRole("menuitem", { name: /Delete/ }));
     const confirmTitle = await screen.findByText("Delete API key");
     const confirmDialog = confirmTitle.closest("[role='alertdialog']");
     expect(confirmDialog).not.toBeNull();
@@ -85,7 +92,9 @@ describe("api keys flow integration", () => {
     await user.click(screen.getByRole("button", { name: "Create key" }));
 
     // Basic mode: should show weekly token limit and weekly cost limit inputs
-    expect(screen.getByText("Limits")).toBeInTheDocument();
+    // "Limits" appears both as a column header and inside the LimitRulesEditor
+    const limitsElements = screen.getAllByText("Limits");
+    expect(limitsElements.length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Weekly token limit")).toBeInTheDocument();
     expect(screen.getByText("Weekly cost limit ($)")).toBeInTheDocument();
 
@@ -101,7 +110,8 @@ describe("api keys flow integration", () => {
 
     expect(await screen.findByText("Default key")).toBeInTheDocument();
     const defaultKeyRow = getParentRow(screen.getByText("Default key"));
-    await user.click(within(defaultKeyRow).getByRole("button", { name: "Edit" }));
+    await openRowActions(user, defaultKeyRow);
+    await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
 
     // Edit dialog should show current usage section
     expect(await screen.findByText("Current usage")).toBeInTheDocument();

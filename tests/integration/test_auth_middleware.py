@@ -7,7 +7,7 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -83,7 +83,6 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
             ApiKeyCreateData(
                 name="middleware-key",
                 allowed_models=None,
-                weekly_token_limit=None,
                 expires_at=None,
             )
         )
@@ -111,10 +110,18 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
         row = await repo.get_by_id(created.id)
         assert row is not None
         row.expires_at = None
-        row.weekly_token_limit = 1
-        row.weekly_tokens_used = 1
-        row.weekly_reset_at = utcnow() + timedelta(days=1)
         await session.commit()
+        await repo.replace_limits(created.id, [
+            ApiKeyLimit(
+                api_key_id=created.id,
+                limit_type=LimitType.TOTAL_TOKENS,
+                limit_window=LimitWindow.WEEKLY,
+                max_value=1,
+                current_value=1,
+                model_filter=None,
+                reset_at=utcnow() + timedelta(days=1),
+            ),
+        ])
 
     over_limit = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
     assert over_limit.status_code == 429

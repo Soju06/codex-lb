@@ -45,6 +45,12 @@ async def _sqlite_drop_email_unique(session: AsyncSession) -> None:
         ),
     )
 
+    # Some older SQLite schemas may enforce RESTRICT/NO ACTION on these FKs.
+    # Clear children after backup so dropping/replacing accounts is always allowed.
+    await session.execute(text("DELETE FROM usage_history"))
+    await session.execute(text("DELETE FROM request_logs"))
+    await session.execute(text("DELETE FROM sticky_sessions"))
+
     await session.execute(
         text(
             """

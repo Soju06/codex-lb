@@ -32,6 +32,32 @@ services:
           path: ./Dockerfile
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile_inline: |
+        FROM oven/bun:1.3.7-alpine
+        WORKDIR /app
+        COPY package.json bun.lock ./
+        RUN bun install --frozen-lockfile
+        COPY . .
+        CMD ["bun", "run", "dev", "--host", "0.0.0.0"]
+    ports:
+      - "5173:5173"
+    environment:
+      API_PROXY_TARGET: http://server:2455
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend
+          target: /app
+          ignore:
+            - node_modules/
+        - action: rebuild
+          path: ./frontend/package.json
+        - action: rebuild
+          path: ./frontend/bun.lock
+
 volumes:
   codex-lb-data:
     name: codex-lb-data

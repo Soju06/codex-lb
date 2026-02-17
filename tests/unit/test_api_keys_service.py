@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.core.utils.time import utcnow
-from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
+from app.db.models import ApiKey, ApiKeyLimit, LimitType
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyInvalidError,
@@ -297,9 +297,7 @@ async def test_validate_key_multi_limit_all_must_pass() -> None:
 async def test_regenerate_key_rotates_hash_and_prefix() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
-    created = await service.create_key(
-        ApiKeyCreateData(name="regen-key", allowed_models=None, expires_at=None)
-    )
+    created = await service.create_key(ApiKeyCreateData(name="regen-key", allowed_models=None, expires_at=None))
 
     row_before = await repo.get_by_id(created.id)
     assert row_before is not None
@@ -361,7 +359,9 @@ async def test_record_usage_model_filter_matching() -> None:
             expires_at=None,
             limits=[
                 LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000),
-                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=500_000, model_filter="gpt-5.1"),
+                LimitRuleInput(
+                    limit_type="total_tokens", limit_window="weekly", max_value=500_000, model_filter="gpt-5.1"
+                ),
             ],
         )
     )
@@ -392,4 +392,4 @@ async def test_record_usage_model_filter_matching() -> None:
     global_limit = next(lim for lim in limits if lim.model_filter is None)
     model_limit = next(lim for lim in limits if lim.model_filter == "gpt-5.1")
     assert global_limit.current_value == 450  # 150 + 300
-    assert model_limit.current_value == 150   # unchanged
+    assert model_limit.current_value == 150  # unchanged

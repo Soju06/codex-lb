@@ -30,6 +30,8 @@ class DashboardRepository:
         return await self._logs_repo.list_since(since)
 
     async def aggregate_logs_by_bucket(
-        self, since: datetime, bucket_seconds: int = 21600,
+        self,
+        since: datetime,
+        bucket_seconds: int = 21600,
     ) -> list[BucketModelAggregate]:
         return await self._logs_repo.aggregate_by_bucket(since, bucket_seconds)

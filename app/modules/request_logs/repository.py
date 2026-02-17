@@ -22,14 +22,14 @@ class RequestLogsRepository:
         return list(result.scalars().all())
 
     async def aggregate_by_bucket(
-        self, since: datetime, bucket_seconds: int = 21600,
+        self,
+        since: datetime,
+        bucket_seconds: int = 21600,
     ) -> list[BucketModelAggregate]:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
-            bucket_expr = (
-                func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
-            )
+            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
         else:
             # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
             epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
@@ -41,9 +41,7 @@ class RequestLogsRepository:
                 bucket_col,
                 RequestLog.model,
                 func.count().label("request_count"),
-                func.sum(
-                    cast(RequestLog.status != literal_column("'success'"), Integer)
-                ).label("error_count"),
+                func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)).label("error_count"),
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
                 func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),

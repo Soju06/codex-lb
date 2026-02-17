@@ -111,17 +111,20 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
         assert row is not None
         row.expires_at = None
         await session.commit()
-        await repo.replace_limits(created.id, [
-            ApiKeyLimit(
-                api_key_id=created.id,
-                limit_type=LimitType.TOTAL_TOKENS,
-                limit_window=LimitWindow.WEEKLY,
-                max_value=1,
-                current_value=1,
-                model_filter=None,
-                reset_at=utcnow() + timedelta(days=1),
-            ),
-        ])
+        await repo.replace_limits(
+            created.id,
+            [
+                ApiKeyLimit(
+                    api_key_id=created.id,
+                    limit_type=LimitType.TOTAL_TOKENS,
+                    limit_window=LimitWindow.WEEKLY,
+                    max_value=1,
+                    current_value=1,
+                    model_filter=None,
+                    reset_at=utcnow() + timedelta(days=1),
+                ),
+            ],
+        )
 
     over_limit = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
     assert over_limit.status_code == 429

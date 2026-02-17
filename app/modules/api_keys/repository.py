@@ -77,19 +77,13 @@ class ApiKeysRepository:
         return True
 
     async def update_last_used(self, key_id: str) -> None:
-        await self._session.execute(
-            update(ApiKey)
-            .where(ApiKey.id == key_id)
-            .values(last_used_at=utcnow())
-        )
+        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
         await self._session.commit()
 
     # ── Limit operations ──
 
     async def get_limits_by_key(self, key_id: str) -> list[ApiKeyLimit]:
-        result = await self._session.execute(
-            select(ApiKeyLimit).where(ApiKeyLimit.api_key_id == key_id)
-        )
+        result = await self._session.execute(select(ApiKeyLimit).where(ApiKeyLimit.api_key_id == key_id))
         return list(result.scalars().all())
 
     async def replace_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]:
@@ -126,9 +120,7 @@ class ApiKeysRepository:
                     .where(ApiKeyLimit.id == limit.id)
                     .values(current_value=ApiKeyLimit.current_value + increment)
                 )
-        await self._session.execute(
-            update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow())
-        )
+        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
         await self._session.commit()
 
     async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool:

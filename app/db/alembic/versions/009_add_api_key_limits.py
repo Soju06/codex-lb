@@ -7,8 +7,6 @@ Create Date: 2026-02-14
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
@@ -58,7 +56,10 @@ def upgrade() -> None:
             sa.Column("reset_at", sa.DateTime(), nullable=False),
         )
         op.create_index(
-            "idx_api_key_limits_key_id", "api_key_limits", ["api_key_id"], unique=False,
+            "idx_api_key_limits_key_id",
+            "api_key_limits",
+            ["api_key_id"],
+            unique=False,
         )
 
     # Migrate existing weekly_token_limit data to api_key_limits rows

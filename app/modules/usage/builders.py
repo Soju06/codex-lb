@@ -34,7 +34,6 @@ from app.modules.usage.schemas import (
     UsageWindowResponse,
 )
 
-
 _BUCKET_COUNT = 28
 _BUCKET_SECONDS = 21600  # 6 hours
 
@@ -45,7 +44,9 @@ def build_trends_from_buckets(
     bucket_seconds: int = _BUCKET_SECONDS,
     bucket_count: int = _BUCKET_COUNT,
 ) -> tuple[MetricsTrends, UsageMetricsSummary, UsageCostSummary]:
-    since_epoch = int(since.replace(tzinfo=timezone.utc).timestamp()) if since.tzinfo is None else int(since.timestamp())
+    since_epoch = (
+        int(since.replace(tzinfo=timezone.utc).timestamp()) if since.tzinfo is None else int(since.timestamp())
+    )
     # Align slots so the last slot contains "now" (since + window).
     # Use floor to snap since to a bucket boundary, then shift by 1
     # so that recent data falls within the slot range.

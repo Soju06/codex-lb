@@ -3,7 +3,20 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, func, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -129,7 +142,10 @@ class ApiKey(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     limits: Mapped[list["ApiKeyLimit"]] = relationship(
-        "ApiKeyLimit", back_populates="api_key", cascade="all, delete-orphan", lazy="selectin",
+        "ApiKeyLimit",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
 
@@ -151,13 +167,17 @@ class ApiKeyLimit(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     api_key_id: Mapped[str] = mapped_column(
-        String, ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False,
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        nullable=False,
     )
     limit_type: Mapped[LimitType] = mapped_column(
-        SqlEnum(LimitType, name="limit_type", validate_strings=True), nullable=False,
+        SqlEnum(LimitType, name="limit_type", validate_strings=True),
+        nullable=False,
     )
     limit_window: Mapped[LimitWindow] = mapped_column(
-        SqlEnum(LimitWindow, name="limit_window", validate_strings=True), nullable=False,
+        SqlEnum(LimitWindow, name="limit_window", validate_strings=True),
+        nullable=False,
     )
     max_value: Mapped[int] = mapped_column(BigInteger, nullable=False)
     current_value: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)

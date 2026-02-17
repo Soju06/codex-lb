@@ -81,10 +81,22 @@ class TestBuildTrendsFromBuckets:
 
     def test_metrics_totals_are_correct(self):
         rows = [
-            _make_row(slot_index=0, request_count=10, error_count=2,
-                      input_tokens=1000, output_tokens=500, cached_input_tokens=100),
-            _make_row(slot_index=5, request_count=20, error_count=3,
-                      input_tokens=2000, output_tokens=1000, cached_input_tokens=200),
+            _make_row(
+                slot_index=0,
+                request_count=10,
+                error_count=2,
+                input_tokens=1000,
+                output_tokens=500,
+                cached_input_tokens=100,
+            ),
+            _make_row(
+                slot_index=5,
+                request_count=20,
+                error_count=3,
+                input_tokens=2000,
+                output_tokens=1000,
+                cached_input_tokens=200,
+            ),
         ]
         _, metrics, _ = build_trends_from_buckets(rows, SINCE)
 

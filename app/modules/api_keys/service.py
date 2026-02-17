@@ -258,7 +258,10 @@ class ApiKeysService:
         cached_input_tokens: int = 0,
     ) -> None:
         cost_microdollars = _calculate_cost_microdollars(
-            model, input_tokens, output_tokens, cached_input_tokens,
+            model,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
         )
         await self._repository.increment_limit_usage(
             key_id,

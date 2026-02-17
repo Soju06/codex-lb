@@ -10,7 +10,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
-from app.db.models import ApiKeyLimit, RequestLog
+from app.db.models import RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 

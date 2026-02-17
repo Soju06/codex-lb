@@ -76,3 +76,15 @@ def _reset_model_registry():
     registry._snapshot = None
     yield
     registry._snapshot = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_codex_version_cache():
+    from app.core.clients.codex_version import get_codex_version_cache
+
+    cache = get_codex_version_cache()
+    cache._cached_version = None
+    cache._cached_at = 0.0
+    yield
+    cache._cached_version = None
+    cache._cached_at = 0.0

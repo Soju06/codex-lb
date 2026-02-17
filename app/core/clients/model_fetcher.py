@@ -5,6 +5,7 @@ from typing import Any
 
 import aiohttp
 
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
@@ -65,7 +66,7 @@ async def fetch_models_for_plan(
 ) -> list[UpstreamModel]:
     settings = get_settings()
     upstream_base = settings.upstream_base_url.rstrip("/")
-    client_version = settings.model_registry_client_version
+    client_version = await get_codex_version_cache().get_version()
     url = f"{upstream_base}/codex/models?client_version={client_version}"
 
     headers: dict[str, str] = {

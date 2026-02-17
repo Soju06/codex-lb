@@ -19,10 +19,7 @@ __pycache__/
 # Build artifacts
 build/
 dist/
-app/static/assets/
-app/static/vite.svg
-app/static/index.html
-app/static/components
+app/static/
 
 # Node
 node_modules/

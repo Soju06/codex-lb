@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, func
 from sqlalchemy import Enum as SqlEnum
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -123,17 +123,54 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
-    weekly_token_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    weekly_tokens_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    weekly_reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    limits: Mapped[list["ApiKeyLimit"]] = relationship(
+        "ApiKeyLimit", back_populates="api_key", cascade="all, delete-orphan", lazy="selectin",
+    )
+
+
+class LimitType(str, Enum):
+    TOTAL_TOKENS = "total_tokens"
+    INPUT_TOKENS = "input_tokens"
+    OUTPUT_TOKENS = "output_tokens"
+    COST_USD = "cost_usd"
+
+
+class LimitWindow(str, Enum):
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+class ApiKeyLimit(Base):
+    __tablename__ = "api_key_limits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_id: Mapped[str] = mapped_column(
+        String, ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False,
+    )
+    limit_type: Mapped[LimitType] = mapped_column(
+        SqlEnum(LimitType, name="limit_type", validate_strings=True), nullable=False,
+    )
+    limit_window: Mapped[LimitWindow] = mapped_column(
+        SqlEnum(LimitWindow, name="limit_window", validate_strings=True), nullable=False,
+    )
+    max_value: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    current_value: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    model_filter: Mapped[str | None] = mapped_column(String, nullable=True)
+    reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="limits")
+
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
+Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)

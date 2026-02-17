@@ -11,6 +11,7 @@ from app.core.errors import dashboard_error, openai_error
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.repository import ApiKeysRepository as _ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyRateLimitExceededError, ApiKeysService
 from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
 
@@ -138,7 +139,7 @@ async def _validate_proxy_api_key(request: Request) -> JSONResponse | None:
         try:
             api_key = await service.validate_key(token)
         except ApiKeyRateLimitExceededError as exc:
-            message = f"API key weekly token limit exceeded. Usage resets at {exc.weekly_reset_at.isoformat()}Z."
+            message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
             return JSONResponse(
                 status_code=429,
                 content=openai_error("rate_limit_exceeded", message, error_type="rate_limit_error"),

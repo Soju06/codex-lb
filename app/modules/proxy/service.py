@@ -148,13 +148,23 @@ class ProxyService:
         output_tokens = usage.output_tokens if usage else None
         if input_tokens is None or output_tokens is None:
             return
+        cached_input_tokens = 0
+        if usage and usage.input_tokens_details:
+            cached_input_tokens = usage.input_tokens_details.cached_tokens or 0
+        model = getattr(response, "model", None) or ""
 
         with anyio.CancelScope(shield=True):
             try:
                 async with self._repo_factory() as repos:
-                    await repos.api_keys.increment_weekly_usage(
+                    from app.modules.api_keys.service import ApiKeysService
+
+                    api_keys_service = ApiKeysService(repos.api_keys)
+                    await api_keys_service.record_usage(
                         api_key.id,
-                        input_tokens + output_tokens,
+                        model=model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_input_tokens=cached_input_tokens,
                     )
             except Exception:
                 logger.warning(
@@ -467,9 +477,15 @@ class ProxyService:
                             error_message=error_message,
                         )
                         if api_key is not None and input_tokens is not None and output_tokens is not None:
-                            await repos.api_keys.increment_weekly_usage(
+                            from app.modules.api_keys.service import ApiKeysService
+
+                            api_keys_service = ApiKeysService(repos.api_keys)
+                            await api_keys_service.record_usage(
                                 api_key.id,
-                                input_tokens + output_tokens,
+                                model=model,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                cached_input_tokens=cached_input_tokens or 0,
                             )
                 except Exception:
                     logger.warning(

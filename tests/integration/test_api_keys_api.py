@@ -10,7 +10,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
-from app.db.models import RequestLog
+from app.db.models import ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 
@@ -84,13 +84,20 @@ async def test_api_keys_crud_and_regenerate(async_client):
         json={
             "name": "dev-key",
             "allowedModels": [],
-            "weeklyTokenLimit": 1000,
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
+            ],
         },
     )
     assert create.status_code == 200
     payload = create.json()
     assert payload["name"] == "dev-key"
     assert payload["key"].startswith("sk-clb-")
+    assert len(payload["limits"]) == 1
+    assert payload["limits"][0]["limitType"] == "total_tokens"
+    assert payload["limits"][0]["maxValue"] == 1000
+    # Backward compat: legacy fields derived from limits
+    assert payload["weeklyTokenLimit"] == 1000
     key_id = payload["id"]
     first_key = payload["key"]
 
@@ -100,6 +107,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert len(rows) == 1
     assert rows[0]["id"] == key_id
     assert "key" not in rows[0]
+    assert len(rows[0]["limits"]) == 1
 
     updated = await async_client.patch(
         f"/api/api-keys/{key_id}",
@@ -126,6 +134,59 @@ async def test_api_keys_crud_and_regenerate(async_client):
     listed_after_delete = await async_client.get("/api/api-keys/")
     assert listed_after_delete.status_code == 200
     assert listed_after_delete.json() == []
+
+
+@pytest.mark.asyncio
+async def test_api_keys_crud_with_legacy_weekly_limit(async_client):
+    """Legacy weeklyTokenLimit field is auto-converted to a limit rule."""
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "legacy-key",
+            "weeklyTokenLimit": 500,
+        },
+    )
+    assert create.status_code == 200
+    payload = create.json()
+    assert len(payload["limits"]) == 1
+    assert payload["limits"][0]["limitType"] == "total_tokens"
+    assert payload["limits"][0]["limitWindow"] == "weekly"
+    assert payload["limits"][0]["maxValue"] == 500
+    assert payload["weeklyTokenLimit"] == 500
+
+    await async_client.delete(f"/api/api-keys/{payload['id']}")
+
+
+@pytest.mark.asyncio
+async def test_api_keys_update_limits(async_client):
+    """Updating limits replaces the entire set."""
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "update-limits-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 500},
+                {"limitType": "cost_usd", "limitWindow": "monthly", "maxValue": 10_000_000},
+            ],
+        },
+    )
+    assert updated.status_code == 200
+    assert len(updated.json()["limits"]) == 2
+    types = {li["limitType"] for li in updated.json()["limits"]}
+    assert types == {"total_tokens", "cost_usd"}
+
+    await async_client.delete(f"/api/api-keys/{key_id}")
 
 
 @pytest.mark.asyncio
@@ -184,7 +245,15 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
     )
     assert enable.status_code == 200
 
-    created = await async_client.post("/api/api-keys/", json={"name": "usage-key"})
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "usage-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000},
+            ],
+        },
+    )
     assert created.status_code == 200
     payload = created.json()
     key = payload["key"]
@@ -217,8 +286,12 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
         repo = ApiKeysRepository(session)
         row = await repo.get_by_id(key_id)
         assert row is not None
-        assert row.weekly_tokens_used == 15
         assert row.last_used_at is not None
+
+        # Verify usage tracked in limits table
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 15  # 10 input + 5 output
 
         result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
         latest_log = result.scalars().first()
@@ -228,7 +301,7 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
-async def test_api_key_weekly_limit_applies_to_compact_responses(async_client, monkeypatch, endpoint):
+async def test_api_key_limit_applies_to_compact_responses(async_client, monkeypatch, endpoint):
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -244,7 +317,9 @@ async def test_api_key_weekly_limit_applies_to_compact_responses(async_client, m
         "/api/api-keys/",
         json={
             "name": "compact-usage-limit",
-            "weeklyTokenLimit": 10,
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 10},
+            ],
         },
     )
     assert created.status_code == 200
@@ -261,6 +336,7 @@ async def test_api_key_weekly_limit_applies_to_compact_responses(async_client, m
         return OpenAIResponsePayload.model_validate(
             {
                 "id": "resp_compact_1",
+                "model": _TEST_MODELS[0],
                 "status": "completed",
                 "usage": {
                     "input_tokens": 7,
@@ -297,6 +373,6 @@ async def test_api_key_weekly_limit_applies_to_compact_responses(async_client, m
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
-        row = await repo.get_by_id(key_id)
-        assert row is not None
-        assert row.weekly_tokens_used == 12
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 12  # 7 input + 5 output

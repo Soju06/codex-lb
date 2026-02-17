@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Protocol
-from uuid import uuid4
 
+from app.core.usage.pricing import (
+    UsageTokens,
+    calculate_cost_from_usage,
+    get_pricing_for_model,
+)
 from app.core.utils.time import utcnow
-from app.db.models import ApiKey
+from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -27,7 +31,6 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         name: str | object = ...,
         allowed_models: str | None | object = ...,
-        weekly_token_limit: int | None | object = ...,
         expires_at: datetime | None | object = ...,
         is_active: bool | object = ...,
         key_hash: str | object = ...,
@@ -36,9 +39,23 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def delete(self, key_id: str) -> bool: ...
 
-    async def increment_weekly_usage(self, key_id: str, token_count: int) -> None: ...
+    async def update_last_used(self, key_id: str) -> None: ...
 
-    async def reset_weekly_usage(self, key_id: str, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool: ...
+    async def get_limits_by_key(self, key_id: str) -> list[ApiKeyLimit]: ...
+
+    async def replace_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]: ...
+
+    async def increment_limit_usage(
+        self,
+        key_id: str,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_microdollars: int,
+    ) -> None: ...
+
+    async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool: ...
 
 
 class ApiKeyNotFoundError(ValueError):
@@ -50,17 +67,36 @@ class ApiKeyInvalidError(ValueError):
 
 
 class ApiKeyRateLimitExceededError(ValueError):
-    def __init__(self, *, weekly_reset_at: datetime) -> None:
-        super().__init__("API key weekly token limit exceeded")
-        self.weekly_reset_at = weekly_reset_at
+    def __init__(self, *, message: str, reset_at: datetime) -> None:
+        super().__init__(message)
+        self.reset_at = reset_at
+
+
+@dataclass(frozen=True, slots=True)
+class LimitRuleData:
+    id: int
+    limit_type: str
+    limit_window: str
+    max_value: int
+    current_value: int
+    model_filter: str | None
+    reset_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class LimitRuleInput:
+    limit_type: str
+    limit_window: str
+    max_value: int
+    model_filter: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
-    weekly_token_limit: int | None
     expires_at: datetime | None
+    limits: list[LimitRuleInput] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,12 +105,12 @@ class ApiKeyUpdateData:
     name_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
-    weekly_token_limit: int | None = None
-    weekly_token_limit_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
     is_active_set: bool = False
+    limits: list[LimitRuleInput] | None = None
+    limits_set: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,18 +119,16 @@ class ApiKeyData:
     name: str
     key_prefix: str
     allowed_models: list[str] | None
-    weekly_token_limit: int | None
-    weekly_tokens_used: int
-    weekly_reset_at: datetime
     expires_at: datetime | None
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    limits: list[LimitRuleData] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreatedData(ApiKeyData):
-    key: str
+    key: str = ""
 
 
 class ApiKeysService:
@@ -105,24 +139,27 @@ class ApiKeysService:
         now = utcnow()
         plain_key = _generate_plain_key()
         row = ApiKey(
-            id=str(uuid4()),
+            id=str(__import__("uuid").uuid4()),
             name=_normalize_name(payload.name),
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(payload.allowed_models),
-            weekly_token_limit=payload.weekly_token_limit,
-            weekly_tokens_used=0,
-            weekly_reset_at=now + timedelta(days=7),
             expires_at=payload.expires_at,
             is_active=True,
             created_at=now,
             last_used_at=None,
         )
         created = await self._repository.create(row)
-        return ApiKeyCreatedData(
-            **asdict(_to_api_key_data(created)),
-            key=plain_key,
-        )
+
+        if payload.limits:
+            limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
+            await self._repository.replace_limits(created.id, limit_rows)
+            # Refresh to get updated limits
+            created = await self._repository.get_by_id(created.id)
+            if created is None:
+                raise ValueError("Failed to create API key")
+
+        return _to_created_data(_to_api_key_data(created), plain_key)
 
     async def list_keys(self) -> list[ApiKeyData]:
         rows = await self._repository.list_all()
@@ -134,8 +171,6 @@ class ApiKeysService:
             updates["name"] = _normalize_name(payload.name or "")
         if payload.allowed_models_set:
             updates["allowed_models"] = _serialize_allowed_models(payload.allowed_models)
-        if payload.weekly_token_limit_set:
-            updates["weekly_token_limit"] = payload.weekly_token_limit
         if payload.expires_at_set:
             updates["expires_at"] = payload.expires_at
         if payload.is_active_set and payload.is_active is not None:
@@ -143,6 +178,16 @@ class ApiKeysService:
         row = await self._repository.update(key_id, **updates)
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+
+        if payload.limits_set and payload.limits is not None:
+            now = utcnow()
+            limit_rows = [_limit_input_to_row(li, key_id, now) for li in payload.limits]
+            await self._repository.replace_limits(key_id, limit_rows)
+            # Refresh to get updated limits
+            row = await self._repository.get_by_id(key_id)
+            if row is None:
+                raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+
         return _to_api_key_data(row)
 
     async def delete_key(self, key_id: str) -> None:
@@ -162,10 +207,7 @@ class ApiKeysService:
         )
         if updated is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
-        return ApiKeyCreatedData(
-            **asdict(_to_api_key_data(updated)),
-            key=plain_key,
-        )
+        return _to_created_data(_to_api_key_data(updated), plain_key)
 
     async def validate_key(self, plain_key: str) -> ApiKeyData:
         if not plain_key:
@@ -179,26 +221,52 @@ class ApiKeysService:
         if row.expires_at is not None and row.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
 
-        if row.weekly_reset_at < now:
-            new_reset_at = _advance_weekly_reset(row.weekly_reset_at, now)
-            reset_ok = await self._repository.reset_weekly_usage(
-                row.id,
-                expected_reset_at=row.weekly_reset_at,
-                new_reset_at=new_reset_at,
-            )
-            if reset_ok:
-                row.weekly_tokens_used = 0
-                row.weekly_reset_at = new_reset_at
-            else:
-                refreshed = await self._repository.get_by_id(row.id)
-                if refreshed is None:
-                    raise ApiKeyInvalidError("Invalid API key")
-                row = refreshed
+        # Lazy reset expired limits
+        limits = row.limits
+        for limit in limits:
+            if limit.reset_at < now:
+                new_reset_at = _advance_reset(limit.reset_at, now, limit.limit_window)
+                await self._repository.reset_limit(
+                    limit.id,
+                    expected_reset_at=limit.reset_at,
+                    new_reset_at=new_reset_at,
+                )
 
-        if row.weekly_token_limit is not None and row.weekly_tokens_used >= row.weekly_token_limit:
-            raise ApiKeyRateLimitExceededError(weekly_reset_at=row.weekly_reset_at)
+        # Re-fetch to get updated limit values after resets
+        row = await self._repository.get_by_hash(_hash_key(plain_key))
+        if row is None:
+            raise ApiKeyInvalidError("Invalid API key")
+
+        # Check all limits
+        for limit in row.limits:
+            if limit.current_value >= limit.max_value:
+                raise ApiKeyRateLimitExceededError(
+                    message=f"API key {limit.limit_type.value} {limit.limit_window.value} limit exceeded"
+                    + (f" for model {limit.model_filter}" if limit.model_filter else ""),
+                    reset_at=limit.reset_at,
+                )
 
         return _to_api_key_data(row)
+
+    async def record_usage(
+        self,
+        key_id: str,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int = 0,
+    ) -> None:
+        cost_microdollars = _calculate_cost_microdollars(
+            model, input_tokens, output_tokens, cached_input_tokens,
+        )
+        await self._repository.increment_limit_usage(
+            key_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_microdollars=cost_microdollars,
+        )
 
 
 def _normalize_name(name: str) -> str:
@@ -209,7 +277,7 @@ def _normalize_name(name: str) -> str:
 
 
 def _generate_plain_key() -> str:
-    return f"sk-clb-{secrets.token_hex(24)}"
+    return f"sk-clb-{secrets.token_urlsafe(32)}"
 
 
 def _hash_key(plain_key: str) -> str:
@@ -233,24 +301,105 @@ def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
     return models
 
 
+def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
+    return LimitRuleData(
+        id=limit.id,
+        limit_type=limit.limit_type.value,
+        limit_window=limit.limit_window.value,
+        max_value=limit.max_value,
+        current_value=limit.current_value,
+        model_filter=limit.model_filter,
+        reset_at=limit.reset_at,
+    )
+
+
+def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
+    return ApiKeyCreatedData(
+        id=data.id,
+        name=data.name,
+        key_prefix=data.key_prefix,
+        allowed_models=data.allowed_models,
+        expires_at=data.expires_at,
+        is_active=data.is_active,
+        created_at=data.created_at,
+        last_used_at=data.last_used_at,
+        limits=data.limits,
+        key=key,
+    )
+
+
 def _to_api_key_data(row: ApiKey) -> ApiKeyData:
+    limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     return ApiKeyData(
         id=row.id,
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
-        weekly_token_limit=row.weekly_token_limit,
-        weekly_tokens_used=row.weekly_tokens_used,
-        weekly_reset_at=row.weekly_reset_at,
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
         last_used_at=row.last_used_at,
+        limits=limits,
     )
 
 
-def _advance_weekly_reset(weekly_reset_at: datetime, now: datetime) -> datetime:
-    next_reset = weekly_reset_at
+def _limit_input_to_row(li: LimitRuleInput, key_id: str, now: datetime) -> ApiKeyLimit:
+    window = LimitWindow(li.limit_window)
+    return ApiKeyLimit(
+        api_key_id=key_id,
+        limit_type=LimitType(li.limit_type),
+        limit_window=window,
+        max_value=li.max_value,
+        current_value=0,
+        model_filter=li.model_filter,
+        reset_at=_next_reset(now, window),
+    )
+
+
+def _next_reset(now: datetime, window: LimitWindow) -> datetime:
+    if window == LimitWindow.DAILY:
+        return now + timedelta(days=1)
+    if window == LimitWindow.WEEKLY:
+        return now + timedelta(days=7)
+    if window == LimitWindow.MONTHLY:
+        return now + timedelta(days=30)
+    return now + timedelta(days=7)
+
+
+def _advance_reset(reset_at: datetime, now: datetime, window: LimitWindow) -> datetime:
+    delta = _window_delta(window)
+    next_reset = reset_at
     while next_reset <= now:
-        next_reset += timedelta(days=7)
+        next_reset += delta
     return next_reset
+
+
+def _window_delta(window: LimitWindow) -> timedelta:
+    if window == LimitWindow.DAILY:
+        return timedelta(days=1)
+    if window == LimitWindow.WEEKLY:
+        return timedelta(days=7)
+    if window == LimitWindow.MONTHLY:
+        return timedelta(days=30)
+    return timedelta(days=7)
+
+
+def _calculate_cost_microdollars(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int,
+) -> int:
+    resolved = get_pricing_for_model(model)
+    if resolved is None:
+        return 0
+    _, price = resolved
+    usage = UsageTokens(
+        input_tokens=float(input_tokens),
+        output_tokens=float(output_tokens),
+        cached_input_tokens=float(cached_input_tokens),
+    )
+    cost_usd = calculate_cost_from_usage(usage, price)
+    if cost_usd is None:
+        return 0
+    return int(cost_usd * 1_000_000)

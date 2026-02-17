@@ -10,10 +10,86 @@ from app.modules.api_keys.schemas import (
     ApiKeyCreateResponse,
     ApiKeyResponse,
     ApiKeyUpdateRequest,
+    LimitRuleResponse,
 )
-from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyNotFoundError, ApiKeyUpdateData
+from app.modules.api_keys.service import (
+    ApiKeyCreateData,
+    ApiKeyData,
+    ApiKeyNotFoundError,
+    ApiKeyUpdateData,
+    LimitRuleInput,
+)
 
 router = APIRouter(prefix="/api/api-keys", tags=["dashboard"])
+
+
+def _to_response(row: ApiKeyData) -> ApiKeyResponse:
+    # Backward compatibility: derive legacy weekly fields from limits
+    weekly_token_limit = None
+    weekly_tokens_used = 0
+    weekly_reset_at = None
+    for limit in row.limits:
+        if limit.limit_type == "total_tokens" and limit.limit_window == "weekly" and limit.model_filter is None:
+            weekly_token_limit = limit.max_value
+            weekly_tokens_used = limit.current_value
+            weekly_reset_at = limit.reset_at
+            break
+
+    return ApiKeyResponse(
+        id=row.id,
+        name=row.name,
+        key_prefix=row.key_prefix,
+        allowed_models=row.allowed_models,
+        weekly_token_limit=weekly_token_limit,
+        weekly_tokens_used=weekly_tokens_used,
+        weekly_reset_at=weekly_reset_at,
+        expires_at=row.expires_at,
+        is_active=row.is_active,
+        created_at=row.created_at,
+        last_used_at=row.last_used_at,
+        limits=[
+            LimitRuleResponse(
+                id=li.id,
+                limit_type=li.limit_type,
+                limit_window=li.limit_window,
+                max_value=li.max_value,
+                current_value=li.current_value,
+                model_filter=li.model_filter,
+                reset_at=li.reset_at,
+            )
+            for li in row.limits
+        ],
+    )
+
+
+def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> list[LimitRuleInput]:
+    limit_inputs: list[LimitRuleInput] = []
+
+    if hasattr(payload, "limits") and payload.limits is not None:
+        for lr in payload.limits:
+            limit_inputs.append(
+                LimitRuleInput(
+                    limit_type=lr.limit_type,
+                    limit_window=lr.limit_window,
+                    max_value=lr.max_value,
+                    model_filter=lr.model_filter,
+                )
+            )
+    elif (
+        hasattr(payload, "weekly_token_limit")
+        and "weekly_token_limit" in payload.model_fields_set
+        and payload.weekly_token_limit is not None
+    ):
+        # Legacy: convert weeklyTokenLimit to a limit rule
+        limit_inputs.append(
+            LimitRuleInput(
+                limit_type="total_tokens",
+                limit_window="weekly",
+                max_value=payload.weekly_token_limit,
+            )
+        )
+
+    return limit_inputs
 
 
 @router.post("/", response_model=ApiKeyCreateResponse)
@@ -21,13 +97,15 @@ async def create_api_key(
     payload: ApiKeyCreateRequest = Body(...),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse | JSONResponse:
+    limit_inputs = _build_limit_inputs(payload)
+
     try:
         created = await context.service.create_key(
             ApiKeyCreateData(
                 name=payload.name,
                 allowed_models=payload.allowed_models,
-                weekly_token_limit=payload.weekly_token_limit,
                 expires_at=payload.expires_at,
+                limits=limit_inputs,
             )
         )
     except ValueError as exc:
@@ -35,18 +113,9 @@ async def create_api_key(
             status_code=400,
             content=dashboard_error("invalid_api_key_payload", str(exc)),
         )
+    resp = _to_response(created)
     return ApiKeyCreateResponse(
-        id=created.id,
-        name=created.name,
-        key_prefix=created.key_prefix,
-        allowed_models=created.allowed_models,
-        weekly_token_limit=created.weekly_token_limit,
-        weekly_tokens_used=created.weekly_tokens_used,
-        weekly_reset_at=created.weekly_reset_at,
-        expires_at=created.expires_at,
-        is_active=created.is_active,
-        created_at=created.created_at,
-        last_used_at=created.last_used_at,
+        **resp.model_dump(),
         key=created.key,
     )
 
@@ -56,22 +125,7 @@ async def list_api_keys(
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> list[ApiKeyResponse]:
     rows = await context.service.list_keys()
-    return [
-        ApiKeyResponse(
-            id=row.id,
-            name=row.name,
-            key_prefix=row.key_prefix,
-            allowed_models=row.allowed_models,
-            weekly_token_limit=row.weekly_token_limit,
-            weekly_tokens_used=row.weekly_tokens_used,
-            weekly_reset_at=row.weekly_reset_at,
-            expires_at=row.expires_at,
-            is_active=row.is_active,
-            created_at=row.created_at,
-            last_used_at=row.last_used_at,
-        )
-        for row in rows
-    ]
+    return [_to_response(row) for row in rows]
 
 
 @router.patch("/{key_id}", response_model=ApiKeyResponse)
@@ -81,17 +135,21 @@ async def update_api_key(
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyResponse | JSONResponse:
     fields = payload.model_fields_set
+
+    limits_set = "limits" in fields or "weekly_token_limit" in fields
+    limit_inputs = _build_limit_inputs(payload) if limits_set else None
+
     update = ApiKeyUpdateData(
         name=payload.name,
         name_set="name" in fields,
         allowed_models=payload.allowed_models,
         allowed_models_set="allowed_models" in fields,
-        weekly_token_limit=payload.weekly_token_limit,
-        weekly_token_limit_set="weekly_token_limit" in fields,
         expires_at=payload.expires_at,
         expires_at_set="expires_at" in fields,
         is_active=payload.is_active,
         is_active_set="is_active" in fields,
+        limits=limit_inputs,
+        limits_set=limits_set,
     )
     try:
         row = await context.service.update_key(key_id, update)
@@ -99,19 +157,7 @@ async def update_api_key(
         return JSONResponse(status_code=404, content=dashboard_error("not_found", str(exc)))
     except ValueError as exc:
         return JSONResponse(status_code=400, content=dashboard_error("invalid_api_key_payload", str(exc)))
-    return ApiKeyResponse(
-        id=row.id,
-        name=row.name,
-        key_prefix=row.key_prefix,
-        allowed_models=row.allowed_models,
-        weekly_token_limit=row.weekly_token_limit,
-        weekly_tokens_used=row.weekly_tokens_used,
-        weekly_reset_at=row.weekly_reset_at,
-        expires_at=row.expires_at,
-        is_active=row.is_active,
-        created_at=row.created_at,
-        last_used_at=row.last_used_at,
-    )
+    return _to_response(row)
 
 
 @router.delete("/{key_id}")
@@ -135,17 +181,8 @@ async def regenerate_api_key(
         row = await context.service.regenerate_key(key_id)
     except ApiKeyNotFoundError as exc:
         return JSONResponse(status_code=404, content=dashboard_error("not_found", str(exc)))
+    resp = _to_response(row)
     return ApiKeyCreateResponse(
-        id=row.id,
-        name=row.name,
-        key_prefix=row.key_prefix,
-        allowed_models=row.allowed_models,
-        weekly_token_limit=row.weekly_token_limit,
-        weekly_tokens_used=row.weekly_tokens_used,
-        weekly_reset_at=row.weekly_reset_at,
-        expires_at=row.expires_at,
-        is_active=row.is_active,
-        created_at=row.created_at,
-        last_used_at=row.last_used_at,
+        **resp.model_dump(),
         key=row.key,
     )

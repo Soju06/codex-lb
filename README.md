@@ -10,51 +10,71 @@ Resources
 
 # codex-lb
 
-Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, view everything in a dashboard.
+Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage API keys, view everything in a dashboard.
 
-## Screenshots
+| ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |
+|:---:|:---:|
 
-### Main Dashboard View
+<details>
+<summary>More screenshots</summary>
 
-![main dashboard view](docs/screenshots/dashboard.jpg)
+| Settings | Login |
+|:---:|:---:|
+| ![settings](docs/screenshots/settings.jpg) | ![login](docs/screenshots/login.jpg) |
 
-### Accounts View
+| Dashboard (dark) | Accounts (dark) | Settings (dark) |
+|:---:|:---:|:---:|
+| ![dashboard-dark](docs/screenshots/dashboard-dark.jpg) | ![accounts-dark](docs/screenshots/accounts-dark.jpg) | ![settings-dark](docs/screenshots/settings-dark.jpg) |
 
-![Accounts list and details](docs/screenshots/accounts.jpg)
+</details>
+
+## Features
+
+<table>
+<tr>
+<td><b>Account Pooling</b><br>Load balance across multiple ChatGPT accounts</td>
+<td><b>Usage Tracking</b><br>Per-account tokens, cost, 28-day trends</td>
+<td><b>API Keys</b><br>Per-key rate limits by token, cost, window, model</td>
+</tr>
+<tr>
+<td><b>Dashboard Auth</b><br>Password + optional TOTP</td>
+<td><b>OpenAI-compatible</b><br>Codex CLI, OpenCode, any OpenAI client</td>
+<td><b>Auto Model Sync</b><br>Available models fetched from upstream</td>
+</tr>
+</table>
 
 ## Quick Start
 
-### Docker
-
 ```bash
-docker run -d --name codex-lb \
-  -p 2455:2455 -p 1455:1455 \
-  -v ~/.codex-lb:/var/lib/codex-lb \
-  ghcr.io/soju06/codex-lb:latest
-```
-
-If you expect high traffic (60+ requests/min), prefer a Docker volume for the data
-directory to reduce SQLite I/O errors on some hosts.
-
-```bash
+# Docker (recommended)
 docker volume create codex-lb-data
 docker run -d --name codex-lb \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
-```
 
-### uvx
-
-```bash
+# or uvx
 uvx codex-lb
 ```
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
-## Codex CLI & Extension Setup
+## Client Setup
 
-Add to `~/.codex/config.toml`:
+Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authentication) is enabled, pass a key from the dashboard as a Bearer token.
+
+| Logo | Client | Endpoint | Config |
+|---|--------|----------|--------|
+| <img src="https://avatars.githubusercontent.com/u/14957082?s=40" width="24" alt="OpenAI"> | **Codex CLI** | `http://127.0.0.1:2455/backend-api/codex` | `~/.codex/config.toml` |
+| <img src="https://avatars.githubusercontent.com/u/208539476?s=40" width="24" alt="OpenCode"> | **OpenCode** | `http://127.0.0.1:2455/v1` | `~/.config/opencode/opencode.json` |
+| <img src="https://avatars.githubusercontent.com/u/252820863?s=40" width="24" alt="OpenClaw"> | **OpenClaw** | `http://127.0.0.1:2455/v1` | `~/.openclaw/openclaw.json` |
+| <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="24" alt="Python"> | **OpenAI Python SDK** | `http://127.0.0.1:2455/v1` | Code |
+
+<details>
+<summary><img src="https://avatars.githubusercontent.com/u/14957082?s=16" width="18" alt="OpenAI">&ensp;<b>Codex CLI / IDE Extension</b></summary>
+<br>
+
+`~/.codex/config.toml`:
 
 ```toml
 model = "gpt-5.3-codex"
@@ -65,57 +85,166 @@ model_provider = "codex-lb"
 name = "OpenAI"  # MUST be "OpenAI" - enables /compact endpoint
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
-chatgpt_base_url = "http://127.0.0.1:2455"
-requires_openai_auth = true  # Required: enables model selection in Codex IDE extension
+requires_openai_auth = true
 ```
 
-## OpenCode Setup
+**With API key auth:**
 
-Run:
+```toml
+model = "gpt-5.3-codex"
+model_reasoning_effort = "xhigh"
+model_provider = "codex-lb"
+
+[model_providers.codex-lb]
+name = "OpenAI"  # MUST be "OpenAI" - enables /compact endpoint
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+env_key = "CODEX_LB_API_KEY"
+```
 
 ```bash
-opencode auth login
+export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
+codex
 ```
 
-Then select `OpenAI` -> `Manually enter API Key` and enter any value.
+</details>
 
-Add the following to `~/.config/opencode/opencode.json`:
+<details>
+<summary><img src="https://avatars.githubusercontent.com/u/208539476?s=16" width="18" alt="OpenCode">&ensp;<b>OpenCode</b></summary>
+<br>
+
+`~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
-  ...
   "provider": {
     "openai": {
-      "options": {
-        "baseURL": "http://127.0.0.1:2455/v1"
-      }
-    },
-    ...
+      "options": { "baseURL": "http://127.0.0.1:2455/v1" }
+    }
   }
 }
 ```
 
+**With API key auth:**
+
+```jsonc
+{
+  "provider": {
+    "codex-lb": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "codex-lb",
+      "options": {
+        "baseURL": "http://127.0.0.1:2455/v1",
+        "apiKey": "{env:CODEX_LB_API_KEY}"   // reads from env var
+      },
+      "models": {
+        "gpt-5.3-codex": { "name": "GPT-5.3 Codex" }
+      }
+    }
+  },
+  "model": "codex-lb/gpt-5.3-codex"
+}
+```
+
+```bash
+export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
+opencode
+```
+
+</details>
+
+<details>
+<summary><img src="https://avatars.githubusercontent.com/u/252820863?s=16" width="18" alt="OpenClaw">&ensp;<b>OpenClaw</b></summary>
+<br>
+
+`~/.openclaw/openclaw.json`:
+
+```jsonc
+{
+  "agents": {
+    "defaults": {
+      "model": { "primary": "codex-lb/gpt-5.3-codex" }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "codex-lb": {
+        "baseUrl": "http://127.0.0.1:2455/v1",
+        "apiKey": "${CODEX_LB_API_KEY}",   // or "dummy" if API key auth is disabled
+        "api": "openai-completions",
+        "models": [
+          { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex" },
+          { "id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark" }
+        ]
+      }
+    }
+  }
+}
+```
+
+Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled, any value works.
+
+</details>
+
+<details>
+<summary><img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="18" alt="Python">&ensp;<b>OpenAI Python SDK</b></summary>
+<br>
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:2455/v1",
+    api_key="sk-clb-...",  # from dashboard, or any string if auth is disabled
+)
+
+response = client.chat.completions.create(
+    model="gpt-5.3-codex",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)
+```
+
+</details>
+
+## API Key Authentication
+
+API key auth is **disabled by default** — the proxy is open to any client. Enable it in **Settings → API Key Auth** on the dashboard.
+
+When enabled, clients must pass a valid API key as a Bearer token:
+
+```
+Authorization: Bearer sk-clb-...
+```
+
+**Creating keys**: Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
+
 ## Configuration
 
-All settings use the `CODEX_LB_` prefix and can be set via environment variables or `.env.local`.
-
-### Dashboard Authentication
-
-Protect the dashboard by configuring an admin password in Settings. After a password is set, dashboard API access requires a valid session. You can optionally enable TOTP as a second factor from the same Settings page.
+Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
+Dashboard auth is configured in Settings.
 
 ## Data
 
-Data storage locations:
+| Environment | Path |
+|-------------|------|
+| Local / uvx | `~/.codex-lb/` |
+| Docker | `/var/lib/codex-lb/` |
 
-- Local/uvx: `~/.codex-lb/`
-- Docker: `/var/lib/codex-lb/`
+Backup this directory to preserve your data.
 
-Files:
+## Development
 
-- `store.db` – accounts, usage logs
-- `encryption.key` – encrypts tokens (auto-generated)
+```bash
+# Docker
+docker compose watch
 
-Backup this directory to preserve your accounts.
+# Local
+uv sync && cd frontend && bun install && cd ..
+uv run fastapi run app/main.py --reload        # backend :2455
+cd frontend && bun run dev                     # frontend :5173
+```
 
 ## Contributors ✨
 

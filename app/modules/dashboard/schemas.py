@@ -7,7 +7,7 @@ from pydantic import Field
 
 from app.modules.accounts.schemas import AccountSummary
 from app.modules.shared.schemas import DashboardModel
-from app.modules.usage.schemas import UsageSummaryResponse, UsageWindowResponse
+from app.modules.usage.schemas import MetricsTrends, UsageSummaryResponse, UsageWindowResponse
 
 
 class DashboardUsageWindows(DashboardModel):
@@ -20,3 +20,4 @@ class DashboardOverviewResponse(DashboardModel):
     accounts: List[AccountSummary] = Field(default_factory=list)
     summary: UsageSummaryResponse
     windows: DashboardUsageWindows
+    trends: MetricsTrends

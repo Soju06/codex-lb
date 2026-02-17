@@ -52,3 +52,15 @@ class UsageWindowResponse(DashboardModel):
     window_key: str
     window_minutes: int | None = None
     accounts: List[UsageHistoryItem] = Field(default_factory=list)
+
+
+class TrendPoint(DashboardModel):
+    t: datetime
+    v: float
+
+
+class MetricsTrends(DashboardModel):
+    requests: List[TrendPoint] = Field(default_factory=list)
+    tokens: List[TrendPoint] = Field(default_factory=list)
+    cost: List[TrendPoint] = Field(default_factory=list)
+    error_rate: List[TrendPoint] = Field(default_factory=list)

@@ -11,6 +11,7 @@ from app.modules.accounts.mappers import build_account_summaries
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import DashboardOverviewResponse, DashboardUsageWindows
 from app.modules.usage.builders import (
+    build_trends_from_buckets,
     build_usage_summary_response,
     build_usage_window_response,
 )
@@ -40,15 +41,19 @@ class DashboardService:
         secondary_minutes = await self._repo.latest_window_minutes("secondary")
         if secondary_minutes is None:
             secondary_minutes = usage_core.default_window_minutes("secondary")
-        logs_secondary = []
-        if secondary_minutes:
-            logs_secondary = await self._repo.list_logs_since(now - timedelta(minutes=secondary_minutes))
+
+        # Use bucket aggregation instead of loading all logs
+        bucket_since = now - timedelta(minutes=secondary_minutes) if secondary_minutes else now - timedelta(days=7)
+        bucket_rows = await self._repo.aggregate_logs_by_bucket(bucket_since)
+        trends, bucket_metrics, bucket_cost = build_trends_from_buckets(bucket_rows, bucket_since)
 
         summary = build_usage_summary_response(
             accounts=accounts,
             primary_rows=primary_rows,
             secondary_rows=secondary_rows,
-            logs_secondary=logs_secondary,
+            logs_secondary=[],
+            metrics_override=bucket_metrics,
+            cost_override=bucket_cost,
         )
 
         primary_window_minutes = await self._repo.latest_window_minutes("primary")
@@ -75,6 +80,7 @@ class DashboardService:
             accounts=account_summaries,
             summary=summary,
             windows=windows,
+            trends=trends,
         )
 
 

@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 
 import anyio
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.usage.types import BucketModelAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, RequestLog
@@ -19,6 +20,53 @@ class RequestLogsRepository:
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(select(RequestLog).where(RequestLog.requested_at >= since))
         return list(result.scalars().all())
+
+    async def aggregate_by_bucket(
+        self, since: datetime, bucket_seconds: int = 21600,
+    ) -> list[BucketModelAggregate]:
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql":
+            bucket_expr = (
+                func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+            )
+        else:
+            # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
+            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_col = bucket_expr.label("bucket_epoch")
+
+        stmt = (
+            select(
+                bucket_col,
+                RequestLog.model,
+                func.count().label("request_count"),
+                func.sum(
+                    cast(RequestLog.status != literal_column("'success'"), Integer)
+                ).label("error_count"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
+            )
+            .where(RequestLog.requested_at >= since)
+            .group_by(bucket_col, RequestLog.model)
+            .order_by(bucket_col)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            BucketModelAggregate(
+                bucket_epoch=int(row.bucket_epoch),
+                model=row.model,
+                request_count=int(row.request_count),
+                error_count=int(row.error_count),
+                input_tokens=int(row.input_tokens),
+                output_tokens=int(row.output_tokens),
+                cached_input_tokens=int(row.cached_input_tokens),
+                reasoning_tokens=int(row.reasoning_tokens),
+            )
+            for row in result.all()
+        ]
 
     async def add_log(
         self,

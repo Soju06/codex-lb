@@ -1,5 +1,7 @@
 import { http, HttpResponse } from "msw";
+import { z } from "zod";
 
+import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
 import {
   createAccountSummary,
   createApiKey,
@@ -24,6 +26,50 @@ import {
 
 const MODEL_OPTION_DELIMITER = ":::";
 const STATUS_ORDER = ["ok", "rate_limit", "quota", "error"] as const;
+
+// ── Zod schemas for mock request bodies ──
+
+const OauthStartPayloadSchema = z.object({
+  forceMethod: z.string().optional(),
+}).passthrough();
+
+const ApiKeyCreatePayloadSchema = z.object({
+  name: z.string().optional(),
+}).passthrough();
+
+const ApiKeyUpdatePayloadSchema = z.object({
+  name: z.string().optional(),
+  allowedModels: z.array(z.string()).nullable().optional(),
+  isActive: z.boolean().optional(),
+  limits: z.array(
+    z.object({
+      limitType: z.enum(LIMIT_TYPES),
+      limitWindow: z.enum(LIMIT_WINDOWS),
+      maxValue: z.number(),
+      modelFilter: z.string().nullable().optional(),
+    }),
+  ).optional(),
+}).passthrough();
+
+const SettingsPayloadSchema = z.object({
+  stickyThreadsEnabled: z.boolean().optional(),
+  preferEarlierResetAccounts: z.boolean().optional(),
+  totpRequiredOnLogin: z.boolean().optional(),
+  totpConfigured: z.boolean().optional(),
+  apiKeyAuthEnabled: z.boolean().optional(),
+}).passthrough();
+
+// ── Helpers ──
+
+async function parseJsonBody<T>(request: Request, schema: z.ZodType<T>): Promise<T | null> {
+  try {
+    const raw: unknown = await request.json();
+    const result = schema.safeParse(raw);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
 
 const state: {
   accounts: AccountSummary[];
@@ -128,7 +174,7 @@ function requestLogOptionsFromEntries(entries: RequestLogEntry[]) {
       });
     }
   }
-  const modelOptions = [...modelMap.values()].sort((a, b) => {
+  const modelOptionsList = [...modelMap.values()].sort((a, b) => {
     if (a.model !== b.model) {
       return a.model.localeCompare(b.model);
     }
@@ -140,7 +186,7 @@ function requestLogOptionsFromEntries(entries: RequestLogEntry[]) {
 
   return createRequestLogFilterOptions({
     accountIds,
-    modelOptions,
+    modelOptions: modelOptionsList,
     statuses: [...statuses],
   });
 }
@@ -244,8 +290,8 @@ export const handlers = [
   }),
 
   http.post("/api/oauth/start", async ({ request }) => {
-    const payload = (await request.json().catch(() => ({}))) as { forceMethod?: string };
-    if (payload.forceMethod === "device") {
+    const payload = await parseJsonBody(request, OauthStartPayloadSchema);
+    if (payload?.forceMethod === "device") {
       return HttpResponse.json(
         createOauthStartResponse({
           method: "device",
@@ -275,7 +321,7 @@ export const handlers = [
   }),
 
   http.put("/api/settings", async ({ request }) => {
-    const payload = (await request.json().catch(() => null)) as Partial<DashboardSettings> | null;
+    const payload = await parseJsonBody(request, SettingsPayloadSchema);
     if (!payload) {
       return HttpResponse.json(state.settings);
     }
@@ -365,17 +411,27 @@ export const handlers = [
     return HttpResponse.json({ status: "ok" });
   }),
 
+  http.get("/api/models", () => {
+    return HttpResponse.json({
+      models: [
+        { id: "gpt-5.1", name: "GPT 5.1" },
+        { id: "gpt-5.1-codex-mini", name: "GPT 5.1 Codex Mini" },
+        { id: "gpt-4o-mini", name: "GPT 4o Mini" },
+      ],
+    });
+  }),
+
   http.get("/api/api-keys/", () => {
     return HttpResponse.json(state.apiKeys);
   }),
 
   http.post("/api/api-keys/", async ({ request }) => {
-    const payload = (await request.json().catch(() => ({}))) as Partial<ApiKey>;
+    const payload = await parseJsonBody(request, ApiKeyCreatePayloadSchema);
     const sequence = state.apiKeys.length + 1;
     const created = createApiKeyCreateResponse({
       ...createApiKey({
         id: `key_${sequence}`,
-        name: payload.name ?? `API Key ${sequence}`,
+        name: payload?.name ?? `API Key ${sequence}`,
       }),
       key: `sk-test-generated-${sequence}`,
     });
@@ -389,10 +445,33 @@ export const handlers = [
     if (!existing) {
       return HttpResponse.json({ error: { code: "not_found", message: "API key not found" } }, { status: 404 });
     }
-    const payload = (await request.json().catch(() => ({}))) as Partial<ApiKey>;
+    const payload = await parseJsonBody(request, ApiKeyUpdatePayloadSchema);
+    if (!payload) {
+      return HttpResponse.json(existing);
+    }
+
+    // Build override with converted limits (create format → response format)
+    const overrides: Partial<ApiKey> = {
+      ...(payload.name !== undefined ? { name: payload.name } : {}),
+      ...(payload.allowedModels !== undefined ? { allowedModels: payload.allowedModels } : {}),
+      ...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
+    };
+
+    if (payload.limits) {
+      overrides.limits = payload.limits.map((l, idx) => ({
+        id: idx + 100,
+        limitType: l.limitType,
+        limitWindow: l.limitWindow,
+        maxValue: l.maxValue,
+        currentValue: 0,
+        modelFilter: l.modelFilter ?? null,
+        resetAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      }));
+    }
+
     const updated = createApiKey({
       ...existing,
-      ...payload,
+      ...overrides,
       id: keyId,
     });
     state.apiKeys = state.apiKeys.map((item) => (item.id === keyId ? updated : item));

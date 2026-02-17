@@ -1,24 +1,8 @@
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
 import type { AccountSummary } from "@/features/accounts/schemas";
-
-type DashboardAccountStatus = "active" | "paused" | "limited" | "exceeded" | "deactivated";
-
-function normalizeStatus(status: string): DashboardAccountStatus {
-  if (status === "paused") {
-    return "paused";
-  }
-  if (status === "rate_limited") {
-    return "limited";
-  }
-  if (status === "quota_exceeded") {
-    return "exceeded";
-  }
-  if (status === "deactivated") {
-    return "deactivated";
-  }
-  return "active";
-}
+import { normalizeStatus } from "@/utils/account-status";
+import { formatSlug } from "@/utils/formatters";
 
 export type AccountListItemProps = {
   account: AccountSummary;
@@ -27,21 +11,29 @@ export type AccountListItemProps = {
 };
 
 export function AccountListItem({ account, selected, onSelect }: AccountListItemProps) {
+  const status = normalizeStatus(account.status);
+  const title = account.displayName || account.email;
+  const subtitle = account.displayName && account.displayName !== account.email
+    ? account.email
+    : formatSlug(account.planType);
+
   return (
     <button
       type="button"
       onClick={() => onSelect(account.accountId)}
       className={cn(
-        "w-full rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
-        selected && "border-primary bg-primary/5",
+        "w-full rounded-lg px-3 py-2.5 text-left transition-colors",
+        selected
+          ? "bg-primary/8 ring-1 ring-primary/25"
+          : "hover:bg-muted/50",
       )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium">{account.email}</p>
-          <p className="truncate text-xs text-muted-foreground">{account.planType}</p>
+      <div className="flex items-center gap-2.5">
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{title}</p>
+          <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
         </div>
-        <StatusBadge status={normalizeStatus(account.status)} />
+        <StatusBadge status={status} />
       </div>
     </button>
   );

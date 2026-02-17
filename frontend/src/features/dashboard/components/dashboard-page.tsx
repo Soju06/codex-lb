@@ -1,8 +1,12 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
 
-import { LoadingOverlay } from "@/components/layout/loading-overlay";
-import { Card, CardContent } from "@/components/ui/card";
+import { AlertMessage } from "@/components/alert-message";
+import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
+import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
@@ -10,13 +14,43 @@ import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
-import { formatModelLabel } from "@/utils/formatters";
+import type { AccountSummary } from "@/features/dashboard/schemas";
+import { useThemeStore } from "@/hooks/use-theme";
+import { REQUEST_STATUS_LABELS } from "@/utils/constants";
+import { formatModelLabel, formatSlug } from "@/utils/formatters";
 
 const MODEL_OPTION_DELIMITER = ":::";
 
 export function DashboardPage() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const isDark = useThemeStore((s) => s.theme === "dark");
   const dashboardQuery = useDashboard();
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
+  const { resumeMutation } = useAccountMutations();
+
+  const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
+
+  const handleRefresh = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+  }, [queryClient]);
+
+  const handleAccountAction = useCallback(
+    (account: AccountSummary, action: string) => {
+      switch (action) {
+        case "details":
+          navigate(`/accounts?selected=${account.accountId}`);
+          break;
+        case "resume":
+          void resumeMutation.mutateAsync(account.accountId);
+          break;
+        case "reauth":
+          navigate(`/accounts?selected=${account.accountId}`);
+          break;
+      }
+    },
+    [navigate, resumeMutation],
+  );
 
   const overview = dashboardQuery.data;
   const logPage = logsQuery.data;
@@ -25,8 +59,8 @@ export function DashboardPage() {
     if (!overview || !logPage) {
       return null;
     }
-    return buildDashboardView(overview, logPage.requests);
-  }, [overview, logPage]);
+    return buildDashboardView(overview, logPage.requests, isDark);
+  }, [overview, logPage, isDark]);
 
   const accountOptions = useMemo(() => {
     const labels = new Map<string, string>();
@@ -52,7 +86,7 @@ export function DashboardPage() {
     () =>
       (optionsQuery.data?.statuses ?? []).map((status) => ({
         value: status,
-        label: status,
+        label: REQUEST_STATUS_LABELS[status] ?? formatSlug(status),
       })),
     [optionsQuery.data?.statuses],
   );
@@ -64,24 +98,30 @@ export function DashboardPage() {
     null;
 
   return (
-    <section className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">Overview, account health, and recent request logs.</p>
+    <div className="animate-fade-in-up space-y-8">
+      {/* Page header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Overview, account health, and recent request logs.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleRefresh}
+          disabled={isRefreshing}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+          title="Refresh dashboard"
+        >
+          <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} />
+        </button>
       </div>
 
-      {errorMessage ? (
-        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {errorMessage}
-        </p>
-      ) : null}
+      {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
       {!view ? (
-        <Card>
-          <CardContent className="px-6 py-8 text-sm text-muted-foreground">
-            Loading dashboard data...
-          </CardContent>
-        </Card>
+        <DashboardSkeleton />
       ) : (
         <>
           <StatsGrid stats={view.stats} />
@@ -95,20 +135,24 @@ export function DashboardPage() {
             secondaryWindowMinutes={overview?.windows.secondary?.windowMinutes ?? null}
           />
 
-          <section className="space-y-2">
-            <h2 className="text-sm font-semibold">Accounts</h2>
-            <AccountCards accounts={overview?.accounts ?? []} />
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
+              <div className="h-px flex-1 bg-border" />
+            </div>
+            <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
           </section>
 
-          <section className="space-y-2">
-            <h2 className="text-sm font-semibold">Request Logs</h2>
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Request Logs</h2>
+              <div className="h-px flex-1 bg-border" />
+            </div>
             <RequestFilters
               filters={filters}
               accountOptions={accountOptions}
               modelOptions={modelOptions}
               statusOptions={statusOptions}
-              total={logPage?.total ?? 0}
-              hasMore={logPage?.hasMore ?? false}
               onSearchChange={(search) => updateFilters({ search, offset: 0 })}
               onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
               onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}
@@ -116,8 +160,6 @@ export function DashboardPage() {
                 updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
               }
               onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
-              onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
-              onOffsetChange={(offset) => updateFilters({ offset })}
               onReset={() =>
                 updateFilters({
                   search: "",
@@ -129,12 +171,22 @@ export function DashboardPage() {
                 })
               }
             />
-            <RecentRequestsTable requests={view.requestLogs} accounts={overview?.accounts ?? []} />
+            <div className="transition-opacity duration-200">
+              <RecentRequestsTable
+                requests={view.requestLogs}
+                accounts={overview?.accounts ?? []}
+                total={logPage?.total ?? 0}
+                limit={filters.limit}
+                offset={filters.offset}
+                hasMore={logPage?.hasMore ?? false}
+                onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
+                onOffsetChange={(offset) => updateFilters({ offset })}
+              />
+            </div>
           </section>
         </>
       )}
 
-      <LoadingOverlay visible={dashboardQuery.isFetching || logsQuery.isFetching} label="Refreshing..." />
-    </section>
+    </div>
   );
 }

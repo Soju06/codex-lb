@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { DonutChart } from "@/components/donut-chart";
 
 describe("DonutChart", () => {
-  it("renders chart title, legend, and conic gradient", () => {
+  it("renders chart title, subtitle, legend, and SVG", () => {
     const { container } = render(
       <DonutChart
         title="Primary Remaining"
@@ -23,7 +23,31 @@ describe("DonutChart", () => {
     expect(screen.getByText("Account B")).toBeInTheDocument();
     expect(screen.getByText("Remaining")).toBeInTheDocument();
 
-    const gradientNode = container.querySelector('div[style*="conic-gradient"]');
-    expect(gradientNode).not.toBeNull();
+    const svg = container.querySelector("svg");
+    expect(svg).not.toBeNull();
+  });
+
+  it("renders consumed segment when items sum is less than total", () => {
+    const { container } = render(
+      <DonutChart
+        title="Test"
+        total={100}
+        items={[{ label: "A", value: 40, color: "#111111" }]}
+      />,
+    );
+
+    const svg = container.querySelector("svg");
+    expect(svg).not.toBeNull();
+    expect(screen.getByText("A")).toBeInTheDocument();
+  });
+
+  it("renders empty state when total is zero", () => {
+    const { container } = render(
+      <DonutChart title="Empty" total={0} items={[]} />,
+    );
+
+    const svg = container.querySelector("svg");
+    expect(svg).not.toBeNull();
+    expect(screen.getByText("Remaining")).toBeInTheDocument();
   });
 });

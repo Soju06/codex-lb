@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DONUT_COLORS,
+  DONUT_COLORS_DARK,
+  DONUT_COLORS_LIGHT,
   ERROR_LABELS,
   KNOWN_PLAN_TYPES,
   MESSAGE_TONE_META,
@@ -50,12 +51,18 @@ describe("KNOWN_PLAN_TYPES", () => {
   });
 });
 
-describe("DONUT_COLORS", () => {
-  it("contains hex color palette entries", () => {
-    expect(DONUT_COLORS.length).toBeGreaterThanOrEqual(6);
-    for (const color of DONUT_COLORS) {
-      expect(color).toMatch(/^#[0-9a-f]{6}$/i);
+describe("DONUT_COLORS_LIGHT / DONUT_COLORS_DARK", () => {
+  it("contains hex color palette entries for both themes", () => {
+    for (const palette of [DONUT_COLORS_LIGHT, DONUT_COLORS_DARK]) {
+      expect(palette.length).toBeGreaterThanOrEqual(6);
+      for (const color of palette) {
+        expect(color).toMatch(/^#[0-9a-f]{6}$/i);
+      }
     }
+  });
+
+  it("light and dark palettes have the same length", () => {
+    expect(DONUT_COLORS_LIGHT.length).toBe(DONUT_COLORS_DARK.length);
   });
 });
 

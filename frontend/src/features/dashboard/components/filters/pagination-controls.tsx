@@ -1,3 +1,5 @@
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -26,11 +28,12 @@ export function PaginationControls({
   onLimitChange,
   onOffsetChange,
 }: PaginationControlsProps) {
-  const currentPage = Math.floor(offset / limit) + 1;
-  const totalPages = total > 0 ? Math.ceil(total / limit) : 1;
+  const lastPage = total > 0 ? Math.max(0, Math.ceil(total / limit) - 1) * limit : 0;
+  const rangeStart = total > 0 ? offset + 1 : 0;
+  const rangeEnd = Math.min(offset + limit, total);
 
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
+    <div className="flex items-center gap-2 text-xs">
       <span className="text-muted-foreground">Rows</span>
       <Select value={String(limit)} onValueChange={(value) => onLimitChange(Number(value))}>
         <SelectTrigger size="sm" className="w-20">
@@ -45,25 +48,53 @@ export function PaginationControls({
         </SelectContent>
       </Select>
 
-      <span className="text-muted-foreground">{currentPage}/{totalPages}</span>
+      <span className="tabular-nums text-muted-foreground">
+        {rangeStart}&ndash;{rangeEnd} of {total}
+      </span>
 
       <Button
         type="button"
         variant="outline"
-        size="sm"
+        size="icon"
+        className="h-8 w-8"
         disabled={offset <= 0}
-        onClick={() => onOffsetChange(Math.max(0, offset - limit))}
+        onClick={() => onOffsetChange(0)}
+        aria-label="First page"
       >
-        Prev
+        <ChevronsLeft className="h-4 w-4" />
       </Button>
       <Button
         type="button"
         variant="outline"
-        size="sm"
+        size="icon"
+        className="h-8 w-8"
+        disabled={offset <= 0}
+        onClick={() => onOffsetChange(Math.max(0, offset - limit))}
+        aria-label="Previous page"
+      >
+        <ChevronLeft className="h-4 w-4" />
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        className="h-8 w-8"
         disabled={!hasMore}
         onClick={() => onOffsetChange(offset + limit)}
+        aria-label="Next page"
       >
-        Next
+        <ChevronRight className="h-4 w-4" />
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        className="h-8 w-8"
+        disabled={!hasMore}
+        onClick={() => onOffsetChange(lastPage)}
+        aria-label="Last page"
+      >
+        <ChevronsRight className="h-4 w-4" />
       </Button>
     </div>
   );

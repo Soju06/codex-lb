@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   deleteAccount,
@@ -13,56 +14,71 @@ function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQuery
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
 }
 
-export function useAccounts() {
+/**
+ * Account mutation actions without the polling query.
+ * Use this when you need account actions but already have account data
+ * from another source (e.g. the dashboard overview query).
+ */
+export function useAccountMutations() {
   const queryClient = useQueryClient();
-
-  const accountsQuery = useQuery({
-    queryKey: ["accounts", "list"],
-    queryFn: listAccounts,
-    select: (data) => data.accounts,
-  });
 
   const importMutation = useMutation({
     mutationFn: importAccount,
     onSuccess: () => {
+      toast.success("Account imported");
       invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Import failed");
     },
   });
 
   const pauseMutation = useMutation({
     mutationFn: pauseAccount,
     onSuccess: () => {
+      toast.success("Account paused");
       invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Pause failed");
     },
   });
 
   const resumeMutation = useMutation({
     mutationFn: reactivateAccount,
     onSuccess: () => {
+      toast.success("Account resumed");
       invalidateAccountRelatedQueries(queryClient);
     },
-  });
-
-  const reactivateMutation = useMutation({
-    mutationFn: reactivateAccount,
-    onSuccess: () => {
-      invalidateAccountRelatedQueries(queryClient);
+    onError: (error: Error) => {
+      toast.error(error.message || "Resume failed");
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: deleteAccount,
     onSuccess: () => {
+      toast.success("Account deleted");
       invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Delete failed");
     },
   });
 
-  return {
-    accountsQuery,
-    importMutation,
-    pauseMutation,
-    resumeMutation,
-    reactivateMutation,
-    deleteMutation,
-  };
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+}
+
+export function useAccounts() {
+  const accountsQuery = useQuery({
+    queryKey: ["accounts", "list"],
+    queryFn: listAccounts,
+    select: (data) => data.accounts,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
+
+  const mutations = useAccountMutations();
+
+  return { accountsQuery, ...mutations };
 }

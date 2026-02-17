@@ -1,3 +1,5 @@
+import { ChevronDown } from "lucide-react";
+
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -39,8 +41,9 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button type="button" variant="outline" size="sm" className="justify-between">
+        <Button type="button" variant="outline" size="sm" className="min-w-[7rem] justify-between gap-1.5">
           {summary}
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-80 min-w-56 overflow-y-auto">
@@ -54,6 +57,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
               key={option.value}
               checked={values.includes(option.value)}
               onCheckedChange={() => toggleValue(option.value)}
+              onSelect={(e) => e.preventDefault()}
             >
               {option.label}
             </DropdownMenuCheckboxItem>

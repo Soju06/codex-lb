@@ -1,5 +1,3 @@
-"use client"
-
 import {
   CircleCheckIcon,
   InfoIcon,
@@ -7,11 +5,12 @@ import {
   OctagonXIcon,
   TriangleAlertIcon,
 } from "lucide-react"
-import { useTheme } from "next-themes"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 
+import { useThemeStore } from "@/hooks/use-theme"
+
 const Toaster = ({ ...props }: ToasterProps) => {
-  const { theme = "system" } = useTheme()
+  const theme = useThemeStore((state) => state.theme)
 
   return (
     <Sonner
@@ -29,7 +28,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
           "--normal-bg": "var(--popover)",
           "--normal-text": "var(--popover-foreground)",
           "--normal-border": "var(--border)",
-          "--border-radius": "var(--radius)",
+          "--border-radius": "0.75rem",
         } as React.CSSProperties
       }
       {...props}

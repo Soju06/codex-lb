@@ -37,7 +37,7 @@ describe("AccountList", () => {
     expect(screen.getByText("primary@example.com")).toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText("Search accounts"), "secondary");
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "secondary");
     expect(screen.queryByText("primary@example.com")).not.toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
 
@@ -66,7 +66,7 @@ describe("AccountList", () => {
       />,
     );
 
-    await user.type(screen.getByPlaceholderText("Search accounts"), "not-found");
-    expect(screen.getByText("No matching accounts.")).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "not-found");
+    expect(screen.getByText("No matching accounts")).toBeInTheDocument();
   });
 });

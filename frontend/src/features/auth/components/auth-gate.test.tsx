@@ -40,7 +40,7 @@ describe("AuthGate", () => {
       </AuthGate>,
     );
 
-    expect(screen.getByText("Dashboard Login")).toBeInTheDocument();
+    expect(screen.getByText("Sign in")).toBeInTheDocument();
     expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
     await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
   });

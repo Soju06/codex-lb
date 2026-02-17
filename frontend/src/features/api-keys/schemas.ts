@@ -1,17 +1,41 @@
 import { z } from "zod";
 
+export const LIMIT_TYPES = ["total_tokens", "input_tokens", "output_tokens", "cost_usd"] as const;
+export const LIMIT_WINDOWS = ["daily", "weekly", "monthly"] as const;
+
+export type LimitType = (typeof LIMIT_TYPES)[number];
+export type LimitWindowType = (typeof LIMIT_WINDOWS)[number];
+
+export const LimitRuleSchema = z.object({
+  id: z.number(),
+  limitType: z.enum(LIMIT_TYPES),
+  limitWindow: z.enum(LIMIT_WINDOWS),
+  maxValue: z.number(),
+  currentValue: z.number(),
+  modelFilter: z.string().nullable(),
+  resetAt: z.string().datetime({ offset: true }),
+});
+
+export const LimitRuleCreateSchema = z.object({
+  limitType: z.enum(LIMIT_TYPES),
+  limitWindow: z.enum(LIMIT_WINDOWS),
+  maxValue: z.number().int().positive(),
+  modelFilter: z.string().nullable().optional(),
+});
+
 export const ApiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
-  weeklyTokenLimit: z.number().int().positive().nullable(),
-  weeklyTokensUsed: z.number().int().nonnegative(),
-  weeklyResetAt: z.string().datetime({ offset: true }),
+  weeklyTokenLimit: z.number().int().positive().nullable().optional(),
+  weeklyTokensUsed: z.number().int().nonnegative().optional(),
+  weeklyResetAt: z.string().datetime({ offset: true }).nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
   createdAt: z.string().datetime({ offset: true }),
   lastUsedAt: z.string().datetime({ offset: true }).nullable(),
+  limits: z.array(LimitRuleSchema).default([]),
 });
 
 export const ApiKeyCreateRequestSchema = z.object({
@@ -19,6 +43,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   allowedModels: z.array(z.string()).optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  limits: z.array(LimitRuleCreateSchema).optional(),
 });
 
 export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
@@ -31,10 +56,13 @@ export const ApiKeyUpdateRequestSchema = z.object({
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),
+  limits: z.array(LimitRuleCreateSchema).optional(),
 });
 
 export const ApiKeyListSchema = z.array(ApiKeySchema);
 
+export type LimitRule = z.infer<typeof LimitRuleSchema>;
+export type LimitRuleCreate = z.infer<typeof LimitRuleCreateSchema>;
 export type ApiKey = z.infer<typeof ApiKeySchema>;
 export type ApiKeyCreateRequest = z.infer<typeof ApiKeyCreateRequestSchema>;
 export type ApiKeyCreateResponse = z.infer<typeof ApiKeyCreateResponseSchema>;

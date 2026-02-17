@@ -5,6 +5,8 @@ import react from "@vitejs/plugin-react-swc";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vitest/config";
 
+const proxyTarget = process.env.API_PROXY_TARGET || "http://localhost:2455";
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -14,15 +16,25 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://localhost:3000",
-      "/v1": "http://localhost:3000",
-      "/backend-api": "http://localhost:3000",
-      "/health": "http://localhost:3000",
+      "/api": proxyTarget,
+      "/v1": proxyTarget,
+      "/backend-api": proxyTarget,
+      "/health": proxyTarget,
     },
   },
   build: {
     outDir: "../app/static",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-react": ["react", "react-dom", "react-router-dom"],
+          "vendor-query": ["@tanstack/react-query"],
+          "vendor-charts": ["recharts"],
+          "vendor-ui": ["radix-ui"],
+        },
+      },
+    },
   },
   test: {
     globals: true,

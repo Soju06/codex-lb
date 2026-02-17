@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+
 import { DonutChart } from "@/components/donut-chart";
 import type { RemainingItem } from "@/features/dashboard/utils";
 import { formatWindowLabel } from "@/utils/formatters";
@@ -19,26 +21,27 @@ export function UsageDonuts({
   primaryWindowMinutes,
   secondaryWindowMinutes,
 }: UsageDonutsProps) {
+  const primaryChartItems = useMemo(
+    () => primaryItems.map((item) => ({ label: item.label, value: item.value, color: item.color })),
+    [primaryItems],
+  );
+  const secondaryChartItems = useMemo(
+    () => secondaryItems.map((item) => ({ label: item.label, value: item.value, color: item.color })),
+    [secondaryItems],
+  );
+
   return (
-    <div className="grid gap-4 xl:grid-cols-2">
+    <div className="grid gap-4 lg:grid-cols-2">
       <DonutChart
         title="Primary Remaining"
         subtitle={`Window ${formatWindowLabel("primary", primaryWindowMinutes)}`}
-        items={primaryItems.map((item) => ({
-          label: item.label,
-          value: item.value,
-          color: item.color,
-        }))}
+        items={primaryChartItems}
         total={primaryTotal}
       />
       <DonutChart
         title="Secondary Remaining"
         subtitle={`Window ${formatWindowLabel("secondary", secondaryWindowMinutes)}`}
-        items={secondaryItems.map((item) => ({
-          label: item.label,
-          value: item.value,
-          color: item.color,
-        }))}
+        items={secondaryChartItems}
         total={secondaryTotal}
       />
     </div>

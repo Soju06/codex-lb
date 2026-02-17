@@ -1,24 +1,22 @@
-import { useMemo, useState } from "react";
+import { lazy, useMemo } from "react";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
+import { useDialogState } from "@/hooks/use-dialog-state";
 import { ApiKeyAuthToggle } from "@/features/api-keys/components/api-key-auth-toggle";
-import { ApiKeyCreateDialog } from "@/features/api-keys/components/api-key-create-dialog";
 import { ApiKeyCreatedDialog } from "@/features/api-keys/components/api-key-created-dialog";
-import { ApiKeyEditDialog } from "@/features/api-keys/components/api-key-edit-dialog";
 import { ApiKeyTable } from "@/features/api-keys/components/api-key-table";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
 import type { ApiKey, ApiKeyCreateRequest, ApiKeyUpdateRequest } from "@/features/api-keys/schemas";
+import { getErrorMessageOrNull } from "@/utils/errors";
 
-function errorMessage(error: unknown): string | null {
-  if (!error) {
-    return null;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return "API key request failed";
-}
+const ApiKeyCreateDialog = lazy(() =>
+  import("@/features/api-keys/components/api-key-create-dialog").then((m) => ({ default: m.ApiKeyCreateDialog })),
+);
+const ApiKeyEditDialog = lazy(() =>
+  import("@/features/api-keys/components/api-key-edit-dialog").then((m) => ({ default: m.ApiKeyEditDialog })),
+);
 
 export type ApiKeysSectionProps = {
   apiKeyAuthEnabled: boolean;
@@ -39,12 +37,10 @@ export function ApiKeysSection({
     regenerateMutation,
   } = useApiKeys();
 
-  const [createOpen, setCreateOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<ApiKey | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
-  const [createdOpen, setCreatedOpen] = useState(false);
-  const [createdKey, setCreatedKey] = useState<string | null>(null);
+  const createDialog = useDialogState();
+  const editDialog = useDialogState<ApiKey>();
+  const deleteDialog = useDialogState<ApiKey>();
+  const createdDialog = useDialogState<string>();
 
   const keys = apiKeysQuery.data ?? [];
   const busy =
@@ -57,34 +53,33 @@ export function ApiKeysSection({
 
   const mutationError = useMemo(
     () =>
-      errorMessage(createMutation.error) ||
-      errorMessage(updateMutation.error) ||
-      errorMessage(deleteMutation.error) ||
-      errorMessage(regenerateMutation.error),
+      getErrorMessageOrNull(createMutation.error) ||
+      getErrorMessageOrNull(updateMutation.error) ||
+      getErrorMessageOrNull(deleteMutation.error) ||
+      getErrorMessageOrNull(regenerateMutation.error),
     [createMutation.error, deleteMutation.error, regenerateMutation.error, updateMutation.error],
   );
 
   const handleCreate = async (payload: ApiKeyCreateRequest) => {
     const created = await createMutation.mutateAsync(payload);
-    setCreatedKey(created.key);
-    setCreatedOpen(true);
+    createdDialog.show(created.key);
   };
 
   const handleUpdate = async (payload: ApiKeyUpdateRequest) => {
-    if (!editTarget) {
+    if (!editDialog.data) {
       return;
     }
-    await updateMutation.mutateAsync({ keyId: editTarget.id, payload });
+    await updateMutation.mutateAsync({ keyId: editDialog.data.id, payload });
   };
 
   return (
-    <section className="space-y-3 rounded-xl border p-4">
+    <section className="space-y-3 rounded-xl border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold">API Keys</h3>
           <p className="text-xs text-muted-foreground">Create and manage API keys for clients.</p>
         </div>
-        <Button type="button" size="sm" onClick={() => setCreateOpen(true)} disabled={busy}>
+        <Button type="button" size="sm" onClick={() => createDialog.show()} disabled={busy}>
           Create key
         </Button>
       </div>
@@ -95,66 +90,53 @@ export function ApiKeysSection({
         onChange={onApiKeyAuthEnabledChange}
       />
 
-      {mutationError ? (
-        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
-          {mutationError}
-        </p>
-      ) : null}
+      {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
 
       <ApiKeyTable
         keys={keys}
         busy={busy}
-        onEdit={(apiKey) => {
-          setEditTarget(apiKey);
-          setEditOpen(true);
-        }}
-        onDelete={(apiKey) => setDeleteTarget(apiKey)}
+        onEdit={(apiKey) => editDialog.show(apiKey)}
+        onDelete={(apiKey) => deleteDialog.show(apiKey)}
         onRegenerate={(apiKey) => {
           void regenerateMutation.mutateAsync(apiKey.id).then((result) => {
-            setCreatedKey(result.key);
-            setCreatedOpen(true);
+            createdDialog.show(result.key);
           });
         }}
       />
 
       <ApiKeyCreateDialog
-        open={createOpen}
+        open={createDialog.open}
         busy={createMutation.isPending}
-        onOpenChange={setCreateOpen}
+        onOpenChange={createDialog.onOpenChange}
         onSubmit={handleCreate}
       />
 
       <ApiKeyEditDialog
-        open={editOpen}
+        open={editDialog.open}
         busy={updateMutation.isPending}
-        apiKey={editTarget}
-        onOpenChange={(open) => {
-          setEditOpen(open);
-          if (!open) {
-            setEditTarget(null);
-          }
-        }}
+        apiKey={editDialog.data}
+        onOpenChange={editDialog.onOpenChange}
         onSubmit={handleUpdate}
       />
 
-      <ApiKeyCreatedDialog open={createdOpen} apiKey={createdKey} onOpenChange={setCreatedOpen} />
+      <ApiKeyCreatedDialog
+        open={createdDialog.open}
+        apiKey={createdDialog.data}
+        onOpenChange={createdDialog.onOpenChange}
+      />
 
       <ConfirmDialog
-        open={deleteTarget !== null}
+        open={deleteDialog.open}
         title="Delete API key"
         description="This key will stop working immediately."
         confirmLabel="Delete"
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleteTarget(null);
-          }
-        }}
+        onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
-          if (!deleteTarget) {
+          if (!deleteDialog.data) {
             return;
           }
-          void deleteMutation.mutateAsync(deleteTarget.id).finally(() => {
-            setDeleteTarget(null);
+          void deleteMutation.mutateAsync(deleteDialog.data.id).finally(() => {
+            deleteDialog.hide();
           });
         }}
       />

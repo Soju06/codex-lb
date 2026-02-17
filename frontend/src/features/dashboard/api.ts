@@ -12,8 +12,6 @@ type RequestLogsParams = {
   search?: string;
   accountIds?: string[];
   statuses?: string[];
-  models?: string[];
-  reasoningEfforts?: string[];
   modelOptions?: string[];
   since?: string;
   until?: string;
@@ -47,8 +45,6 @@ export function getRequestLogs(params: RequestLogsParams = {}) {
   }
   appendMany(query, "accountId", params.accountIds);
   appendMany(query, "status", params.statuses);
-  appendMany(query, "model", params.models);
-  appendMany(query, "reasoningEffort", params.reasoningEfforts);
   appendMany(query, "modelOption", params.modelOptions);
   if (params.since) {
     query.set("since", params.since);

@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { DONUT_COLORS } from "@/utils/constants";
+import { DONUT_COLORS_DARK, DONUT_COLORS_LIGHT } from "@/utils/constants";
 import {
-  CONSUMED_COLOR,
   adjustHexColor,
-  buildDonutGradient,
   buildDonutPalette,
 } from "@/utils/colors";
 
@@ -22,48 +20,19 @@ describe("adjustHexColor", () => {
 });
 
 describe("buildDonutPalette", () => {
-  it("uses base palette for small counts", () => {
+  it("uses light palette by default for small counts", () => {
     const palette = buildDonutPalette(3);
-    expect(palette).toEqual(DONUT_COLORS.slice(0, 3));
+    expect(palette).toEqual(DONUT_COLORS_LIGHT.slice(0, 3));
+  });
+
+  it("uses dark palette when isDark is true", () => {
+    const palette = buildDonutPalette(3, true);
+    expect(palette).toEqual(DONUT_COLORS_DARK.slice(0, 3));
   });
 
   it("extends palette for large counts", () => {
     const palette = buildDonutPalette(10);
     expect(palette).toHaveLength(10);
-    expect(palette.slice(0, DONUT_COLORS.length)).toEqual([...DONUT_COLORS]);
-  });
-});
-
-describe("buildDonutGradient", () => {
-  it("returns consumed gradient for empty items", () => {
-    expect(buildDonutGradient([], 100)).toBe(`conic-gradient(${CONSUMED_COLOR} 0 100%)`);
-  });
-
-  it("builds gradient with segments and consumed remainder", () => {
-    const gradient = buildDonutGradient(
-      [
-        { value: 60, color: "#111111" },
-        { value: 20, color: "#222222" },
-      ],
-      100,
-    );
-
-    expect(gradient.startsWith("conic-gradient(")).toBe(true);
-    expect(gradient).toContain("#111111");
-    expect(gradient).toContain("#222222");
-    expect(gradient).toContain(CONSUMED_COLOR);
-  });
-
-  it("renders tiny fallback segments for zero-value items when needed", () => {
-    const gradient = buildDonutGradient(
-      [
-        { value: 0, color: "#111111" },
-        { value: 10, color: "#222222" },
-      ],
-      20,
-    );
-
-    expect(gradient).toContain("#111111");
-    expect(gradient).toContain("#222222");
+    expect(palette.slice(0, DONUT_COLORS_LIGHT.length)).toEqual([...DONUT_COLORS_LIGHT]);
   });
 });

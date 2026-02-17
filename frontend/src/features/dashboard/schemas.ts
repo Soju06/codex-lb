@@ -62,6 +62,18 @@ export const DashboardMetricsSchema = z.object({
   topError: z.string().nullable(),
 });
 
+export const TrendPointSchema = z.object({
+  t: z.string().datetime({ offset: true }),
+  v: z.number(),
+});
+
+export const MetricsTrendsSchema = z.object({
+  requests: z.array(TrendPointSchema),
+  tokens: z.array(TrendPointSchema),
+  cost: z.array(TrendPointSchema),
+  errorRate: z.array(TrendPointSchema),
+});
+
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.string().datetime({ offset: true }).nullable(),
   accounts: z.array(AccountSummarySchema),
@@ -75,6 +87,7 @@ export const DashboardOverviewSchema = z.object({
     primary: UsageWindowSchema,
     secondary: UsageWindowSchema.nullable(),
   }),
+  trends: MetricsTrendsSchema,
 });
 
 export const RequestLogSchema = z.object({
@@ -122,6 +135,8 @@ export const FilterStateSchema = z.object({
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type DashboardMetrics = z.infer<typeof DashboardMetricsSchema>;
 export type DashboardOverview = z.infer<typeof DashboardOverviewSchema>;
+export type TrendPoint = z.infer<typeof TrendPointSchema>;
+export type MetricsTrends = z.infer<typeof MetricsTrendsSchema>;
 export type UsageWindow = z.infer<typeof UsageWindowSchema>;
 export type RequestLog = z.infer<typeof RequestLogSchema>;
 export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;

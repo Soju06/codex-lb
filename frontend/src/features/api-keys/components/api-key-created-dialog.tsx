@@ -1,4 +1,6 @@
-import { CopyButton } from "@/components/copy-button";
+import { useCallback, useState } from "react";
+import { Check, Copy } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -26,10 +28,15 @@ export function ApiKeyCreatedDialog({ open, apiKey, onOpenChange }: ApiKeyCreate
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
-          <p className="break-all font-mono text-xs">{apiKey || "-"}</p>
-          {apiKey ? <CopyButton value={apiKey} /> : null}
-        </div>
+        {apiKey ? (
+          <div className="min-w-0 space-y-1.5">
+            <p className="text-xs font-medium text-muted-foreground">API Key</p>
+            <div className="flex min-w-0 items-center gap-2 overflow-hidden rounded-lg border bg-muted/20 px-3 py-2">
+              <p className="min-w-0 flex-1 truncate font-mono text-xs">{apiKey}</p>
+              <InlineCopyButton text={apiKey} />
+            </div>
+          </div>
+        ) : null}
 
         <DialogFooter>
           <Button type="button" onClick={() => onOpenChange(false)}>
@@ -38,5 +45,37 @@ export function ApiKeyCreatedDialog({ open, apiKey, onOpenChange }: ApiKeyCreate
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function InlineCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [text]);
+
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      className="h-7 shrink-0 gap-1 px-2 text-xs"
+      onClick={() => void handleCopy()}
+    >
+      {copied ? (
+        <>
+          <Check className="h-3 w-3" />
+          Copied!
+        </>
+      ) : (
+        <>
+          <Copy className="h-3 w-3" />
+          Copy
+        </>
+      )}
+    </Button>
   );
 }

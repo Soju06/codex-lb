@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +25,11 @@ const baseSettings = {
   apiKeyAuthEnabled: true,
 };
 
+function renderWithClient(ui: React.ReactElement) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+}
+
 describe("TotpSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -32,7 +38,26 @@ describe("TotpSettings", () => {
     });
   });
 
-  it("supports setup flow and login requirement toggle", async () => {
+  it("shows setup button when not configured", () => {
+    renderWithClient(
+      <TotpSettings settings={baseSettings} onSave={vi.fn().mockResolvedValue(undefined)} />,
+    );
+    expect(screen.getByRole("button", { name: "Enable TOTP" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disable" })).not.toBeInTheDocument();
+  });
+
+  it("shows disable button when configured", () => {
+    renderWithClient(
+      <TotpSettings
+        settings={{ ...baseSettings, totpConfigured: true }}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Disable" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Enable TOTP" })).not.toBeInTheDocument();
+  });
+
+  it("supports setup flow via dialog", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
 
@@ -43,37 +68,43 @@ describe("TotpSettings", () => {
     });
     vi.mocked(confirmTotpSetup).mockResolvedValue({ status: "ok" });
 
-    render(
-      <TotpSettings
-        settings={baseSettings}
-        onSave={onSave}
-      />,
+    renderWithClient(
+      <TotpSettings settings={baseSettings} onSave={onSave} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Enable" }));
-    expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: true,
-      preferEarlierResetAccounts: false,
-      totpRequiredOnLogin: true,
-      apiKeyAuthEnabled: true,
-    });
+    await user.click(screen.getByRole("button", { name: "Enable TOTP" }));
 
-    await user.click(screen.getByRole("button", { name: "Start setup" }));
-    expect(startTotpSetup).toHaveBeenCalledTimes(1);
+    // Dialog opens with QR and secret
     expect(await screen.findByText("Secret: SECRET123")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "TOTP QR code" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Verification code"), "123456");
     await user.click(screen.getByRole("button", { name: "Confirm setup" }));
     expect(confirmTotpSetup).toHaveBeenCalledWith({ secret: "SECRET123", code: "123456" });
-    expect(await screen.findByText("TOTP configured.")).toBeInTheDocument();
   });
 
-  it("supports disable flow when already configured", async () => {
+  it("toggles require-on-login via switch", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    renderWithClient(
+      <TotpSettings settings={baseSettings} onSave={onSave} />,
+    );
+
+    await user.click(screen.getByRole("switch"));
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: false,
+      totpRequiredOnLogin: true,
+      apiKeyAuthEnabled: true,
+    });
+  });
+
+  it("supports disable flow via dialog", async () => {
     const user = userEvent.setup();
     vi.mocked(disableTotp).mockResolvedValue({ status: "ok" });
 
-    render(
+    renderWithClient(
       <TotpSettings
         settings={{
           ...baseSettings,
@@ -84,10 +115,11 @@ describe("TotpSettings", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText("Disable with TOTP code"), "654321");
-    await user.click(screen.getByRole("button", { name: "Disable TOTP" }));
+    await user.click(screen.getByRole("button", { name: "Disable" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
 
+    await user.type(screen.getByLabelText("TOTP code"), "654321");
+    await user.click(screen.getByRole("button", { name: "Disable TOTP" }));
     expect(disableTotp).toHaveBeenCalledWith({ code: "654321" });
-    expect(await screen.findByText("TOTP disabled.")).toBeInTheDocument();
   });
 });

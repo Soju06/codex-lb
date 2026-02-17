@@ -35,14 +35,25 @@ export const KNOWN_PLAN_TYPES = new Set([
   "edu",
 ]);
 
-export const DONUT_COLORS = [
-  "#7bb661",
-  "#d9a441",
-  "#4b6ea8",
-  "#c35d5d",
-  "#8d6bd6",
-  "#4aa0a8",
+export const DONUT_COLORS_LIGHT = [
+  "#3b82f6",
+  "#8b5cf6",
+  "#10b981",
+  "#f59e0b",
+  "#ec4899",
+  "#06b6d4",
 ] as const;
+
+export const DONUT_COLORS_DARK = [
+  "#2563eb",
+  "#7c3aed",
+  "#059669",
+  "#d97706",
+  "#db2777",
+  "#0891b2",
+] as const;
+
+export const DONUT_COLORS = DONUT_COLORS_LIGHT;
 
 export const MESSAGE_TONE_META = {
   success: {
@@ -71,5 +82,12 @@ export const MESSAGE_TONE_META = {
     defaultTitle: "Confirm",
   },
 } as const;
+
+export const REQUEST_STATUS_LABELS: Record<string, string> = {
+  ok: "OK",
+  rate_limit: "Rate limit",
+  quota: "Quota",
+  error: "Error",
+};
 
 export const RESET_ERROR_LABEL = "--";

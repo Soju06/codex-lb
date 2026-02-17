@@ -20,6 +20,10 @@ if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
   });
 }
 
+if (typeof document !== "undefined" && typeof document.elementFromPoint !== "function") {
+  document.elementFromPoint = () => null;
+}
+
 if (typeof globalThis.ResizeObserver === "undefined") {
   class ResizeObserverMock {
     observe() {}

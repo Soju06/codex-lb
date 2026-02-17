@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -91,15 +91,21 @@ export function useRequestLogs() {
         since,
       }),
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    placeholderData: keepPreviousData,
   });
 
   const optionsQuery = useQuery({
-    queryKey: ["dashboard", "request-log-options", filters.timeframe, since],
+    queryKey: ["dashboard", "request-log-options", filters.timeframe, since, filters.statuses],
     queryFn: () =>
       getRequestLogOptions({
         since,
         statuses: filters.statuses,
       }),
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 
   const updateFilters = (patch: Partial<FilterState>) => {

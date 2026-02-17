@@ -34,6 +34,7 @@ describe("useApiKeys", () => {
     await waitFor(() => expect(result.current.apiKeysQuery.isSuccess).toBe(true));
     const existingKeyId = result.current.apiKeysQuery.data?.[0]?.id;
     expect(existingKeyId).toBeTruthy();
+    if (!existingKeyId) throw new Error("Expected at least one API key in test data");
 
     const created = await result.current.createMutation.mutateAsync({
       name: "Test Key",
@@ -44,13 +45,13 @@ describe("useApiKeys", () => {
     expect(created.key).toContain("sk-test");
 
     await result.current.updateMutation.mutateAsync({
-      keyId: existingKeyId as string,
+      keyId: existingKeyId,
       payload: {
         name: "Updated Name",
       },
     });
 
-    await result.current.regenerateMutation.mutateAsync(existingKeyId as string);
+    await result.current.regenerateMutation.mutateAsync(existingKeyId);
     await result.current.deleteMutation.mutateAsync(created.id);
 
     await waitFor(() => {

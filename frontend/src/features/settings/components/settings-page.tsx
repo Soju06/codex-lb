@@ -1,77 +1,75 @@
+import { lazy } from "react";
+import { Settings } from "lucide-react";
+
+import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
-import { TotpSettings } from "@/features/settings/components/totp-settings";
+import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { useSettings } from "@/features/settings/hooks/use-settings";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
+import { getErrorMessageOrNull } from "@/utils/errors";
 
-function getErrorMessage(error: unknown): string | null {
-  if (!error) {
-    return null;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return "Settings request failed";
-}
+const TotpSettings = lazy(() =>
+  import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
+);
 
 export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
 
   const settings = settingsQuery.data;
-  const busy = settingsQuery.isFetching || updateSettingsMutation.isPending;
-  const error = getErrorMessage(settingsQuery.error) || getErrorMessage(updateSettingsMutation.error);
+  const busy = updateSettingsMutation.isPending;
+  const error = getErrorMessageOrNull(settingsQuery.error) || getErrorMessageOrNull(updateSettingsMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
     await updateSettingsMutation.mutateAsync(payload);
   };
 
-  if (!settings) {
-    return (
-      <section className="space-y-2">
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="text-sm text-muted-foreground">Loading settings...</p>
-      </section>
-    );
-  }
-
   return (
-    <section className="space-y-4">
+    <div className="animate-fade-in-up space-y-6">
+      {/* Page header */}
       <div>
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="text-sm text-muted-foreground">Configure routing, auth, and API key management.</p>
+        <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
+          <Settings className="h-5 w-5 text-primary" />
+          Settings
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">Configure routing, auth, and API key management.</p>
       </div>
 
-      {error ? (
-        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {error}
-        </p>
-      ) : null}
+      {!settings ? (
+        <SettingsSkeleton />
+      ) : (
+        <>
+          {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
 
-      <RoutingSettings
-        key={`${settings.stickyThreadsEnabled}:${settings.preferEarlierResetAccounts}`}
-        settings={settings}
-        busy={busy}
-        onSave={handleSave}
-      />
-      <PasswordSettings disabled={busy} />
-      <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+          <div className="space-y-4">
+            <RoutingSettings
+              key={`${settings.stickyThreadsEnabled}:${settings.preferEarlierResetAccounts}`}
+              settings={settings}
+              busy={busy}
+              onSave={handleSave}
+            />
+            <PasswordSettings disabled={busy} />
+            <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
 
-      <ApiKeysSection
-        apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
-        disabled={busy}
-        onApiKeyAuthEnabledChange={(enabled) =>
-          void handleSave({
-            stickyThreadsEnabled: settings.stickyThreadsEnabled,
-            preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-            totpRequiredOnLogin: settings.totpRequiredOnLogin,
-            apiKeyAuthEnabled: enabled,
-          })
-        }
-      />
+            <ApiKeysSection
+              apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
+              disabled={busy}
+              onApiKeyAuthEnabledChange={(enabled) =>
+                void handleSave({
+                  stickyThreadsEnabled: settings.stickyThreadsEnabled,
+                  preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+                  totpRequiredOnLogin: settings.totpRequiredOnLogin,
+                  apiKeyAuthEnabled: enabled,
+                })
+              }
+            />
+          </div>
 
-      <LoadingOverlay visible={busy} label="Saving settings..." />
-    </section>
+          <LoadingOverlay visible={!!settings && busy} label="Saving settings..." />
+        </>
+      )}
+    </div>
   );
 }

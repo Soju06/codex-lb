@@ -9,6 +9,13 @@ import {
 
 const ISO = "2026-01-01T00:00:00+00:00";
 
+const EMPTY_TRENDS = {
+  requests: [],
+  tokens: [],
+  cost: [],
+  errorRate: [],
+};
+
 describe("DashboardOverviewSchema", () => {
   it("parses overview payload without request_logs", () => {
     const parsed = DashboardOverviewSchema.parse({
@@ -43,6 +50,7 @@ describe("DashboardOverviewSchema", () => {
         },
         secondary: null,
       },
+      trends: EMPTY_TRENDS,
     });
 
     expect(parsed.accounts).toHaveLength(0);
@@ -75,6 +83,7 @@ describe("DashboardOverviewSchema", () => {
         },
         secondary: null,
       },
+      trends: EMPTY_TRENDS,
       request_logs: [{ request_id: "legacy-row" }],
     });
 

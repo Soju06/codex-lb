@@ -41,7 +41,7 @@ describe("auth flow integration", () => {
     window.history.pushState({}, "", "/dashboard");
     renderWithProviders(<App />);
 
-    expect(await screen.findByText("Dashboard Login")).toBeInTheDocument();
+    expect(await screen.findByText("Sign in")).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Password"), "secret-password");
     await user.click(screen.getByRole("button", { name: "Sign In" }));
@@ -49,8 +49,8 @@ describe("auth flow integration", () => {
     expect(await screen.findByText("Two-factor verification")).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("TOTP code"), "123456");
-    await user.click(screen.getByRole("button", { name: "Verify" }));
 
+    // Auto-submit triggers on 6-digit completion via onComplete
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
     });

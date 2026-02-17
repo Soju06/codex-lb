@@ -1,6 +1,6 @@
-import { Loader2 } from "lucide-react";
-
 import { cn } from "@/lib/utils";
+
+import { Spinner } from "@/components/ui/spinner";
 
 export type LoadingOverlayProps = {
   visible: boolean;
@@ -20,16 +20,16 @@ export function LoadingOverlay({
   return (
     <div
       className={cn(
-        "fixed inset-0 z-50 flex items-center justify-center bg-background/70 backdrop-blur-sm",
+        "fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm",
         className,
       )}
       role="status"
       aria-live="polite"
       aria-label={label}
     >
-      <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-sm shadow-sm">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        <span>{label}</span>
+      <div className="flex items-center gap-2.5 rounded-xl border bg-card px-5 py-3.5 text-sm shadow-lg">
+        <Spinner size="sm" />
+        <span className="font-medium">{label}</span>
       </div>
     </div>
   );

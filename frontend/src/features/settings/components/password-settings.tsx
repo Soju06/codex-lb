@@ -1,148 +1,282 @@
+import { zodResolver } from "@hookform/resolvers/zod";
+import { KeyRound } from "lucide-react";
 import { useState } from "react";
-import type { FormEvent } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
 
+import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { changePassword, removePassword, setupPassword } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import {
+  PasswordChangeRequestSchema,
+  PasswordRemoveRequestSchema,
+  PasswordSetupRequestSchema,
+} from "@/features/auth/schemas";
+import { getErrorMessage } from "@/utils/errors";
 
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return "Password request failed";
-}
+type PasswordDialog = "setup" | "change" | "remove" | null;
 
 export type PasswordSettingsProps = {
   disabled?: boolean;
 };
 
 export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
-  const refreshSession = useAuthStore((state) => state.refreshSession);
-  const [setupPasswordValue, setSetupPasswordValue] = useState("");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [removePasswordValue, setRemovePasswordValue] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const passwordRequired = useAuthStore((s) => s.passwordRequired);
+  const refreshSession = useAuthStore((s) => s.refreshSession);
+
+  const [activeDialog, setActiveDialog] = useState<PasswordDialog>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const setupForm = useForm({
+    resolver: zodResolver(PasswordSetupRequestSchema),
+    defaultValues: { password: "" },
+  });
+
+  const changeForm = useForm({
+    resolver: zodResolver(PasswordChangeRequestSchema),
+    defaultValues: { currentPassword: "", newPassword: "" },
+  });
+
+  const removeForm = useForm({
+    resolver: zodResolver(PasswordRemoveRequestSchema),
+    defaultValues: { password: "" },
+  });
+
+  const busy =
+    setupForm.formState.isSubmitting ||
+    changeForm.formState.isSubmitting ||
+    removeForm.formState.isSubmitting;
   const lock = busy || disabled;
 
-  const handleSetup = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setBusy(true);
-    setMessage(null);
+  const closeDialog = () => {
+    setActiveDialog(null);
+    setError(null);
+    setupForm.reset();
+    changeForm.reset();
+    removeForm.reset();
+  };
+
+  const handleSetup = async (values: { password: string }) => {
     setError(null);
     try {
-      await setupPassword({ password: setupPasswordValue });
+      await setupPassword(values);
       await refreshSession();
-      setMessage("Password configured.");
-      setSetupPasswordValue("");
+      toast.success("Password configured");
+      closeDialog();
     } catch (caught) {
       setError(getErrorMessage(caught));
-    } finally {
-      setBusy(false);
     }
   };
 
-  const handleChange = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setBusy(true);
-    setMessage(null);
+  const handleChange = async (values: { currentPassword: string; newPassword: string }) => {
     setError(null);
     try {
-      await changePassword({ currentPassword, newPassword });
-      setMessage("Password changed.");
-      setCurrentPassword("");
-      setNewPassword("");
+      await changePassword(values);
+      toast.success("Password changed");
+      closeDialog();
     } catch (caught) {
       setError(getErrorMessage(caught));
-    } finally {
-      setBusy(false);
     }
   };
 
-  const handleRemove = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setBusy(true);
-    setMessage(null);
+  const handleRemove = async (values: { password: string }) => {
     setError(null);
     try {
-      await removePassword({ password: removePasswordValue });
+      await removePassword(values);
       await refreshSession();
-      setMessage("Password removed.");
-      setRemovePasswordValue("");
+      toast.success("Password removed");
+      closeDialog();
     } catch (caught) {
       setError(getErrorMessage(caught));
-    } finally {
-      setBusy(false);
     }
   };
 
   return (
-    <section className="space-y-3 rounded-xl border p-4">
-      <div>
-        <h3 className="text-sm font-semibold">Password</h3>
-        <p className="text-xs text-muted-foreground">Setup, rotate, or remove dashboard password.</p>
+    <section className="rounded-xl border bg-card p-5">
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+            <KeyRound className="h-4 w-4 text-primary" aria-hidden="true" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold">Password</h3>
+            <p className="text-xs text-muted-foreground">
+              {passwordRequired ? "Password is configured." : "No password set."}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {passwordRequired ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={lock}
+                onClick={() => setActiveDialog("change")}
+              >
+                Change
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs text-destructive hover:text-destructive"
+                disabled={lock}
+                onClick={() => setActiveDialog("remove")}
+              >
+                Remove
+              </Button>
+            </>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              className="h-8 text-xs"
+              disabled={lock}
+              onClick={() => setActiveDialog("setup")}
+            >
+              Set password
+            </Button>
+          )}
+        </div>
+        </div>
       </div>
 
-      {message ? <p className="rounded-md bg-emerald-500/10 px-2 py-1 text-xs text-emerald-700">{message}</p> : null}
-      {error ? <p className="rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</p> : null}
+      {/* Setup dialog */}
+      <Dialog open={activeDialog === "setup"} onOpenChange={(open) => !open && closeDialog()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Set password</DialogTitle>
+            <DialogDescription>Set a password for dashboard login.</DialogDescription>
+          </DialogHeader>
+          {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+          <Form {...setupForm}>
+            <form onSubmit={setupForm.handleSubmit(handleSetup)} className="space-y-4">
+              <FormField
+                control={setupForm.control}
+                name="password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Password</FormLabel>
+                    <FormControl>
+                      <Input {...field} type="password" autoComplete="new-password" placeholder="Min. 8 characters" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={closeDialog} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={lock}>
+                  Set password
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
 
-      <form className="space-y-2 rounded-md border p-3" onSubmit={handleSetup}>
-        <Label htmlFor="setup-password">Setup password</Label>
-        <Input
-          id="setup-password"
-          type="password"
-          minLength={8}
-          value={setupPasswordValue}
-          onChange={(event) => setSetupPasswordValue(event.target.value)}
-        />
-        <Button type="submit" size="sm" disabled={lock || setupPasswordValue.length < 8}>
-          Setup
-        </Button>
-      </form>
+      {/* Change dialog */}
+      <Dialog open={activeDialog === "change"} onOpenChange={(open) => !open && closeDialog()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Change password</DialogTitle>
+            <DialogDescription>Enter your current password and a new one.</DialogDescription>
+          </DialogHeader>
+          {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+          <Form {...changeForm}>
+            <form onSubmit={changeForm.handleSubmit(handleChange)} className="space-y-4">
+              <FormField
+                control={changeForm.control}
+                name="currentPassword"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Current password</FormLabel>
+                    <FormControl>
+                      <Input {...field} type="password" autoComplete="current-password" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={changeForm.control}
+                name="newPassword"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>New password</FormLabel>
+                    <FormControl>
+                      <Input {...field} type="password" autoComplete="new-password" placeholder="Min. 8 characters" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={closeDialog} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={lock}>
+                  Change password
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
 
-      <form className="space-y-2 rounded-md border p-3" onSubmit={handleChange}>
-        <Label htmlFor="current-password">Current password</Label>
-        <Input
-          id="current-password"
-          type="password"
-          value={currentPassword}
-          onChange={(event) => setCurrentPassword(event.target.value)}
-        />
-        <Label htmlFor="new-password">New password</Label>
-        <Input
-          id="new-password"
-          type="password"
-          minLength={8}
-          value={newPassword}
-          onChange={(event) => setNewPassword(event.target.value)}
-        />
-        <Button
-          type="submit"
-          size="sm"
-          variant="outline"
-          disabled={lock || !currentPassword || newPassword.length < 8}
-        >
-          Change
-        </Button>
-      </form>
-
-      <form className="space-y-2 rounded-md border p-3" onSubmit={handleRemove}>
-        <Label htmlFor="remove-password">Confirm password to remove</Label>
-        <Input
-          id="remove-password"
-          type="password"
-          value={removePasswordValue}
-          onChange={(event) => setRemovePasswordValue(event.target.value)}
-        />
-        <Button type="submit" size="sm" variant="destructive" disabled={lock || !removePasswordValue}>
-          Remove password
-        </Button>
-      </form>
+      {/* Remove dialog */}
+      <Dialog open={activeDialog === "remove"} onOpenChange={(open) => !open && closeDialog()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove password</DialogTitle>
+            <DialogDescription>Confirm your current password to remove it.</DialogDescription>
+          </DialogHeader>
+          {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+          <Form {...removeForm}>
+            <form onSubmit={removeForm.handleSubmit(handleRemove)} className="space-y-4">
+              <FormField
+                control={removeForm.control}
+                name="password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Current password</FormLabel>
+                    <FormControl>
+                      <Input {...field} type="password" autoComplete="current-password" placeholder="Enter current password" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={closeDialog} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="destructive" disabled={lock}>
+                  Remove password
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

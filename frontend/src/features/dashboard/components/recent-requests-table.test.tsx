@@ -1,10 +1,19 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 
 const ISO = "2026-01-01T12:00:00+00:00";
+
+const PAGINATION_PROPS = {
+  total: 1,
+  limit: 25,
+  offset: 0,
+  hasMore: false,
+  onLimitChange: vi.fn(),
+  onOffsetChange: vi.fn(),
+};
 
 describe("RecentRequestsTable", () => {
   it("renders rows with status badges and supports error expansion", async () => {
@@ -13,6 +22,7 @@ describe("RecentRequestsTable", () => {
 
     render(
       <RecentRequestsTable
+        {...PAGINATION_PROPS}
         accounts={[
           {
             accountId: "acc-primary",
@@ -41,23 +51,20 @@ describe("RecentRequestsTable", () => {
       />,
     );
 
-    expect(screen.getByText("Recent Requests")).toBeInTheDocument();
     expect(screen.getByText("Primary Account")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.1 (high)")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
 
-    const expandButton = screen.getByRole("button", { name: "Expand" });
-    await user.click(expandButton);
-    expect(screen.getByRole("button", { name: "Collapse" })).toBeInTheDocument();
-    expect(
-      screen.getByText((content) =>
-        content.includes("Rate limit reached while processing this request"),
-      ),
-    ).toBeInTheDocument();
+    const viewButton = screen.getByRole("button", { name: "View" });
+    await user.click(viewButton);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByText("Error Detail")).toBeInTheDocument();
+    expect(dialog.textContent).toContain("Rate limit reached while processing this request");
   });
 
   it("renders empty state", () => {
-    render(<RecentRequestsTable accounts={[]} requests={[]} />);
+    render(<RecentRequestsTable {...PAGINATION_PROPS} total={0} accounts={[]} requests={[]} />);
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 });

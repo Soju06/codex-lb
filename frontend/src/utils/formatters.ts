@@ -41,6 +41,13 @@ export type AccountAuthStatus = {
   idToken?: TokenState | null;
 };
 
+export function formatSlug(value: string): string {
+  if (!value) return "";
+  const words = value.split("_");
+  words[0] = words[0].charAt(0).toUpperCase() + words[0].slice(1);
+  return words.join(" ");
+}
+
 export function toNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -221,7 +228,7 @@ export function truncateText(value: unknown, maxLen = 80): string {
   if (maxLen <= 3) {
     return text.slice(0, maxLen);
   }
-  return `${text.slice(0, maxLen - 3)}...`;
+  return `${text.slice(0, maxLen - 1)}\u2026`;
 }
 
 export function formatAccessTokenLabel(auth: AccountAuthStatus | null | undefined): string {
@@ -257,4 +264,55 @@ export function formatIdTokenLabel(auth: AccountAuthStatus | null | undefined): 
     unknown: "Unknown",
   };
   return state && labelMap[state] ? labelMap[state] : "Unknown";
+}
+
+export function toModels(value: string): string[] | undefined {
+  const values = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values : undefined;
+}
+
+export function toModelsNullable(value: string): string[] | null {
+  const values = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values : null;
+}
+
+export function toIsoDateTime(value: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+  return date.toISOString();
+}
+
+export function toIsoDateTimeNullable(value: string): string | null {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return date.toISOString();
+}
+
+export function toLocalDateTime(value: string | null): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const offset = date.getTimezoneOffset();
+  const adjusted = new Date(date.getTime() - offset * 60_000);
+  return adjusted.toISOString().slice(0, 16);
 }

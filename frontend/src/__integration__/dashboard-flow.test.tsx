@@ -43,7 +43,7 @@ describe("dashboard flow integration", () => {
     renderWithProviders(<App />);
 
     expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-    expect(await screen.findByText("Recent Requests")).toBeInTheDocument();
+    expect(await screen.findByText("Request Logs")).toBeInTheDocument();
 
     await waitFor(() => {
       expect(overviewCalls).toBeGreaterThan(0);
@@ -64,7 +64,7 @@ describe("dashboard flow integration", () => {
     expect(overviewCalls).toBe(overviewAfterLoad);
 
     const logsAfterFilter = requestLogCalls;
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
 
     await waitFor(() => {
       expect(requestLogCalls).toBeGreaterThan(logsAfterFilter);

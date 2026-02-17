@@ -1,23 +1,20 @@
-import { useMemo, useState } from "react";
+import { lazy, useMemo, useState } from "react";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
+import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
+import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
-import { OauthDialog } from "@/features/accounts/components/oauth-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { getErrorMessageOrNull } from "@/utils/errors";
 
-function getErrorMessage(error: unknown): string | null {
-  if (!error) {
-    return null;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return "Request failed";
-}
+const OauthDialog = lazy(() =>
+  import("@/features/accounts/components/oauth-dialog").then((m) => ({ default: m.OauthDialog })),
+);
 
 export function AccountsPage() {
   const {
@@ -30,9 +27,9 @@ export function AccountsPage() {
   const oauth = useOauth();
 
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
-  const [importOpen, setImportOpen] = useState(false);
-  const [oauthOpen, setOauthOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const importDialog = useDialogState();
+  const oauthDialog = useDialogState();
+  const deleteDialog = useDialogState<string>();
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
 
@@ -54,67 +51,69 @@ export function AccountsPage() {
     [accounts, resolvedSelectedAccountId],
   );
 
-  const busy =
-    accountsQuery.isFetching ||
+  const mutationBusy =
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     deleteMutation.isPending;
 
   const mutationError =
-    getErrorMessage(importMutation.error) ||
-    getErrorMessage(pauseMutation.error) ||
-    getErrorMessage(resumeMutation.error) ||
-    getErrorMessage(deleteMutation.error);
+    getErrorMessageOrNull(importMutation.error) ||
+    getErrorMessageOrNull(pauseMutation.error) ||
+    getErrorMessageOrNull(resumeMutation.error) ||
+    getErrorMessageOrNull(deleteMutation.error);
 
   return (
-    <section className="space-y-4">
+    <div className="animate-fade-in-up space-y-6">
+      {/* Page header */}
       <div>
-        <h1 className="text-2xl font-semibold">Accounts</h1>
-        <p className="text-sm text-muted-foreground">Manage imported accounts and authentication flows.</p>
+        <h1 className="text-2xl font-semibold tracking-tight">Accounts</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Manage imported accounts and authentication flows.
+        </p>
       </div>
 
-      {mutationError ? (
-        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {mutationError}
-        </p>
-      ) : null}
+      {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
 
-      <div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
-        <div className="rounded-xl border bg-card p-4">
-          <AccountList
-            accounts={accounts}
-            selectedAccountId={resolvedSelectedAccountId}
-            onSelect={setSelectedAccountId}
-            onOpenImport={() => setImportOpen(true)}
-            onOpenOauth={() => setOauthOpen(true)}
+      {!accountsQuery.data ? (
+        <AccountsSkeleton />
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
+          <div className="rounded-xl border bg-card p-4">
+            <AccountList
+              accounts={accounts}
+              selectedAccountId={resolvedSelectedAccountId}
+              onSelect={setSelectedAccountId}
+              onOpenImport={() => importDialog.show()}
+              onOpenOauth={() => oauthDialog.show()}
+            />
+          </div>
+
+          <AccountDetail
+            account={selectedAccount}
+            busy={mutationBusy}
+            onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
+            onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
+            onDelete={(accountId) => deleteDialog.show(accountId)}
+            onReauth={() => oauthDialog.show()}
           />
         </div>
-
-        <AccountDetail
-          account={selectedAccount}
-          busy={busy}
-          onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
-          onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
-          onDelete={(accountId) => setDeleteTarget(accountId)}
-          onReauth={() => setOauthOpen(true)}
-        />
-      </div>
+      )}
 
       <ImportDialog
-        open={importOpen}
+        open={importDialog.open}
         busy={importMutation.isPending}
-        error={getErrorMessage(importMutation.error)}
-        onOpenChange={setImportOpen}
+        error={getErrorMessageOrNull(importMutation.error)}
+        onOpenChange={importDialog.onOpenChange}
         onImport={async (file) => {
           await importMutation.mutateAsync(file);
         }}
       />
 
       <OauthDialog
-        open={oauthOpen}
+        open={oauthDialog.open}
         state={oauth.state}
-        onOpenChange={setOauthOpen}
+        onOpenChange={oauthDialog.onOpenChange}
         onStart={async (method) => {
           await oauth.start(method);
         }}
@@ -126,27 +125,23 @@ export function AccountsPage() {
       />
 
       <ConfirmDialog
-        open={deleteTarget !== null}
+        open={deleteDialog.open}
         title="Delete account"
         description="This action removes the account from the load balancer configuration."
         confirmLabel="Delete"
         cancelLabel="Cancel"
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleteTarget(null);
-          }
-        }}
+        onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
-          if (!deleteTarget) {
+          if (!deleteDialog.data) {
             return;
           }
-          void deleteMutation.mutateAsync(deleteTarget).finally(() => {
-            setDeleteTarget(null);
+          void deleteMutation.mutateAsync(deleteDialog.data).finally(() => {
+            deleteDialog.hide();
           });
         }}
       />
 
-      <LoadingOverlay visible={busy} label="Updating accounts..." />
-    </section>
+      <LoadingOverlay visible={!!accountsQuery.data && mutationBusy} label="Updating accounts..." />
+    </div>
   );
 }

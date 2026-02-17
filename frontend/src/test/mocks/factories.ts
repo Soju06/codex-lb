@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
+
 const isoDateSchema = z.string().datetime({ offset: true });
 
 const accountUsageSchema = z.object({
@@ -43,6 +45,18 @@ const usageWindowResponseSchema = z.object({
   accounts: z.array(usageHistoryItemSchema),
 });
 
+const trendPointSchema = z.object({
+  t: isoDateSchema,
+  v: z.number(),
+});
+
+const metricsTrendsSchema = z.object({
+  requests: z.array(trendPointSchema),
+  tokens: z.array(trendPointSchema),
+  cost: z.array(trendPointSchema),
+  errorRate: z.array(trendPointSchema),
+});
+
 const dashboardOverviewSchema = z.object({
   lastSyncAt: isoDateSchema.nullable(),
   accounts: z.array(accountSummarySchema),
@@ -81,6 +95,7 @@ const dashboardOverviewSchema = z.object({
     primary: usageWindowResponseSchema,
     secondary: usageWindowResponseSchema.nullable(),
   }),
+  trends: metricsTrendsSchema,
 });
 
 const requestLogEntrySchema = z.object({
@@ -150,18 +165,29 @@ const oauthCompleteSchema = z.object({
   status: z.string(),
 });
 
+const limitRuleSchema = z.object({
+  id: z.number(),
+  limitType: z.enum(LIMIT_TYPES),
+  limitWindow: z.enum(LIMIT_WINDOWS),
+  maxValue: z.number(),
+  currentValue: z.number(),
+  modelFilter: z.string().nullable(),
+  resetAt: isoDateSchema,
+});
+
 const apiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
-  weeklyTokenLimit: z.number().nullable(),
-  weeklyTokensUsed: z.number(),
-  weeklyResetAt: isoDateSchema,
+  weeklyTokenLimit: z.number().nullable().optional(),
+  weeklyTokensUsed: z.number().optional(),
+  weeklyResetAt: isoDateSchema.nullable().optional(),
   expiresAt: isoDateSchema.nullable(),
   isActive: z.boolean(),
   createdAt: isoDateSchema,
   lastUsedAt: isoDateSchema.nullable(),
+  limits: z.array(limitRuleSchema).default([]),
 });
 
 const apiKeyCreateSchema = apiKeySchema.extend({
@@ -225,6 +251,13 @@ export function createDefaultAccounts(): AccountSummary[] {
   ];
 }
 
+function createTrendPoints(baseValue: number, count = 28): Array<{ t: string; v: number }> {
+  return Array.from({ length: count }, (_, i) => ({
+    t: new Date(BASE_TIME.getTime() - (count - i) * 6 * 3600_000).toISOString(),
+    v: Math.max(0, baseValue + Math.sin(i) * baseValue * 0.3),
+  }));
+}
+
 export function createDashboardOverview(overrides: Partial<DashboardOverview> = {}): DashboardOverview {
   const accounts = overrides.accounts ?? createDefaultAccounts();
   const response = {
@@ -278,6 +311,12 @@ export function createDashboardOverview(overrides: Partial<DashboardOverview> = 
           remainingCredits: ((account.usage?.secondaryRemainingPercent ?? 0) / 100) * 7560,
         })),
       },
+    },
+    trends: {
+      requests: createTrendPoints(8),
+      tokens: createTrendPoints(1600),
+      cost: createTrendPoints(0.065),
+      errorRate: createTrendPoints(0.03),
     },
     ...overrides,
   };
@@ -426,6 +465,17 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
     isActive: true,
     createdAt: offsetIso(-60),
     lastUsedAt: offsetIso(-5),
+    limits: [
+      {
+        id: 1,
+        limitType: "total_tokens",
+        limitWindow: "weekly",
+        maxValue: 1_000_000,
+        currentValue: 125_000,
+        modelFilter: null,
+        resetAt: offsetIso(7 * 24 * 60),
+      },
+    ],
     ...overrides,
   });
 }
@@ -449,10 +499,11 @@ export function createDefaultApiKeys(): ApiKey[] {
       keyPrefix: "sk-second",
       allowedModels: ["gpt-4o-mini"],
       weeklyTokenLimit: null,
-      weeklyTokensUsed: 12_000,
+      weeklyTokensUsed: 0,
       isActive: false,
       expiresAt: null,
       lastUsedAt: null,
+      limits: [],
     }),
   ];
 }

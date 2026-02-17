@@ -110,7 +110,7 @@ describe("formatters", () => {
 
   it("truncates long text safely", () => {
     expect(truncateText("short", 10)).toBe("short");
-    expect(truncateText("1234567890", 5)).toBe("12...");
+    expect(truncateText("1234567890", 5)).toBe("1234\u2026");
     expect(truncateText(null, 5)).toBe("");
   });
 

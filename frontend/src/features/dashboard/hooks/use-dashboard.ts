@@ -7,5 +7,7 @@ export function useDashboard() {
     queryKey: ["dashboard", "overview"],
     queryFn: getDashboardOverview,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 }

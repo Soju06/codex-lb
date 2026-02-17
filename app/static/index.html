@@ -92,7 +92,7 @@
                     </div>
                   </div>
                   <ul class="legend">
-                    <template x-for="item in donut.items" :key="item.label">
+                    <template x-for="item in donut.items" :key="item.key">
                       <li>
                         <span class="legend-label">
                           <i :style="{ '--legend-color': item.color }"></i>

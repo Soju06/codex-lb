@@ -818,7 +818,7 @@
 		const accountMap = new Map(
 			(accounts || []).map((account) => [account.id, account]),
 		);
-		const items = (entries || []).map((entry) => {
+		const rawItems = (entries || []).map((entry) => {
 			const account = accountMap.get(entry.accountId);
 			const label = account ? account.email : entry.accountId;
 			const value = toNumber(entry.remainingCredits) || 0;
@@ -842,9 +842,29 @@
 			const remainingPercent = Math.min(100, Math.max(0, rawPercent));
 			return {
 				accountId: entry.accountId,
-				label,
+				baseLabel: label,
 				value,
 				remainingPercent,
+			};
+		});
+		const labelCounts = rawItems.reduce((acc, item) => {
+			const key = String(item.baseLabel || "");
+			acc[key] = (acc[key] || 0) + 1;
+			return acc;
+		}, {});
+		const items = rawItems.map((item) => {
+			const count = labelCounts[String(item.baseLabel || "")] || 0;
+			const shortAccountId = String(item.accountId || "").slice(0, 8);
+			const label =
+				count > 1 && shortAccountId
+					? `${item.baseLabel} (${shortAccountId})`
+					: item.baseLabel;
+			return {
+				accountId: item.accountId,
+				key: item.accountId || label,
+				label,
+				value: item.value,
+				remainingPercent: item.remainingPercent,
 			};
 		});
 		items.sort((a, b) => {
@@ -1026,6 +1046,7 @@
 					valueClass = "limited";
 				}
 				return {
+					key: item.key,
 					label: truncateText(item.label, 28),
 					fullLabel: item.label,
 					detailLabel: "Remaining",
@@ -1046,6 +1067,7 @@
 					consumedClass = "limited";
 				}
 				legendItems.push({
+					key: `consumed-${window.key}`,
 					label: "Consumed",
 					fullLabel: "Consumed",
 					detailLabel: "",

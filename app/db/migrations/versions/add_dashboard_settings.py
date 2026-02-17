@@ -38,6 +38,9 @@ async def run(session: AsyncSession) -> None:
     if "totp_required_on_login" in columns:
         insert_columns.append("totp_required_on_login")
         params["totp_required_on_login"] = False
+    if "import_without_overwrite" in columns:
+        insert_columns.append("import_without_overwrite")
+        params["import_without_overwrite"] = False
 
     column_list = ", ".join(insert_columns)
     values_list = ", ".join(f":{name}" for name in insert_columns)

@@ -1417,6 +1417,7 @@
 	const normalizeSettingsPayload = (payload) => ({
 		stickyThreadsEnabled: Boolean(payload?.stickyThreadsEnabled),
 		preferEarlierResetAccounts: Boolean(payload?.preferEarlierResetAccounts),
+		importWithoutOverwrite: Boolean(payload?.importWithoutOverwrite),
 		totpRequiredOnLogin: Boolean(payload?.totpRequiredOnLogin),
 		totpConfigured: Boolean(payload?.totpConfigured),
 	});
@@ -1453,24 +1454,25 @@
 				hasLoaded: false,
 			},
 
-					settings: {
-						stickyThreadsEnabled: false,
-						preferEarlierResetAccounts: false,
-						totpRequiredOnLogin: false,
-						totpConfigured: false,
-						setupToken: "",
-						totpSetup: {
-							open: false,
-							secret: "",
-							otpauthUri: "",
-						qrSvgDataUri: "",
-						code: "",
-						isSubmitting: false,
-					},
-					isLoading: false,
-					isSaving: false,
-					hasLoaded: false,
+			settings: {
+				stickyThreadsEnabled: false,
+				preferEarlierResetAccounts: false,
+				importWithoutOverwrite: false,
+				totpRequiredOnLogin: false,
+				totpConfigured: false,
+				setupToken: "",
+				totpSetup: {
+					open: false,
+					secret: "",
+					otpauthUri: "",
+					qrSvgDataUri: "",
+					code: "",
+					isSubmitting: false,
 				},
+				isLoading: false,
+				isSaving: false,
+				hasLoaded: false,
+			},
 			accounts: {
 				selectedId: "",
 				rows: [],
@@ -1637,6 +1639,8 @@
 						this.settings.stickyThreadsEnabled = settings.stickyThreadsEnabled;
 						this.settings.preferEarlierResetAccounts =
 							settings.preferEarlierResetAccounts;
+						this.settings.importWithoutOverwrite =
+							settings.importWithoutOverwrite;
 						this.settings.totpRequiredOnLogin = settings.totpRequiredOnLogin;
 						this.settings.totpConfigured = settings.totpConfigured;
 						this.settings.hasLoaded = true;
@@ -2073,29 +2077,32 @@
 				} else if (!this.accounts.selectedId && this.accounts.rows.length > 0) {
 					this.accounts.selectedId = this.accounts.rows[0].id;
 				}
-					this.dashboardData = buildDashboardDataFromApi({
-						summary: data.summary,
-						primaryUsage: data.primaryUsage,
-						secondaryUsage: data.secondaryUsage,
-						requestLogs: data.requestLogs,
-						lastSyncAt: data.lastSyncAt,
-					});
-					if (data.settings) {
-						this.settings.stickyThreadsEnabled = Boolean(
-							data.settings.stickyThreadsEnabled,
-						);
-						this.settings.preferEarlierResetAccounts = Boolean(
-							data.settings.preferEarlierResetAccounts,
-						);
-						this.settings.totpRequiredOnLogin = Boolean(
-							data.settings.totpRequiredOnLogin,
-						);
-						this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
-					}
-					this.ui.usageWindows = buildUsageWindowConfig(data.summary);
-					this.dashboard = buildDashboardView(this);
-					this.syncAccountSearchSelection();
-				},
+				this.dashboardData = buildDashboardDataFromApi({
+					summary: data.summary,
+					primaryUsage: data.primaryUsage,
+					secondaryUsage: data.secondaryUsage,
+					requestLogs: data.requestLogs,
+					lastSyncAt: data.lastSyncAt,
+				});
+				if (data.settings) {
+					this.settings.stickyThreadsEnabled = Boolean(
+						data.settings.stickyThreadsEnabled,
+					);
+					this.settings.preferEarlierResetAccounts = Boolean(
+						data.settings.preferEarlierResetAccounts,
+					);
+					this.settings.importWithoutOverwrite = Boolean(
+						data.settings.importWithoutOverwrite,
+					);
+					this.settings.totpRequiredOnLogin = Boolean(
+						data.settings.totpRequiredOnLogin,
+					);
+					this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
+				}
+				this.ui.usageWindows = buildUsageWindowConfig(data.summary);
+				this.dashboard = buildDashboardView(this);
+				this.syncAccountSearchSelection();
+			},
 			async saveSettings() {
 				if (this.settings.isSaving) {
 					return;
@@ -2111,6 +2118,7 @@
 					const payload = {
 						stickyThreadsEnabled: this.settings.stickyThreadsEnabled,
 						preferEarlierResetAccounts: this.settings.preferEarlierResetAccounts,
+						importWithoutOverwrite: this.settings.importWithoutOverwrite,
 						totpRequiredOnLogin: this.settings.totpRequiredOnLogin,
 					};
 					const updated = await putJson(
@@ -2122,6 +2130,8 @@
 					this.settings.stickyThreadsEnabled = normalized.stickyThreadsEnabled;
 					this.settings.preferEarlierResetAccounts =
 						normalized.preferEarlierResetAccounts;
+					this.settings.importWithoutOverwrite =
+						normalized.importWithoutOverwrite;
 					this.settings.totpRequiredOnLogin = normalized.totpRequiredOnLogin;
 					this.settings.totpConfigured = normalized.totpConfigured;
 					if (this.settings.totpRequiredOnLogin) {

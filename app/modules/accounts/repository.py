@@ -5,7 +5,10 @@ from datetime import datetime
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, AccountStatus, RequestLog, StickySession, UsageHistory
+from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
+
+_SETTINGS_ROW_ID = 1
+_DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 
 
 class AccountsRepository:
@@ -16,21 +19,27 @@ class AccountsRepository:
         result = await self._session.execute(select(Account).order_by(Account.email))
         return list(result.scalars().all())
 
-    async def upsert(self, account: Account) -> Account:
+    async def upsert(self, account: Account, *, merge_by_email: bool | None = None) -> Account:
+        if merge_by_email is None:
+            merge_by_email = await self._merge_by_email_enabled()
+
         existing = await self._session.get(Account, account.id)
         if existing:
-            _apply_account_updates(existing, account)
-            await self._session.commit()
-            await self._session.refresh(existing)
-            return existing
+            if merge_by_email:
+                _apply_account_updates(existing, account)
+                await self._session.commit()
+                await self._session.refresh(existing)
+                return existing
+            account.id = await self._next_available_account_id(account.id)
 
-        result = await self._session.execute(select(Account).where(Account.email == account.email))
-        existing_by_email = result.scalar_one_or_none()
-        if existing_by_email:
-            _apply_account_updates(existing_by_email, account)
-            await self._session.commit()
-            await self._session.refresh(existing_by_email)
-            return existing_by_email
+        if merge_by_email:
+            result = await self._session.execute(select(Account).where(Account.email == account.email))
+            existing_by_email = result.scalar_one_or_none()
+            if existing_by_email:
+                _apply_account_updates(existing_by_email, account)
+                await self._session.commit()
+                await self._session.refresh(existing_by_email)
+                return existing_by_email
 
         self._session.add(account)
         await self._session.commit()
@@ -89,6 +98,20 @@ class AccountsRepository:
         )
         await self._session.commit()
         return result.scalar_one_or_none() is not None
+
+    async def _merge_by_email_enabled(self) -> bool:
+        settings = await self._session.get(DashboardSettings, _SETTINGS_ROW_ID)
+        if settings is None:
+            return True
+        return not settings.import_without_overwrite
+
+    async def _next_available_account_id(self, base_id: str) -> str:
+        candidate = base_id
+        sequence = 2
+        while await self._session.get(Account, candidate) is not None:
+            candidate = f"{base_id}{_DUPLICATE_ACCOUNT_SUFFIX}{sequence}"
+            sequence += 1
+        return candidate
 
 
 def _apply_account_updates(target: Account, source: Account) -> None:

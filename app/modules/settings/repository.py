@@ -20,6 +20,7 @@ class SettingsRepository:
             id=_SETTINGS_ID,
             sticky_threads_enabled=False,
             prefer_earlier_reset_accounts=False,
+            import_without_overwrite=False,
             totp_required_on_login=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
@@ -34,6 +35,7 @@ class SettingsRepository:
         *,
         sticky_threads_enabled: bool | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
+        import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -41,6 +43,8 @@ class SettingsRepository:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if prefer_earlier_reset_accounts is not None:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
+        if import_without_overwrite is not None:
+            settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:
             settings.totp_required_on_login = totp_required_on_login
         await self.commit_refresh(settings)

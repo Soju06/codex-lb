@@ -9,6 +9,7 @@ from app.modules.settings.repository import SettingsRepository
 class DashboardSettingsData:
     sticky_threads_enabled: bool
     prefer_earlier_reset_accounts: bool
+    import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
 
@@ -17,6 +18,7 @@ class DashboardSettingsData:
 class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
     prefer_earlier_reset_accounts: bool
+    import_without_overwrite: bool
     totp_required_on_login: bool
 
 
@@ -29,6 +31,7 @@ class SettingsService:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
+            import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
         )
@@ -40,11 +43,13 @@ class SettingsService:
         row = await self._repository.update(
             sticky_threads_enabled=payload.sticky_threads_enabled,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
+            import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
+            import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
         )

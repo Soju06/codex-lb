@@ -113,7 +113,7 @@
           <section style="margin-top: 12px">
             <h3>Account status</h3>
             <div class="account-grid">
-              <template x-for="card in dashboard.accountCards" :key="card.email">
+              <template x-for="card in dashboard.accountCards" :key="card.accountId">
                 <div class="account-card">
                   <header>
                     <div>
@@ -537,6 +537,16 @@
               <div id="reset-priority-help" class="text-muted" style="margin-top: 6px">
                 When enabled, the load balancer prefers accounts whose secondary quota resets sooner, then balances
                 usage.
+              </div>
+            </fieldset>
+
+            <fieldset class="settings-fieldset" :disabled="settings.isLoading || settings.isSaving || !settings.hasLoaded">
+              <legend>Account import behavior</legend>
+              <input id="import-without-overwrite-toggle" type="checkbox" x-model="settings.importWithoutOverwrite"
+                aria-describedby="import-without-overwrite-help">
+              <label for="import-without-overwrite-toggle">Do not overwrite existing accounts on duplicate imports</label>
+              <div id="import-without-overwrite-help" class="text-muted" style="margin-top: 6px">
+                Keeps repeated imports as separate local accounts, even with the same email/account identity.
               </div>
             </fieldset>
 

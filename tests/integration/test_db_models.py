@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, StatementError
+from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
@@ -29,14 +29,16 @@ def _make_account(account_id: str, email: str, status: AccountStatus) -> Account
 
 
 @pytest.mark.asyncio
-async def test_duplicate_emails_rejected(db_setup):
+async def test_duplicate_emails_allowed(db_setup):
     async with SessionLocal() as session:
         session.add(_make_account("acc1", "dup@example.com", AccountStatus.ACTIVE))
         await session.commit()
 
         session.add(_make_account("acc2", "dup@example.com", AccountStatus.ACTIVE))
-        with pytest.raises(IntegrityError):
-            await session.commit()
+        await session.commit()
+
+        rows = await session.execute(select(Account).where(Account.email == "dup@example.com"))
+        assert len(list(rows.scalars().all())) == 2
 
 
 @pytest.mark.asyncio

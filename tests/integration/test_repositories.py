@@ -55,6 +55,28 @@ async def test_accounts_upsert_updates_existing_by_email(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_accounts_upsert_with_merge_disabled_keeps_duplicate_identity(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        first = await repo.upsert(_make_account("acc_same", "dup@example.com"), merge_by_email=False)
+
+        updated = _make_account("acc_same", "dup@example.com")
+        updated.plan_type = "team"
+        second = await repo.upsert(updated, merge_by_email=False)
+
+        assert first.id == "acc_same"
+        assert second.id != first.id
+        assert second.id.startswith("acc_same__copy")
+
+        result = await session.execute(select(Account).where(Account.email == "dup@example.com"))
+        rows = list(result.scalars().all())
+        assert len(rows) == 2
+        row_ids = {row.id for row in rows}
+        assert first.id in row_ids
+        assert second.id in row_ids
+
+
+@pytest.mark.asyncio
 async def test_usage_repository_aggregate(db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

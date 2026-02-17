@@ -92,8 +92,17 @@ async def v1_responses(
     return await _collect_responses(request, responses_payload, context)
 
 
+@router.get("/models", response_model=ModelListResponse)
+async def models(request: Request) -> ModelListResponse:
+    return _build_models_response(request)
+
+
 @v1_router.get("/models", response_model=ModelListResponse)
 async def v1_models(request: Request) -> ModelListResponse:
+    return _build_models_response(request)
+
+
+def _build_models_response(request: Request) -> ModelListResponse:
     api_key = _request_api_key(request)
     allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     created = int(time.time())

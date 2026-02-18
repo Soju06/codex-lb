@@ -31,12 +31,12 @@ describe("MultiSelectFilter", () => {
     expect(screen.getByText("Status (2)")).toBeInTheDocument();
   });
 
-  it("falls back to count label when option not found for single value", () => {
+  it("shows the raw value when selected value is not in options", () => {
     render(
       <MultiSelectFilter label="Status" values={["unknown"]} options={OPTIONS} onChange={vi.fn()} />,
     );
 
-    expect(screen.getByText("Status (1)")).toBeInTheDocument();
+    expect(screen.getByText("unknown")).toBeInTheDocument();
   });
 
   it("toggles value on when clicking an unselected option", async () => {
@@ -70,5 +70,63 @@ describe("MultiSelectFilter", () => {
     await user.click(screen.getByRole("button"));
 
     expect(await screen.findByText("No options")).toBeInTheDocument();
+  });
+
+  it("renders stale selected values with a badge and allows toggling off", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <MultiSelectFilter
+        label="Status"
+        values={["unknown"]}
+        options={OPTIONS}
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button"));
+    expect(await screen.findByRole("menuitemcheckbox", { name: /unknown/i })).toBeInTheDocument();
+    expect(await screen.findByText("Stale")).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /unknown/i }));
+    expect(onChange).toHaveBeenCalledWith([]);
+  });
+
+  it("supports stale chip removal without global reset", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <MultiSelectFilter
+        label="Status"
+        values={["ok", "unknown"]}
+        options={OPTIONS}
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button"));
+    await user.click(await screen.findByRole("button", { name: "Remove stale unknown" }));
+
+    expect(onChange).toHaveBeenCalledWith(["ok"]);
+  });
+
+  it("does not interfere when stale and normal values are toggled independently", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <MultiSelectFilter
+        label="Status"
+        values={["ok", "unknown"]}
+        options={OPTIONS}
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button"));
+    await user.click(await screen.findByText("OK"));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /unknown/i }));
+
+    expect(onChange).toHaveBeenNthCalledWith(1, ["unknown"]);
+    expect(onChange).toHaveBeenNthCalledWith(2, ["ok"]);
   });
 });

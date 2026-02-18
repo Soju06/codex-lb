@@ -41,6 +41,7 @@ const ApiKeyUpdatePayloadSchema = z.object({
   name: z.string().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   isActive: z.boolean().optional(),
+  resetUsage: z.boolean().optional(),
   limits: z.array(
     z.object({
       limitType: z.enum(LIMIT_TYPES),
@@ -93,7 +94,8 @@ function parseDateValue(value: string | null): number | null {
   return Number.isNaN(timestamp) ? null : timestamp;
 }
 
-function filterRequestLogs(url: URL): RequestLogEntry[] {
+function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): RequestLogEntry[] {
+  const includeStatuses = options?.includeStatuses ?? true;
   const accountIds = new Set(url.searchParams.getAll("accountId"));
   const statuses = new Set(url.searchParams.getAll("status").map((value) => value.toLowerCase()));
   const models = new Set(url.searchParams.getAll("model"));
@@ -108,7 +110,7 @@ function filterRequestLogs(url: URL): RequestLogEntry[] {
       return false;
     }
 
-    if (statuses.size > 0 && !statuses.has("all") && !statuses.has(entry.status)) {
+    if (includeStatuses && statuses.size > 0 && !statuses.has("all") && !statuses.has(entry.status)) {
       return false;
     }
 
@@ -225,7 +227,7 @@ export const handlers = [
   }),
 
   http.get("/api/request-logs/options", ({ request }) => {
-    const filtered = filterRequestLogs(new URL(request.url));
+    const filtered = filterRequestLogs(new URL(request.url), { includeStatuses: false });
     return HttpResponse.json(requestLogOptionsFromEntries(filtered));
   }),
 

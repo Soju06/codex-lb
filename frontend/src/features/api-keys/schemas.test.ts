@@ -16,9 +16,6 @@ describe("ApiKeySchema", () => {
       name: "Service Key",
       keyPrefix: "sk-live",
       allowedModels: ["gpt-4.1"],
-      weeklyTokenLimit: 100000,
-      weeklyTokensUsed: 1200,
-      weeklyResetAt: ISO,
       expiresAt: null,
       isActive: true,
       createdAt: ISO,
@@ -108,6 +105,14 @@ describe("ApiKeyUpdateRequestSchema", () => {
 
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits![0].limitType).toBe("cost_usd");
+  });
+
+  it("accepts resetUsage flag", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      resetUsage: true,
+    });
+
+    expect(parsed.resetUsage).toBe(true);
   });
 });
 

@@ -884,3 +884,199 @@ async def test_allowed_but_unsupported_model_is_not_exposed(async_client):
     ids = {item["id"] for item in listed.json()["data"]}
     assert _TEST_MODELS[0] in ids
     assert _HIDDEN_MODEL not in ids
+
+
+# ---------------------------------------------------------------------------
+# Reservation lifecycle regression tests (fix-api-key-reservation-leak)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch):
+    """401 refresh retry 성공 시 finalize 1회만 호출되어 usage가 정확히 반영된다."""
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "stream-401-retry",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_401_retry", "acc-401-retry@example.com")
+
+    call_count = {"value": 0}
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise ProxyResponseError(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": "unauthorized"}})
+        usage = {"input_tokens": 20, "output_tokens": 10}
+        event = {"type": "response.completed", "response": {"id": "resp_retry", "usage": usage}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    assert call_count["value"] == 2  # first failed, second succeeded
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 30  # 20 input + 10 output, finalized once
+
+
+@pytest.mark.asyncio
+async def test_stream_no_accounts_releases_reservation(async_client, monkeypatch):
+    """no_accounts 즉시 종료 시 reservation이 release되어 quota가 원복된다."""
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "stream-no-accounts",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    # Intentionally NOT importing any accounts → no_accounts path
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+        assert any("no_accounts" in line for line in lines)
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0  # reservation released
+
+
+@pytest.mark.asyncio
+async def test_compact_unexpected_exception_releases_reservation(async_client, monkeypatch):
+    """compact에서 ProxyResponseError 외 일반 예외 발생 시 reservation이 release된다."""
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-unexpected-error",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_compact_unexpected", "compact-unexpected@example.com")
+
+    async def raising_compact(_payload, _headers, _access_token, _account_id):
+        raise RuntimeError("unexpected internal error")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", raising_compact)
+
+    # ASGITransport propagates unhandled exceptions directly in tests
+    with pytest.raises(RuntimeError, match="unexpected internal error"):
+        await async_client.post(
+            "/v1/responses/compact",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+        )
+
+    # Despite the unhandled exception, the finally block should have released the reservation
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0  # reservation released despite unexpected error
+
+
+@pytest.mark.asyncio
+async def test_stream_without_api_key_auth_skips_settlement(async_client, monkeypatch):
+    """API key auth 비활성 시 정산 로직이 스킵되고 에러 없이 동작한다."""
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": False,
+        },
+    )
+    assert enable.status_code == 200
+
+    await _import_account(async_client, "acc_no_auth", "no-auth@example.com")
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        usage = {"input_tokens": 10, "output_tokens": 5}
+        event = {"type": "response.completed", "response": {"id": "resp_no_auth", "usage": usage}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+        assert len(lines) >= 1  # stream completed without error

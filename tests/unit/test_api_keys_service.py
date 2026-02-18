@@ -662,3 +662,77 @@ async def test_finalize_usage_reservation_is_idempotent() -> None:
 
     limits = await repo.get_limits_by_key(created.id)
     assert limits[0].current_value == 15
+
+
+@pytest.mark.asyncio
+async def test_release_after_finalize_is_noop() -> None:
+    """Finalize 후 release 호출 시 quota 이중 반영 없음 (멱등성)."""
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="finalize-then-release-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 100  # reserved
+
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=10,
+        output_tokens=5,
+        cached_input_tokens=0,
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 15  # finalized: 100 -> 15
+
+    # Release after finalize should be no-op
+    await service.release_usage_reservation(reservation.reservation_id)
+
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 15  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_finalize_after_release_is_noop() -> None:
+    """Release 후 finalize 호출 시 quota 반영 없음 (멱등성)."""
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="release-then-finalize-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    await service.release_usage_reservation(reservation.reservation_id)
+
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 0  # released: 100 -> 0
+
+    # Finalize after release should be no-op
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=10,
+        output_tokens=5,
+        cached_input_tokens=0,
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 0  # unchanged

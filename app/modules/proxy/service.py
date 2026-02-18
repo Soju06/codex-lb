@@ -31,7 +31,7 @@ from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
@@ -69,6 +69,7 @@ class ProxyService:
         *,
         propagate_http_errors: bool = False,
         api_key: ApiKeyData | None = None,
+        api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         _maybe_log_proxy_request_shape("stream", payload, headers)
@@ -78,6 +79,7 @@ class ProxyService:
             filtered,
             propagate_http_errors=propagate_http_errors,
             api_key=api_key,
+            api_key_reservation=api_key_reservation,
         )
 
     async def compact_responses(
@@ -86,6 +88,7 @@ class ProxyService:
         headers: Mapping[str, str],
         *,
         api_key: ApiKeyData | None = None,
+        api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> OpenAIResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
@@ -115,10 +118,19 @@ class ProxyService:
 
         try:
             response = await _call_compact(account)
-            await self._record_compact_api_key_usage(api_key=api_key, response=response)
+            await self._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                response=response,
+            )
             return response
         except ProxyResponseError as exc:
             if exc.status_code != 401:
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                )
                 await self._handle_proxy_error(account, exc)
                 raise
             try:
@@ -126,49 +138,63 @@ class ProxyService:
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                )
                 raise exc
             try:
                 response = await _call_compact(account)
-                await self._record_compact_api_key_usage(api_key=api_key, response=response)
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=response,
+                )
                 return response
             except ProxyResponseError as exc:
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                )
                 await self._handle_proxy_error(account, exc)
                 raise
 
-    async def _record_compact_api_key_usage(
+    async def _settle_compact_api_key_usage(
         self,
         *,
         api_key: ApiKeyData | None,
-        response: OpenAIResponsePayload,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+        response: OpenAIResponsePayload | None,
     ) -> None:
-        if api_key is None:
+        if api_key is None or api_key_reservation is None:
             return
-        usage = response.usage
+
+        reservation_id = api_key_reservation.reservation_id
+        usage = response.usage if response is not None else None
         input_tokens = usage.input_tokens if usage else None
         output_tokens = usage.output_tokens if usage else None
-        if input_tokens is None or output_tokens is None:
-            return
-        cached_input_tokens = 0
-        if usage and usage.input_tokens_details:
-            cached_input_tokens = usage.input_tokens_details.cached_tokens or 0
-        model = getattr(response, "model", None) or ""
+        cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else 0
+        model_name = api_key_reservation.model or (getattr(response, "model", None) or "")
 
         with anyio.CancelScope(shield=True):
             try:
                 async with self._repo_factory() as repos:
-                    from app.modules.api_keys.service import ApiKeysService
-
                     api_keys_service = ApiKeysService(repos.api_keys)
-                    await api_keys_service.record_usage(
-                        api_key.id,
-                        model=model,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cached_input_tokens=cached_input_tokens,
-                    )
+                    if response is not None and input_tokens is not None and output_tokens is not None:
+                        await api_keys_service.finalize_usage_reservation(
+                            reservation_id,
+                            model=model_name,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            cached_input_tokens=cached_input_tokens or 0,
+                        )
+                    else:
+                        await api_keys_service.release_usage_reservation(reservation_id)
             except Exception:
                 logger.warning(
-                    "Failed to increment compact API key usage key_id=%s request_id=%s",
+                    "Failed to settle compact API key reservation key_id=%s request_id=%s",
                     api_key.id,
                     get_request_id(),
                     exc_info=True,
@@ -252,6 +278,7 @@ class ProxyService:
         *,
         propagate_http_errors: bool,
         api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         settings = await get_settings_cache().get()
@@ -285,6 +312,7 @@ class ProxyService:
                     request_id,
                     attempt < max_attempts - 1,
                     api_key=api_key,
+                    api_key_reservation=api_key_reservation,
                 ):
                     yield line
                 return
@@ -306,6 +334,7 @@ class ProxyService:
                         request_id,
                         False,
                         api_key=api_key,
+                        api_key_reservation=api_key_reservation,
                     ):
                         yield line
                     return
@@ -369,6 +398,7 @@ class ProxyService:
         allow_retry: bool,
         *,
         api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -380,6 +410,7 @@ class ProxyService:
         error_code = None
         error_message = None
         usage = None
+        settle_reservation = True
 
         try:
             stream = core_stream_responses(
@@ -410,6 +441,7 @@ class ProxyService:
                 error_message = error.message if error else None
                 if allow_retry:
                     error_payload = _upstream_error_from_openai(error)
+                    settle_reservation = False
                     raise _RetryableStreamError(code, error_payload)
 
             if event and event.type in ("response.completed", "response.incomplete"):
@@ -476,17 +508,6 @@ class ProxyService:
                             error_code=error_code,
                             error_message=error_message,
                         )
-                        if api_key is not None and input_tokens is not None and output_tokens is not None:
-                            from app.modules.api_keys.service import ApiKeysService
-
-                            api_keys_service = ApiKeysService(repos.api_keys)
-                            await api_keys_service.record_usage(
-                                api_key.id,
-                                model=model,
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                cached_input_tokens=cached_input_tokens or 0,
-                            )
                 except Exception:
                     logger.warning(
                         "Failed to persist request log account_id=%s request_id=%s",
@@ -494,6 +515,29 @@ class ProxyService:
                         request_id,
                         exc_info=True,
                     )
+                if settle_reservation and api_key is not None and api_key_reservation is not None:
+                    try:
+                        async with self._repo_factory() as repos:
+                            api_keys_service = ApiKeysService(repos.api_keys)
+                            if status == "success" and input_tokens is not None and output_tokens is not None:
+                                await api_keys_service.finalize_usage_reservation(
+                                    api_key_reservation.reservation_id,
+                                    model=api_key_reservation.model or model,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    cached_input_tokens=cached_input_tokens or 0,
+                                )
+                            else:
+                                await api_keys_service.release_usage_reservation(
+                                    api_key_reservation.reservation_id,
+                                )
+                    except Exception:
+                        logger.warning(
+                            "Failed to settle stream API key reservation key_id=%s request_id=%s",
+                            api_key.id,
+                            request_id,
+                            exc_info=True,
+                        )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
         latest_usage = await repos.usage.latest_by_account(window="primary")

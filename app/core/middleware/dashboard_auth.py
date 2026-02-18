@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request
@@ -11,7 +12,7 @@ from app.core.errors import dashboard_error, openai_error
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyRateLimitExceededError, ApiKeysService
+from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeysService
 from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
 
 PUBLIC_PATHS = {"/health"}
@@ -19,6 +20,7 @@ PUBLIC_PREFIXES = ("/api/dashboard-auth/",)
 PROXY_PREFIXES = ("/v1/", "/backend-api/codex/")
 CODEX_USAGE_PATH = "/api/codex/usage"
 CODEX_USAGE_PATHS = {CODEX_USAGE_PATH, f"{CODEX_USAGE_PATH}/"}
+logger = logging.getLogger(__name__)
 
 
 def add_auth_middleware(app: FastAPI) -> None:
@@ -54,12 +56,24 @@ def add_auth_middleware(app: FastAPI) -> None:
 
 async def _validate_dashboard_session(request: Request) -> JSONResponse | None:
     settings = await get_settings_cache().get()
-    if settings.password_hash is None:
+    requires_auth = settings.password_hash is not None or settings.totp_required_on_login
+    if not requires_auth:
         return None
+
+    if settings.password_hash is None and settings.totp_required_on_login:
+        logger.warning(
+            "dashboard_auth_migration_inconsistency password_hash is NULL"
+            " while totp_required_on_login=true metric=dashboard_auth_migration_inconsistency"
+        )
 
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     state = get_dashboard_session_store().get(session_id)
-    if state is None or not state.password_verified:
+    if state is None:
+        return JSONResponse(
+            status_code=401,
+            content=dashboard_error("authentication_required", "Authentication is required"),
+        )
+    if settings.password_hash is not None and not state.password_verified:
         return JSONResponse(
             status_code=401,
             content=dashboard_error("authentication_required", "Authentication is required"),
@@ -137,12 +151,6 @@ async def _validate_proxy_api_key(request: Request) -> JSONResponse | None:
         service = ApiKeysService(ApiKeysRepository(session))
         try:
             api_key = await service.validate_key(token)
-        except ApiKeyRateLimitExceededError as exc:
-            message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
-            return JSONResponse(
-                status_code=429,
-                content=openai_error("rate_limit_exceeded", message, error_type="rate_limit_error"),
-            )
         except ApiKeyInvalidError as exc:
             return JSONResponse(
                 status_code=401,

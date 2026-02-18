@@ -236,6 +236,13 @@ class DashboardAuthService:
             raise PasswordSessionRequiredError("Password-authenticated session is required")
         return settings
 
+    async def _require_totp_verified_session(self, session_id: str | None) -> DashboardAuthSettingsProtocol:
+        settings = await self._require_active_password_session(session_id)
+        session = self._session_store.get(session_id)
+        if session is None or not session.totp_verified:
+            raise PasswordSessionRequiredError("TOTP-verified session is required")
+        return settings
+
     async def start_totp_setup(self, *, session_id: str | None) -> TotpSetupStartResponse:
         settings = await self._require_active_password_session(session_id)
         if settings.totp_secret_encrypted is not None:
@@ -280,13 +287,21 @@ class DashboardAuthService:
         return self._session_store.create(password_verified=True, totp_verified=True)
 
     async def disable_totp(self, *, session_id: str | None, code: str) -> None:
-        settings = await self._require_active_password_session(session_id)
+        settings = await self._require_totp_verified_session(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
             raise TotpNotConfiguredError("TOTP is not configured")
         secret = self._encryptor.decrypt(secret_encrypted)
-        verification = verify_totp_code(secret, code, window=1)
-        if not verification.is_valid:
+        verification = verify_totp_code(
+            secret,
+            code,
+            window=1,
+            last_verified_step=settings.totp_last_verified_step,
+        )
+        if not verification.is_valid or verification.matched_step is None:
+            raise TotpInvalidCodeError("Invalid TOTP code")
+        updated = await self._repository.try_advance_totp_last_verified_step(verification.matched_step)
+        if not updated:
             raise TotpInvalidCodeError("Invalid TOTP code")
         await self._repository.set_totp_secret(None)
 

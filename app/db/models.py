@@ -136,6 +136,13 @@ class DashboardSettings(Base):
     )
 
 
+class ApiFirewallAllowlist(Base):
+    __tablename__ = "api_firewall_allowlist"
+
+    ip_address: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
 

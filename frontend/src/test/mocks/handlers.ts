@@ -38,6 +38,10 @@ const ApiKeyCreatePayloadSchema = z.object({
   name: z.string().optional(),
 }).passthrough();
 
+const FirewallIpCreatePayloadSchema = z.object({
+  ipAddress: z.string().optional(),
+}).passthrough();
+
 const ApiKeyUpdatePayloadSchema = z.object({
   name: z.string().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
@@ -80,12 +84,14 @@ const state: {
   authSession: DashboardAuthSession;
   settings: DashboardSettings;
   apiKeys: ApiKey[];
+  firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
 } = {
   accounts: createDefaultAccounts(),
   requestLogs: createDefaultRequestLogs(),
   authSession: createDashboardAuthSession(),
   settings: createDashboardSettings(),
   apiKeys: createDefaultApiKeys(),
+  firewallEntries: [],
 };
 
 function parseDateValue(value: string | null): number | null {
@@ -334,6 +340,46 @@ export const handlers = [
 
   http.get("/api/settings", () => {
     return HttpResponse.json(state.settings);
+  }),
+
+  http.get("/api/firewall/ips", () => {
+    return HttpResponse.json({
+      mode: state.firewallEntries.length === 0 ? "allow_all" : "allowlist_active",
+      entries: state.firewallEntries,
+    });
+  }),
+
+  http.post("/api/firewall/ips", async ({ request }) => {
+    const payload = await parseJsonBody(request, FirewallIpCreatePayloadSchema);
+    const ipAddress = String(payload?.ipAddress || "").trim();
+    if (!ipAddress) {
+      return HttpResponse.json(
+        { error: { code: "invalid_ip", message: "IP address is required" } },
+        { status: 400 },
+      );
+    }
+    if (state.firewallEntries.some((entry) => entry.ipAddress === ipAddress)) {
+      return HttpResponse.json(
+        { error: { code: "ip_exists", message: "IP address already exists" } },
+        { status: 409 },
+      );
+    }
+    const created = { ipAddress, createdAt: new Date().toISOString() };
+    state.firewallEntries = [...state.firewallEntries, created];
+    return HttpResponse.json(created);
+  }),
+
+  http.delete("/api/firewall/ips/:ipAddress", ({ params }) => {
+    const ipAddress = decodeURIComponent(String(params.ipAddress));
+    const exists = state.firewallEntries.some((entry) => entry.ipAddress === ipAddress);
+    if (!exists) {
+      return HttpResponse.json(
+        { error: { code: "ip_not_found", message: "IP address not found" } },
+        { status: 404 },
+      );
+    }
+    state.firewallEntries = state.firewallEntries.filter((entry) => entry.ipAddress !== ipAddress);
+    return HttpResponse.json({ status: "deleted" });
   }),
 
   http.put("/api/settings", async ({ request }) => {

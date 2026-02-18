@@ -7,7 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings_cache import get_settings_cache
-from app.core.exceptions import DashboardAuthError, ProxyAuthError
+from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -105,7 +105,7 @@ async def validate_codex_usage_identity(request: Request) -> None:
             raise ProxyRateLimitError(exc.message) from exc
         if exc.status_code in (401, 403):
             raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
-        raise ProxyAuthError("Unable to validate ChatGPT credentials at this time") from exc
+        raise ProxyUpstreamError("Unable to validate ChatGPT credentials at this time") from exc
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

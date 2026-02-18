@@ -36,6 +36,12 @@ class ProxyRateLimitError(AppError):
     error_type = "rate_limit_error"
 
 
+class ProxyUpstreamError(AppError):
+    status_code = 503
+    code = "upstream_error"
+    error_type = "server_error"
+
+
 # --- Dashboard-envelope errors ---
 
 

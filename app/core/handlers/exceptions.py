@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import (
     http_exception_handler,
@@ -21,12 +23,16 @@ from app.core.exceptions import (
     ProxyAuthError,
     ProxyModelNotAllowed,
     ProxyRateLimitError,
+    ProxyUpstreamError,
 )
+
+logger = logging.getLogger(__name__)
 
 _OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     ProxyAuthError,
     ProxyModelNotAllowed,
     ProxyRateLimitError,
+    ProxyUpstreamError,
 )
 
 _DASHBOARD_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
@@ -137,3 +143,21 @@ def add_exception_handlers(app: FastAPI) -> None:
                 code = "server_error"
             return JSONResponse(status_code=exc.status_code, content=openai_error(code, detail, error_type=error_type))
         return await http_exception_handler(request, exc)
+
+    # --- Catch-all for unhandled exceptions ---
+
+    @app.exception_handler(Exception)
+    async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        fmt = _error_format(request)
+        if fmt == "dashboard":
+            return JSONResponse(
+                status_code=500,
+                content=dashboard_error("internal_error", "Unexpected error"),
+            )
+        if fmt == "openai":
+            return JSONResponse(
+                status_code=500,
+                content=openai_error("server_error", "Internal server error", error_type="server_error"),
+            )
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})

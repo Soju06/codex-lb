@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -20,6 +20,8 @@ import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-edi
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
+
+import { hasLimitRuleChanges, normalizeLimitRules } from "./limit-rules-utils";
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -62,18 +64,21 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   });
 
   const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
-  const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => limitsToCreateRules(apiKey));
+  const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
+  const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
 
   const handleSubmit = async (values: FormValues) => {
-    const validLimits = limitRules.filter((r) => r.maxValue > 0);
+    const normalizedLimits = normalizeLimitRules(limitRules);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
-      limits: validLimits,
     };
+    if (hasLimitRuleChanges(initialLimitRules, limitRules)) {
+      payload.limits = normalizedLimits;
+    }
     await onSubmit(payload);
     onClose();
   };

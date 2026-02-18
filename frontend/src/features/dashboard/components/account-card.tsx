@@ -21,9 +21,11 @@ export type AccountCardProps = {
 function QuotaBar({
   label,
   percent,
+  resetLabel,
 }: {
   label: string;
   percent: number;
+  resetLabel: string;
 }) {
   const clamped = Math.max(0, Math.min(100, percent));
   return (
@@ -48,6 +50,10 @@ function QuotaBar({
           className={cn("h-full rounded-full transition-all duration-500 ease-out", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
         />
+      </div>
+      <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+        <Clock className="h-3 w-3 shrink-0" />
+        <span>{resetLabel}</span>
       </div>
     </div>
   );
@@ -83,17 +89,9 @@ export function AccountCard({ account, onAction }: AccountCardProps) {
       </div>
 
       {/* Quota bars */}
-      <div className="mt-3.5 space-y-2.5">
-        <QuotaBar label="Primary" percent={primaryRemaining} />
-        <QuotaBar label="Secondary" percent={secondaryRemaining} />
-      </div>
-
-      {/* Reset info */}
-      <div className="mt-3 flex items-center gap-3 text-[11px] text-muted-foreground">
-        <Clock className="h-3 w-3 shrink-0" />
-        <span>Primary {primaryReset}</span>
-        <span className="text-border">&middot;</span>
-        <span>Secondary {secondaryReset}</span>
+      <div className="mt-3.5 grid grid-cols-2 gap-3">
+        <QuotaBar label="Primary" percent={primaryRemaining} resetLabel={primaryReset} />
+        <QuotaBar label="Secondary" percent={secondaryRemaining} resetLabel={secondaryReset} />
       </div>
 
       {/* Actions */}

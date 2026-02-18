@@ -20,6 +20,12 @@ export function quotaBarTrack(percent: number): string {
   return "bg-red-500/15";
 }
 
+export function quotaStrokeColor(percent: number): string {
+  if (percent >= 70) return "#10b981";
+  if (percent >= 30) return "#f59e0b";
+  return "#ef4444";
+}
+
 export function normalizeStatus(status: string): DashboardAccountStatus {
   if (status === "paused") {
     return "paused";

@@ -1,12 +1,14 @@
 import { Clock } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import { AccountTrendChart } from "@/features/accounts/components/account-trend-chart";
+import type { AccountSummary, AccountTrendsResponse } from "@/features/accounts/schemas";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import { formatPercent, formatQuotaResetLabel } from "@/utils/formatters";
 
 export type AccountUsagePanelProps = {
   account: AccountSummary;
+  trends?: AccountTrendsResponse | null;
 };
 
 function QuotaRow({
@@ -50,15 +52,36 @@ function QuotaRow({
   );
 }
 
-export function AccountUsagePanel({ account }: AccountUsagePanelProps) {
+export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
   const primary = account.usage?.primaryRemainingPercent ?? 0;
   const secondary = account.usage?.secondaryRemainingPercent ?? 0;
+  const hasTrends = trends && (trends.primary.length > 0 || trends.secondary.length > 0);
 
   return (
     <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Usage</h3>
-      <QuotaRow label="Primary" percent={primary} resetAt={account.resetAtPrimary} />
-      <QuotaRow label="Secondary" percent={secondary} resetAt={account.resetAtSecondary} />
+      <div className="grid grid-cols-2 gap-4">
+        <QuotaRow label="Primary" percent={primary} resetAt={account.resetAtPrimary} />
+        <QuotaRow label="Secondary" percent={secondary} resetAt={account.resetAtSecondary} />
+      </div>
+      {hasTrends && (
+        <div className="pt-3">
+          <div className="mb-2 flex items-center justify-between">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">7-day trend</h4>
+            <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+                Primary
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+                Secondary
+              </span>
+            </div>
+          </div>
+          <AccountTrendChart primary={trends.primary} secondary={trends.secondary} />
+        </div>
+      )}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import {
   AccountActionResponseSchema,
   AccountImportResponseSchema,
   AccountsResponseSchema,
+  AccountTrendsResponseSchema,
   OauthCompleteRequestSchema,
   OauthCompleteResponseSchema,
   OauthStartRequestSchema,
@@ -37,6 +38,13 @@ export function reactivateAccount(accountId: string) {
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/reactivate`,
     AccountActionResponseSchema,
+  );
+}
+
+export function getAccountTrends(accountId: string) {
+  return get(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
+    AccountTrendsResponseSchema,
   );
 }
 

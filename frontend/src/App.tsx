@@ -8,7 +8,6 @@ import { SpinnerBlock } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { useThemeStore } from "@/hooks/use-theme";
 
 const DashboardPage = lazy(async () => {
   const module = await import("@/features/dashboard/components/dashboard-page");
@@ -32,16 +31,12 @@ function RouteLoadingFallback() {
 }
 
 function AppLayout() {
-  const theme = useThemeStore((state) => state.theme);
-  const toggleTheme = useThemeStore((state) => state.toggleTheme);
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
 
   return (
     <div className="flex min-h-screen flex-col bg-background pb-10">
       <AppHeader
-        theme={theme}
-        onThemeToggle={toggleTheme}
         onLogout={() => {
           void logout();
         }}

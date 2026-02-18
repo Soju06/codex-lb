@@ -103,6 +103,7 @@ export function buildDashboardView(
     {
       label: "Requests (7d)",
       value: formatCompactNumber(metrics?.requests7d ?? 0),
+      meta: `Avg/day ${formatCompactNumber(Math.round((metrics?.requests7d ?? 0) / 7))}`,
       icon: Activity,
       trend: trendPointsToValues(trends.requests),
       trendColor: TREND_COLORS[0],
@@ -126,7 +127,9 @@ export function buildDashboardView(
     {
       label: "Error rate",
       value: formatRate(metrics?.errorRate7d ?? null),
-      meta: metrics?.topError ? `Top: ${metrics.topError}` : undefined,
+      meta: metrics?.topError
+        ? `Top: ${metrics.topError}`
+        : `~${formatCompactNumber(Math.round((metrics?.errorRate7d ?? 0) * (metrics?.requests7d ?? 0)))} errors in 7d`,
       icon: AlertTriangle,
       trend: trendPointsToValues(trends.errorRate),
       trendColor: TREND_COLORS[3],

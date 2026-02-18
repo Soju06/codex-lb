@@ -6,7 +6,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type TimeframeValue = "all" | "1h" | "24h" | "7d";
+const TIMEFRAME_VALUES = ["all", "1h", "24h", "7d"] as const;
+export type TimeframeValue = (typeof TIMEFRAME_VALUES)[number];
+
+function isTimeframeValue(value: string): value is TimeframeValue {
+  return (TIMEFRAME_VALUES as readonly string[]).includes(value);
+}
 
 export type TimeframeSelectProps = {
   value: TimeframeValue;
@@ -15,7 +20,7 @@ export type TimeframeSelectProps = {
 
 export function TimeframeSelect({ value, onChange }: TimeframeSelectProps) {
   return (
-    <Select value={value} onValueChange={(next) => onChange(next as TimeframeValue)}>
+    <Select value={value} onValueChange={(next) => { if (isTimeframeValue(next)) onChange(next); }}>
       <SelectTrigger size="sm" className="w-28">
         <SelectValue placeholder="Timeframe" />
       </SelectTrigger>

@@ -1,5 +1,15 @@
 import { z } from "zod";
 
+export const UsageTrendPointSchema = z.object({
+  t: z.string().datetime({ offset: true }),
+  v: z.number(),
+});
+
+export const AccountUsageTrendSchema = z.object({
+  primary: z.array(UsageTrendPointSchema),
+  secondary: z.array(UsageTrendPointSchema),
+});
+
 export const AccountUsageSchema = z.object({
   primaryRemainingPercent: z.number().nullable(),
   secondaryRemainingPercent: z.number().nullable(),
@@ -26,6 +36,12 @@ export const AccountSummarySchema = z.object({
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
+});
+
+export const AccountTrendsResponseSchema = z.object({
+  accountId: z.string(),
+  primary: z.array(UsageTrendPointSchema),
+  secondary: z.array(UsageTrendPointSchema),
 });
 
 export const AccountsResponseSchema = z.object({
@@ -90,7 +106,10 @@ export const ImportStateSchema = z.object({
   message: z.string().nullable(),
 });
 
+export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
+export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type OAuthState = z.infer<typeof OAuthStateSchema>;

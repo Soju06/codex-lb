@@ -6,7 +6,7 @@ import {
   RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
 
-type RequestLogsParams = {
+export type RequestLogsListFilters = {
   limit?: number;
   offset?: number;
   search?: string;
@@ -15,6 +15,13 @@ type RequestLogsParams = {
   modelOptions?: string[];
   since?: string;
   until?: string;
+};
+
+export type RequestLogFacetFilters = {
+  since?: string;
+  until?: string;
+  accountIds?: string[];
+  modelOptions?: string[];
 };
 
 function appendMany(params: URLSearchParams, key: string, values?: string[]): void {
@@ -32,7 +39,7 @@ export function getDashboardOverview() {
   return get("/api/dashboard/overview", DashboardOverviewSchema);
 }
 
-export function getRequestLogs(params: RequestLogsParams = {}) {
+export function getRequestLogs(params: RequestLogsListFilters = {}) {
   const query = new URLSearchParams();
   if (typeof params.limit === "number") {
     query.set("limit", String(params.limit));
@@ -56,15 +63,16 @@ export function getRequestLogs(params: RequestLogsParams = {}) {
   return get(`/api/request-logs${suffix}`, RequestLogsResponseSchema);
 }
 
-export function getRequestLogOptions(params?: { since?: string; until?: string; statuses?: string[] }) {
+export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
   const query = new URLSearchParams();
-  if (params?.since) {
+  if (params.since) {
     query.set("since", params.since);
   }
-  if (params?.until) {
+  if (params.until) {
     query.set("until", params.until);
   }
-  appendMany(query, "status", params?.statuses);
+  appendMany(query, "accountId", params.accountIds);
+  appendMany(query, "modelOption", params.modelOptions);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return get(`/api/request-logs/options${suffix}`, RequestLogFilterOptionsSchema);
 }

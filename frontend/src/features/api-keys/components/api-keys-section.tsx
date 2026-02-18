@@ -1,3 +1,4 @@
+import { KeySquare } from "lucide-react";
 import { lazy, useMemo } from "react";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -73,13 +74,18 @@ export function ApiKeysSection({
   };
 
   return (
-    <section className="space-y-3 rounded-xl border bg-card p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold">API Keys</h3>
-          <p className="text-xs text-muted-foreground">Create and manage API keys for clients.</p>
+    <section className="space-y-3 rounded-xl border bg-card p-5">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+            <KeySquare className="h-4 w-4 text-primary" aria-hidden="true" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold">API Keys</h3>
+            <p className="text-xs text-muted-foreground">Create and manage API keys for clients.</p>
+          </div>
         </div>
-        <Button type="button" size="sm" onClick={() => createDialog.show()} disabled={busy}>
+        <Button type="button" size="sm" className="h-8 text-xs" onClick={() => createDialog.show()} disabled={busy}>
           Create key
         </Button>
       </div>

@@ -4,6 +4,7 @@ import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
@@ -22,6 +23,8 @@ export function AccountDetail({
   onDelete,
   onReauth,
 }: AccountDetailProps) {
+  const { data: trends } = useAccountTrends(account?.accountId ?? null);
+
   if (!account) {
     return (
       <div className="flex flex-col items-center justify-center rounded-xl border border-dashed p-12">
@@ -46,7 +49,7 @@ export function AccountDetail({
         )}
       </div>
 
-      <AccountUsagePanel account={account} />
+      <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />
       <AccountActions
         account={account}

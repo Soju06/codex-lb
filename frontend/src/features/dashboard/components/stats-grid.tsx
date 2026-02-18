@@ -1,6 +1,6 @@
-import { cn } from "@/lib/utils";
 import { SparklineChart } from "@/components/sparkline-chart";
 import type { DashboardStat } from "@/features/dashboard/utils";
+import { cn } from "@/lib/utils";
 
 const ACCENT_STYLES = [
   "bg-blue-500/10 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400",
@@ -31,14 +31,14 @@ export function StatsGrid({ stats }: StatsGridProps) {
                 <Icon className="h-4 w-4" aria-hidden="true" />
               </div>
             </div>
-            <div className="mt-3">
+            <div className="mt-1">
               <p className="text-[1.625rem] font-semibold tracking-[-0.02em]">{stat.value}</p>
               {stat.meta ? (
                 <p className="mt-1 text-xs text-muted-foreground">{stat.meta}</p>
               ) : null}
             </div>
             {stat.trend.length > 0 ? (
-              <div className="mt-3">
+              <div className="mt-1">
                 <SparklineChart data={stat.trend} color={stat.trendColor} index={index} />
               </div>
             ) : null}

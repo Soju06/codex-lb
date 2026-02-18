@@ -1,19 +1,7 @@
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Save } from "lucide-react";
-import { useForm } from "react-hook-form";
-import { z } from "zod";
+import { Route } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Form, FormField } from "@/components/ui/form";
 import { Switch } from "@/components/ui/switch";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
-
-const formSchema = z.object({
-  stickyThreadsEnabled: z.boolean(),
-  preferEarlierResetAccounts: z.boolean(),
-});
-
-type FormValues = z.infer<typeof formSchema>;
 
 export type RoutingSettingsProps = {
   settings: DashboardSettings;
@@ -22,74 +10,56 @@ export type RoutingSettingsProps = {
 };
 
 export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
-  const form = useForm<FormValues>({
-    resolver: zodResolver(formSchema),
-    defaultValues: {
+  const save = (patch: Partial<SettingsUpdateRequest>) =>
+    void onSave({
       stickyThreadsEnabled: settings.stickyThreadsEnabled,
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-    },
-  });
-
-  const handleSubmit = (values: FormValues) => {
-    void onSave({
-      ...values,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
+      ...patch,
     });
-  };
 
   return (
     <section className="rounded-xl border bg-card p-5">
-      <div className="mb-4">
-        <h3 className="text-sm font-semibold">Routing</h3>
-        <p className="mt-0.5 text-xs text-muted-foreground">Control how requests are distributed across accounts.</p>
-      </div>
-
-      <Form {...form}>
-        <form onSubmit={form.handleSubmit(handleSubmit)}>
-          <div className="space-y-1">
-            <FormField
-              control={form.control}
-              name="stickyThreadsEnabled"
-              render={({ field }) => (
-                <div className="flex items-center justify-between rounded-lg p-3 transition-colors hover:bg-muted/40">
-                  <div>
-                    <p className="text-sm font-medium">Sticky threads</p>
-                    <p className="text-xs text-muted-foreground">Keep related requests on the same account.</p>
-                  </div>
-                  <Switch checked={field.value} onCheckedChange={field.onChange} disabled={busy} />
-                </div>
-              )}
-            />
-
-            <FormField
-              control={form.control}
-              name="preferEarlierResetAccounts"
-              render={({ field }) => (
-                <div className="flex items-center justify-between rounded-lg p-3 transition-colors hover:bg-muted/40">
-                  <div>
-                    <p className="text-sm font-medium">Prefer earlier reset</p>
-                    <p className="text-xs text-muted-foreground">Bias traffic to accounts with earlier quota reset.</p>
-                  </div>
-                  <Switch checked={field.value} onCheckedChange={field.onChange} disabled={busy} />
-                </div>
-              )}
-            />
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+              <Route className="h-4 w-4 text-primary" aria-hidden="true" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold">Routing</h3>
+              <p className="text-xs text-muted-foreground">Control how requests are distributed across accounts.</p>
+            </div>
           </div>
+        </div>
 
-          <div className="mt-4 border-t pt-4">
-            <Button
-              type="submit"
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
+        <div className="divide-y rounded-lg border">
+          <div className="flex items-center justify-between p-3">
+            <div>
+              <p className="text-sm font-medium">Sticky threads</p>
+              <p className="text-xs text-muted-foreground">Keep related requests on the same account.</p>
+            </div>
+            <Switch
+              checked={settings.stickyThreadsEnabled}
               disabled={busy}
-            >
-              <Save className="h-3.5 w-3.5" />
-              Save routing settings
-            </Button>
+              onCheckedChange={(checked) => save({ stickyThreadsEnabled: checked })}
+            />
           </div>
-        </form>
-      </Form>
+
+          <div className="flex items-center justify-between p-3">
+            <div>
+              <p className="text-sm font-medium">Prefer earlier reset</p>
+              <p className="text-xs text-muted-foreground">Bias traffic to accounts with earlier quota reset.</p>
+            </div>
+            <Switch
+              checked={settings.preferEarlierResetAccounts}
+              disabled={busy}
+              onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
+            />
+          </div>
+        </div>
+      </div>
     </section>
   );
 }

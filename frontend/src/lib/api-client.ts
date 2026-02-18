@@ -3,6 +3,13 @@ import { z, type ZodType } from "zod";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
+type RequestOptions = {
+  body?: unknown;
+  headers?: HeadersInit;
+  signal?: AbortSignal;
+  credentials?: RequestCredentials;
+};
+
 const JSON_CONTENT_TYPE = "application/json";
 const EMPTY_RESPONSE_STATUS = new Set([204, 205]);
 
@@ -106,17 +113,24 @@ function parseApiErrorPayload(payload: unknown): {
   };
 }
 
+async function request(
+  method: HttpMethod,
+  url: string,
+  schema: null,
+  options?: RequestOptions,
+): Promise<void>;
+async function request<T>(
+  method: HttpMethod,
+  url: string,
+  schema: ZodType<T>,
+  options?: RequestOptions,
+): Promise<T>;
 async function request<T>(
   method: HttpMethod,
   url: string,
   schema: ZodType<T> | null,
-  options?: {
-    body?: unknown;
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
-): Promise<T> {
+  options?: RequestOptions,
+): Promise<T | void> {
   const requestBody = buildRequestBody(options?.body);
   const headers = new Headers(options?.headers);
   if (requestBody.contentType && !headers.has("Content-Type")) {
@@ -161,7 +175,7 @@ async function request<T>(
   }
 
   if (schema === null) {
-    return undefined as T;
+    return undefined;
   }
 
   const parsed = schema.safeParse(payload);
@@ -184,11 +198,7 @@ async function request<T>(
 export function get<T>(
   url: string,
   schema: ZodType<T>,
-  options?: {
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
+  options?: RequestOptions,
 ): Promise<T> {
   return request("GET", url, schema, options);
 }
@@ -196,12 +206,7 @@ export function get<T>(
 export function post<T>(
   url: string,
   schema: ZodType<T>,
-  options?: {
-    body?: unknown;
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
+  options?: RequestOptions,
 ): Promise<T> {
   return request("POST", url, schema, options);
 }
@@ -209,12 +214,7 @@ export function post<T>(
 export function patch<T>(
   url: string,
   schema: ZodType<T>,
-  options?: {
-    body?: unknown;
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
+  options?: RequestOptions,
 ): Promise<T> {
   return request("PATCH", url, schema, options);
 }
@@ -222,51 +222,24 @@ export function patch<T>(
 export function put<T>(
   url: string,
   schema: ZodType<T>,
-  options?: {
-    body?: unknown;
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
+  options?: RequestOptions,
 ): Promise<T> {
   return request("PUT", url, schema, options);
 }
 
 export function del(
   url: string,
-  options?: {
-    body?: unknown;
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
+  options?: RequestOptions,
 ): Promise<void>;
 export function del<T>(
   url: string,
   schema: ZodType<T>,
-  options?: {
-    body?: unknown;
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
+  options?: RequestOptions,
 ): Promise<T>;
 export function del<T>(
   url: string,
-  schemaOrOptions?:
-    | ZodType<T>
-    | {
-        body?: unknown;
-        headers?: HeadersInit;
-        signal?: AbortSignal;
-        credentials?: RequestCredentials;
-      },
-  maybeOptions?: {
-    body?: unknown;
-    headers?: HeadersInit;
-    signal?: AbortSignal;
-    credentials?: RequestCredentials;
-  },
+  schemaOrOptions?: ZodType<T> | RequestOptions,
+  maybeOptions?: RequestOptions,
 ): Promise<T | void> {
   if (schemaOrOptions instanceof z.ZodType) {
     return request("DELETE", url, schemaOrOptions, maybeOptions);

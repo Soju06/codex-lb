@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
 import type { AccountSummary } from "@/features/accounts/schemas";
-import { normalizeStatus } from "@/utils/account-status";
+import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import { formatSlug } from "@/utils/formatters";
 
 export type AccountListItemProps = {
@@ -10,12 +10,25 @@ export type AccountListItemProps = {
   onSelect: (accountId: string) => void;
 };
 
+function MiniQuotaBar({ percent }: { percent: number }) {
+  const clamped = Math.max(0, Math.min(100, percent));
+  return (
+    <div className={cn("h-1 flex-1 overflow-hidden rounded-full", quotaBarTrack(clamped))}>
+      <div
+        className={cn("h-full rounded-full", quotaBarColor(clamped))}
+        style={{ width: `${clamped}%` }}
+      />
+    </div>
+  );
+}
+
 export function AccountListItem({ account, selected, onSelect }: AccountListItemProps) {
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
   const subtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : formatSlug(account.planType);
+  const secondary = account.usage?.secondaryRemainingPercent ?? 0;
 
   return (
     <button
@@ -34,6 +47,9 @@ export function AccountListItem({ account, selected, onSelect }: AccountListItem
           <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
         </div>
         <StatusBadge status={status} />
+      </div>
+      <div className="mt-1.5">
+        <MiniQuotaBar percent={secondary} />
       </div>
     </button>
   );

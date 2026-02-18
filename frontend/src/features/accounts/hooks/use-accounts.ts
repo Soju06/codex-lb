@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import {
   deleteAccount,
+  getAccountTrends,
   importAccount,
   listAccounts,
   pauseAccount,
@@ -67,6 +68,17 @@ export function useAccountMutations() {
   });
 
   return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+}
+
+export function useAccountTrends(accountId: string | null) {
+  return useQuery({
+    queryKey: ["accounts", "trends", accountId],
+    queryFn: () => getAccountTrends(accountId!),
+    enabled: !!accountId,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+  });
 }
 
 export function useAccounts() {

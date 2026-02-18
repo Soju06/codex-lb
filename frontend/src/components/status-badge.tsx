@@ -13,13 +13,12 @@ const statusClassMap: Record<StatusValue, string> = {
 };
 
 export type StatusBadgeProps = {
-  status: StatusValue | string;
+  status: StatusValue;
 };
 
 export function StatusBadge({ status }: StatusBadgeProps) {
-  const normalized = (status || "deactivated") as StatusValue;
-  const className = statusClassMap[normalized] ?? statusClassMap.deactivated;
-  const label = STATUS_LABELS[normalized] ?? status;
+  const className = statusClassMap[status] ?? statusClassMap.deactivated;
+  const label = STATUS_LABELS[status] ?? status;
 
   return (
     <Badge className={cn("gap-1.5", className)} variant="outline">

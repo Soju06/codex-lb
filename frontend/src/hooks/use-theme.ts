@@ -2,65 +2,104 @@ import { create } from "zustand";
 
 const THEME_STORAGE_KEY = "codex-lb-theme";
 
-export type Theme = "light" | "dark";
+export type ThemePreference = "light" | "dark" | "auto";
+export type ResolvedTheme = "light" | "dark";
+
+/** @deprecated Use ThemePreference instead */
+export type Theme = ResolvedTheme;
 
 type ThemeState = {
-  theme: Theme;
+  preference: ThemePreference;
+  /** The resolved (effective) theme — always "light" | "dark". */
+  theme: ResolvedTheme;
   initialized: boolean;
   initializeTheme: () => void;
-  setTheme: (theme: Theme) => void;
-  toggleTheme: () => void;
+  setTheme: (pref: ThemePreference) => void;
 };
 
-function applyThemeToDocument(theme: Theme): void {
+function applyThemeToDocument(theme: ResolvedTheme): void {
   if (typeof document === "undefined") {
     return;
   }
   document.documentElement.classList.toggle("dark", theme === "dark");
 }
 
-function readStoredTheme(): Theme | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-  if (stored === "light" || stored === "dark") {
-    return stored;
-  }
-  return null;
-}
-
-function resolveInitialTheme(): Theme {
-  const stored = readStoredTheme();
-  if (stored) {
-    return stored;
-  }
+function getSystemTheme(): ResolvedTheme {
   if (typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches) {
     return "dark";
   }
   return "light";
 }
 
-export const useThemeStore = create<ThemeState>((set, get) => ({
+function resolveTheme(preference: ThemePreference): ResolvedTheme {
+  if (preference === "auto") return getSystemTheme();
+  return preference;
+}
+
+function readStoredPreference(): ThemePreference | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (stored === "light" || stored === "dark" || stored === "auto") {
+    return stored;
+  }
+  return null;
+}
+
+let mediaQuery: MediaQueryList | null = null;
+let mediaListener: ((e: MediaQueryListEvent) => void) | null = null;
+
+function setupSystemThemeListener() {
+  cleanupSystemThemeListener();
+  if (typeof window === "undefined") return;
+  mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  mediaListener = () => {
+    const state = useThemeStore.getState();
+    if (state.preference === "auto") {
+      const resolved = getSystemTheme();
+      applyThemeToDocument(resolved);
+      useThemeStore.setState({ theme: resolved });
+    }
+  };
+  mediaQuery.addEventListener("change", mediaListener);
+}
+
+function cleanupSystemThemeListener() {
+  if (mediaQuery && mediaListener) {
+    mediaQuery.removeEventListener("change", mediaListener);
+  }
+  mediaQuery = null;
+  mediaListener = null;
+}
+
+export const useThemeStore = create<ThemeState>((set) => ({
+  preference: "auto",
   theme: "light",
   initialized: false,
   initializeTheme: () => {
-    const next = resolveInitialTheme();
-    applyThemeToDocument(next);
+    const preference = readStoredPreference() ?? "auto";
+    const resolved = resolveTheme(preference);
+    applyThemeToDocument(resolved);
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+      window.localStorage.setItem(THEME_STORAGE_KEY, preference);
     }
-    set({ theme: next, initialized: true });
+    set({ preference, theme: resolved, initialized: true });
+    if (preference === "auto") {
+      setupSystemThemeListener();
+    }
   },
-  setTheme: (theme) => {
-    applyThemeToDocument(theme);
+  setTheme: (pref) => {
+    const resolved = resolveTheme(pref);
+    applyThemeToDocument(resolved);
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+      window.localStorage.setItem(THEME_STORAGE_KEY, pref);
     }
-    set({ theme, initialized: true });
-  },
-  toggleTheme: () => {
-    const nextTheme: Theme = get().theme === "dark" ? "light" : "dark";
-    get().setTheme(nextTheme);
+    set({ preference: pref, theme: resolved, initialized: true });
+    if (pref === "auto") {
+      setupSystemThemeListener();
+    } else {
+      cleanupSystemThemeListener();
+    }
   },
 }));

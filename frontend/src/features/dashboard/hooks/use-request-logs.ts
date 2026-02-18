@@ -2,7 +2,12 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { getRequestLogOptions, getRequestLogs } from "@/features/dashboard/api";
+import {
+  getRequestLogOptions,
+  getRequestLogs,
+  type RequestLogFacetFilters,
+  type RequestLogsListFilters,
+} from "@/features/dashboard/api";
 import { FilterStateSchema, type FilterState } from "@/features/dashboard/schemas";
 
 const DEFAULT_FILTER_STATE: FilterState = {
@@ -16,6 +21,9 @@ const DEFAULT_FILTER_STATE: FilterState = {
 };
 
 function parseNumber(value: string | null, fallback: number): number {
+  if (value === null) {
+    return fallback;
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -77,19 +85,30 @@ export function useRequestLogs() {
 
   const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
   const since = useMemo(() => timeframeToSinceIso(filters.timeframe), [filters.timeframe]);
+  const listFilters = useMemo<RequestLogsListFilters>(
+    () => ({
+      search: filters.search || undefined,
+      limit: filters.limit,
+      offset: filters.offset,
+      accountIds: filters.accountIds,
+      statuses: filters.statuses,
+      modelOptions: filters.modelOptions,
+      since,
+    }),
+    [filters, since],
+  );
+  const facetFilters = useMemo<RequestLogFacetFilters>(
+    () => ({
+      since,
+      accountIds: filters.accountIds,
+      modelOptions: filters.modelOptions,
+    }),
+    [filters.accountIds, filters.modelOptions, since],
+  );
 
   const logsQuery = useQuery({
-    queryKey: ["dashboard", "request-logs", filters, since],
-    queryFn: () =>
-      getRequestLogs({
-        search: filters.search || undefined,
-        limit: filters.limit,
-        offset: filters.offset,
-        accountIds: filters.accountIds,
-        statuses: filters.statuses,
-        modelOptions: filters.modelOptions,
-        since,
-      }),
+    queryKey: ["dashboard", "request-logs", listFilters],
+    queryFn: () => getRequestLogs(listFilters),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -97,12 +116,8 @@ export function useRequestLogs() {
   });
 
   const optionsQuery = useQuery({
-    queryKey: ["dashboard", "request-log-options", filters.timeframe, since, filters.statuses],
-    queryFn: () =>
-      getRequestLogOptions({
-        since,
-        statuses: filters.statuses,
-      }),
+    queryKey: ["dashboard", "request-log-options", facetFilters],
+    queryFn: () => getRequestLogOptions(facetFilters),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -118,6 +133,8 @@ export function useRequestLogs() {
 
   return {
     filters,
+    listFilters,
+    facetFilters,
     logsQuery,
     optionsQuery,
     updateFilters,

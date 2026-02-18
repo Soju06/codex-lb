@@ -1,4 +1,4 @@
-import { LogOut, Menu, Moon, Sun } from "lucide-react";
+import { LogOut, Menu } from "lucide-react";
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
 
@@ -14,16 +14,12 @@ const NAV_ITEMS = [
 ] as const;
 
 export type AppHeaderProps = {
-  theme: "light" | "dark";
-  onThemeToggle: () => void;
   onLogout: () => void;
   showLogout?: boolean;
   className?: string;
 };
 
 export function AppHeader({
-  theme,
-  onThemeToggle,
   onLogout,
   showLogout = true,
   className,
@@ -33,7 +29,7 @@ export function AppHeader({
   return (
     <header
       className={cn(
-        "sticky top-0 z-20 border-b border-white/[0.08] bg-background/50 px-4 py-2.5 shadow-[0_1px_12px_rgba(0,0,0,0.06)] backdrop-blur-2xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_1px_12px_rgba(0,0,0,0.25)]",
+        "sticky top-0 z-20 border-b border-white/[0.08] bg-background/50 px-4 py-2.5 shadow-[0_1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_1px_12px_rgba(0,0,0,0.25)]",
         className,
       )}
     >
@@ -70,16 +66,6 @@ export function AppHeader({
 
         {/* Actions */}
         <div className="flex flex-1 items-center justify-end gap-1.5">
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            onClick={onThemeToggle}
-            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            className="press-scale h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
-          >
-            {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </Button>
           {showLogout && (
             <Button
               type="button"

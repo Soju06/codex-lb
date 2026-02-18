@@ -6,13 +6,14 @@ export type SparklineChartProps = {
   data: { value: number }[];
   color: string;
   index: number;
+  height?: number;
 };
 
-export function SparklineChart({ data, color, index }: SparklineChartProps) {
+export function SparklineChart({ data, color, index, height = 40 }: SparklineChartProps) {
   const gradientId = `sparkline-fill-${index}`;
 
   return (
-    <ResponsiveContainer width="100%" height={40}>
+    <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={data} margin={CHART_MARGIN}>
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">

@@ -4,6 +4,7 @@ import { Settings } from "lucide-react";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
+import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
@@ -44,8 +45,8 @@ export function SettingsPage() {
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
 
           <div className="space-y-4">
+            <AppearanceSettings />
             <RoutingSettings
-              key={`${settings.stickyThreadsEnabled}:${settings.preferEarlierResetAccounts}`}
               settings={settings}
               busy={busy}
               onSave={handleSave}

@@ -88,7 +88,7 @@ export function AccountList({
         </Button>
       </div>
 
-      <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto pr-1">
+      <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1">
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-center">
             <p className="text-sm font-medium text-muted-foreground">No matching accounts</p>

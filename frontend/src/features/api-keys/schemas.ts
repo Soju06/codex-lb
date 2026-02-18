@@ -28,9 +28,6 @@ export const ApiKeySchema = z.object({
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
-  weeklyTokenLimit: z.number().int().positive().nullable().optional(),
-  weeklyTokensUsed: z.number().int().nonnegative().optional(),
-  weeklyResetAt: z.string().datetime({ offset: true }).nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
   createdAt: z.string().datetime({ offset: true }),
@@ -57,6 +54,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
+  resetUsage: z.boolean().optional(),
 });
 
 export const ApiKeyListSchema = z.array(ApiKeySchema);

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import aiohttp
 
@@ -9,6 +8,7 @@ from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
+from app.core.types import JsonValue
 
 logger = logging.getLogger(__name__)
 
@@ -23,38 +23,58 @@ class ModelFetchError(Exception):
         self.message = message
 
 
-def _parse_upstream_model(data: dict[str, Any]) -> UpstreamModel:
+def _str(data: dict[str, JsonValue], key: str, default: str = "") -> str:
+    v = data.get(key)
+    return v if isinstance(v, str) else default
+
+
+def _int(data: dict[str, JsonValue], key: str, default: int = 0) -> int:
+    v = data.get(key)
+    if isinstance(v, bool):
+        return default
+    return int(v) if isinstance(v, (int, float)) else default
+
+
+def _opt_str(data: dict[str, JsonValue], key: str) -> str | None:
+    v = data.get(key)
+    return v if isinstance(v, str) else None
+
+
+def _list_raw(data: dict[str, JsonValue], key: str) -> list[JsonValue]:
+    v = data.get(key)
+    if isinstance(v, list):
+        return v  # type: ignore[return-value]
+    return []
+
+
+def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
     raw = {k: v for k, v in data.items() if k not in _FILTERED_FIELDS}
 
-    reasoning_levels_raw = data.get("supported_reasoning_levels") or []
     reasoning_levels = tuple(
         ReasoningLevel(effort=rl.get("effort", ""), description=rl.get("description", ""))
-        for rl in reasoning_levels_raw
+        for rl in _list_raw(data, "supported_reasoning_levels")
         if isinstance(rl, dict)
     )
 
-    available_plans_raw = data.get("available_in_plans") or []
-    available_in_plans = frozenset(p for p in available_plans_raw if isinstance(p, str))
-
-    input_modalities_raw = data.get("input_modalities") or []
-    input_modalities = tuple(m for m in input_modalities_raw if isinstance(m, str))
+    available_in_plans = frozenset(p for p in _list_raw(data, "available_in_plans") if isinstance(p, str))
+    input_modalities = tuple(m for m in _list_raw(data, "input_modalities") if isinstance(m, str))
 
     return UpstreamModel(
-        slug=data.get("slug", ""),
-        display_name=data.get("display_name", ""),
-        description=data.get("description", ""),
-        context_window=data.get("context_window", 0),
+        slug=_str(data, "slug"),
+        display_name=_str(data, "display_name"),
+        description=_str(data, "description"),
+        context_window=_int(data, "context_window"),
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,
-        default_reasoning_level=data.get("default_reasoning_level"),
+        default_reasoning_level=_opt_str(data, "default_reasoning_level"),
         supports_reasoning_summaries=bool(data.get("supports_reasoning_summaries")),
         support_verbosity=bool(data.get("support_verbosity")),
-        default_verbosity=data.get("default_verbosity"),
+        default_verbosity=_opt_str(data, "default_verbosity"),
         prefer_websockets=bool(data.get("prefer_websockets")),
         supports_parallel_tool_calls=bool(data.get("supports_parallel_tool_calls")),
         supported_in_api=bool(data.get("supported_in_api", True)),
-        minimal_client_version=data.get("minimal_client_version"),
-        priority=int(data.get("priority", 0)),
+        minimal_client_version=_opt_str(data, "minimal_client_version"),
+        priority=_int(data, "priority"),
         available_in_plans=available_in_plans,
         raw=raw,
     )

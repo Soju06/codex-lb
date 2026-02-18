@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.core.openai.model_registry import get_model_registry
+from app.core.openai.model_registry import get_model_registry, is_public_model
 from app.dependencies import DashboardContext, get_dashboard_context
 from app.modules.dashboard.schemas import DashboardOverviewResponse
 
@@ -25,6 +25,6 @@ async def list_models() -> dict:
     models = [
         {"id": slug, "name": model.display_name or slug}
         for slug, model in snapshot.models.items()
-        if model.supported_in_api
+        if is_public_model(model, None)
     ]
     return {"models": models}

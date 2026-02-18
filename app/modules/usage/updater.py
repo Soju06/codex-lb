@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
@@ -35,6 +36,11 @@ class UsageRepositoryPort(Protocol):
     ) -> UsageHistory | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class AccountRefreshResult:
+    usage_written: bool
+
+
 class UsageUpdater:
     def __init__(
         self,
@@ -50,7 +56,7 @@ class UsageUpdater:
         accounts: list[Account],
         latest_usage: Mapping[str, UsageHistory],
     ) -> bool:
-        """Refresh usage for all accounts. Returns True if any account was actually refreshed."""
+        """Refresh usage for all accounts. Returns True if usage rows were written."""
         settings = get_settings()
         if not settings.usage_refresh_enabled:
             return False
@@ -68,8 +74,11 @@ class UsageUpdater:
             # within the request-scoped session to avoid PK collisions and
             # flush-time warnings (SAWarning: Session.add during flush).
             try:
-                await self._refresh_account(account, usage_account_id=account.chatgpt_account_id)
-                refreshed = True
+                result = await self._refresh_account(
+                    account,
+                    usage_account_id=account.chatgpt_account_id,
+                )
+                refreshed = refreshed or result.usage_written
             except Exception as exc:
                 logger.warning(
                     "Usage refresh failed account_id=%s request_id=%s error=%s",
@@ -82,7 +91,12 @@ class UsageUpdater:
                 continue
         return refreshed
 
-    async def _refresh_account(self, account: Account, *, usage_account_id: str | None) -> None:
+    async def _refresh_account(
+        self,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+    ) -> AccountRefreshResult:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
         try:
@@ -93,13 +107,13 @@ class UsageUpdater:
         except UsageFetchError as exc:
             if _should_deactivate_for_usage_error(exc.status_code):
                 await self._deactivate_for_client_error(account, exc)
-                return
+                return AccountRefreshResult(usage_written=False)
             if exc.status_code != 401 or not self._auth_manager:
-                return
+                return AccountRefreshResult(usage_written=False)
             try:
                 account = await self._auth_manager.ensure_fresh(account, force=True)
             except RefreshError:
-                return
+                return AccountRefreshResult(usage_written=False)
             access_token = self._encryptor.decrypt(account.access_token_encrypted)
             try:
                 payload = await fetch_usage(
@@ -109,22 +123,23 @@ class UsageUpdater:
             except UsageFetchError as retry_exc:
                 if _should_deactivate_for_usage_error(retry_exc.status_code):
                     await self._deactivate_for_client_error(account, retry_exc)
-                return
+                return AccountRefreshResult(usage_written=False)
 
         if payload is None:
-            return
+            return AccountRefreshResult(usage_written=False)
 
         rate_limit = payload.rate_limit
         if rate_limit is None:
-            return
+            return AccountRefreshResult(usage_written=False)
 
         primary = rate_limit.primary_window
         secondary = rate_limit.secondary_window
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         now_epoch = _now_epoch()
+        usage_written = False
 
         if primary and primary.used_percent is not None:
-            await self._usage_repo.add_entry(
+            entry = await self._usage_repo.add_entry(
                 account_id=account.id,
                 used_percent=float(primary.used_percent),
                 input_tokens=None,
@@ -136,9 +151,10 @@ class UsageUpdater:
                 credits_unlimited=credits_unlimited,
                 credits_balance=credits_balance,
             )
+            usage_written = usage_written or _usage_entry_written(entry)
 
         if secondary and secondary.used_percent is not None:
-            await self._usage_repo.add_entry(
+            entry = await self._usage_repo.add_entry(
                 account_id=account.id,
                 used_percent=float(secondary.used_percent),
                 input_tokens=None,
@@ -147,6 +163,9 @@ class UsageUpdater:
                 reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
                 window_minutes=_window_minutes(secondary.limit_window_seconds),
             )
+            usage_written = usage_written or _usage_entry_written(entry)
+
+        return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
@@ -172,6 +191,10 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     credits_unlimited = credits.unlimited
     balance_value = credits.balance
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
+
+
+def _usage_entry_written(entry: UsageHistory | None) -> bool:
+    return entry is not None
 
 
 def _parse_credits_balance(value: str | int | float | None) -> float | None:

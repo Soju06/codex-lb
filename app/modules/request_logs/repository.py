@@ -176,18 +176,22 @@ class RequestLogsRepository:
         self,
         since: datetime | None = None,
         until: datetime | None = None,
-        include_success: bool = True,
-        include_error_other: bool = True,
-        error_codes_in: list[str] | None = None,
-        error_codes_excluding: list[str] | None = None,
+        account_ids: list[str] | None = None,
+        model_options: list[tuple[str, str | None]] | None = None,
+        models: list[str] | None = None,
+        reasoning_efforts: list[str] | None = None,
     ) -> tuple[list[str], list[tuple[str, str | None]], list[tuple[str, str | None]]]:
         conditions = self._build_filters(
             since=since,
             until=until,
-            include_success=include_success,
-            include_error_other=include_error_other,
-            error_codes_in=error_codes_in,
-            error_codes_excluding=error_codes_excluding,
+            account_ids=account_ids,
+            model_options=model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            include_success=True,
+            include_error_other=True,
+            error_codes_in=None,
+            error_codes_excluding=None,
         )
 
         account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())

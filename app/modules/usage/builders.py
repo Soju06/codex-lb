@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import cast
 
 from app.core import usage as usage_core
 from app.core.usage.logs import (
-    RequestLogLike,
     cached_input_tokens_from_log,
     total_tokens_from_log,
     usage_tokens_from_log,
@@ -229,7 +227,7 @@ def _build_account_history(
 
 def _log_to_cost_item(log: RequestLog) -> CostItem | None:
     model = log.model
-    usage = usage_tokens_from_log(cast(RequestLogLike, log))
+    usage = usage_tokens_from_log(log)
     if not model or not usage:
         return None
     return CostItem(model=model, usage=usage)
@@ -256,14 +254,14 @@ def _usage_metrics(logs_secondary: list[RequestLog]) -> UsageMetricsSummary:
 def _sum_tokens(logs: list[RequestLog]) -> int:
     total = 0
     for log in logs:
-        total += total_tokens_from_log(cast(RequestLogLike, log)) or 0
+        total += total_tokens_from_log(log) or 0
     return total
 
 
 def _sum_cached_input_tokens(logs: list[RequestLog]) -> int:
     total = 0
     for log in logs:
-        total += cached_input_tokens_from_log(cast(RequestLogLike, log)) or 0
+        total += cached_input_tokens_from_log(log) or 0
     return total
 
 

@@ -33,6 +33,7 @@ class DashboardService:
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
             encryptor=self._encryptor,
+            include_auth=False,
         )
 
         primary_rows = _rows_from_latest(primary_usage)

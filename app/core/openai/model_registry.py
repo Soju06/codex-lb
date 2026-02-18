@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+
+from app.core.types import JsonValue
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ class UpstreamModel:
     minimal_client_version: str | None
     priority: int
     available_in_plans: frozenset[str]
-    raw: dict[str, Any] = field(hash=False, compare=False)
+    raw: dict[str, JsonValue] = field(hash=False, compare=False)
 
 
 @dataclass
@@ -112,3 +113,11 @@ _model_registry = ModelRegistry()
 
 def get_model_registry() -> ModelRegistry:
     return _model_registry
+
+
+def is_public_model(model: UpstreamModel, allowed_models: set[str] | None) -> bool:
+    if not model.supported_in_api:
+        return False
+    if allowed_models is None:
+        return True
+    return model.slug in allowed_models

@@ -88,22 +88,27 @@ class RequestLogsService:
         self,
         since: datetime | None = None,
         until: datetime | None = None,
-        status: list[str] | None = None,
+        account_ids: list[str] | None = None,
+        model_options: list[RequestLogModelOption] | None = None,
+        models: list[str] | None = None,
+        reasoning_efforts: list[str] | None = None,
     ) -> RequestLogFilterOptions:
-        status_filter = _map_status_filter(status)
-        account_ids, model_options, status_values = await self._repo.list_filter_options(
+        normalized_model_options = (
+            [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
+        )
+        option_account_ids, option_model_options, status_values = await self._repo.list_filter_options(
             since=since,
             until=until,
-            include_success=status_filter.include_success,
-            include_error_other=status_filter.include_error_other,
-            error_codes_in=status_filter.error_codes_in,
-            error_codes_excluding=status_filter.error_codes_excluding,
+            account_ids=account_ids,
+            model_options=normalized_model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
         )
         return RequestLogFilterOptions(
-            account_ids=account_ids,
+            account_ids=option_account_ids,
             model_options=[
                 RequestLogModelOption(model=model, reasoning_effort=reasoning_effort)
-                for model, reasoning_effort in model_options
+                for model, reasoning_effort in option_model_options
             ],
             statuses=_normalize_status_values(status_values),
         )

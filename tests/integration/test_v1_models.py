@@ -68,7 +68,7 @@ async def test_v1_models_empty_when_registry_not_populated(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_excludes_unsupported_models(async_client):
+async def test_v1_models_includes_supported_in_api_false_models(async_client):
     registry = get_model_registry()
     models = [
         _make_upstream_model("gpt-5.2"),
@@ -80,12 +80,11 @@ async def test_v1_models_excludes_unsupported_models(async_client):
     resp = await async_client.get("/v1/models")
     assert resp.status_code == 200
     ids = {item["id"] for item in resp.json()["data"]}
-    assert "gpt-hidden" not in ids
-    assert {"gpt-5.2", "gpt-5.3-codex"}.issubset(ids)
+    assert {"gpt-5.2", "gpt-5.3-codex", "gpt-hidden"}.issubset(ids)
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_models_excludes_unsupported_models(async_client):
+async def test_backend_codex_models_include_supported_in_api_false_models(async_client):
     registry = get_model_registry()
     models = [
         _make_upstream_model("gpt-5.2"),
@@ -97,8 +96,7 @@ async def test_backend_codex_models_excludes_unsupported_models(async_client):
     resp = await async_client.get("/backend-api/codex/models")
     assert resp.status_code == 200
     ids = {item["id"] for item in resp.json()["data"]}
-    assert "gpt-hidden" not in ids
-    assert {"gpt-5.2", "gpt-5.3-codex"}.issubset(ids)
+    assert {"gpt-5.2", "gpt-5.3-codex", "gpt-hidden"}.issubset(ids)
 
 
 @pytest.mark.asyncio

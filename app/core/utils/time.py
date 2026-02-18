@@ -13,6 +13,11 @@ def to_utc_naive(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def naive_utc_to_epoch(dt: datetime) -> int:
+    """Convert a naive-UTC datetime to Unix epoch seconds."""
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
+
+
 def from_epoch_seconds(value: int | float | None) -> datetime | None:
     if value is None:
         return None

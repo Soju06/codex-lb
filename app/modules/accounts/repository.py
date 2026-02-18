@@ -12,6 +12,9 @@ class AccountsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, account_id: str) -> Account | None:
+        return await self._session.get(Account, account_id)
+
     async def list_accounts(self) -> list[Account]:
         result = await self._session.execute(select(Account).order_by(Account.email))
         return list(result.scalars().all())

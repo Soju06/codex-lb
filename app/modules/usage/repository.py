@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.usage.types import UsageAggregateRow
+from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
 
@@ -111,6 +111,59 @@ class UsageRepository:
         stmt = select(UsageHistory).join(subq, UsageHistory.id == subq.c.usage_id).where(subq.c.row_number == 1)
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
+
+    async def trends_by_bucket(
+        self,
+        since: datetime,
+        bucket_seconds: int = 21600,
+        window: str | None = None,
+        account_id: str | None = None,
+    ) -> list[UsageTrendBucket]:
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql":
+            bucket_expr = func.floor(func.extract("epoch", UsageHistory.recorded_at) / bucket_seconds) * bucket_seconds
+        else:
+            epoch_col = cast(func.strftime("%s", UsageHistory.recorded_at), Integer)
+            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_col = bucket_expr.label("bucket_epoch")
+
+        conditions: list = [UsageHistory.recorded_at >= since]
+        if window:
+            if window == "primary":
+                conditions.append(or_(UsageHistory.window == "primary", UsageHistory.window.is_(None)))
+            else:
+                conditions.append(UsageHistory.window == window)
+        if account_id:
+            conditions.append(UsageHistory.account_id == account_id)
+
+        stmt = (
+            select(
+                bucket_col,
+                UsageHistory.account_id,
+                func.coalesce(UsageHistory.window, "primary").label("window"),
+                func.avg(UsageHistory.used_percent).label("avg_used_percent"),
+                func.count(UsageHistory.id).label("samples"),
+            )
+            .where(*conditions)
+            .group_by(
+                bucket_col,
+                UsageHistory.account_id,
+                func.coalesce(UsageHistory.window, "primary"),
+            )
+            .order_by(bucket_col)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            UsageTrendBucket(
+                bucket_epoch=int(row.bucket_epoch),
+                account_id=row.account_id,
+                window=row.window,
+                avg_used_percent=float(row.avg_used_percent) if row.avg_used_percent is not None else 0.0,
+                samples=int(row.samples),
+            )
+            for row in result.all()
+        ]
 
     async def latest_window_minutes(self, window: str) -> int | None:
         if window == "primary":

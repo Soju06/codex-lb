@@ -97,6 +97,15 @@ class UsageHistoryPayload:
 
 
 @dataclass(frozen=True)
+class UsageTrendBucket:
+    bucket_epoch: int
+    account_id: str
+    window: str
+    avg_used_percent: float
+    samples: int
+
+
+@dataclass(frozen=True)
 class BucketModelAggregate:
     bucket_epoch: int
     model: str

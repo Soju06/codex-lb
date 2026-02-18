@@ -8,6 +8,16 @@ from pydantic import Field
 from app.modules.shared.schemas import DashboardModel
 
 
+class UsageTrendPoint(DashboardModel):
+    t: datetime
+    v: float
+
+
+class AccountUsageTrend(DashboardModel):
+    primary: list[UsageTrendPoint] = Field(default_factory=list)
+    secondary: list[UsageTrendPoint] = Field(default_factory=list)
+
+
 class AccountUsage(DashboardModel):
     primary_remaining_percent: float | None = None
     secondary_remaining_percent: float | None = None
@@ -57,3 +67,9 @@ class AccountReactivateResponse(DashboardModel):
 
 class AccountDeleteResponse(DashboardModel):
     status: str
+
+
+class AccountTrendsResponse(DashboardModel):
+    account_id: str
+    primary: list[UsageTrendPoint] = Field(default_factory=list)
+    secondary: list[UsageTrendPoint] = Field(default_factory=list)

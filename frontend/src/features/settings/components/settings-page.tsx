@@ -5,6 +5,7 @@ import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
@@ -51,6 +52,7 @@ export function SettingsPage() {
               busy={busy}
               onSave={handleSave}
             />
+            <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
             <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
 

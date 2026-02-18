@@ -14,7 +14,6 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
     void onSave({
       stickyThreadsEnabled: settings.stickyThreadsEnabled,
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-      importWithoutOverwrite: settings.importWithoutOverwrite,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
       ...patch,
@@ -57,20 +56,6 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               checked={settings.preferEarlierResetAccounts}
               disabled={busy}
               onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
-            />
-          </div>
-
-          <div className="flex items-center justify-between p-3">
-            <div>
-              <p className="text-sm font-medium">Allow import without overwrite</p>
-              <p className="text-xs text-muted-foreground">
-                Keep duplicate imports as separate accounts instead of replacing existing ones.
-              </p>
-            </div>
-            <Switch
-              checked={settings.importWithoutOverwrite}
-              disabled={busy}
-              onCheckedChange={(checked) => save({ importWithoutOverwrite: checked })}
             />
           </div>
         </div>

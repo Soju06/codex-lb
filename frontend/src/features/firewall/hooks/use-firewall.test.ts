@@ -3,7 +3,9 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 
+import * as firewallApi from "@/features/firewall/api";
 import { useFirewall } from "@/features/firewall/hooks/use-firewall";
 import { server } from "@/test/mocks/server";
 
@@ -70,5 +72,31 @@ describe("useFirewall", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["firewall", "ips"] });
     });
+  });
+
+  it("uses fallback toast messages when mutation errors have empty messages", async () => {
+    const queryClient = createTestQueryClient();
+    const toastSpy = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const createSpy = vi
+      .spyOn(firewallApi, "createFirewallIp")
+      .mockRejectedValueOnce(new Error(""));
+    const deleteSpy = vi
+      .spyOn(firewallApi, "deleteFirewallIp")
+      .mockRejectedValueOnce(new Error(""));
+
+    const { result } = renderHook(() => useFirewall(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.firewallQuery.isSuccess).toBe(true));
+    await expect(result.current.createMutation.mutateAsync("127.0.0.1")).rejects.toThrow();
+    await expect(result.current.deleteMutation.mutateAsync("127.0.0.1")).rejects.toThrow();
+
+    expect(toastSpy).toHaveBeenCalledWith("Failed to add firewall IP");
+    expect(toastSpy).toHaveBeenCalledWith("Failed to remove firewall IP");
+
+    createSpy.mockRestore();
+    deleteSpy.mockRestore();
+    toastSpy.mockRestore();
   });
 });

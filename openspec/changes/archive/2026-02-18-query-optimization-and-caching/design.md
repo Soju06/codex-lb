@@ -91,9 +91,70 @@ stmt = select(UsageHistory).join(
 
 **근거**: 3개 쿼리를 단일로 통합하면 쿼리 복잡도가 크게 증가하고, 호출 빈도가 낮아 실질적 효과 미미.
 
+### 7. `refresh_accounts()` refreshed 플래그 정확성
+
+**결정**: `_refresh_account()` 반환 타입을 `AccountRefreshResult(usage_written: bool)`로 변경하고, `refresh_accounts()`는 `usage_written=True`인 경우에만 `refreshed=True`로 집계.
+
+**근거**: 현재 로직은 "refresh 시도"와 "usage 데이터 변경"을 동일하게 취급하여, payload 없음/API 오류/rate limit 정보 없음 등으로 DB 쓰기 없이 종료되는 경우에도 `refreshed=True`가 설정됨. 이로 인해 쿼리 최적화 목적(불필요한 `latest_by_account()` 재조회 억제)이 오류 트래픽 구간에서 무력화됨.
+
+**구현**:
+- `_refresh_account()` → `AccountRefreshResult` dataclass 반환
+- `usage_repo.add_entry()` 호출 결과가 실제 row 생성일 때만 `usage_written=True`
+- primary/secondary 중 하나라도 row 생성 시 `True`
+- `refresh_accounts()`에서 `refreshed = refreshed or result.usage_written`
+
+### 8. API Key Quota 원자적 검증
+
+**결정**: 승인(allow)과 quota 차감/예약을 같은 원자 연산으로 처리. Repository에 `try_reserve_usage()` CAS 메서드를 추가하고, 서비스는 이 결과로만 허용/거절을 결정.
+
+**근거**: 현재 `validate_key()`는 read-then-act(`current_value >= max_value`)로 검사하고, 실제 누적은 `record_usage()`에서 사후 증가. 병렬 요청 시 동일한 stale counter를 통과해 quota를 크게 초과할 수 있음.
+
+**구현**:
+- CAS SQL: `UPDATE api_key_limits SET current_value = current_value + :delta WHERE id = :limit_id AND reset_at = :expected_reset_at AND current_value + :delta <= max_value RETURNING ...`
+- 2단계 정산: 요청 시작 시 보수적 budget 예약(reserve) → 응답 수신 시 실제 usage로 정산(finalize) + 초과 예약분 환급(release) → upstream 실패/취소 시 예약 전액 해제
+- 요청별 `usage_reservation_id`로 finalize 멱등 처리
+
+**대안**: 낙관적 잠금(optimistic lock) + 재시도 → 경합이 높을 때 재시도 비용 증가. Redis 기반 atomic counter → 인프라 복잡도 증가.
+
+### 9. TOTP Disable Step-Up 강제
+
+**결정**: `disable_totp()`에 `_require_totp_verified_session()` 헬퍼를 도입하여 `password_verified && totp_verified` 완전 인증 세션을 요구.
+
+**근거**: 현재 `disable_totp()`는 `_require_active_password_session()`만 호출하여 `password_verified=True`만 확인. 비밀번호 유출 시 TOTP 검증 없이 2FA 해제가 가능해짐.
+
+**구현**:
+- `_require_totp_verified_session(session_id)` → `password_verified && totp_verified` 강제
+- 코드 재검증 시 `verify_totp_code(..., last_verified_step=settings.totp_last_verified_step)` + `try_advance_totp_last_verified_step()` replay 방지
+- 운영 모델: `tv=true` 세션만 요구 (단순) 또는 `tv=true` + `code` (보수적)
+
+### 10. Stale 필터 선택값 가시성
+
+**결정**: `MultiSelectFilter` 렌더링 집합을 `options ∪ selectedValues` 합집합으로 구성. `options`에 없는 선택값은 `isStale=true` 메타를 부착하여 구분.
+
+**근거**: 현재 필터 상태(source of truth)는 `selectedValues`이지만 UI 렌더링 집합은 `options`로만 제한되어, 서버 옵션에서 사라진 기존 선택값을 해제할 수 없음.
+
+**구현**:
+- `mergeFacetOptions(options, selectedValues)` 유틸리티로 합집합 구성
+- stale 항목에 구분 배지 + 체크 해제/`x` 버튼 제공
+- 필터 활성 상태 SSOT는 `selectedValues`(또는 URL query state)로 유지
+
+### 11. Status Facet Self-Filtering 방지
+
+**결정**: `/api/request-logs/options` 호출 시 `filters.statuses`를 제외하여 status facet이 자기 자신으로 축소되지 않도록 함.
+
+**근거**: 옵션 조회 쿼리가 목록 조회와 동일 필터를 재사용하면서, 백엔드가 status 조건을 적용해 status 옵션을 계산 → facet이 "한 번 좁히면 복구 어려운 단일 선택"처럼 동작.
+
+**구현**:
+- `listFilters`(실제 결과 조회용)와 `facetFilters`(옵션 계산용)를 타입으로 분리
+- status 옵션 계산 요청에는 `statuses` 제외 필터만 전달
+- 백엔드 방어: status 옵션 계산 시 서버에서도 `statuses` 조건 무시
+
 ## Risks / Trade-offs
 
 - **Rate limit 헤더 staleness**: 캐시 TTL 동안 값이 stale할 수 있음 → usage refresh 주기와 동기화하여 실질적 영향 최소화. refresh 완료 시 즉시 invalidate.
 - **Settings 캐시 일관성**: 5초 TTL 내 설정 변경이 반영되지 않을 수 있음 → 이미 auth middleware에서 동일 패턴 사용 중이므로 기존과 동일한 수준.
 - **`refresh_accounts()` 반환값 변경**: 기존 호출처에 영향 → 호출처가 `LoadBalancer`와 `RefreshScheduler` 2곳뿐이므로 영향 범위 제한적.
 - **subquery 방식의 `latest_by_account()`**: usage_history 테이블이 매우 클 경우 GROUP BY 성능 → `(account_id, window)` 인덱스로 커버 가능.
+- **CAS 기반 quota 예약**: UPDATE 실패 시 즉시 429 반환 → 정상적인 경합 상황에서도 false-reject 가능성. 단, quota 초과 방지가 더 중요한 요구사항이므로 수용.
+- **2단계 정산 복잡도**: reserve → finalize/release 패턴은 코드 복잡도 증가 → upstream 실패 시 자동 해제 + 멱등 finalize로 안전장치 확보.
+- **TOTP step-up 추가**: disable_totp() UX 단계가 늘어남 → 보안 민감 작업이므로 수용. 기존 verify_totp()와 동일한 anti-replay contract 재사용으로 구현 복잡도 최소화.

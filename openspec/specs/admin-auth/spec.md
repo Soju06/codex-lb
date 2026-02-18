@@ -81,37 +81,56 @@ The system SHALL allow the admin to remove the password via `DELETE /api/dashboa
 
 ### Requirement: Session authentication middleware
 
-The system SHALL enforce session authentication on all `/api/*` routes except `/api/dashboard-auth/*`. When `password_hash` is NULL, the middleware MUST allow all requests (unauthenticated mode). When `password_hash` is set, the middleware MUST validate the session cookie.
+The system SHALL enforce session authentication on `/api/*` routes except `/api/dashboard-auth/*`.
 
-#### Scenario: Unauthenticated mode (no password set)
+Authentication required condition: the system SHALL evaluate `password_hash` and `totp_required_on_login` together to determine whether authentication is required. When `password_hash` is NULL **and** `totp_required_on_login` is false, the middleware MUST allow all requests (unauthenticated mode). When either `password_hash` is set **or** `totp_required_on_login` is true, the middleware MUST require a valid session.
 
-- **WHEN** `password_hash` is NULL and a request arrives at `/api/accounts`
-- **THEN** the middleware allows the request through without checking cookies
+Session validation steps when `requires_auth` is true:
+1. A valid session cookie MUST be present (otherwise 401)
+2. If `password_hash` is not NULL, the session MUST have `password_verified=true`
+3. If `totp_required_on_login` is true, the session MUST have `totp_verified=true`
 
-#### Scenario: Password set but no session cookie
+Migration inconsistency (`password_hash=NULL` with `totp_required_on_login=true`) SHALL always be treated as fail-closed — the system MUST NOT fall back to unauthenticated mode. The system SHOULD emit a warning log/metric for this inconsistency state.
 
-- **WHEN** `password_hash` is set and a request arrives at `/api/settings` without a session cookie
-- **THEN** the middleware returns 401 with error code `authentication_required`
+`GET /api/codex/usage` is an exception path for dashboard session auth: the system SHALL require a valid Codex bearer caller identity (`Authorization: Bearer <token>` + `chatgpt-account-id`) that is authorized against LB account membership and successfully validated against upstream usage.
 
-#### Scenario: Valid session with password only
+#### Scenario: Codex usage caller identity validation in password mode
 
-- **WHEN** `password_hash` is set, `totp_required_on_login` is false, and a request has a valid session cookie with `pw=true`
-- **THEN** the middleware allows the request through
+- **WHEN** `password_hash` is set and `GET /api/codex/usage` is requested
+- **AND** `Authorization` bearer token and `chatgpt-account-id` are provided
+- **AND** `chatgpt-account-id` exists in LB accounts
+- **AND** upstream usage validation succeeds for the token/account pair
+- **THEN** the middleware allows the request
 
-#### Scenario: Valid session but TOTP not verified
+#### Scenario: Codex usage caller identity required even with dashboard session
 
-- **WHEN** `password_hash` is set, `totp_required_on_login` is true, and the session cookie has `pw=true, tv=false`
-- **THEN** the middleware returns 401 with error code `totp_required`
+- **WHEN** `password_hash` is set and `GET /api/codex/usage` is requested with a valid dashboard session cookie
+- **AND** codex bearer caller identity is missing
+- **THEN** the middleware returns 401
 
-#### Scenario: Fully authenticated session
+#### Scenario: Codex usage denied when caller identity is not authorized
 
-- **WHEN** `password_hash` is set, `totp_required_on_login` is true, and the session cookie has `pw=true, tv=true`
-- **THEN** the middleware allows the request through
+- **WHEN** `GET /api/codex/usage` is requested
+- **AND** codex bearer caller identity is missing or invalid
+- **THEN** the middleware returns 401
 
-#### Scenario: Auth endpoint exemption
+#### Scenario: Legacy TOTP protection preserved when password_hash is NULL
 
-- **WHEN** a request arrives at `/api/dashboard-auth/session` or any `/api/dashboard-auth/*` path
-- **THEN** the middleware allows the request through regardless of auth state
+- **WHEN** `password_hash` is NULL and `totp_required_on_login` is true
+- **AND** no session cookie is present
+- **THEN** the middleware returns 401
+
+#### Scenario: TOTP-only session accepted when password is not configured
+
+- **WHEN** `password_hash` is NULL and `totp_required_on_login` is true
+- **AND** session has `password_verified=false` and `totp_verified=true`
+- **THEN** the middleware allows the request
+
+#### Scenario: TOTP verification required even with password session
+
+- **WHEN** `password_hash` is NULL and `totp_required_on_login` is true
+- **AND** session has `password_verified=true` but `totp_verified=false`
+- **THEN** the middleware returns 401 with `totp_required` indication
 
 ### Requirement: Session state endpoint
 
@@ -210,3 +229,4 @@ The SPA SHALL check `GET /api/dashboard-auth/session` on load. When `passwordReq
 
 - **WHEN** the SPA loads and the session endpoint returns `passwordRequired: false`
 - **THEN** the full dashboard UI is shown immediately
+

@@ -24,25 +24,11 @@ router = APIRouter(prefix="/api/api-keys", tags=["dashboard"])
 
 
 def _to_response(row: ApiKeyData) -> ApiKeyResponse:
-    # Backward compatibility: derive legacy weekly fields from limits
-    weekly_token_limit = None
-    weekly_tokens_used = 0
-    weekly_reset_at = None
-    for limit in row.limits:
-        if limit.limit_type == "total_tokens" and limit.limit_window == "weekly" and limit.model_filter is None:
-            weekly_token_limit = limit.max_value
-            weekly_tokens_used = limit.current_value
-            weekly_reset_at = limit.reset_at
-            break
-
     return ApiKeyResponse(
         id=row.id,
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=row.allowed_models,
-        weekly_token_limit=weekly_token_limit,
-        weekly_tokens_used=weekly_tokens_used,
-        weekly_reset_at=weekly_reset_at,
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
@@ -150,6 +136,7 @@ async def update_api_key(
         is_active_set="is_active" in fields,
         limits=limit_inputs,
         limits_set=limits_set,
+        reset_usage=bool(payload.reset_usage),
     )
     try:
         row = await context.service.update_key(key_id, update)

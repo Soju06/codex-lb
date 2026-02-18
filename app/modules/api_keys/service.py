@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -14,6 +15,13 @@ from app.core.usage.pricing import (
 )
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
+from app.modules.api_keys.repository import (
+    _UNSET,
+    ReservationResult,
+    UsageReservationData,
+    UsageReservationItemData,
+    _Unset,
+)
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -29,21 +37,27 @@ class ApiKeysRepositoryProtocol(Protocol):
         self,
         key_id: str,
         *,
-        name: str | object = ...,
-        allowed_models: str | None | object = ...,
-        expires_at: datetime | None | object = ...,
-        is_active: bool | object = ...,
-        key_hash: str | object = ...,
-        key_prefix: str | object = ...,
+        name: str | _Unset = ...,
+        allowed_models: str | None | _Unset = ...,
+        expires_at: datetime | None | _Unset = ...,
+        is_active: bool | _Unset = ...,
+        key_hash: str | _Unset = ...,
+        key_prefix: str | _Unset = ...,
     ) -> ApiKey | None: ...
 
     async def delete(self, key_id: str) -> bool: ...
 
     async def update_last_used(self, key_id: str) -> None: ...
 
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
+
     async def get_limits_by_key(self, key_id: str) -> list[ApiKeyLimit]: ...
 
     async def replace_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]: ...
+
+    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]: ...
 
     async def increment_limit_usage(
         self,
@@ -56,6 +70,60 @@ class ApiKeysRepositoryProtocol(Protocol):
     ) -> None: ...
 
     async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool: ...
+
+    async def try_reserve_usage(
+        self,
+        limit_id: int,
+        *,
+        delta: int,
+        expected_reset_at: datetime,
+    ) -> ReservationResult: ...
+
+    async def adjust_reserved_usage(
+        self,
+        limit_id: int,
+        *,
+        delta: int,
+        expected_reset_at: datetime,
+    ) -> bool: ...
+
+    async def create_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        key_id: str,
+        model: str,
+        items: list[UsageReservationItemData],
+    ) -> None: ...
+
+    async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None: ...
+
+    async def transition_usage_reservation_status(
+        self,
+        reservation_id: str,
+        *,
+        expected_status: str,
+        new_status: str,
+    ) -> bool: ...
+
+    async def upsert_reservation_item_actual(
+        self,
+        reservation_id: str,
+        *,
+        item: UsageReservationItemData,
+        actual_delta: int,
+    ) -> None: ...
+
+    async def settle_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        status: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None,
+        cost_microdollars: int | None,
+    ) -> None: ...
 
 
 class ApiKeyNotFoundError(ValueError):
@@ -111,6 +179,7 @@ class ApiKeyUpdateData:
     is_active_set: bool = False
     limits: list[LimitRuleInput] | None = None
     limits_set: bool = False
+    reset_usage: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +198,13 @@ class ApiKeyData:
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreatedData(ApiKeyData):
     key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyUsageReservationData:
+    reservation_id: str
+    key_id: str
+    model: str
 
 
 class ApiKeysService:
@@ -166,24 +242,37 @@ class ApiKeysService:
         return [_to_api_key_data(row) for row in rows]
 
     async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
-        updates: dict[str, object] = {}
-        if payload.name_set:
-            updates["name"] = _normalize_name(payload.name or "")
-        if payload.allowed_models_set:
-            updates["allowed_models"] = _serialize_allowed_models(payload.allowed_models)
-        if payload.expires_at_set:
-            updates["expires_at"] = payload.expires_at
-        if payload.is_active_set and payload.is_active is not None:
-            updates["is_active"] = payload.is_active
-        row = await self._repository.update(key_id, **updates)
+        row = await self._repository.update(
+            key_id,
+            name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
+            allowed_models=_serialize_allowed_models(payload.allowed_models) if payload.allowed_models_set else _UNSET,
+            expires_at=payload.expires_at if payload.expires_at_set else _UNSET,
+            is_active=(
+                payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET
+            ),
+        )
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-        if payload.limits_set and payload.limits is not None:
+        if payload.limits_set:
             now = utcnow()
-            limit_rows = [_limit_input_to_row(li, key_id, now) for li in payload.limits]
-            await self._repository.replace_limits(key_id, limit_rows)
-            # Refresh to get updated limits
+            existing_limits = await self._repository.get_limits_by_key(key_id)
+            submitted_limits = payload.limits or []
+            limit_rows = _build_limit_rows_for_update(
+                key_id=key_id,
+                now=now,
+                submitted_limits=submitted_limits,
+                existing_limits=existing_limits,
+                reset_usage=payload.reset_usage,
+            )
+            await self._repository.upsert_limits(key_id, limit_rows)
+        elif payload.reset_usage:
+            now = utcnow()
+            existing_limits = await self._repository.get_limits_by_key(key_id)
+            limit_rows = _build_reset_limit_rows(key_id=key_id, now=now, existing_limits=existing_limits)
+            await self._repository.upsert_limits(key_id, limit_rows)
+
+        if payload.limits_set or payload.reset_usage:
             row = await self._repository.get_by_id(key_id)
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
@@ -213,40 +302,179 @@ class ApiKeysService:
         if not plain_key:
             raise ApiKeyInvalidError("Missing API key in Authorization header")
 
-        row = await self._repository.get_by_hash(_hash_key(plain_key))
-        if row is None or not row.is_active:
-            raise ApiKeyInvalidError("Invalid API key")
-
+        key_hash = _hash_key(plain_key)
         now = utcnow()
+        row = _ensure_valid_api_key_row(await self._repository.get_by_hash(key_hash))
         if row.expires_at is not None and row.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
+        await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
+        refreshed = _ensure_valid_api_key_row(await self._repository.get_by_hash(key_hash))
+        if refreshed.expires_at is not None and refreshed.expires_at < now:
+            raise ApiKeyInvalidError("API key has expired")
+        return _to_api_key_data(refreshed)
 
-        # Lazy reset expired limits
-        limits = row.limits
-        for limit in limits:
-            if limit.reset_at < now:
-                new_reset_at = _advance_reset(limit.reset_at, now, limit.limit_window)
-                await self._repository.reset_limit(
+    async def enforce_limits_for_request(
+        self,
+        key_id: str,
+        *,
+        request_model: str | None,
+    ) -> ApiKeyUsageReservationData:
+        now = utcnow()
+        row = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
+        if row.expires_at is not None and row.expires_at < now:
+            raise ApiKeyInvalidError("API key has expired")
+        await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
+        refreshed = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
+        if refreshed.expires_at is not None and refreshed.expires_at < now:
+            raise ApiKeyInvalidError("API key has expired")
+
+        reservation_items: list[UsageReservationItemData] = []
+        try:
+            for limit in refreshed.limits:
+                if not _limit_applies_for_request(limit, request_model=request_model):
+                    continue
+                if limit.current_value >= limit.max_value:
+                    raise _rate_limit_exceeded_error(limit)
+                reserve_delta = _reserve_delta_for_limit(limit)
+                if reserve_delta <= 0:
+                    continue
+                result = await self._repository.try_reserve_usage(
                     limit.id,
+                    delta=reserve_delta,
                     expected_reset_at=limit.reset_at,
-                    new_reset_at=new_reset_at,
+                )
+                if not result.success:
+                    raise _rate_limit_exceeded_error(limit)
+                reservation_items.append(
+                    UsageReservationItemData(
+                        limit_id=limit.id,
+                        limit_type=limit.limit_type,
+                        reserved_delta=reserve_delta,
+                        expected_reset_at=limit.reset_at,
+                    )
                 )
 
-        # Re-fetch to get updated limit values after resets
-        row = await self._repository.get_by_hash(_hash_key(plain_key))
-        if row is None:
-            raise ApiKeyInvalidError("Invalid API key")
+            reservation_id = _next_usage_reservation_id()
+            await self._repository.create_usage_reservation(
+                reservation_id,
+                key_id=key_id,
+                model=request_model or "",
+                items=reservation_items,
+            )
+            await self._repository.commit()
+        except Exception:
+            await self._repository.rollback()
+            raise
 
-        # Check all limits
-        for limit in row.limits:
-            if limit.current_value >= limit.max_value:
-                raise ApiKeyRateLimitExceededError(
-                    message=f"API key {limit.limit_type.value} {limit.limit_window.value} limit exceeded"
-                    + (f" for model {limit.model_filter}" if limit.model_filter else ""),
-                    reset_at=limit.reset_at,
+        return ApiKeyUsageReservationData(
+            reservation_id=reservation_id,
+            key_id=key_id,
+            model=request_model or "",
+        )
+
+    async def finalize_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int = 0,
+    ) -> None:
+        reservation = await self._repository.get_usage_reservation(reservation_id)
+        if reservation is None or reservation.status != "reserved":
+            return
+
+        claimed = await self._repository.transition_usage_reservation_status(
+            reservation_id,
+            expected_status="reserved",
+            new_status="settling",
+        )
+        if not claimed:
+            await self._repository.rollback()
+            return
+
+        cost_microdollars = _calculate_cost_microdollars(
+            model,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        )
+
+        try:
+            for item in reservation.items:
+                actual_delta = _compute_increment_for_limit_type(
+                    item.limit_type,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_microdollars=cost_microdollars,
+                )
+                delta = actual_delta - item.reserved_delta
+                if delta != 0:
+                    await self._repository.adjust_reserved_usage(
+                        item.limit_id,
+                        delta=delta,
+                        expected_reset_at=item.expected_reset_at,
+                    )
+                await self._repository.upsert_reservation_item_actual(
+                    reservation_id,
+                    item=item,
+                    actual_delta=actual_delta,
                 )
 
-        return _to_api_key_data(row)
+            await self._repository.settle_usage_reservation(
+                reservation_id,
+                status="finalized",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cost_microdollars=cost_microdollars,
+            )
+            await self._repository.commit()
+        except Exception:
+            await self._repository.rollback()
+            raise
+
+        await self._repository.update_last_used(reservation.api_key_id)
+
+    async def release_usage_reservation(self, reservation_id: str) -> None:
+        reservation = await self._repository.get_usage_reservation(reservation_id)
+        if reservation is None or reservation.status != "reserved":
+            return
+
+        claimed = await self._repository.transition_usage_reservation_status(
+            reservation_id,
+            expected_status="reserved",
+            new_status="released",
+        )
+        if not claimed:
+            await self._repository.rollback()
+            return
+
+        try:
+            for item in reservation.items:
+                await self._repository.adjust_reserved_usage(
+                    item.limit_id,
+                    delta=-item.reserved_delta,
+                    expected_reset_at=item.expected_reset_at,
+                )
+                await self._repository.upsert_reservation_item_actual(
+                    reservation_id,
+                    item=item,
+                    actual_delta=0,
+                )
+            await self._repository.settle_usage_reservation(
+                reservation_id,
+                status="released",
+                input_tokens=None,
+                output_tokens=None,
+                cached_input_tokens=None,
+                cost_microdollars=None,
+            )
+            await self._repository.commit()
+        except Exception:
+            await self._repository.rollback()
+            raise
 
     async def record_usage(
         self,
@@ -316,6 +544,87 @@ def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
     )
 
 
+def _ensure_valid_api_key_row(row: ApiKey | None) -> ApiKey:
+    if row is None or not row.is_active:
+        raise ApiKeyInvalidError("Invalid API key")
+    return row
+
+
+async def _lazy_reset_expired_limits(
+    repository: ApiKeysRepositoryProtocol,
+    limits: list[ApiKeyLimit],
+    *,
+    now: datetime,
+) -> None:
+    for limit in limits:
+        if limit.reset_at >= now:
+            continue
+        new_reset_at = _advance_reset(limit.reset_at, now, limit.limit_window)
+        await repository.reset_limit(
+            limit.id,
+            expected_reset_at=limit.reset_at,
+            new_reset_at=new_reset_at,
+        )
+
+
+def _rate_limit_exceeded_error(limit: ApiKeyLimit) -> ApiKeyRateLimitExceededError:
+    return ApiKeyRateLimitExceededError(
+        message=f"API key {limit.limit_type.value} {limit.limit_window.value} limit exceeded"
+        + (f" for model {limit.model_filter}" if limit.model_filter else ""),
+        reset_at=limit.reset_at,
+    )
+
+
+def _limit_applies_for_request(limit: ApiKeyLimit, *, request_model: str | None) -> bool:
+    if limit.model_filter is None:
+        return True
+    if request_model is None:
+        return False
+    return limit.model_filter == request_model
+
+
+def _reserve_delta_for_limit(limit: ApiKeyLimit) -> int:
+    remaining = limit.max_value - limit.current_value
+    if remaining <= 0:
+        return 0
+    budget = _reserve_budget_for_limit_type(limit.limit_type)
+    return min(remaining, budget)
+
+
+def _reserve_budget_for_limit_type(limit_type: LimitType) -> int:
+    if limit_type == LimitType.TOTAL_TOKENS:
+        return 8_192
+    if limit_type == LimitType.INPUT_TOKENS:
+        return 8_192
+    if limit_type == LimitType.OUTPUT_TOKENS:
+        return 8_192
+    if limit_type == LimitType.COST_USD:
+        return 2_000_000
+    return 1
+
+
+def _compute_increment_for_limit_type(
+    limit_type: LimitType,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cost_microdollars: int,
+) -> int:
+    if limit_type == LimitType.TOTAL_TOKENS:
+        return input_tokens + output_tokens
+    if limit_type == LimitType.INPUT_TOKENS:
+        return input_tokens
+    if limit_type == LimitType.OUTPUT_TOKENS:
+        return output_tokens
+    if limit_type == LimitType.COST_USD:
+        return cost_microdollars
+    return 0
+
+
+def _next_usage_reservation_id() -> str:
+    return f"ur_{uuid.uuid4().hex}"
+
+
 def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
     return ApiKeyCreatedData(
         id=data.id,
@@ -346,17 +655,86 @@ def _to_api_key_data(row: ApiKey) -> ApiKeyData:
     )
 
 
-def _limit_input_to_row(li: LimitRuleInput, key_id: str, now: datetime) -> ApiKeyLimit:
+def _limit_input_to_row(
+    li: LimitRuleInput,
+    key_id: str,
+    now: datetime,
+    *,
+    current_value: int = 0,
+    reset_at: datetime | None = None,
+) -> ApiKeyLimit:
     window = LimitWindow(li.limit_window)
     return ApiKeyLimit(
         api_key_id=key_id,
         limit_type=LimitType(li.limit_type),
         limit_window=window,
         max_value=li.max_value,
-        current_value=0,
+        current_value=current_value,
         model_filter=li.model_filter,
-        reset_at=_next_reset(now, window),
+        reset_at=reset_at if reset_at is not None else _next_reset(now, window),
     )
+
+
+def _build_limit_rows_for_update(
+    *,
+    key_id: str,
+    now: datetime,
+    submitted_limits: list[LimitRuleInput],
+    existing_limits: list[ApiKeyLimit],
+    reset_usage: bool,
+) -> list[ApiKeyLimit]:
+    existing_by_key = {_limit_identity_from_row(limit): limit for limit in existing_limits}
+    submitted_by_key = {_limit_identity_from_input(limit): limit for limit in submitted_limits}
+    if len(submitted_by_key) != len(submitted_limits):
+        raise ValueError("Duplicate limit rules are not allowed")
+
+    rows: list[ApiKeyLimit] = []
+    for submitted in submitted_limits:
+        identity = _limit_identity_from_input(submitted)
+        matched = existing_by_key.get(identity)
+        if matched is None or reset_usage:
+            rows.append(_limit_input_to_row(submitted, key_id, now))
+            continue
+        rows.append(
+            _limit_input_to_row(
+                submitted,
+                key_id,
+                now,
+                current_value=matched.current_value,
+                reset_at=matched.reset_at,
+            )
+        )
+    return rows
+
+
+def _build_reset_limit_rows(
+    *,
+    key_id: str,
+    now: datetime,
+    existing_limits: list[ApiKeyLimit],
+) -> list[ApiKeyLimit]:
+    rows: list[ApiKeyLimit] = []
+    for existing in existing_limits:
+        rows.append(
+            ApiKeyLimit(
+                api_key_id=key_id,
+                limit_type=existing.limit_type,
+                limit_window=existing.limit_window,
+                max_value=existing.max_value,
+                current_value=0,
+                model_filter=existing.model_filter,
+                reset_at=_next_reset(now, existing.limit_window),
+            )
+        )
+    return rows
+
+
+def _limit_identity_from_input(limit: LimitRuleInput) -> tuple[str, str, str | None]:
+    return (limit.limit_type, limit.limit_window, limit.model_filter)
+
+
+def _limit_identity_from_row(limit: ApiKeyLimit) -> tuple[str, str, str | None]:
+    return (limit.limit_type.value, limit.limit_window.value, limit.model_filter)
 
 
 def _next_reset(now: datetime, window: LimitWindow) -> datetime:

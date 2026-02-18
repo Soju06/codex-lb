@@ -14,6 +14,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -187,6 +188,71 @@ class ApiKeyLimit(Base):
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="limits")
 
 
+class ApiKeyUsageReservation(Base):
+    __tablename__ = "api_key_usage_reservations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="reserved")
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cached_input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cost_microdollars: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    items: Mapped[list["ApiKeyUsageReservationItem"]] = relationship(
+        "ApiKeyUsageReservationItem",
+        back_populates="reservation",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class ApiKeyUsageReservationItem(Base):
+    __tablename__ = "api_key_usage_reservation_items"
+    __table_args__ = (UniqueConstraint("reservation_id", "limit_id", name="uq_reservation_limit"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reservation_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_key_usage_reservations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    limit_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("api_key_limits.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    limit_type: Mapped[str] = mapped_column(String, nullable=False)
+    reserved_delta: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actual_delta: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    expected_reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    reservation: Mapped[ApiKeyUsageReservation] = relationship(
+        "ApiKeyUsageReservation",
+        back_populates="items",
+    )
+    limit: Mapped[ApiKeyLimit] = relationship("ApiKeyLimit")
+
+
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
@@ -194,3 +260,6 @@ Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
+Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
+Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
+Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)

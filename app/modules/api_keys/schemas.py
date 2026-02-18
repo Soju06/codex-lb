@@ -39,6 +39,7 @@ class ApiKeyUpdateRequest(DashboardModel):
     expires_at: datetime | None = None
     is_active: bool | None = None
     limits: list[LimitRuleCreate] | None = None
+    reset_usage: bool | None = None
 
 
 class ApiKeyResponse(DashboardModel):
@@ -46,9 +47,6 @@ class ApiKeyResponse(DashboardModel):
     name: str
     key_prefix: str
     allowed_models: list[str] | None
-    weekly_token_limit: int | None = None
-    weekly_tokens_used: int = 0
-    weekly_reset_at: datetime | None = None
     expires_at: datetime | None
     is_active: bool
     created_at: datetime
@@ -58,7 +56,3 @@ class ApiKeyResponse(DashboardModel):
 
 class ApiKeyCreateResponse(ApiKeyResponse):
     key: str
-
-
-class ApiKeyListResponse(DashboardModel):
-    keys: list[ApiKeyResponse]

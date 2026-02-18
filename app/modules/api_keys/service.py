@@ -247,9 +247,7 @@ class ApiKeysService:
             name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
             allowed_models=_serialize_allowed_models(payload.allowed_models) if payload.allowed_models_set else _UNSET,
             expires_at=payload.expires_at if payload.expires_at_set else _UNSET,
-            is_active=(
-                payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET
-            ),
+            is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
         )
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")

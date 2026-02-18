@@ -8,13 +8,17 @@ from app.core.auth import DEFAULT_PLAN
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.migrate import LEGACY_MIGRATION_ORDER, run_startup_migrations
+from app.db.migrate import LEGACY_MIGRATION_ORDER, inspect_migration_state, run_startup_migrations
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.integration
 _DATABASE_URL = get_settings().database_url
+
+
+def _expected_head_revision() -> str:
+    return inspect_migration_state(_DATABASE_URL).head_revision
 
 
 def _make_account(account_id: str, email: str, plan_type: str) -> Account:
@@ -41,7 +45,8 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
         await repo.upsert(_make_account("acc_three", "three@example.com", ""))
 
     result = await run_startup_migrations(_DATABASE_URL)
-    assert result.current_revision == "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+    expected_head = _expected_head_revision()
+    assert result.current_revision == expected_head
     assert result.bootstrap.stamped_revision is None
 
     async with SessionLocal() as session:
@@ -56,7 +61,7 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
         assert acc_three.plan_type == DEFAULT_PLAN
 
     rerun = await run_startup_migrations(_DATABASE_URL)
-    assert rerun.current_revision == "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+    assert rerun.current_revision == expected_head
 
 
 @pytest.mark.asyncio
@@ -80,14 +85,15 @@ async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
+    expected_head = _expected_head_revision()
 
     assert result.bootstrap.stamped_revision == "004_add_accounts_chatgpt_account_id"
-    assert result.current_revision == "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+    assert result.current_revision == expected_head
 
     async with SessionLocal() as session:
         revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
         revisions = [str(row[0]) for row in revision_rows.fetchall()]
-        assert revisions == ["012_add_import_without_overwrite_and_drop_accounts_email_unique"]
+        assert revisions == [expected_head]
 
 
 @pytest.mark.asyncio
@@ -112,9 +118,10 @@ async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_mi
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
+    expected_head = _expected_head_revision()
 
     assert result.bootstrap.stamped_revision is None
-    assert result.current_revision == "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+    assert result.current_revision == expected_head
 
     async with SessionLocal() as session:
         setting_id = await session.execute(text("SELECT id FROM dashboard_settings WHERE id = 1"))
@@ -145,10 +152,11 @@ async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
+    expected_head = _expected_head_revision()
 
     assert result.bootstrap.stamped_revision == "001_normalize_account_plan_types"
     assert result.bootstrap.unknown_migrations == ("900_custom_hotfix",)
-    assert result.current_revision == "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+    assert result.current_revision == expected_head
 
 
 @pytest.mark.asyncio

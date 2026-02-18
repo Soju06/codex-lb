@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -115,7 +116,12 @@ class DashboardSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    import_without_overwrite: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    import_without_overwrite: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     totp_required_on_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_key_auth_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

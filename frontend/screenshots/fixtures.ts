@@ -1,5 +1,6 @@
 import {
   createAccountSummary,
+  createAccountTrends,
   createApiKey,
   createDashboardAuthSession,
   createDashboardOverview,
@@ -8,6 +9,7 @@ import {
   createRequestLogFilterOptions,
   createRequestLogsResponse,
   type AccountSummary,
+  type AccountTrendsResponse,
   type RequestLogEntry,
 } from "../src/test/mocks/factories";
 
@@ -484,5 +486,36 @@ export const models = [
   { id: "gpt-5.2", name: "GPT 5.2" },
   { id: "gpt-5.1-codex-mini", name: "GPT 5.1 Codex Mini" },
 ];
+
+// ── Per-account usage trends ──
+
+function makeTrendPoints(percentages: number[]) {
+  return percentages.map((v, i) => ({
+    t: trendIso((percentages.length - i) * 6),
+    v,
+  }));
+}
+
+export const accountTrends: Record<string, AccountTrendsResponse> = Object.fromEntries(
+  accounts.map((a) => {
+    const prim = a.usage?.primaryRemainingPercent ?? 100;
+    const sec = a.usage?.secondaryRemainingPercent ?? 100;
+    return [
+      a.accountId,
+      createAccountTrends(a.accountId, {
+        primary: makeTrendPoints(
+          Array.from({ length: 28 }, (_, i) =>
+            Math.max(0, Math.min(100, prim + Math.sin(i * 0.5) * 15)),
+          ),
+        ),
+        secondary: makeTrendPoints(
+          Array.from({ length: 28 }, (_, i) =>
+            Math.max(0, Math.min(100, sec + Math.sin(i * 0.4) * 12)),
+          ),
+        ),
+      }),
+    ];
+  }),
+);
 
 export { createRequestLogsResponse };

@@ -4,6 +4,7 @@ import { test, type Page, type Route } from "@playwright/test";
 
 import {
   accounts,
+  accountTrends,
   apiKeys,
   authSession,
   createRequestLogsResponse,
@@ -57,6 +58,12 @@ async function interceptApi(page: Page, session: SessionOverride = authSession) 
       return fulfill(route, createRequestLogsResponse(slice, requestLogs.length, offset + limit < requestLogs.length));
     }
     if (p === "/api/accounts") return fulfill(route, { accounts });
+    const trendsMatch = p.match(/^\/api\/accounts\/([^/]+)\/trends$/);
+    if (trendsMatch) {
+      const trends = accountTrends[trendsMatch[1]];
+      if (trends) return fulfill(route, trends);
+      return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "account_not_found", message: "Account not found" } }) });
+    }
     if (p === "/api/settings") return fulfill(route, settings);
     if (p === "/api/models") return fulfill(route, { models });
     if (p === "/api/api-keys" || p === "/api/api-keys/") return fulfill(route, apiKeys);

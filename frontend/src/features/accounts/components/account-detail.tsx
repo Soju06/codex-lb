@@ -40,21 +40,20 @@ export function AccountDetail({
     );
   }
 
+  const title = account.displayName || account.email;
+  const compactId = formatCompactAccountId(account.accountId);
   const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : null;
-  const subtitle = showAccountId
-    ? emailSubtitle
-      ? `${emailSubtitle} | ID ${formatCompactAccountId(account.accountId)}`
-      : `ID ${formatCompactAccountId(account.accountId)}`
-    : emailSubtitle;
+  const heading = showAccountId && !emailSubtitle ? `${title} (${compactId})` : title;
+  const subtitle = showAccountId && emailSubtitle ? `${emailSubtitle} | ID ${compactId}` : emailSubtitle;
 
   return (
     <div key={account.accountId} className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5">
       {/* Account header */}
       <div>
         <h2 className="text-base font-semibold">
-          {account.displayName || account.email}
+          {heading}
         </h2>
         {subtitle ? (
           <p className="mt-0.5 text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>

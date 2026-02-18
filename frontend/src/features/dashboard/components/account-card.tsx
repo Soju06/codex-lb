@@ -70,22 +70,20 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
 
   const title = account.displayName || account.email;
+  const compactId = formatCompactAccountId(account.accountId);
   const emailSubtitle =
     account.displayName && account.displayName !== account.email
       ? account.email
       : null;
-  const subtitle = showAccountId
-    ? emailSubtitle
-      ? `${emailSubtitle} | ID ${formatCompactAccountId(account.accountId)}`
-      : `ID ${formatCompactAccountId(account.accountId)}`
-    : emailSubtitle;
+  const heading = showAccountId && !emailSubtitle ? `${title} (${compactId})` : title;
+  const subtitle = showAccountId && emailSubtitle ? `${emailSubtitle} | ID ${compactId}` : emailSubtitle;
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold leading-tight">{title}</p>
+          <p className="truncate text-sm font-semibold leading-tight">{heading}</p>
           {subtitle ? (
             <p className="mt-0.5 truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
               {subtitle}

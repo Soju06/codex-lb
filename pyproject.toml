@@ -36,6 +36,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "asyncpg>=0.30.0",
     "bcrypt>=4.3.0",
+    "brotli>=1.2.0",
     "cryptography>=46.0.3",
     "python-dotenv>=1.2.1",
     "fastapi[standard]>=0.128.0",

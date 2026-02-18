@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
 from typing import AsyncIterator, Mapping
@@ -363,7 +363,10 @@ class ProxyService:
                     ):
                         yield line
                     settled = await self._settle_stream_api_key_usage(
-                        api_key, api_key_reservation, settlement, request_id,
+                        api_key,
+                        api_key_reservation,
+                        settlement,
+                        request_id,
                     )
                     return
                 except _RetryableStreamError as exc:
@@ -389,7 +392,10 @@ class ProxyService:
                         ):
                             yield line
                         settled = await self._settle_stream_api_key_usage(
-                            api_key, api_key_reservation, settlement, request_id,
+                            api_key,
+                            api_key_reservation,
+                            settlement,
+                            request_id,
                         )
                         return
                     error = _parse_openai_error(exc.payload)

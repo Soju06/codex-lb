@@ -926,7 +926,10 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
     async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
         call_count["value"] += 1
         if call_count["value"] == 1:
-            raise ProxyResponseError(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": "unauthorized"}})
+            raise ProxyResponseError(
+                401,
+                {"error": {"message": "unauthorized", "type": "auth_error", "code": "unauthorized"}},
+            )
         usage = {"input_tokens": 20, "output_tokens": 10}
         event = {"type": "response.completed", "response": {"id": "resp_retry", "usage": usage}}
         yield f"data: {json.dumps(event)}\n\n"

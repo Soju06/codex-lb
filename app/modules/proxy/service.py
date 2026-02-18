@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import timedelta
 from hashlib import sha256
 from typing import AsyncIterator, Mapping
@@ -200,6 +201,48 @@ class ProxyService:
                     exc_info=True,
                 )
 
+    async def _settle_stream_api_key_usage(
+        self,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+        settlement: _StreamSettlement,
+        request_id: str,
+    ) -> bool:
+        """Settle stream reservation. Returns True if settled."""
+        if api_key is None or api_key_reservation is None:
+            return True
+
+        reservation_id = api_key_reservation.reservation_id
+        model_name = api_key_reservation.model or settlement.model or ""
+
+        with anyio.CancelScope(shield=True):
+            try:
+                async with self._repo_factory() as repos:
+                    api_keys_service = ApiKeysService(repos.api_keys)
+                    if (
+                        settlement.status == "success"
+                        and settlement.input_tokens is not None
+                        and settlement.output_tokens is not None
+                    ):
+                        await api_keys_service.finalize_usage_reservation(
+                            reservation_id,
+                            model=model_name,
+                            input_tokens=settlement.input_tokens,
+                            output_tokens=settlement.output_tokens,
+                            cached_input_tokens=settlement.cached_input_tokens or 0,
+                        )
+                    else:
+                        await api_keys_service.release_usage_reservation(reservation_id)
+                return True
+            except Exception:
+                logger.warning(
+                    "Failed to settle stream API key reservation key_id=%s request_id=%s",
+                    api_key.id,
+                    request_id,
+                    exc_info=True,
+                )
+                return False
+
     async def rate_limit_headers(self) -> dict[str, str]:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
 
@@ -286,108 +329,135 @@ class ProxyService:
         sticky_threads_enabled = settings.sticky_threads_enabled
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
         max_attempts = 3
-        for attempt in range(max_attempts):
-            selection = await self._load_balancer.select_account(
-                sticky_key=sticky_key,
-                prefer_earlier_reset_accounts=prefer_earlier_reset,
-                model=payload.model,
-            )
-            account = selection.account
-            if not account:
-                event = response_failed_event(
-                    "no_accounts",
-                    selection.error_message or "No active accounts available",
-                    response_id=request_id,
+        settled = False
+        settlement = _StreamSettlement()
+        try:
+            for attempt in range(max_attempts):
+                selection = await self._load_balancer.select_account(
+                    sticky_key=sticky_key,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    model=payload.model,
                 )
-                yield format_sse_event(event)
-                return
+                account = selection.account
+                if not account:
+                    event = response_failed_event(
+                        "no_accounts",
+                        selection.error_message or "No active accounts available",
+                        response_id=request_id,
+                    )
+                    yield format_sse_event(event)
+                    return
 
-            account_id_value = account.id
-            try:
-                account = await self._ensure_fresh(account)
-                async for line in self._stream_once(
-                    account,
-                    payload,
-                    headers,
-                    request_id,
-                    attempt < max_attempts - 1,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                ):
-                    yield line
-                return
-            except _RetryableStreamError as exc:
-                await self._handle_stream_error(account, exc.error, exc.code)
-                continue
-            except ProxyResponseError as exc:
-                if exc.status_code == 401:
-                    try:
-                        account = await self._ensure_fresh(account, force=True)
-                    except RefreshError as refresh_exc:
-                        if refresh_exc.is_permanent:
-                            await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                        continue
+                account_id_value = account.id
+                try:
+                    account = await self._ensure_fresh(account)
+                    settlement = _StreamSettlement()
                     async for line in self._stream_once(
                         account,
                         payload,
                         headers,
                         request_id,
-                        False,
+                        attempt < max_attempts - 1,
                         api_key=api_key,
-                        api_key_reservation=api_key_reservation,
+                        settlement=settlement,
                     ):
                         yield line
+                    settled = await self._settle_stream_api_key_usage(
+                        api_key, api_key_reservation, settlement, request_id,
+                    )
                     return
-                error = _parse_openai_error(exc.payload)
-                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-                error_message = error.message if error else None
-                error_type = error.type if error else None
-                error_param = error.param if error else None
-                await self._handle_stream_error(
-                    account,
-                    _upstream_error_from_openai(error),
-                    error_code,
-                )
-                if propagate_http_errors:
-                    raise
-                event = response_failed_event(
-                    error_code,
-                    error_message or "Upstream error",
-                    error_type=error_type or "server_error",
-                    response_id=request_id,
-                    error_param=error_param,
-                )
-                _apply_error_metadata(event["response"]["error"], error)
-                yield format_sse_event(event)
-                return
-            except RefreshError as exc:
-                if exc.is_permanent:
-                    await self._load_balancer.mark_permanent_failure(account, exc.code)
-                continue
-            except Exception:
-                try:
-                    await self._load_balancer.record_error(account)
-                except Exception:
-                    logger.warning(
-                        "Failed to record proxy error account_id=%s request_id=%s",
-                        account_id_value,
-                        request_id,
-                        exc_info=True,
+                except _RetryableStreamError as exc:
+                    await self._handle_stream_error(account, exc.error, exc.code)
+                    continue
+                except ProxyResponseError as exc:
+                    if exc.status_code == 401:
+                        try:
+                            account = await self._ensure_fresh(account, force=True)
+                        except RefreshError as refresh_exc:
+                            if refresh_exc.is_permanent:
+                                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            continue
+                        settlement = _StreamSettlement()
+                        async for line in self._stream_once(
+                            account,
+                            payload,
+                            headers,
+                            request_id,
+                            False,
+                            api_key=api_key,
+                            settlement=settlement,
+                        ):
+                            yield line
+                        settled = await self._settle_stream_api_key_usage(
+                            api_key, api_key_reservation, settlement, request_id,
+                        )
+                        return
+                    error = _parse_openai_error(exc.payload)
+                    error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                    error_message = error.message if error else None
+                    error_type = error.type if error else None
+                    error_param = error.param if error else None
+                    await self._handle_stream_error(
+                        account,
+                        _upstream_error_from_openai(error),
+                        error_code,
                     )
-                if attempt == max_attempts - 1:
+                    if propagate_http_errors:
+                        raise
                     event = response_failed_event(
-                        "upstream_error",
-                        "Proxy streaming failed",
+                        error_code,
+                        error_message or "Upstream error",
+                        error_type=error_type or "server_error",
                         response_id=request_id,
+                        error_param=error_param,
                     )
+                    _apply_error_metadata(event["response"]["error"], error)
                     yield format_sse_event(event)
                     return
-        event = response_failed_event(
-            "no_accounts",
-            "No available accounts after retries",
-            response_id=request_id,
-        )
-        yield format_sse_event(event)
+                except RefreshError as exc:
+                    if exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, exc.code)
+                    continue
+                except Exception:
+                    try:
+                        await self._load_balancer.record_error(account)
+                    except Exception:
+                        logger.warning(
+                            "Failed to record proxy error account_id=%s request_id=%s",
+                            account_id_value,
+                            request_id,
+                            exc_info=True,
+                        )
+                    if attempt == max_attempts - 1:
+                        event = response_failed_event(
+                            "upstream_error",
+                            "Proxy streaming failed",
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
+                        return
+            event = response_failed_event(
+                "no_accounts",
+                "No available accounts after retries",
+                response_id=request_id,
+            )
+            yield format_sse_event(event)
+        finally:
+            if not settled and api_key is not None and api_key_reservation is not None:
+                with anyio.CancelScope(shield=True):
+                    try:
+                        async with self._repo_factory() as repos:
+                            api_keys_service = ApiKeysService(repos.api_keys)
+                            await api_keys_service.release_usage_reservation(
+                                api_key_reservation.reservation_id,
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Failed to release stream API key reservation key_id=%s request_id=%s",
+                            api_key.id,
+                            request_id,
+                            exc_info=True,
+                        )
 
     async def _stream_once(
         self,
@@ -398,7 +468,7 @@ class ProxyService:
         allow_retry: bool,
         *,
         api_key: ApiKeyData | None,
-        api_key_reservation: ApiKeyUsageReservationData | None,
+        settlement: _StreamSettlement,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -410,7 +480,6 @@ class ProxyService:
         error_code = None
         error_message = None
         usage = None
-        settle_reservation = True
 
         try:
             stream = core_stream_responses(
@@ -441,7 +510,6 @@ class ProxyService:
                 error_message = error.message if error else None
                 if allow_retry:
                     error_payload = _upstream_error_from_openai(error)
-                    settle_reservation = False
                     raise _RetryableStreamError(code, error_payload)
 
             if event and event.type in ("response.completed", "response.incomplete"):
@@ -490,6 +558,11 @@ class ProxyService:
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
+            settlement.status = status
+            settlement.model = model
+            settlement.input_tokens = input_tokens
+            settlement.output_tokens = output_tokens
+            settlement.cached_input_tokens = cached_input_tokens
             with anyio.CancelScope(shield=True):
                 try:
                     async with self._repo_factory() as repos:
@@ -515,29 +588,6 @@ class ProxyService:
                         request_id,
                         exc_info=True,
                     )
-                if settle_reservation and api_key is not None and api_key_reservation is not None:
-                    try:
-                        async with self._repo_factory() as repos:
-                            api_keys_service = ApiKeysService(repos.api_keys)
-                            if status == "success" and input_tokens is not None and output_tokens is not None:
-                                await api_keys_service.finalize_usage_reservation(
-                                    api_key_reservation.reservation_id,
-                                    model=api_key_reservation.model or model,
-                                    input_tokens=input_tokens,
-                                    output_tokens=output_tokens,
-                                    cached_input_tokens=cached_input_tokens or 0,
-                                )
-                            else:
-                                await api_keys_service.release_usage_reservation(
-                                    api_key_reservation.reservation_id,
-                                )
-                    except Exception:
-                        logger.warning(
-                            "Failed to settle stream API key reservation key_id=%s request_id=%s",
-                            api_key.id,
-                            request_id,
-                            exc_info=True,
-                        )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
         latest_usage = await repos.usage.latest_by_account(window="primary")
@@ -605,6 +655,17 @@ class _RetryableStreamError(Exception):
         super().__init__(code)
         self.code = code
         self.error = error
+
+
+@dataclass
+class _StreamSettlement:
+    """Populated by _stream_once(), consumed by _stream_with_retry() for reservation settlement."""
+
+    status: str = "success"
+    model: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_input_tokens: int | None = None
 
 
 def _maybe_log_proxy_request_shape(

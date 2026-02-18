@@ -375,7 +375,6 @@ async def _compact_responses(
             api_key_reservation=_request_api_key_reservation(request),
         )
     except NotImplementedError:
-        await _release_request_reservation(request)
         error = OpenAIErrorEnvelopeModel(
             error=OpenAIError(
                 message="responses/compact is not implemented",
@@ -389,13 +388,14 @@ async def _compact_responses(
             headers=rate_limit_headers,
         )
     except ProxyResponseError as exc:
-        await _release_request_reservation(request)
         error = _parse_error_envelope(exc.payload)
         return JSONResponse(
             status_code=exc.status_code,
             content=error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
+    finally:
+        await _release_request_reservation(request)
     return JSONResponse(
         content=result.model_dump(mode="json", exclude_none=True),
         headers=rate_limit_headers,

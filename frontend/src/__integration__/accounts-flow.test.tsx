@@ -7,7 +7,7 @@ import { renderWithProviders } from "@/test/utils";
 
 describe("accounts flow integration", () => {
   it("supports account selection and pause/resume actions", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
 
     window.history.pushState({}, "", "/accounts");
     renderWithProviders(<App />);

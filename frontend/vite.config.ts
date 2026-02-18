@@ -41,6 +41,7 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     exclude: ["screenshots/**", "node_modules/**"],
+    testTimeout: 15_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],

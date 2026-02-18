@@ -15,7 +15,7 @@ import { renderWithProviders } from "@/test/utils";
 
 describe("dashboard flow integration", () => {
   it("loads dashboard, refetches request logs on filter/pagination, and avoids overview refetch", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const logs = createDefaultRequestLogs();
 
     let overviewCalls = 0;

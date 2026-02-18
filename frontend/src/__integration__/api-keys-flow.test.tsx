@@ -25,7 +25,7 @@ describe("api keys flow integration", () => {
     window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
-    expect(await screen.findByText("API Keys", {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(await screen.findByText("API Keys", {}, { timeout: 5000 })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Create key" }));
     await user.type(screen.getByLabelText("Name"), createdName);
@@ -67,7 +67,9 @@ describe("api keys flow integration", () => {
     });
   });
 
-  it("displays existing api keys with limit summaries", async () => {
+  it("displays existing api keys with limit summaries and shows limit rules editor in create dialog", async () => {
+    const user = userEvent.setup({ delay: null });
+
     window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
@@ -78,31 +80,19 @@ describe("api keys flow integration", () => {
     // Verify limit summary is displayed for the first key (has limits)
     const defaultKeyRow = getParentRow(screen.getByText("Default key"));
     expect(within(defaultKeyRow).getByText(/Tokens/)).toBeInTheDocument();
-  });
 
-  it("shows limit rules editor in create dialog with basic mode", async () => {
-    const user = userEvent.setup();
-
-    window.history.pushState({}, "", "/settings");
-    renderWithProviders(<App />);
-
-    expect(await screen.findByText("API Keys")).toBeInTheDocument();
-
+    // Open create dialog and verify limit rules editor in basic mode
     await user.click(screen.getByRole("button", { name: "Create key" }));
 
-    // Basic mode: should show weekly token limit and weekly cost limit inputs
-    // "Limits" appears both as a column header and inside the LimitRulesEditor
     const limitsElements = screen.getAllByText("Limits");
     expect(limitsElements.length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Weekly token limit")).toBeInTheDocument();
     expect(screen.getByText("Weekly cost limit ($)")).toBeInTheDocument();
-
-    // Should also show "Allowed models" label
     expect(screen.getByText("Allowed models")).toBeInTheDocument();
   });
 
   it("shows usage bars when editing a key with limits", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
 
     window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);

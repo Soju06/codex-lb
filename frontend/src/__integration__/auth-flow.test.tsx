@@ -9,7 +9,7 @@ import { server } from "@/test/mocks/server";
 
 describe("auth flow integration", () => {
   it("flows from login to totp to dashboard", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
 
     server.use(
       http.get("/api/dashboard-auth/session", () =>

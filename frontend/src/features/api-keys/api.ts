@@ -6,9 +6,11 @@ import {
   ApiKeyListSchema,
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
+  ModelsResponseSchema,
 } from "@/features/api-keys/schemas";
 
 const API_KEYS_BASE_PATH = "/api/api-keys";
+const MODELS_PATH = "/api/models";
 
 export function listApiKeys() {
   return get(`${API_KEYS_BASE_PATH}/`, ApiKeyListSchema);
@@ -37,4 +39,8 @@ export function regenerateApiKey(keyId: string) {
     `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}/regenerate`,
     ApiKeyCreateResponseSchema,
   );
+}
+
+export function listModels() {
+  return get(MODELS_PATH, ModelsResponseSchema);
 }

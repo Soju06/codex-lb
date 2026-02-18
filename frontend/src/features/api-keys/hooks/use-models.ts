@@ -1,27 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { z } from "zod";
 
-import { get } from "@/lib/api-client";
+import { listModels } from "@/features/api-keys/api";
 
-const ModelsResponseSchema = z.object({
-  models: z.array(
-    z.object({
-      id: z.string(),
-      name: z.string(),
-    }),
-  ),
-});
-
-export type ModelItem = { id: string; name: string };
-
-function fetchModels() {
-  return get("/api/models", ModelsResponseSchema);
-}
+export type { ModelItem } from "@/features/api-keys/schemas";
 
 export function useModels() {
   return useQuery({
     queryKey: ["models"],
-    queryFn: fetchModels,
+    queryFn: listModels,
     staleTime: 5 * 60 * 1000,
     select: (data) => data.models,
   });

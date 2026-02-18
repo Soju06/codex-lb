@@ -1,32 +1,10 @@
 import { z } from "zod";
 
-export const AccountUsageSchema = z.object({
-  primaryRemainingPercent: z.number().nullable(),
-  secondaryRemainingPercent: z.number().nullable(),
-});
+import { AccountSummarySchema, AccountUsageSchema } from "@/features/accounts/schemas";
+import type { AccountSummary } from "@/features/accounts/schemas";
 
-export const AccountTokenStatusSchema = z.object({
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
-  state: z.string().nullable().optional(),
-});
-
-export const AccountAuthSchema = z.object({
-  access: AccountTokenStatusSchema.nullable().optional(),
-  refresh: AccountTokenStatusSchema.nullable().optional(),
-  idToken: AccountTokenStatusSchema.nullable().optional(),
-});
-
-export const AccountSummarySchema = z.object({
-  accountId: z.string(),
-  email: z.string(),
-  displayName: z.string(),
-  planType: z.string(),
-  status: z.string(),
-  usage: AccountUsageSchema.nullable().optional(),
-  resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
-  resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
-  auth: AccountAuthSchema.nullable().optional(),
-});
+export { AccountSummarySchema, AccountUsageSchema };
+export type { AccountSummary };
 
 export const UsageHistoryItemSchema = z.object({
   accountId: z.string(),
@@ -132,7 +110,6 @@ export const FilterStateSchema = z.object({
   offset: z.number().int().nonnegative(),
 });
 
-export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type DashboardMetrics = z.infer<typeof DashboardMetricsSchema>;
 export type DashboardOverview = z.infer<typeof DashboardOverviewSchema>;
 export type TrendPoint = z.infer<typeof TrendPointSchema>;

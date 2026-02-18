@@ -6,6 +6,9 @@ import {
   RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
 
+const DASHBOARD_PATH = "/api/dashboard";
+const REQUEST_LOGS_PATH = "/api/request-logs";
+
 export type RequestLogsListFilters = {
   limit?: number;
   offset?: number;
@@ -36,7 +39,7 @@ function appendMany(params: URLSearchParams, key: string, values?: string[]): vo
 }
 
 export function getDashboardOverview() {
-  return get("/api/dashboard/overview", DashboardOverviewSchema);
+  return get(`${DASHBOARD_PATH}/overview`, DashboardOverviewSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {
@@ -60,7 +63,7 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
     query.set("until", params.until);
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`/api/request-logs${suffix}`, RequestLogsResponseSchema);
+  return get(`${REQUEST_LOGS_PATH}${suffix}`, RequestLogsResponseSchema);
 }
 
 export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
@@ -74,5 +77,5 @@ export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
   appendMany(query, "accountId", params.accountIds);
   appendMany(query, "modelOption", params.modelOptions);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`/api/request-logs/options${suffix}`, RequestLogFilterOptionsSchema);
+  return get(`${REQUEST_LOGS_PATH}/options${suffix}`, RequestLogFilterOptionsSchema);
 }

@@ -72,10 +72,10 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
       <TableHeader>
         <TableRow>
           <TableHead className="w-[12%] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
-          <TableHead className="w-[20%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
+          <TableHead className="w-[10%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
           <TableHead className="w-[14%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
-          <TableHead className="w-[18%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
-          <TableHead className="w-[14%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
+          <TableHead className="w-[24%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
+          <TableHead className="w-[18%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
           <TableHead className="w-[12%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
           <TableHead className="w-[10%] pr-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Actions</TableHead>
         </TableRow>
@@ -90,7 +90,7 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
               <TableCell className="pl-4 font-medium">{apiKey.name}</TableCell>
               <TableCell className="font-mono text-xs">{apiKey.keyPrefix}</TableCell>
               <TableCell className="max-w-[14rem] truncate">{models}</TableCell>
-              <TableCell className="max-w-[20rem] text-xs tabular-nums">{usageText}</TableCell>
+              <TableCell className="truncate text-xs tabular-nums">{usageText}</TableCell>
               <TableCell className="text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt)}</TableCell>
               <TableCell>
                 <Badge className={apiKey.isActive ? "bg-emerald-500 text-white" : "bg-zinc-500 text-white"}>

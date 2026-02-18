@@ -60,14 +60,41 @@ def _resolve_client_ip(
     if trust_proxy_headers and socket_ip and _is_trusted_proxy_source(socket_ip, trusted_proxy_networks):
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for:
-            first = forwarded_for.split(",", 1)[0].strip()
-            if _is_valid_ip(first):
-                return first
+            resolved_from_chain = _resolve_client_ip_from_xff_chain(
+                socket_ip,
+                forwarded_for,
+                trusted_proxy_networks,
+            )
+            if resolved_from_chain is not None:
+                return resolved_from_chain
     return socket_ip
 
 
 def _parse_trusted_proxy_networks(cidrs: list[str]) -> tuple[IPv4Network | IPv6Network, ...]:
     return tuple(ip_network(cidr, strict=False) for cidr in cidrs)
+
+
+def _resolve_client_ip_from_xff_chain(
+    socket_ip: str,
+    forwarded_for: str,
+    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...],
+) -> str | None:
+    hops = [entry.strip() for entry in forwarded_for.split(",")]
+    if not hops:
+        return None
+    if any(not _is_valid_ip(entry) for entry in hops):
+        return None
+
+    chain = [*hops, socket_ip]
+    resolved = socket_ip
+    for index in range(len(chain) - 1, 0, -1):
+        current_proxy = chain[index]
+        previous_hop = chain[index - 1]
+        if not _is_trusted_proxy_source(current_proxy, trusted_proxy_networks):
+            resolved = current_proxy
+            break
+        resolved = previous_hop
+    return resolved
 
 
 def _is_trusted_proxy_source(

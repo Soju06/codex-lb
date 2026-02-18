@@ -18,6 +18,7 @@ from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.clients.proxy import stream_responses as core_stream_responses
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error, response_failed_event
 from app.core.openai.models import OpenAIResponsePayload
@@ -30,6 +31,7 @@ from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
@@ -46,6 +48,7 @@ from app.modules.proxy.helpers import (
     _window_snapshot,
 )
 from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.types import RateLimitStatusPayloadData
 from app.modules.usage.updater import UsageUpdater
@@ -65,6 +68,8 @@ class ProxyService:
         headers: Mapping[str, str],
         *,
         propagate_http_errors: bool = False,
+        api_key: ApiKeyData | None = None,
+        api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         _maybe_log_proxy_request_shape("stream", payload, headers)
@@ -73,25 +78,30 @@ class ProxyService:
             payload,
             filtered,
             propagate_http_errors=propagate_http_errors,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
         )
 
     async def compact_responses(
         self,
         payload: ResponsesCompactRequest,
         headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None = None,
+        api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> OpenAIResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
-        async with self._repo_factory() as repos:
-            settings = await repos.settings.get_or_create()
-            prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-            sticky_threads_enabled = settings.sticky_threads_enabled
+        settings = await get_settings_cache().get()
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        sticky_threads_enabled = settings.sticky_threads_enabled
         sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
             reallocate_sticky=sticky_key is not None,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
+            model=payload.model,
         )
         account = selection.account
         if not account:
@@ -107,9 +117,20 @@ class ProxyService:
             return await core_compact_responses(payload, filtered, access_token, account_id)
 
         try:
-            return await _call_compact(account)
+            response = await _call_compact(account)
+            await self._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                response=response,
+            )
+            return response
         except ProxyResponseError as exc:
             if exc.status_code != 401:
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                )
                 await self._handle_proxy_error(account, exc)
                 raise
             try:
@@ -117,14 +138,72 @@ class ProxyService:
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                )
                 raise exc
             try:
-                return await _call_compact(account)
+                response = await _call_compact(account)
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=response,
+                )
+                return response
             except ProxyResponseError as exc:
+                await self._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                )
                 await self._handle_proxy_error(account, exc)
                 raise
 
+    async def _settle_compact_api_key_usage(
+        self,
+        *,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+        response: OpenAIResponsePayload | None,
+    ) -> None:
+        if api_key is None or api_key_reservation is None:
+            return
+
+        reservation_id = api_key_reservation.reservation_id
+        usage = response.usage if response is not None else None
+        input_tokens = usage.input_tokens if usage else None
+        output_tokens = usage.output_tokens if usage else None
+        cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else 0
+        model_name = api_key_reservation.model or (getattr(response, "model", None) or "")
+
+        with anyio.CancelScope(shield=True):
+            try:
+                async with self._repo_factory() as repos:
+                    api_keys_service = ApiKeysService(repos.api_keys)
+                    if response is not None and input_tokens is not None and output_tokens is not None:
+                        await api_keys_service.finalize_usage_reservation(
+                            reservation_id,
+                            model=model_name,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            cached_input_tokens=cached_input_tokens or 0,
+                        )
+                    else:
+                        await api_keys_service.release_usage_reservation(reservation_id)
+            except Exception:
+                logger.warning(
+                    "Failed to settle compact API key reservation key_id=%s request_id=%s",
+                    api_key.id,
+                    get_request_id(),
+                    exc_info=True,
+                )
+
     async def rate_limit_headers(self) -> dict[str, str]:
+        return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
+
+    async def _compute_rate_limit_headers(self) -> dict[str, str]:
         now = utcnow()
         headers: dict[str, str] = {}
         async with self._repo_factory() as repos:
@@ -198,18 +277,20 @@ class ProxyService:
         headers: Mapping[str, str],
         *,
         propagate_http_errors: bool,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
-        async with self._repo_factory() as repos:
-            settings = await repos.settings.get_or_create()
-            prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-            sticky_threads_enabled = settings.sticky_threads_enabled
+        settings = await get_settings_cache().get()
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        sticky_threads_enabled = settings.sticky_threads_enabled
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
         max_attempts = 3
         for attempt in range(max_attempts):
             selection = await self._load_balancer.select_account(
                 sticky_key=sticky_key,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
+                model=payload.model,
             )
             account = selection.account
             if not account:
@@ -230,6 +311,8 @@ class ProxyService:
                     headers,
                     request_id,
                     attempt < max_attempts - 1,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
                 ):
                     yield line
                 return
@@ -244,7 +327,15 @@ class ProxyService:
                         if refresh_exc.is_permanent:
                             await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                         continue
-                    async for line in self._stream_once(account, payload, headers, request_id, False):
+                    async for line in self._stream_once(
+                        account,
+                        payload,
+                        headers,
+                        request_id,
+                        False,
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                    ):
                         yield line
                     return
                 error = _parse_openai_error(exc.payload)
@@ -305,6 +396,9 @@ class ProxyService:
         headers: Mapping[str, str],
         request_id: str,
         allow_retry: bool,
+        *,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -316,6 +410,7 @@ class ProxyService:
         error_code = None
         error_message = None
         usage = None
+        settle_reservation = True
 
         try:
             stream = core_stream_responses(
@@ -346,6 +441,7 @@ class ProxyService:
                 error_message = error.message if error else None
                 if allow_retry:
                     error_payload = _upstream_error_from_openai(error)
+                    settle_reservation = False
                     raise _RetryableStreamError(code, error_payload)
 
             if event and event.type in ("response.completed", "response.incomplete"):
@@ -399,6 +495,7 @@ class ProxyService:
                     async with self._repo_factory() as repos:
                         await repos.request_logs.add_log(
                             account_id=account_id_value,
+                            api_key_id=api_key.id if api_key else None,
                             request_id=request_id,
                             model=model,
                             input_tokens=input_tokens,
@@ -418,6 +515,29 @@ class ProxyService:
                         request_id,
                         exc_info=True,
                     )
+                if settle_reservation and api_key is not None and api_key_reservation is not None:
+                    try:
+                        async with self._repo_factory() as repos:
+                            api_keys_service = ApiKeysService(repos.api_keys)
+                            if status == "success" and input_tokens is not None and output_tokens is not None:
+                                await api_keys_service.finalize_usage_reservation(
+                                    api_key_reservation.reservation_id,
+                                    model=api_key_reservation.model or model,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    cached_input_tokens=cached_input_tokens or 0,
+                                )
+                            else:
+                                await api_keys_service.release_usage_reservation(
+                                    api_key_reservation.reservation_id,
+                                )
+                    except Exception:
+                        logger.warning(
+                            "Failed to settle stream API key reservation key_id=%s request_id=%s",
+                            api_key.id,
+                            request_id,
+                            exc_info=True,
+                        )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
         latest_usage = await repos.usage.latest_by_account(window="primary")

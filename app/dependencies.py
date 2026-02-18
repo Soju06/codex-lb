@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import SessionLocal, _safe_close, _safe_rollback, get_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeysService
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.service import DashboardService
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
@@ -55,6 +57,13 @@ class DashboardAuthContext:
 @dataclass(slots=True)
 class ProxyContext:
     service: ProxyService
+
+
+@dataclass(slots=True)
+class ApiKeysContext:
+    session: AsyncSession
+    repository: ApiKeysRepository
+    service: ApiKeysService
 
 
 @dataclass(slots=True)
@@ -132,7 +141,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             usage=UsageRepository(session),
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
-            settings=SettingsRepository(session),
+            api_keys=ApiKeysRepository(session),
         )
     except BaseException:
         await _safe_rollback(session)
@@ -161,6 +170,14 @@ def get_dashboard_auth_context(
 def get_proxy_context() -> ProxyContext:
     service = ProxyService(repo_factory=_proxy_repo_context)
     return ProxyContext(service=service)
+
+
+def get_api_keys_context(
+    session: AsyncSession = Depends(get_session),
+) -> ApiKeysContext:
+    repository = ApiKeysRepository(session)
+    service = ApiKeysService(repository)
+    return ApiKeysContext(session=session, repository=repository, service=service)
 
 
 def get_request_logs_context(

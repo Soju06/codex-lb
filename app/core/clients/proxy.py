@@ -242,7 +242,7 @@ async def _error_payload_from_response(resp: ErrorResponse) -> OpenAIErrorEnvelo
     return openai_error("upstream_error", fallback_message)
 
 
-def _extract_upstream_message(data: dict) -> str | None:
+def _extract_upstream_message(data: Mapping[str, object]) -> str | None:
     for key in ("message", "detail", "error"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():

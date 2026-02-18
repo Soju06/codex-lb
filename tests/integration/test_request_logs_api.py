@@ -63,8 +63,11 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
     response = await async_client.get("/api/request-logs?limit=2")
     assert response.status_code == 200
-    payload = response.json()["requests"]
+    body = response.json()
+    payload = body["requests"]
     assert len(payload) == 2
+    assert body["total"] == 2
+    assert body["hasMore"] is False
 
     latest = payload[0]
     assert latest["status"] == "rate_limit"

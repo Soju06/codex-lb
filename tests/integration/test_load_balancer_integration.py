@@ -11,11 +11,11 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -29,7 +29,7 @@ async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
             usage=UsageRepository(session),
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
-            settings=SettingsRepository(session),
+            api_keys=ApiKeysRepository(session),
         )
 
 

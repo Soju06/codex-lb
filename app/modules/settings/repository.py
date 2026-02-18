@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DashboardSettings
@@ -21,11 +22,20 @@ class SettingsRepository:
             sticky_threads_enabled=False,
             prefer_earlier_reset_accounts=False,
             totp_required_on_login=False,
+            password_hash=None,
+            api_key_auth_enabled=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
         )
         self._session.add(row)
-        await self._session.commit()
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
+            if existing is None:
+                raise
+            return existing
         await self._session.refresh(row)
         return row
 
@@ -35,6 +45,7 @@ class SettingsRepository:
         sticky_threads_enabled: bool | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
         totp_required_on_login: bool | None = None,
+        api_key_auth_enabled: bool | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -43,6 +54,8 @@ class SettingsRepository:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
         if totp_required_on_login is not None:
             settings.totp_required_on_login = totp_required_on_login
+        if api_key_auth_enabled is not None:
+            settings.api_key_auth_enabled = api_key_auth_enabled
         await self.commit_refresh(settings)
         return settings
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -12,10 +13,17 @@ from app.modules.usage.repository import UsageRepository
 pytestmark = pytest.mark.integration
 
 
-def _make_account(account_id: str, email: str, plan_type: str = "plus") -> Account:
+def _make_account(
+    account_id: str,
+    email: str,
+    *,
+    chatgpt_account_id: str | None = None,
+    plan_type: str = "plus",
+) -> Account:
     encryptor = TokenEncryptor()
     return Account(
         id=account_id,
+        chatgpt_account_id=chatgpt_account_id,
         email=email,
         plan_type=plan_type,
         access_token_encrypted=encryptor.encrypt("access"),
@@ -27,14 +35,24 @@ def _make_account(account_id: str, email: str, plan_type: str = "plus") -> Accou
     )
 
 
+@pytest.fixture(autouse=True)
+def stub_codex_usage_caller_validation(monkeypatch):
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "chatgpt-token"
+        assert account_id is not None
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    monkeypatch.setattr("app.core.middleware.dashboard_auth.fetch_usage", stub_fetch_usage)
+
+
 @pytest.mark.asyncio
 async def test_codex_usage_aggregates_windows(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
 
-        await accounts_repo.upsert(_make_account("acc_a", "a@example.com"))
-        await accounts_repo.upsert(_make_account("acc_b", "b@example.com"))
+        await accounts_repo.upsert(_make_account("acc_a", "a@example.com", chatgpt_account_id="workspace_acc_a"))
+        await accounts_repo.upsert(_make_account("acc_b", "b@example.com", chatgpt_account_id="workspace_acc_b"))
 
         await usage_repo.add_entry(
             "acc_a",
@@ -71,7 +89,13 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             window_minutes=10080,
         )
 
-    response = await async_client.get("/api/codex/usage")
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_acc_a",
+        },
+    )
     assert response.status_code == 200
     payload = response.json()
 
@@ -104,8 +128,8 @@ async def test_codex_usage_header_ignored(async_client, db_setup):
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
 
-        await accounts_repo.upsert(_make_account("acc_a", "a@example.com"))
-        await accounts_repo.upsert(_make_account("acc_b", "b@example.com"))
+        await accounts_repo.upsert(_make_account("acc_a", "a@example.com", chatgpt_account_id="workspace_acc_a"))
+        await accounts_repo.upsert(_make_account("acc_b", "b@example.com", chatgpt_account_id="workspace_acc_b"))
 
         await usage_repo.add_entry(
             "acc_a",
@@ -124,7 +148,10 @@ async def test_codex_usage_header_ignored(async_client, db_setup):
 
     response = await async_client.get(
         "/api/codex/usage",
-        headers={"chatgpt-account-id": "acc_b"},
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_acc_b",
+        },
     )
     assert response.status_code == 200
     payload = response.json()

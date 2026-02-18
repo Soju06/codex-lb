@@ -1,208 +1,56 @@
+import {
+  AccountSummarySchema,
+  AccountTrendsResponseSchema,
+  OauthStartResponseSchema,
+  OauthStatusResponseSchema,
+  OauthCompleteResponseSchema,
+} from "@/features/accounts/schemas";
+import type {
+  AccountSummary,
+  AccountTrendsResponse,
+  OauthStartResponse,
+  OauthStatusResponse,
+} from "@/features/accounts/schemas";
+import {
+  DashboardOverviewSchema,
+  RequestLogSchema,
+  RequestLogsResponseSchema,
+  RequestLogFilterOptionsSchema,
+} from "@/features/dashboard/schemas";
+import type {
+  DashboardOverview,
+  RequestLog,
+  RequestLogsResponse,
+  RequestLogFilterOptions,
+} from "@/features/dashboard/schemas";
+import { AuthSessionSchema } from "@/features/auth/schemas";
+import type { AuthSession } from "@/features/auth/schemas";
+import { DashboardSettingsSchema } from "@/features/settings/schemas";
+import type { DashboardSettings } from "@/features/settings/schemas";
+import {
+  ApiKeySchema,
+  ApiKeyCreateResponseSchema,
+} from "@/features/api-keys/schemas";
+import type { ApiKey, ApiKeyCreateResponse } from "@/features/api-keys/schemas";
 import { z } from "zod";
 
-import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
+// Backward-compatible type aliases
+export type RequestLogEntry = RequestLog;
+export type DashboardAuthSession = AuthSession;
+export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
 
-const isoDateSchema = z.string().datetime({ offset: true });
-
-const accountUsageSchema = z.object({
-  primaryRemainingPercent: z.number().nullable(),
-  secondaryRemainingPercent: z.number().nullable(),
-});
-
-const accountTokenStatusSchema = z.object({
-  expiresAt: isoDateSchema.nullable().optional(),
-  state: z.string().nullable().optional(),
-});
-
-const accountAuthStatusSchema = z.object({
-  access: accountTokenStatusSchema.nullable().optional(),
-  refresh: accountTokenStatusSchema.nullable().optional(),
-  idToken: accountTokenStatusSchema.nullable().optional(),
-});
-
-const accountSummarySchema = z.object({
-  accountId: z.string(),
-  email: z.string(),
-  displayName: z.string(),
-  planType: z.string(),
-  status: z.string(),
-  usage: accountUsageSchema.nullable().optional(),
-  resetAtPrimary: isoDateSchema.nullable().optional(),
-  resetAtSecondary: isoDateSchema.nullable().optional(),
-  auth: accountAuthStatusSchema.nullable().optional(),
-});
-
-const usageHistoryItemSchema = z.object({
-  accountId: z.string(),
-  remainingPercentAvg: z.number(),
-  capacityCredits: z.number(),
-  remainingCredits: z.number(),
-});
-
-const usageWindowResponseSchema = z.object({
-  windowKey: z.string(),
-  windowMinutes: z.number().nullable(),
-  accounts: z.array(usageHistoryItemSchema),
-});
-
-const trendPointSchema = z.object({
-  t: isoDateSchema,
-  v: z.number(),
-});
-
-const metricsTrendsSchema = z.object({
-  requests: z.array(trendPointSchema),
-  tokens: z.array(trendPointSchema),
-  cost: z.array(trendPointSchema),
-  errorRate: z.array(trendPointSchema),
-});
-
-const dashboardOverviewSchema = z.object({
-  lastSyncAt: isoDateSchema.nullable(),
-  accounts: z.array(accountSummarySchema),
-  summary: z.object({
-    primaryWindow: z.object({
-      remainingPercent: z.number(),
-      capacityCredits: z.number(),
-      remainingCredits: z.number(),
-      resetAt: isoDateSchema.nullable(),
-      windowMinutes: z.number().nullable(),
-    }),
-    secondaryWindow: z
-      .object({
-        remainingPercent: z.number(),
-        capacityCredits: z.number(),
-        remainingCredits: z.number(),
-        resetAt: isoDateSchema.nullable(),
-        windowMinutes: z.number().nullable(),
-      })
-      .nullable(),
-    cost: z.object({
-      currency: z.string(),
-      totalUsd7d: z.number(),
-    }),
-    metrics: z
-      .object({
-        requests7d: z.number().nullable(),
-        tokensSecondaryWindow: z.number().nullable(),
-        cachedTokensSecondaryWindow: z.number().nullable(),
-        errorRate7d: z.number().nullable(),
-        topError: z.string().nullable(),
-      })
-      .nullable(),
-  }),
-  windows: z.object({
-    primary: usageWindowResponseSchema,
-    secondary: usageWindowResponseSchema.nullable(),
-  }),
-  trends: metricsTrendsSchema,
-});
-
-const requestLogEntrySchema = z.object({
-  requestedAt: isoDateSchema,
-  accountId: z.string(),
-  requestId: z.string(),
-  model: z.string(),
-  status: z.enum(["ok", "rate_limit", "quota", "error"]),
-  errorCode: z.string().nullable(),
-  errorMessage: z.string().nullable(),
-  tokens: z.number().nullable(),
-  cachedInputTokens: z.number().nullable(),
-  reasoningEffort: z.string().nullable(),
-  costUsd: z.number().nullable(),
-  latencyMs: z.number().nullable(),
-});
-
-const requestLogsResponseSchema = z.object({
-  requests: z.array(requestLogEntrySchema),
-  total: z.number().int().nonnegative(),
-  hasMore: z.boolean(),
-});
-
-const requestLogFilterOptionsSchema = z.object({
-  accountIds: z.array(z.string()),
-  modelOptions: z.array(
-    z.object({
-      model: z.string(),
-      reasoningEffort: z.string().nullable(),
-    }),
-  ),
-  statuses: z.array(z.string()),
-});
-
-const authSessionSchema = z.object({
-  authenticated: z.boolean(),
-  passwordRequired: z.boolean(),
-  totpRequiredOnLogin: z.boolean(),
-  totpConfigured: z.boolean(),
-});
-
-const settingsSchema = z.object({
-  stickyThreadsEnabled: z.boolean(),
-  preferEarlierResetAccounts: z.boolean(),
-  totpRequiredOnLogin: z.boolean(),
-  totpConfigured: z.boolean(),
-  apiKeyAuthEnabled: z.boolean(),
-});
-
-const oauthStartSchema = z.object({
-  method: z.string(),
-  authorizationUrl: z.string().nullable(),
-  callbackUrl: z.string().nullable(),
-  verificationUrl: z.string().nullable(),
-  userCode: z.string().nullable(),
-  deviceAuthId: z.string().nullable(),
-  intervalSeconds: z.number().nullable(),
-  expiresInSeconds: z.number().nullable(),
-});
-
-const oauthStatusSchema = z.object({
-  status: z.string(),
-  errorMessage: z.string().nullable(),
-});
-
-const oauthCompleteSchema = z.object({
-  status: z.string(),
-});
-
-const limitRuleSchema = z.object({
-  id: z.number(),
-  limitType: z.enum(LIMIT_TYPES),
-  limitWindow: z.enum(LIMIT_WINDOWS),
-  maxValue: z.number(),
-  currentValue: z.number(),
-  modelFilter: z.string().nullable(),
-  resetAt: isoDateSchema,
-});
-
-const apiKeySchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  keyPrefix: z.string(),
-  allowedModels: z.array(z.string()).nullable(),
-  expiresAt: isoDateSchema.nullable(),
-  isActive: z.boolean(),
-  createdAt: isoDateSchema,
-  lastUsedAt: isoDateSchema.nullable(),
-  limits: z.array(limitRuleSchema).default([]),
-});
-
-const apiKeyCreateSchema = apiKeySchema.extend({
-  key: z.string(),
-});
-
-export type AccountSummary = z.infer<typeof accountSummarySchema>;
-export type DashboardOverview = z.infer<typeof dashboardOverviewSchema>;
-export type RequestLogEntry = z.infer<typeof requestLogEntrySchema>;
-export type RequestLogsResponse = z.infer<typeof requestLogsResponseSchema>;
-export type RequestLogFilterOptions = z.infer<typeof requestLogFilterOptionsSchema>;
-export type DashboardAuthSession = z.infer<typeof authSessionSchema>;
-export type DashboardSettings = z.infer<typeof settingsSchema>;
-export type OauthStartResponse = z.infer<typeof oauthStartSchema>;
-export type OauthStatusResponse = z.infer<typeof oauthStatusSchema>;
-export type OauthCompleteResponse = z.infer<typeof oauthCompleteSchema>;
-export type ApiKey = z.infer<typeof apiKeySchema>;
-export type ApiKeyCreateResponse = z.infer<typeof apiKeyCreateSchema>;
+export type {
+  AccountSummary,
+  AccountTrendsResponse,
+  DashboardOverview,
+  RequestLogsResponse,
+  RequestLogFilterOptions,
+  DashboardSettings,
+  OauthStartResponse,
+  OauthStatusResponse,
+  ApiKey,
+  ApiKeyCreateResponse,
+};
 
 const BASE_TIME = new Date("2026-01-01T12:00:00Z");
 
@@ -211,7 +59,7 @@ function offsetIso(minutes: number): string {
 }
 
 export function createAccountSummary(overrides: Partial<AccountSummary> = {}): AccountSummary {
-  return accountSummarySchema.parse({
+  return AccountSummarySchema.parse({
     accountId: "acc_primary",
     email: "primary@example.com",
     displayName: "primary@example.com",
@@ -317,11 +165,11 @@ export function createDashboardOverview(overrides: Partial<DashboardOverview> = 
     },
     ...overrides,
   };
-  return dashboardOverviewSchema.parse(response);
+  return DashboardOverviewSchema.parse(response);
 }
 
 export function createRequestLogEntry(overrides: Partial<RequestLogEntry> = {}): RequestLogEntry {
-  return requestLogEntrySchema.parse({
+  return RequestLogSchema.parse({
     requestedAt: offsetIso(-1),
     accountId: "acc_primary",
     requestId: "req_1",
@@ -370,7 +218,7 @@ export function createRequestLogsResponse(
   total: number,
   hasMore: boolean,
 ): RequestLogsResponse {
-  return requestLogsResponseSchema.parse({
+  return RequestLogsResponseSchema.parse({
     requests,
     total,
     hasMore,
@@ -380,7 +228,7 @@ export function createRequestLogsResponse(
 export function createRequestLogFilterOptions(
   overrides: Partial<RequestLogFilterOptions> = {},
 ): RequestLogFilterOptions {
-  return requestLogFilterOptionsSchema.parse({
+  return RequestLogFilterOptionsSchema.parse({
     accountIds: ["acc_primary", "acc_secondary"],
     modelOptions: [
       { model: "gpt-5.1", reasoningEffort: null },
@@ -394,7 +242,7 @@ export function createRequestLogFilterOptions(
 export function createDashboardAuthSession(
   overrides: Partial<DashboardAuthSession> = {},
 ): DashboardAuthSession {
-  return authSessionSchema.parse({
+  return AuthSessionSchema.parse({
     authenticated: true,
     passwordRequired: true,
     totpRequiredOnLogin: false,
@@ -404,7 +252,7 @@ export function createDashboardAuthSession(
 }
 
 export function createDashboardSettings(overrides: Partial<DashboardSettings> = {}): DashboardSettings {
-  return settingsSchema.parse({
+  return DashboardSettingsSchema.parse({
     stickyThreadsEnabled: true,
     preferEarlierResetAccounts: false,
     totpRequiredOnLogin: false,
@@ -417,7 +265,7 @@ export function createDashboardSettings(overrides: Partial<DashboardSettings> = 
 export function createOauthStartResponse(
   overrides: Partial<OauthStartResponse> = {},
 ): OauthStartResponse {
-  return oauthStartSchema.parse({
+  return OauthStartResponseSchema.parse({
     method: "browser",
     authorizationUrl: "https://auth.example.com/start",
     callbackUrl: "http://localhost:3000/api/oauth/callback",
@@ -433,7 +281,7 @@ export function createOauthStartResponse(
 export function createOauthStatusResponse(
   overrides: Partial<OauthStatusResponse> = {},
 ): OauthStatusResponse {
-  return oauthStatusSchema.parse({
+  return OauthStatusResponseSchema.parse({
     status: "pending",
     errorMessage: null,
     ...overrides,
@@ -443,14 +291,14 @@ export function createOauthStatusResponse(
 export function createOauthCompleteResponse(
   overrides: Partial<OauthCompleteResponse> = {},
 ): OauthCompleteResponse {
-  return oauthCompleteSchema.parse({
+  return OauthCompleteResponseSchema.parse({
     status: "ok",
     ...overrides,
   });
 }
 
 export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
-  return apiKeySchema.parse({
+  return ApiKeySchema.parse({
     id: "key_1",
     name: "Default key",
     keyPrefix: "sk-test",
@@ -477,7 +325,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 export function createApiKeyCreateResponse(
   overrides: Partial<ApiKeyCreateResponse> = {},
 ): ApiKeyCreateResponse {
-  return apiKeyCreateSchema.parse({
+  return ApiKeyCreateResponseSchema.parse({
     ...createApiKey(),
     key: "sk-test-generated-secret",
     ...overrides,
@@ -498,4 +346,26 @@ export function createDefaultApiKeys(): ApiKey[] {
       limits: [],
     }),
   ];
+}
+
+function createUsageTrendPoints(
+  basePercent: number,
+  count = 28,
+): Array<{ t: string; v: number }> {
+  return Array.from({ length: count }, (_, i) => ({
+    t: new Date(BASE_TIME.getTime() - (count - i) * 6 * 3600_000).toISOString(),
+    v: Math.max(0, Math.min(100, basePercent + Math.sin(i) * 15)),
+  }));
+}
+
+export function createAccountTrends(
+  accountId: string,
+  overrides: Partial<AccountTrendsResponse> = {},
+): AccountTrendsResponse {
+  return AccountTrendsResponseSchema.parse({
+    accountId,
+    primary: createUsageTrendPoints(80),
+    secondary: createUsageTrendPoints(55),
+    ...overrides,
+  });
 }

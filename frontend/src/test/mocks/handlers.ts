@@ -4,6 +4,7 @@ import { z } from "zod";
 import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
 import {
   createAccountSummary,
+  createAccountTrends,
   createApiKey,
   createApiKeyCreateResponse,
   createDashboardAuthSession,
@@ -276,6 +277,18 @@ export const handlers = [
     }
     account.status = "active";
     return HttpResponse.json({ status: "reactivated" });
+  }),
+
+  http.get("/api/accounts/:accountId/trends", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json(createAccountTrends(accountId));
   }),
 
   http.delete("/api/accounts/:accountId", ({ params }) => {

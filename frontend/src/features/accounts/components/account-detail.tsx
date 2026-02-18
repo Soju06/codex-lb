@@ -5,9 +5,11 @@ import { AccountTokenInfo } from "@/features/accounts/components/account-token-i
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
+import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
+  showAccountId?: boolean;
   busy: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
@@ -17,6 +19,7 @@ export type AccountDetailProps = {
 
 export function AccountDetail({
   account,
+  showAccountId = false,
   busy,
   onPause,
   onResume,
@@ -37,6 +40,15 @@ export function AccountDetail({
     );
   }
 
+  const emailSubtitle = account.displayName && account.displayName !== account.email
+    ? account.email
+    : null;
+  const subtitle = showAccountId
+    ? emailSubtitle
+      ? `${emailSubtitle} | ID ${formatCompactAccountId(account.accountId)}`
+      : `ID ${formatCompactAccountId(account.accountId)}`
+    : emailSubtitle;
+
   return (
     <div key={account.accountId} className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5">
       {/* Account header */}
@@ -44,12 +56,11 @@ export function AccountDetail({
         <h2 className="text-base font-semibold">
           {account.displayName || account.email}
         </h2>
-        {account.displayName && account.displayName !== account.email && (
-          <p className="mt-0.5 text-xs text-muted-foreground">{account.email}</p>
-        )}
-        <p className="mt-0.5 font-mono text-[11px] text-muted-foreground/80">
-          Account ID {account.accountId}
-        </p>
+        {subtitle ? (
+          <p className="mt-0.5 text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
+            {subtitle}
+          </p>
+        ) : null}
       </div>
 
       <AccountUsagePanel account={account} trends={trends} />

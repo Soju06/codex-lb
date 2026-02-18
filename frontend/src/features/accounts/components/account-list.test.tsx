@@ -69,4 +69,43 @@ describe("AccountList", () => {
     await user.type(screen.getByPlaceholderText("Search accounts..."), "not-found");
     expect(screen.getByText("No matching accounts")).toBeInTheDocument();
   });
+
+  it("shows account id only for duplicate emails", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "d48f0bfc-8ea6-48a7-8d76-d0e5ef1816c5_6f12b5d5",
+            email: "dup@example.com",
+            displayName: "Duplicate A",
+            planType: "plus",
+            status: "active",
+          },
+          {
+            accountId: "7f9de2ad-7621-4a6f-88bc-ec7f3d914701_91a95cee",
+            email: "dup@example.com",
+            displayName: "Duplicate B",
+            planType: "plus",
+            status: "active",
+          },
+          {
+            accountId: "acc-3",
+            email: "unique@example.com",
+            displayName: "Unique",
+            planType: "pro",
+            status: "active",
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/dup@example\.com \| ID d48f0bfc\.\.\.12b5d5/)).toBeInTheDocument();
+    expect(screen.getByText(/dup@example\.com \| ID 7f9de2ad\.\.\.a95cee/)).toBeInTheDocument();
+    expect(screen.getByText("unique@example.com")).toBeInTheDocument();
+    expect(screen.queryByText(/unique@example\.com \| ID/)).not.toBeInTheDocument();
+  });
 });

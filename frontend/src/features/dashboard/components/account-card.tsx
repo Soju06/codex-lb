@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { cn } from "@/lib/utils";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   normalizeStatus,
   quotaBarColor,
@@ -15,6 +16,7 @@ type AccountAction = "details" | "resume" | "reauth";
 
 export type AccountCardProps = {
   account: AccountSummary;
+  showAccountId?: boolean;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
 
@@ -59,7 +61,7 @@ function QuotaBar({
   );
 }
 
-export function AccountCard({ account, onAction }: AccountCardProps) {
+export function AccountCard({ account, showAccountId = false, onAction }: AccountCardProps) {
   const status = normalizeStatus(account.status);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? 0;
   const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? 0;
@@ -68,10 +70,15 @@ export function AccountCard({ account, onAction }: AccountCardProps) {
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
 
   const title = account.displayName || account.email;
-  const subtitle =
+  const emailSubtitle =
     account.displayName && account.displayName !== account.email
       ? account.email
       : null;
+  const subtitle = showAccountId
+    ? emailSubtitle
+      ? `${emailSubtitle} | ID ${formatCompactAccountId(account.accountId)}`
+      : `ID ${formatCompactAccountId(account.accountId)}`
+    : emailSubtitle;
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
@@ -79,14 +86,11 @@ export function AccountCard({ account, onAction }: AccountCardProps) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold leading-tight">{title}</p>
-          {subtitle && (
-            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+          {subtitle ? (
+            <p className="mt-0.5 truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
               {subtitle}
             </p>
-          )}
-          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/80" title={account.accountId}>
-            ID {account.accountId}
-          </p>
+          ) : null}
         </div>
         <StatusBadge status={status} />
       </div>

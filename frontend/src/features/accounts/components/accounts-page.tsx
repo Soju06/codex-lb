@@ -10,6 +10,7 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
@@ -32,6 +33,7 @@ export function AccountsPage() {
   const deleteDialog = useDialogState<string>();
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
+  const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 
   const resolvedSelectedAccountId = useMemo(() => {
     if (accounts.length === 0) {
@@ -91,6 +93,7 @@ export function AccountsPage() {
 
           <AccountDetail
             account={selectedAccount}
+            showAccountId={selectedAccount ? duplicateAccountIds.has(selectedAccount.accountId) : false}
             busy={mutationBusy}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}

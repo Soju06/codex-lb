@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "deactivated"];
@@ -50,6 +51,8 @@ export function AccountList({
       );
     });
   }, [accounts, search, statusFilter]);
+
+  const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 
   return (
     <div className="space-y-3">
@@ -100,6 +103,7 @@ export function AccountList({
               key={account.accountId}
               account={account}
               selected={account.accountId === selectedAccountId}
+              showAccountId={duplicateAccountIds.has(account.accountId)}
               onSelect={onSelect}
             />
           ))

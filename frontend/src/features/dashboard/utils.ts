@@ -2,6 +2,7 @@ import { Activity, AlertTriangle, Coins, DollarSign } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { buildDonutPalette } from "@/utils/colors";
+import { buildDuplicateAccountIdSet, formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   formatCachedTokensMeta,
   formatCompactNumber,
@@ -60,12 +61,15 @@ export function buildRemainingItems(
 ): RemainingItem[] {
   const usageIndex = buildWindowIndex(window);
   const palette = buildDonutPalette(accounts.length, isDark);
+  const duplicateAccountIds = buildDuplicateAccountIdSet(accounts);
 
   return accounts.map((account, index) => {
     const fallbackPercent = account.usage?.primaryRemainingPercent ?? 0;
     const remaining = usageIndex.get(account.accountId) ?? 0;
     const baseLabel = account.displayName || account.email || account.accountId;
-    const label = baseLabel === account.accountId ? account.accountId : `${baseLabel} (${account.accountId})`;
+    const label = duplicateAccountIds.has(account.accountId)
+      ? `${baseLabel} (${formatCompactAccountId(account.accountId)})`
+      : baseLabel;
     return {
       accountId: account.accountId,
       label,

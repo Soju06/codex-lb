@@ -8,7 +8,7 @@ export type { AccountSummary };
 
 export const UsageHistoryItemSchema = z.object({
   accountId: z.string(),
-  remainingPercentAvg: z.number(),
+  remainingPercentAvg: z.number().nullable(),
   capacityCredits: z.number(),
   remainingCredits: z.number(),
 });

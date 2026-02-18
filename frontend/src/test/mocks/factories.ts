@@ -71,6 +71,8 @@ export function createAccountSummary(overrides: Partial<AccountSummary> = {}): A
     },
     resetAtPrimary: offsetIso(60),
     resetAtSecondary: offsetIso(24 * 60),
+    windowMinutesPrimary: 300,
+    windowMinutesSecondary: 10_080,
     auth: {
       access: { expiresAt: offsetIso(30), state: null },
       refresh: { state: "stored" },

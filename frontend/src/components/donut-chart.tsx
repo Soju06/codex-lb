@@ -56,13 +56,13 @@ export function DonutChart({ items, total, title, subtitle }: DonutChartProps) {
 
       <div className="flex items-center gap-6">
         <div className="relative h-36 w-36 shrink-0 overflow-visible">
-          <PieChart width={144} height={144} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+          <PieChart width={144} height={144} margin={{ top: 1, right: 1, bottom: 1, left: 1 }}>
             <Pie
               data={chartData}
-              cx={72}
-              cy={72}
-              innerRadius={54}
-              outerRadius={72}
+              cx={71}
+              cy={71}
+              innerRadius={53}
+              outerRadius={71}
               startAngle={90}
               endAngle={-270}
               dataKey="value"

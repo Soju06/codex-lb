@@ -1,6 +1,6 @@
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
 
-const CHART_MARGIN = { top: 2, right: 0, bottom: 0, left: 0 } as const;
+const CHART_MARGIN = { top: 2, right: 0, bottom: 2, left: 0 } as const;
 
 export type SparklineChartProps = {
   data: { value: number }[];

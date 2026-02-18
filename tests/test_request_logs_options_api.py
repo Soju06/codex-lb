@@ -74,7 +74,7 @@ async def test_request_logs_options_returns_distinct_accounts_and_models(async_c
 
 
 @pytest.mark.asyncio
-async def test_request_logs_options_respects_status_filter(async_client, db_setup):
+async def test_request_logs_options_ignores_status_self_filter(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -108,6 +108,107 @@ async def test_request_logs_options_respects_status_filter(async_client, db_setu
     response = await async_client.get("/api/request-logs/options?status=ok")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["accountIds"] == ["acc_opt_ok"]
+    assert payload["accountIds"] == ["acc_opt_err", "acc_opt_ok"]
+    assert payload["modelOptions"] == [
+        {"model": "gpt-4o", "reasoningEffort": None},
+        {"model": "gpt-5.1", "reasoningEffort": None},
+    ]
+    assert payload["statuses"] == ["ok", "rate_limit"]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_ignore_status_matches_unfiltered_response(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_opt_ok_2", "ok2@example.com"))
+        await accounts_repo.upsert(_make_account("acc_opt_quota", "quota@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_opt_ok_2",
+            request_id="req_opt_ok_2",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now,
+        )
+        await logs_repo.add_log(
+            account_id="acc_opt_quota",
+            request_id="req_opt_quota",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=100,
+            status="error",
+            error_code="insufficient_quota",
+            requested_at=now,
+        )
+
+    base = await async_client.get("/api/request-logs/options")
+    with_status = await async_client.get("/api/request-logs/options?status=ok&status=quota")
+
+    assert base.status_code == 200
+    assert with_status.status_code == 200
+    assert with_status.json() == base.json()
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_respects_non_status_filters(async_client, db_setup):
+    now = utcnow()
+    old = now - timedelta(days=10)
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_scope_a", "scope-a@example.com"))
+        await accounts_repo.upsert(_make_account("acc_scope_b", "scope-b@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_scope_a",
+            request_id="req_scope_1",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now,
+        )
+        await logs_repo.add_log(
+            account_id="acc_scope_a",
+            request_id="req_scope_2",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=100,
+            status="error",
+            error_code="rate_limit_exceeded",
+            requested_at=now,
+        )
+        await logs_repo.add_log(
+            account_id="acc_scope_b",
+            request_id="req_scope_3",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=100,
+            status="error",
+            error_code="insufficient_quota",
+            requested_at=old,
+        )
+
+    scoped = await async_client.get(
+        "/api/request-logs/options"
+        "?accountId=acc_scope_a"
+        "&modelOption=gpt-5.1:::"
+        f"&since={(now - timedelta(hours=1)).isoformat()}"
+    )
+
+    assert scoped.status_code == 200
+    payload = scoped.json()
+    assert payload["accountIds"] == ["acc_scope_a"]
     assert payload["modelOptions"] == [{"model": "gpt-5.1", "reasoningEffort": None}]
-    assert payload["statuses"] == ["ok"]
+    assert payload["statuses"] == ["ok", "rate_limit"]

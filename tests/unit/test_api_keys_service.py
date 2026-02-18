@@ -6,6 +6,7 @@ import pytest
 
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType
+from app.modules.api_keys.repository import ReservationResult, UsageReservationData, UsageReservationItemData
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyInvalidError,
@@ -22,6 +23,7 @@ class _FakeApiKeysRepository:
         self.rows: dict[str, ApiKey] = {}
         self._limits: dict[str, list[ApiKeyLimit]] = {}
         self._limit_id_seq = 0
+        self._reservations: dict[str, UsageReservationData] = {}
 
     async def create(self, row: ApiKey) -> ApiKey:
         self.rows[row.id] = row
@@ -68,6 +70,12 @@ class _FakeApiKeysRepository:
         if row is not None:
             row.last_used_at = utcnow()
 
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
     async def get_limits_by_key(self, key_id: str) -> list[ApiKeyLimit]:
         return list(self._limits.get(key_id, []))
 
@@ -81,6 +89,31 @@ class _FakeApiKeysRepository:
         if row is not None:
             row.limits = self._limits[key_id]
         return self._limits[key_id]
+
+    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]:
+        existing = self._limits.get(key_id, [])
+        existing_by_key = {(limit.limit_type, limit.limit_window, limit.model_filter): limit for limit in existing}
+
+        updated: list[ApiKeyLimit] = []
+        for incoming in limits:
+            key = (incoming.limit_type, incoming.limit_window, incoming.model_filter)
+            matched = existing_by_key.get(key)
+            if matched is not None:
+                matched.max_value = incoming.max_value
+                matched.current_value = incoming.current_value
+                matched.reset_at = incoming.reset_at
+                updated.append(matched)
+                continue
+            self._limit_id_seq += 1
+            incoming.id = self._limit_id_seq
+            incoming.api_key_id = key_id
+            updated.append(incoming)
+
+        self._limits[key_id] = updated
+        row = self.rows.get(key_id)
+        if row is not None:
+            row.limits = updated
+        return updated
 
     async def increment_limit_usage(
         self,
@@ -111,6 +144,169 @@ class _FakeApiKeysRepository:
                     return True
         return False
 
+    async def try_reserve_usage(
+        self,
+        limit_id: int,
+        *,
+        delta: int,
+        expected_reset_at: datetime,
+    ) -> ReservationResult:
+        limit = _find_limit_by_id(self._limits, limit_id)
+        if limit is None:
+            return ReservationResult(False, limit_id, None, None, None)
+        if limit.reset_at != expected_reset_at:
+            return ReservationResult(False, limit_id, limit.current_value, limit.max_value, limit.reset_at)
+        if limit.current_value + delta > limit.max_value:
+            return ReservationResult(False, limit_id, limit.current_value, limit.max_value, limit.reset_at)
+        limit.current_value += delta
+        return ReservationResult(True, limit_id, limit.current_value, limit.max_value, limit.reset_at)
+
+    async def adjust_reserved_usage(
+        self,
+        limit_id: int,
+        *,
+        delta: int,
+        expected_reset_at: datetime,
+    ) -> bool:
+        limit = _find_limit_by_id(self._limits, limit_id)
+        if limit is None or limit.reset_at != expected_reset_at:
+            return False
+        next_value = limit.current_value + delta
+        if next_value < 0:
+            return False
+        limit.current_value = next_value
+        return True
+
+    async def create_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        key_id: str,
+        model: str,
+        items: list[UsageReservationItemData],
+    ) -> None:
+        self._reservations[reservation_id] = UsageReservationData(
+            reservation_id=reservation_id,
+            api_key_id=key_id,
+            model=model,
+            status="reserved",
+            items=[
+                UsageReservationItemData(
+                    limit_id=item.limit_id,
+                    limit_type=item.limit_type,
+                    reserved_delta=item.reserved_delta,
+                    expected_reset_at=item.expected_reset_at,
+                    actual_delta=item.actual_delta,
+                )
+                for item in items
+            ],
+        )
+
+    async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None:
+            return None
+        return UsageReservationData(
+            reservation_id=reservation.reservation_id,
+            api_key_id=reservation.api_key_id,
+            model=reservation.model,
+            status=reservation.status,
+            items=[
+                UsageReservationItemData(
+                    limit_id=item.limit_id,
+                    limit_type=item.limit_type,
+                    reserved_delta=item.reserved_delta,
+                    expected_reset_at=item.expected_reset_at,
+                    actual_delta=item.actual_delta,
+                )
+                for item in reservation.items
+            ],
+        )
+
+    async def transition_usage_reservation_status(
+        self,
+        reservation_id: str,
+        *,
+        expected_status: str,
+        new_status: str,
+    ) -> bool:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None or reservation.status != expected_status:
+            return False
+        self._reservations[reservation_id] = UsageReservationData(
+            reservation_id=reservation.reservation_id,
+            api_key_id=reservation.api_key_id,
+            model=reservation.model,
+            status=new_status,
+            items=reservation.items,
+        )
+        return True
+
+    async def upsert_reservation_item_actual(
+        self,
+        reservation_id: str,
+        *,
+        item: UsageReservationItemData,
+        actual_delta: int,
+    ) -> None:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None:
+            return
+        updated_items: list[UsageReservationItemData] = []
+        found = False
+        for existing in reservation.items:
+            if existing.limit_id == item.limit_id:
+                updated_items.append(
+                    UsageReservationItemData(
+                        limit_id=existing.limit_id,
+                        limit_type=existing.limit_type,
+                        reserved_delta=existing.reserved_delta,
+                        expected_reset_at=existing.expected_reset_at,
+                        actual_delta=actual_delta,
+                    )
+                )
+                found = True
+            else:
+                updated_items.append(existing)
+        if not found:
+            updated_items.append(
+                UsageReservationItemData(
+                    limit_id=item.limit_id,
+                    limit_type=item.limit_type,
+                    reserved_delta=item.reserved_delta,
+                    expected_reset_at=item.expected_reset_at,
+                    actual_delta=actual_delta,
+                )
+            )
+        self._reservations[reservation_id] = UsageReservationData(
+            reservation_id=reservation.reservation_id,
+            api_key_id=reservation.api_key_id,
+            model=reservation.model,
+            status=reservation.status,
+            items=updated_items,
+        )
+
+    async def settle_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        status: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None,
+        cost_microdollars: int | None,
+    ) -> None:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None:
+            return
+        self._reservations[reservation_id] = UsageReservationData(
+            reservation_id=reservation.reservation_id,
+            api_key_id=reservation.api_key_id,
+            model=reservation.model,
+            status=status,
+            items=reservation.items,
+        )
+
 
 def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:
     if limit.limit_type == LimitType.TOTAL_TOKENS:
@@ -122,6 +318,17 @@ def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int
     if limit.limit_type == LimitType.COST_USD:
         return cost_microdollars
     return 0
+
+
+def _find_limit_by_id(
+    limits_by_key: dict[str, list[ApiKeyLimit]],
+    limit_id: int,
+) -> ApiKeyLimit | None:
+    for limits in limits_by_key.values():
+        for limit in limits:
+            if limit.id == limit_id:
+                return limit
+    return None
 
 
 @pytest.mark.asyncio
@@ -189,12 +396,15 @@ async def test_validate_key_checks_expiry_and_limit() -> None:
         )
     )
 
-    # Exceed the limit
+    # validate_key now checks auth/expiry only.
     limits = await repo.get_limits_by_key(created.id)
     limits[0].current_value = 10
     limits[0].reset_at = utcnow() + timedelta(days=1)
+    validated = await service.validate_key(created.key)
+    assert validated.id == created.id
+
     with pytest.raises(ApiKeyRateLimitExceededError):
-        await service.validate_key(created.key)
+        await service.enforce_limits_for_request(created.id, request_model="gpt-5")
 
     # Test expiry
     limits[0].current_value = 5
@@ -289,7 +499,7 @@ async def test_validate_key_multi_limit_all_must_pass() -> None:
     cost_limit.reset_at = utcnow() + timedelta(days=1)
 
     with pytest.raises(ApiKeyRateLimitExceededError) as exc_info:
-        await service.validate_key(created.key)
+        await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
     assert "cost_usd" in str(exc_info.value)
 
 
@@ -393,3 +603,62 @@ async def test_record_usage_model_filter_matching() -> None:
     model_limit = next(lim for lim in limits if lim.model_filter == "gpt-5.1")
     assert global_limit.current_value == 450  # 150 + 300
     assert model_limit.current_value == 150  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_release_usage_reservation_restores_reserved_counter() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-release-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 100
+
+    await service.release_usage_reservation(reservation.reservation_id)
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_finalize_usage_reservation_is_idempotent() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-finalize-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=10,
+        output_tokens=5,
+        cached_input_tokens=0,
+    )
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=10,
+        output_tokens=5,
+        cached_input_tokens=0,
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 15

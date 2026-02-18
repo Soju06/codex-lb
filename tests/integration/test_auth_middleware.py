@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 import pytest
 
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow
+from app.db.models import Account, AccountStatus, ApiKeyLimit, DashboardSettings, LimitType, LimitWindow
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
+from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
 
 pytestmark = pytest.mark.integration
 
@@ -30,6 +33,28 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str) -> Accou
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+async def _set_migration_inconsistent_totp_only_mode() -> None:
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        if settings is None:
+            settings = DashboardSettings(
+                id=1,
+                sticky_threads_enabled=False,
+                prefer_earlier_reset_accounts=False,
+                totp_required_on_login=True,
+                password_hash=None,
+                api_key_auth_enabled=False,
+                totp_secret_encrypted=None,
+                totp_last_verified_step=None,
+            )
+            session.add(settings)
+        else:
+            settings.password_hash = None
+            settings.totp_required_on_login = True
+        await session.commit()
+    await get_settings_cache().invalidate()
 
 
 @pytest.mark.asyncio
@@ -55,6 +80,40 @@ async def test_session_branch_allows_without_password_and_blocks_without_session
     assert login.status_code == 200
     allowed = await async_client.get("/api/settings")
     assert allowed.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_totp_only_mode_requires_session_even_when_password_hash_is_null(async_client, caplog):
+    await _set_migration_inconsistent_totp_only_mode()
+
+    caplog.set_level(logging.WARNING, logger="app.core.middleware.dashboard_auth")
+    blocked = await async_client.get("/api/settings")
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "authentication_required"
+    assert any("dashboard_auth_migration_inconsistency" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_totp_only_mode_accepts_totp_verified_session(async_client):
+    await _set_migration_inconsistent_totp_only_mode()
+
+    session_id = get_dashboard_session_store().create(password_verified=False, totp_verified=True)
+    async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
+
+    allowed = await async_client.get("/api/settings")
+    assert allowed.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_totp_only_mode_rejects_missing_totp_verification(async_client):
+    await _set_migration_inconsistent_totp_only_mode()
+
+    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
+    async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
+
+    blocked = await async_client.get("/api/settings")
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "totp_required"
 
 
 @pytest.mark.asyncio

@@ -16,15 +16,9 @@ class UsageWindow(DashboardModel):
     window_minutes: int | None = None
 
 
-class UsageCostByModel(DashboardModel):
-    model: str
-    usd: float
-
-
 class UsageCost(DashboardModel):
     currency: str
     total_usd_7d: float = Field(alias="totalUsd7d")
-    by_model: List[UsageCostByModel] = Field(default_factory=list)
 
 
 class UsageMetrics(DashboardModel):
@@ -44,7 +38,6 @@ class UsageSummaryResponse(DashboardModel):
 
 class UsageHistoryItem(DashboardModel):
     account_id: str
-    email: str
     remaining_percent_avg: float
     capacity_credits: float
     remaining_credits: float
@@ -59,3 +52,15 @@ class UsageWindowResponse(DashboardModel):
     window_key: str
     window_minutes: int | None = None
     accounts: List[UsageHistoryItem] = Field(default_factory=list)
+
+
+class TrendPoint(DashboardModel):
+    t: datetime
+    v: float
+
+
+class MetricsTrends(DashboardModel):
+    requests: List[TrendPoint] = Field(default_factory=list)
+    tokens: List[TrendPoint] = Field(default_factory=list)
+    cost: List[TrendPoint] = Field(default_factory=list)
+    error_rate: List[TrendPoint] = Field(default_factory=list)

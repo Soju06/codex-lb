@@ -26,6 +26,37 @@ class DashboardAuthRepository:
         await self._settings_repository.commit_refresh(row)
         return row
 
+    async def set_password_hash(self, password_hash: str) -> DashboardSettings:
+        row = await self._settings_repository.get_or_create()
+        row.password_hash = password_hash
+        await self._settings_repository.commit_refresh(row)
+        return row
+
+    async def try_set_password_hash(self, password_hash: str) -> bool:
+        await self._settings_repository.get_or_create()
+        result = await self._session.execute(
+            update(DashboardSettings)
+            .where(DashboardSettings.id == _SETTINGS_ID)
+            .where(DashboardSettings.password_hash.is_(None))
+            .values(password_hash=password_hash)
+            .returning(DashboardSettings.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def get_password_hash(self) -> str | None:
+        row = await self._settings_repository.get_or_create()
+        return row.password_hash
+
+    async def clear_password_and_totp(self) -> DashboardSettings:
+        row = await self._settings_repository.get_or_create()
+        row.password_hash = None
+        row.totp_required_on_login = False
+        row.totp_secret_encrypted = None
+        row.totp_last_verified_step = None
+        await self._settings_repository.commit_refresh(row)
+        return row
+
     async def try_advance_totp_last_verified_step(self, step: int) -> bool:
         await self._settings_repository.get_or_create()
         result = await self._session.execute(
@@ -38,6 +69,7 @@ class DashboardAuthRepository:
                 )
             )
             .values(totp_last_verified_step=step)
+            .returning(DashboardSettings.id)
         )
         await self._session.commit()
-        return bool(result.rowcount and result.rowcount > 0)
+        return result.scalar_one_or_none() is not None

@@ -11,6 +11,7 @@ from app.modules.accounts.schemas import (
     AccountPauseResponse,
     AccountReactivateResponse,
     AccountsResponse,
+    AccountTrendsResponse,
 )
 
 router = APIRouter(prefix="/api/accounts", tags=["dashboard"])
@@ -22,6 +23,20 @@ async def list_accounts(
 ) -> AccountsResponse:
     accounts = await context.service.list_accounts()
     return AccountsResponse(accounts=accounts)
+
+
+@router.get("/{account_id}/trends", response_model=AccountTrendsResponse)
+async def get_account_trends(
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountTrendsResponse | JSONResponse:
+    result = await context.service.get_account_trends(account_id)
+    if not result:
+        return JSONResponse(
+            status_code=404,
+            content=dashboard_error("account_not_found", "Account not found"),
+        )
+    return result
 
 
 @router.post("/import", response_model=AccountImportResponse)

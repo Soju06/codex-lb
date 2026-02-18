@@ -10,8 +10,8 @@ from app.db.models import UsageHistory
 from app.modules.accounts.mappers import build_account_summaries
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import DashboardOverviewResponse, DashboardUsageWindows
-from app.modules.request_logs.mappers import to_request_log_entry
 from app.modules.usage.builders import (
+    build_trends_from_buckets,
     build_usage_summary_response,
     build_usage_window_response,
 )
@@ -22,7 +22,7 @@ class DashboardService:
         self._repo = repo
         self._encryptor = TokenEncryptor()
 
-    async def get_overview(self, *, request_limit: int, request_offset: int) -> DashboardOverviewResponse:
+    async def get_overview(self) -> DashboardOverviewResponse:
         now = utcnow()
         accounts = await self._repo.list_accounts()
         primary_usage = await self._repo.latest_usage_by_account("primary")
@@ -33,6 +33,7 @@ class DashboardService:
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
             encryptor=self._encryptor,
+            include_auth=False,
         )
 
         primary_rows = _rows_from_latest(primary_usage)
@@ -41,15 +42,19 @@ class DashboardService:
         secondary_minutes = await self._repo.latest_window_minutes("secondary")
         if secondary_minutes is None:
             secondary_minutes = usage_core.default_window_minutes("secondary")
-        logs_secondary = []
-        if secondary_minutes:
-            logs_secondary = await self._repo.list_logs_since(now - timedelta(minutes=secondary_minutes))
+
+        # Use bucket aggregation instead of loading all logs
+        bucket_since = now - timedelta(minutes=secondary_minutes) if secondary_minutes else now - timedelta(days=7)
+        bucket_rows = await self._repo.aggregate_logs_by_bucket(bucket_since)
+        trends, bucket_metrics, bucket_cost = build_trends_from_buckets(bucket_rows, bucket_since)
 
         summary = build_usage_summary_response(
             accounts=accounts,
             primary_rows=primary_rows,
             secondary_rows=secondary_rows,
-            logs_secondary=logs_secondary,
+            logs_secondary=[],
+            metrics_override=bucket_metrics,
+            cost_override=bucket_cost,
         )
 
         primary_window_minutes = await self._repo.latest_window_minutes("primary")
@@ -71,15 +76,12 @@ class DashboardService:
             ),
         )
 
-        recent_logs = await self._repo.list_recent_logs(limit=request_limit, offset=request_offset)
-        request_logs = [to_request_log_entry(log) for log in recent_logs]
-
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage),
             accounts=account_summaries,
             summary=summary,
             windows=windows,
-            request_logs=request_logs,
+            trends=trends,
         )
 
 

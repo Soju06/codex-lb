@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends
 from fastapi.responses import JSONResponse
 
+from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import dashboard_error
 from app.dependencies import SettingsContext, get_settings_context
 from app.modules.settings.schemas import DashboardSettingsResponse, DashboardSettingsUpdateRequest
@@ -22,6 +23,7 @@ async def get_settings(
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
+        api_key_auth_enabled=settings.api_key_auth_enabled,
     )
 
 
@@ -46,6 +48,11 @@ async def update_settings(
                     if payload.totp_required_on_login is not None
                     else current.totp_required_on_login
                 ),
+                api_key_auth_enabled=(
+                    payload.api_key_auth_enabled
+                    if payload.api_key_auth_enabled is not None
+                    else current.api_key_auth_enabled
+                ),
             )
         )
     except ValueError as exc:
@@ -54,10 +61,12 @@ async def update_settings(
             content=dashboard_error("invalid_totp_config", str(exc)),
         )
 
+    await get_settings_cache().invalidate()
     return DashboardSettingsResponse(
         sticky_threads_enabled=updated.sticky_threads_enabled,
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
         import_without_overwrite=updated.import_without_overwrite,
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,
+        api_key_auth_enabled=updated.api_key_auth_enabled,
     )

@@ -94,3 +94,24 @@ class UsageHistoryEntry:
 class UsageHistoryPayload:
     window_hours: int
     accounts: list[UsageHistoryEntry]
+
+
+@dataclass(frozen=True)
+class UsageTrendBucket:
+    bucket_epoch: int
+    account_id: str
+    window: str
+    avg_used_percent: float
+    samples: int
+
+
+@dataclass(frozen=True)
+class BucketModelAggregate:
+    bucket_epoch: int
+    model: str
+    request_count: int
+    error_count: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    reasoning_tokens: int

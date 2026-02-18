@@ -49,7 +49,7 @@ async def list_request_logs(
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
-    logs = await context.service.list_recent(
+    page = await context.service.list_recent(
         limit=limit,
         offset=offset,
         search=search,
@@ -61,20 +61,36 @@ async def list_request_logs(
         reasoning_efforts=reasoning_effort,
         status=status,
     )
-    return RequestLogsResponse(requests=logs)
+    return RequestLogsResponse(
+        requests=page.requests,
+        total=page.total,
+        has_more=page.has_more,
+    )
 
 
 @router.get("/options", response_model=RequestLogFilterOptionsResponse)
 async def list_request_log_filter_options(
     status: list[str] | None = Query(default=None),
+    account_id: list[str] | None = Query(default=None, alias="accountId"),
+    model: list[str] | None = Query(default=None),
+    reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
+    model_option: list[str] | None = Query(default=None, alias="modelOption"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogFilterOptionsResponse:
+    _ = status  # Keep input backward compatible but do not self-filter status facet.
+    parsed_options: list[ServiceRequestLogModelOption] | None = None
+    if model_option:
+        parsed = [_parse_model_option(value) for value in model_option]
+        parsed_options = [value for value in parsed if value is not None] or None
     options = await context.service.list_filter_options(
-        status=status,
         since=since,
         until=until,
+        account_ids=account_id,
+        model_options=parsed_options,
+        models=model,
+        reasoning_efforts=reasoning_effort,
     )
     return RequestLogFilterOptionsResponse(
         account_ids=options.account_ids,
@@ -82,4 +98,5 @@ async def list_request_log_filter_options(
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options
         ],
+        statuses=options.statuses,
     )

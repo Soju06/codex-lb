@@ -15,6 +15,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
+    assert payload["apiKeyAuthEnabled"] is False
 
     response = await async_client.put(
         "/api/settings",
@@ -23,6 +24,7 @@ async def test_settings_api_get_and_update(async_client):
             "preferEarlierResetAccounts": True,
             "importWithoutOverwrite": True,
             "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
         },
     )
     assert response.status_code == 200
@@ -32,6 +34,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["importWithoutOverwrite"] is True
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
+    assert updated["apiKeyAuthEnabled"] is True
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -41,3 +44,4 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
+    assert payload["apiKeyAuthEnabled"] is True

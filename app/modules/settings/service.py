@@ -12,6 +12,7 @@ class DashboardSettingsData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
+    api_key_auth_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,7 @@ class DashboardSettingsUpdateData:
     prefer_earlier_reset_accounts: bool
     import_without_overwrite: bool
     totp_required_on_login: bool
+    api_key_auth_enabled: bool
 
 
 class SettingsService:
@@ -34,6 +36,7 @@ class SettingsService:
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
+            api_key_auth_enabled=row.api_key_auth_enabled,
         )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
@@ -45,6 +48,7 @@ class SettingsService:
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
+            api_key_auth_enabled=payload.api_key_auth_enabled,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
@@ -52,4 +56,5 @@ class SettingsService:
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
+            api_key_auth_enabled=row.api_key_auth_enabled,
         )

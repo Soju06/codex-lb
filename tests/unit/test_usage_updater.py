@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -30,8 +31,10 @@ class UsageEntry:
 
 
 class StubUsageRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, return_rows: bool = False) -> None:
         self.entries: list[UsageEntry] = []
+        self._return_rows = return_rows
+        self._next_id = 1
 
     async def add_entry(
         self,
@@ -62,7 +65,24 @@ class StubUsageRepository:
                 credits_balance=credits_balance,
             )
         )
-        return None
+        if not self._return_rows:
+            return None
+        entry = UsageHistory(
+            id=self._next_id,
+            account_id=account_id,
+            used_percent=used_percent,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            recorded_at=recorded_at or datetime.now(tz=timezone.utc),
+            window=window,
+            reset_at=reset_at,
+            window_minutes=window_minutes,
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        )
+        self._next_id += 1
+        return entry
 
 
 def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@example.com") -> Account:
@@ -341,3 +361,138 @@ async def test_usage_updater_computes_reset_at_from_reset_after_seconds(monkeypa
     entry = usage_repo.entries[0]
     assert entry.window == "primary"
     assert entry.reset_at == 1120
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_refresh_accounts_returns_false_when_rate_limit_missing(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate({})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_no_rate", "workspace_no_rate", email="no-rate@example.com")
+
+    refreshed = await updater.refresh_accounts([acc], latest_usage={})
+
+    assert refreshed is False
+    assert len(usage_repo.entries) == 0
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage_401(**_: Any) -> UsagePayload:
+        raise UsageFetchError(401, "Unauthorized")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    assert updater._auth_manager is not None
+
+    async def stub_ensure_fresh(account: Account, *, force: bool = False) -> Account:
+        raise RefreshError(code="invalid_grant", message="refresh failed", is_permanent=False)
+
+    monkeypatch.setattr(updater._auth_manager, "ensure_fresh", stub_ensure_fresh)
+
+    acc = _make_account("acc_401_retry", "workspace_401_retry", email="auth-retry@example.com")
+    refreshed = await updater.refresh_accounts([acc], latest_usage={})
+
+    assert refreshed is False
+    assert len(usage_repo.entries) == 0
+
+
+@pytest.mark.parametrize(
+    ("primary_used", "secondary_used"),
+    [
+        (10.0, None),
+        (None, 20.0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_usage_updater_refresh_accounts_returns_true_when_any_window_written(
+    monkeypatch,
+    primary_used: float | None,
+    secondary_used: float | None,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        assert access_token
+        assert account_id == "workspace_written"
+        rate_limit: dict[str, Any] = {}
+        if primary_used is not None:
+            rate_limit["primary_window"] = {
+                "used_percent": primary_used,
+                "reset_at": 1735689600,
+                "limit_window_seconds": 60,
+            }
+        if secondary_used is not None:
+            rate_limit["secondary_window"] = {
+                "used_percent": secondary_used,
+                "reset_at": 1735689600,
+                "limit_window_seconds": 60,
+            }
+        return UsagePayload.model_validate({"rate_limit": rate_limit})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_written", "workspace_written", email="written@example.com")
+
+    refreshed = await updater.refresh_accounts([acc], latest_usage={})
+
+    assert refreshed is True
+    assert len(usage_repo.entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_refresh_accounts_returns_true_when_partial_write(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, account_id: str | None, **_: Any) -> UsagePayload:
+        if account_id == "workspace_skip":
+            return UsagePayload.model_validate({})
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc_skip = _make_account("acc_skip", "workspace_skip", email="skip@example.com")
+    acc_write = _make_account("acc_write", "workspace_write", email="write@example.com")
+
+    refreshed = await updater.refresh_accounts([acc_skip, acc_write], latest_usage={})
+
+    assert refreshed is True
+    assert len(usage_repo.entries) == 1

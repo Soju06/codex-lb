@@ -15,9 +15,21 @@ class AccountsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, account_id: str) -> Account | None:
+        return await self._session.get(Account, account_id)
+
     async def list_accounts(self) -> list[Account]:
         result = await self._session.execute(select(Account).order_by(Account.email))
         return list(result.scalars().all())
+
+    async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
+        result = await self._session.execute(
+            select(Account.id)
+            .where(Account.chatgpt_account_id == chatgpt_account_id)
+            .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def upsert(self, account: Account, *, merge_by_email: bool | None = None) -> Account:
         if merge_by_email is None:

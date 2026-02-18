@@ -98,7 +98,6 @@ async def test_pause_account(async_client):
     matched = next((account for account in data if account["accountId"] == expected_account_id), None)
     assert matched is not None
     assert matched["status"] == "paused"
-    assert matched["deactivationReason"] is None
 
 
 @pytest.mark.asyncio

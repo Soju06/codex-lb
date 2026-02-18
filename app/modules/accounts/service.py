@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from app.core.auth import (
     DEFAULT_EMAIL,
     DEFAULT_PLAN,
@@ -9,16 +11,20 @@ from app.core.auth import (
 )
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.utils.time import to_utc_naive, utcnow
+from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
-from app.modules.accounts.mappers import build_account_summaries
+from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountImportResponse,
     AccountSummary,
+    AccountTrendsResponse,
 )
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
+
+_SPARKLINE_DAYS = 7
+_DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
 
 class AccountsService:
@@ -38,11 +44,33 @@ class AccountsService:
             return []
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
+
         return build_account_summaries(
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
             encryptor=self._encryptor,
+        )
+
+    async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
+        account = await self._repo.get_by_id(account_id)
+        if not account or not self._usage_repo:
+            return None
+        now = utcnow()
+        since = now - timedelta(days=_SPARKLINE_DAYS)
+        since_epoch = naive_utc_to_epoch(since)
+        bucket_count = (_SPARKLINE_DAYS * 24 * 3600) // _DETAIL_BUCKET_SECONDS
+        buckets = await self._usage_repo.trends_by_bucket(
+            since=since,
+            bucket_seconds=_DETAIL_BUCKET_SECONDS,
+            account_id=account_id,
+        )
+        trends = build_account_usage_trends(buckets, since_epoch, _DETAIL_BUCKET_SECONDS, bucket_count)
+        trend = trends.get(account_id)
+        return AccountTrendsResponse(
+            account_id=account_id,
+            primary=trend.primary if trend else [],
+            secondary=trend.secondary if trend else [],
         )
 
     async def import_account(self, raw: bytes) -> AccountImportResponse:

@@ -86,7 +86,7 @@ async def test_session_branch_allows_without_password_and_blocks_without_session
 async def test_totp_only_mode_requires_session_even_when_password_hash_is_null(async_client, caplog):
     await _set_migration_inconsistent_totp_only_mode()
 
-    caplog.set_level(logging.WARNING, logger="app.core.middleware.dashboard_auth")
+    caplog.set_level(logging.WARNING, logger="app.core.auth.dependencies")
     blocked = await async_client.get("/api/settings")
     assert blocked.status_code == 401
     assert blocked.json()["error"]["code"] == "authentication_required"
@@ -242,7 +242,7 @@ async def test_codex_usage_allows_registered_chatgpt_account_id_with_bearer(asyn
         assert account_id == raw_chatgpt_account_id
         return UsagePayload.model_validate({"plan_type": "team"})
 
-    monkeypatch.setattr("app.core.middleware.dashboard_auth.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
 
     await async_client.post("/api/dashboard-auth/logout", json={})
     allowed = await async_client.get(
@@ -266,7 +266,7 @@ async def test_codex_usage_blocks_unregistered_chatgpt_account_id(async_client, 
     async def should_not_call_fetch_usage(**_: object) -> UsagePayload:
         raise AssertionError("fetch_usage should not be called for unknown chatgpt-account-id")
 
-    monkeypatch.setattr("app.core.middleware.dashboard_auth.fetch_usage", should_not_call_fetch_usage)
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", should_not_call_fetch_usage)
 
     await async_client.post("/api/dashboard-auth/logout", json={})
     blocked = await async_client.get(

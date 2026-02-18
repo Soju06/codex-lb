@@ -116,8 +116,6 @@ def get_model_registry() -> ModelRegistry:
 
 
 def is_public_model(model: UpstreamModel, allowed_models: set[str] | None) -> bool:
-    if not model.supported_in_api:
-        return False
     if allowed_models is None:
         return True
     return model.slug in allowed_models

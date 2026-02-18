@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import (
     http_exception_handler,
@@ -10,20 +12,94 @@ from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.errors import dashboard_error, openai_error
+from app.core.exceptions import (
+    AppError,
+    DashboardAuthError,
+    DashboardBadRequestError,
+    DashboardConflictError,
+    DashboardNotFoundError,
+    DashboardRateLimitError,
+    DashboardValidationError,
+    ProxyAuthError,
+    ProxyModelNotAllowed,
+    ProxyRateLimitError,
+    ProxyUpstreamError,
+)
+
+logger = logging.getLogger(__name__)
+
+_OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
+    ProxyAuthError,
+    ProxyModelNotAllowed,
+    ProxyRateLimitError,
+    ProxyUpstreamError,
+)
+
+_DASHBOARD_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
+    DashboardAuthError,
+    DashboardNotFoundError,
+    DashboardConflictError,
+    DashboardBadRequestError,
+    DashboardValidationError,
+    DashboardRateLimitError,
+)
+
+
+def _error_format(request: Request) -> str | None:
+    fmt = getattr(request.state, "error_format", None)
+    if fmt is not None:
+        return fmt
+    # Fallback for unmatched routes (e.g. SPA fallback 404s)
+    path = request.url.path
+    if path.startswith("/api/"):
+        return "dashboard"
+    if path.startswith("/v1/") or path.startswith("/backend-api/"):
+        return "openai"
+    return None
 
 
 def add_exception_handlers(app: FastAPI) -> None:
+    # --- Domain exceptions: OpenAI envelope ---
+
+    for exc_cls in _OPENAI_EXCEPTION_TYPES:
+
+        @app.exception_handler(exc_cls)
+        async def _openai_domain_handler(request: Request, exc: AppError) -> JSONResponse:
+            error_type = getattr(exc, "error_type", "server_error")
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=openai_error(exc.code, exc.message, error_type=error_type),
+            )
+
+    # --- Domain exceptions: Dashboard envelope ---
+
+    for exc_cls in _DASHBOARD_EXCEPTION_TYPES:
+
+        @app.exception_handler(exc_cls)
+        async def _dashboard_domain_handler(request: Request, exc: AppError) -> JSONResponse:
+            headers: dict[str, str] | None = None
+            if isinstance(exc, DashboardRateLimitError):
+                headers = {"Retry-After": str(exc.retry_after)}
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=dashboard_error(exc.code, exc.message),
+                headers=headers,
+            )
+
+    # --- Framework exceptions: format based on router marker ---
+
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
         request: Request,
         exc: RequestValidationError,
     ) -> Response:
-        if request.url.path.startswith("/api/"):
+        fmt = _error_format(request)
+        if fmt == "dashboard":
             return JSONResponse(
                 status_code=422,
                 content=dashboard_error("validation_error", "Invalid request payload"),
             )
-        if request.url.path.startswith("/v1/"):
+        if fmt == "openai":
             error = openai_error("invalid_request_error", "Invalid request payload", error_type="invalid_request_error")
             if exc.errors():
                 first = exc.errors()[0]
@@ -40,14 +116,14 @@ def add_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: StarletteHTTPException,
     ) -> Response:
-        if request.url.path.startswith("/api/"):
-            detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        fmt = _error_format(request)
+        detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        if fmt == "dashboard":
             return JSONResponse(
                 status_code=exc.status_code,
                 content=dashboard_error(f"http_{exc.status_code}", detail),
             )
-        if request.url.path.startswith("/v1/"):
-            detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        if fmt == "openai":
             error_type = "invalid_request_error"
             code = "invalid_request_error"
             if exc.status_code == 401:
@@ -67,3 +143,21 @@ def add_exception_handlers(app: FastAPI) -> None:
                 code = "server_error"
             return JSONResponse(status_code=exc.status_code, content=openai_error(code, detail, error_type=error_type))
         return await http_exception_handler(request, exc)
+
+    # --- Catch-all for unhandled exceptions ---
+
+    @app.exception_handler(Exception)
+    async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        fmt = _error_format(request)
+        if fmt == "dashboard":
+            return JSONResponse(
+                status_code=500,
+                content=dashboard_error("internal_error", "Unexpected error"),
+            )
+        if fmt == "openai":
+            return JSONResponse(
+                status_code=500,
+                content=openai_error("server_error", "Internal server error", error_type="server_error"),
+            )
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})

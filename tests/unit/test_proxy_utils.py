@@ -31,6 +31,32 @@ def test_filter_inbound_headers_strips_auth_and_account():
     assert filtered["X-Request-Id"] == "req_1"
 
 
+def test_filter_inbound_headers_strips_proxy_identity_headers():
+    headers = {
+        "X-Forwarded-For": "1.2.3.4",
+        "X-Forwarded-Proto": "https",
+        "X-Real-IP": "1.2.3.4",
+        "Forwarded": "for=1.2.3.4;proto=https",
+        "CF-Connecting-IP": "1.2.3.4",
+        "CF-Ray": "ray123",
+        "True-Client-IP": "1.2.3.4",
+        "User-Agent": "codex-test",
+        "Accept": "text/event-stream",
+    }
+
+    filtered = filter_inbound_headers(headers)
+
+    assert "X-Forwarded-For" not in filtered
+    assert "X-Forwarded-Proto" not in filtered
+    assert "X-Real-IP" not in filtered
+    assert "Forwarded" not in filtered
+    assert "CF-Connecting-IP" not in filtered
+    assert "CF-Ray" not in filtered
+    assert "True-Client-IP" not in filtered
+    assert filtered["User-Agent"] == "codex-test"
+    assert filtered["Accept"] == "text/event-stream"
+
+
 def test_build_upstream_headers_overrides_auth():
     inbound = {"X-Request-Id": "req_1"}
     headers = _build_upstream_headers(inbound, "token", "acc_2")

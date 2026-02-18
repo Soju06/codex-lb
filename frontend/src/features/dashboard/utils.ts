@@ -68,7 +68,7 @@ export function buildRemainingItems(
     const remaining = usageIndex.get(account.accountId) ?? 0;
     const baseLabel = account.displayName || account.email || account.accountId;
     const label = duplicateAccountIds.has(account.accountId)
-      ? `${baseLabel} (${formatCompactAccountId(account.accountId)})`
+      ? `${baseLabel} (${formatCompactAccountId(account.accountId, 5, 4)})`
       : baseLabel;
     return {
       accountId: account.accountId,

@@ -44,8 +44,8 @@ describe("buildRemainingItems", () => {
       null,
     );
 
-    expect(items[0].label).toBe(`dup@example.com (${formatCompactAccountId(duplicateA)})`);
-    expect(items[1].label).toBe(`dup@example.com (${formatCompactAccountId(duplicateB)})`);
+    expect(items[0].label).toBe(`dup@example.com (${formatCompactAccountId(duplicateA, 5, 4)})`);
+    expect(items[1].label).toBe(`dup@example.com (${formatCompactAccountId(duplicateB, 5, 4)})`);
     expect(items[2].label).toBe("unique@example.com");
   });
 });

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, UploadFile
-from fastapi.responses import JSONResponse
 
-from app.core.errors import dashboard_error
+from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.schemas import (
     AccountDeleteResponse,
@@ -14,7 +14,11 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
 )
 
-router = APIRouter(prefix="/api/accounts", tags=["dashboard"])
+router = APIRouter(
+    prefix="/api/accounts",
+    tags=["dashboard"],
+    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+)
 
 
 @router.get("", response_model=AccountsResponse)
@@ -29,13 +33,10 @@ async def list_accounts(
 async def get_account_trends(
     account_id: str,
     context: AccountsContext = Depends(get_accounts_context),
-) -> AccountTrendsResponse | JSONResponse:
+) -> AccountTrendsResponse:
     result = await context.service.get_account_trends(account_id)
     if not result:
-        return JSONResponse(
-            status_code=404,
-            content=dashboard_error("account_not_found", "Account not found"),
-        )
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
     return result
 
 
@@ -43,28 +44,22 @@ async def get_account_trends(
 async def import_account(
     auth_json: UploadFile = File(...),
     context: AccountsContext = Depends(get_accounts_context),
-) -> AccountImportResponse | JSONResponse:
+) -> AccountImportResponse:
     raw = await auth_json.read()
     try:
         return await context.service.import_account(raw)
-    except Exception:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_auth_json", "Invalid auth.json payload"),
-        )
+    except Exception as exc:
+        raise DashboardBadRequestError("Invalid auth.json payload", code="invalid_auth_json") from exc
 
 
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)
 async def reactivate_account(
     account_id: str,
     context: AccountsContext = Depends(get_accounts_context),
-) -> AccountReactivateResponse | JSONResponse:
+) -> AccountReactivateResponse:
     success = await context.service.reactivate_account(account_id)
     if not success:
-        return JSONResponse(
-            status_code=404,
-            content=dashboard_error("account_not_found", "Account not found"),
-        )
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountReactivateResponse(status="reactivated")
 
 
@@ -72,13 +67,10 @@ async def reactivate_account(
 async def pause_account(
     account_id: str,
     context: AccountsContext = Depends(get_accounts_context),
-) -> AccountPauseResponse | JSONResponse:
+) -> AccountPauseResponse:
     success = await context.service.pause_account(account_id)
     if not success:
-        return JSONResponse(
-            status_code=404,
-            content=dashboard_error("account_not_found", "Account not found"),
-        )
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountPauseResponse(status="paused")
 
 
@@ -86,11 +78,8 @@ async def pause_account(
 async def delete_account(
     account_id: str,
     context: AccountsContext = Depends(get_accounts_context),
-) -> AccountDeleteResponse | JSONResponse:
+) -> AccountDeleteResponse:
     success = await context.service.delete_account(account_id)
     if not success:
-        return JSONResponse(
-            status_code=404,
-            content=dashboard_error("account_not_found", "Account not found"),
-        )
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountDeleteResponse(status="deleted")

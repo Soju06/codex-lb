@@ -70,7 +70,7 @@ async def test_proxy_responses_requires_instructions(async_client):
     payload = {"model": "gpt-5.1", "input": []}
     resp = await async_client.post("/backend-api/codex/responses", json=payload)
 
-    assert resp.status_code == 422
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio

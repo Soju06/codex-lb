@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Protocol, TypeVar
 
@@ -138,6 +139,21 @@ def _load_sqlite_backup_creator() -> _SqliteBackupCreator:
     from app.db.backup import create_sqlite_pre_migration_backup
 
     return create_sqlite_pre_migration_backup
+
+
+@asynccontextmanager
+async def get_background_session() -> AsyncIterator[AsyncSession]:
+    """Session provider for background tasks, schedulers, and auth dependencies."""
+    session = SessionLocal()
+    try:
+        yield session
+    except BaseException:
+        await _safe_rollback(session)
+        raise
+    finally:
+        if session.in_transaction():
+            await _safe_rollback(session)
+        await _safe_close(session)
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

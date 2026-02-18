@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, Response
-from fastapi.responses import JSONResponse
 
-from app.core.errors import dashboard_error
+from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.schemas import (
     ApiKeyCreateRequest,
@@ -20,7 +20,11 @@ from app.modules.api_keys.service import (
     LimitRuleInput,
 )
 
-router = APIRouter(prefix="/api/api-keys", tags=["dashboard"])
+router = APIRouter(
+    prefix="/api/api-keys",
+    tags=["dashboard"],
+    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+)
 
 
 def _to_response(row: ApiKeyData) -> ApiKeyResponse:
@@ -82,7 +86,7 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
 async def create_api_key(
     payload: ApiKeyCreateRequest = Body(...),
     context: ApiKeysContext = Depends(get_api_keys_context),
-) -> ApiKeyCreateResponse | JSONResponse:
+) -> ApiKeyCreateResponse:
     limit_inputs = _build_limit_inputs(payload)
 
     try:
@@ -95,10 +99,7 @@ async def create_api_key(
             )
         )
     except ValueError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_api_key_payload", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     resp = _to_response(created)
     return ApiKeyCreateResponse(
         **resp.model_dump(),
@@ -119,7 +120,7 @@ async def update_api_key(
     key_id: str,
     payload: ApiKeyUpdateRequest = Body(...),
     context: ApiKeysContext = Depends(get_api_keys_context),
-) -> ApiKeyResponse | JSONResponse:
+) -> ApiKeyResponse:
     fields = payload.model_fields_set
 
     limits_set = "limits" in fields or "weekly_token_limit" in fields
@@ -141,9 +142,9 @@ async def update_api_key(
     try:
         row = await context.service.update_key(key_id, update)
     except ApiKeyNotFoundError as exc:
-        return JSONResponse(status_code=404, content=dashboard_error("not_found", str(exc)))
+        raise DashboardNotFoundError(str(exc)) from exc
     except ValueError as exc:
-        return JSONResponse(status_code=400, content=dashboard_error("invalid_api_key_payload", str(exc)))
+        raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     return _to_response(row)
 
 
@@ -155,7 +156,7 @@ async def delete_api_key(
     try:
         await context.service.delete_key(key_id)
     except ApiKeyNotFoundError as exc:
-        return JSONResponse(status_code=404, content=dashboard_error("not_found", str(exc)))
+        raise DashboardNotFoundError(str(exc)) from exc
     return Response(status_code=204)
 
 
@@ -163,11 +164,11 @@ async def delete_api_key(
 async def regenerate_api_key(
     key_id: str,
     context: ApiKeysContext = Depends(get_api_keys_context),
-) -> ApiKeyCreateResponse | JSONResponse:
+) -> ApiKeyCreateResponse:
     try:
         row = await context.service.regenerate_key(key_id)
     except ApiKeyNotFoundError as exc:
-        return JSONResponse(status_code=404, content=dashboard_error("not_found", str(exc)))
+        raise DashboardNotFoundError(str(exc)) from exc
     resp = _to_response(row)
     return ApiKeyCreateResponse(
         **resp.model_dump(),

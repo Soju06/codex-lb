@@ -11,7 +11,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import UpstreamModel, get_model_registry
 from app.db.models import Account, AccountStatus
-from app.db.session import SessionLocal, _safe_close, _safe_rollback
+from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 
@@ -51,45 +51,41 @@ class ModelRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        session = SessionLocal()
         try:
-            accounts_repo = AccountsRepository(session)
-            accounts = await accounts_repo.list_accounts()
-            grouped = _group_by_plan(accounts)
-            if not grouped:
-                logger.debug("No active accounts for model registry refresh")
-                return
+            async with get_background_session() as session:
+                accounts_repo = AccountsRepository(session)
+                accounts = await accounts_repo.list_accounts()
+                grouped = _group_by_plan(accounts)
+                if not grouped:
+                    logger.debug("No active accounts for model registry refresh")
+                    return
 
-            encryptor = TokenEncryptor()
-            per_plan_results: dict[str, list[UpstreamModel]] = {}
+                encryptor = TokenEncryptor()
+                per_plan_results: dict[str, list[UpstreamModel]] = {}
 
-            for plan_type, candidates in grouped.items():
-                models = await _fetch_with_failover(
-                    candidates,
-                    encryptor,
-                    accounts_repo,
-                )
-                if models is not None:
-                    per_plan_results[plan_type] = models
+                for plan_type, candidates in grouped.items():
+                    models = await _fetch_with_failover(
+                        candidates,
+                        encryptor,
+                        accounts_repo,
+                    )
+                    if models is not None:
+                        per_plan_results[plan_type] = models
 
-            if per_plan_results:
-                registry = get_model_registry()
-                registry.update(per_plan_results)
-                snapshot = registry.get_snapshot()
-                total_models = len(snapshot.models) if snapshot else 0
-                logger.info(
-                    "Model registry refreshed plans=%d total_models=%d",
-                    len(per_plan_results),
-                    total_models,
-                )
-            else:
-                logger.warning("Model registry refresh failed for all plans")
+                if per_plan_results:
+                    registry = get_model_registry()
+                    registry.update(per_plan_results)
+                    snapshot = registry.get_snapshot()
+                    total_models = len(snapshot.models) if snapshot else 0
+                    logger.info(
+                        "Model registry refreshed plans=%d total_models=%d",
+                        len(per_plan_results),
+                        total_models,
+                    )
+                else:
+                    logger.warning("Model registry refresh failed for all plans")
         except Exception:
             logger.exception("Model registry refresh loop failed")
-        finally:
-            if session.in_transaction():
-                await _safe_rollback(session)
-            await _safe_close(session)
 
 
 def _group_by_plan(accounts: list[Account]) -> dict[str, list[Account]]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Annotated
 
@@ -77,6 +78,10 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    firewall_trust_proxy_headers: bool = False
+    firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["127.0.0.1/32", "::1/128"]
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -114,6 +119,31 @@ class Settings(BaseSettings):
                         normalized.append(host)
             return normalized
         raise TypeError("image_inline_allowed_hosts must be a list or comma-separated string")
+
+    @field_validator("firewall_trusted_proxy_cidrs", mode="before")
+    @classmethod
+    def _normalize_firewall_trusted_proxy_cidrs(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        cidrs: list[str] = []
+        if isinstance(value, str):
+            entries = [entry.strip() for entry in value.split(",")]
+            cidrs = [entry for entry in entries if entry]
+        elif isinstance(value, list):
+            for entry in value:
+                if isinstance(entry, str):
+                    cidr = entry.strip()
+                    if cidr:
+                        cidrs.append(cidr)
+        else:
+            raise TypeError("firewall_trusted_proxy_cidrs must be a list or comma-separated string")
+
+        for cidr in cidrs:
+            try:
+                ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
+        return cidrs
 
 
 @lru_cache(maxsize=1)

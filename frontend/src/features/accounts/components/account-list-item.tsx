@@ -45,6 +45,9 @@ export function AccountListItem({ account, selected, onSelect }: AccountListItem
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">{title}</p>
           <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+          <p className="truncate font-mono text-[11px] text-muted-foreground/80" title={account.accountId}>
+            ID {account.accountId}
+          </p>
         </div>
         <StatusBadge status={status} />
       </div>

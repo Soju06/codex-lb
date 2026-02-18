@@ -64,9 +64,11 @@ export function buildRemainingItems(
   return accounts.map((account, index) => {
     const fallbackPercent = account.usage?.primaryRemainingPercent ?? 0;
     const remaining = usageIndex.get(account.accountId) ?? 0;
+    const baseLabel = account.displayName || account.email || account.accountId;
+    const label = baseLabel === account.accountId ? account.accountId : `${baseLabel} (${account.accountId})`;
     return {
       accountId: account.accountId,
-      label: account.displayName || account.email || account.accountId,
+      label,
       value: remaining,
       remainingPercent: fallbackPercent,
       color: palette[index % palette.length],

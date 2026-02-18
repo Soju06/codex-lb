@@ -10,12 +10,14 @@ describe("DashboardSettingsSchema", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
       preferEarlierResetAccounts: false,
+      importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
+    expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
   });
 });
@@ -25,10 +27,12 @@ describe("SettingsUpdateRequestSchema", () => {
     const parsed = SettingsUpdateRequestSchema.parse({
       stickyThreadsEnabled: false,
       preferEarlierResetAccounts: true,
+      importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
     });
 
+    expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
   });
@@ -39,6 +43,7 @@ describe("SettingsUpdateRequestSchema", () => {
       preferEarlierResetAccounts: true,
     });
 
+    expect(parsed.importWithoutOverwrite).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
   });

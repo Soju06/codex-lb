@@ -37,6 +37,7 @@ describe("useSettings", () => {
     await result.current.updateSettingsMutation.mutateAsync({
       stickyThreadsEnabled: false,
       preferEarlierResetAccounts: true,
+      importWithoutOverwrite: true,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
     });

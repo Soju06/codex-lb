@@ -255,6 +255,7 @@ export function createDashboardSettings(overrides: Partial<DashboardSettings> = 
   return DashboardSettingsSchema.parse({
     stickyThreadsEnabled: true,
     preferEarlierResetAccounts: false,
+    importWithoutOverwrite: false,
     totpRequiredOnLogin: false,
     totpConfigured: true,
     apiKeyAuthEnabled: true,

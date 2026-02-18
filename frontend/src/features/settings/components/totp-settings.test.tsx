@@ -20,6 +20,7 @@ vi.mock("@/features/auth/api", () => ({
 const baseSettings = {
   stickyThreadsEnabled: true,
   preferEarlierResetAccounts: false,
+  importWithoutOverwrite: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
@@ -101,6 +102,7 @@ describe("TotpSettings", () => {
     expect(onSave).toHaveBeenCalledWith({
       stickyThreadsEnabled: true,
       preferEarlierResetAccounts: false,
+      importWithoutOverwrite: false,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: true,
     });

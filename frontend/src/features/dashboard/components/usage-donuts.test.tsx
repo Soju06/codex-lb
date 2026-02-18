@@ -10,7 +10,7 @@ describe("UsageDonuts", () => {
         primaryItems={[
           {
             accountId: "acc-1",
-            label: "primary@example.com",
+            label: "primary@example.com (acc-1)",
             value: 120,
             remainingPercent: 60,
             color: "#7bb661",
@@ -19,7 +19,7 @@ describe("UsageDonuts", () => {
         secondaryItems={[
           {
             accountId: "acc-2",
-            label: "secondary@example.com",
+            label: "secondary@example.com (acc-2)",
             value: 80,
             remainingPercent: 40,
             color: "#d9a441",
@@ -34,8 +34,8 @@ describe("UsageDonuts", () => {
 
     expect(screen.getByText("Primary Remaining")).toBeInTheDocument();
     expect(screen.getByText("Secondary Remaining")).toBeInTheDocument();
-    expect(screen.getByText("primary@example.com")).toBeInTheDocument();
-    expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
+    expect(screen.getByText("primary@example.com (acc-1)")).toBeInTheDocument();
+    expect(screen.getByText("secondary@example.com (acc-2)")).toBeInTheDocument();
   });
 
   it("handles empty data gracefully", () => {

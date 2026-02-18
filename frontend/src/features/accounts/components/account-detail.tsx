@@ -47,6 +47,9 @@ export function AccountDetail({
         {account.displayName && account.displayName !== account.email && (
           <p className="mt-0.5 text-xs text-muted-foreground">{account.email}</p>
         )}
+        <p className="mt-0.5 font-mono text-[11px] text-muted-foreground/80">
+          Account ID {account.accountId}
+        </p>
       </div>
 
       <AccountUsagePanel account={account} trends={trends} />

@@ -59,7 +59,10 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
 
   return (
     <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
-      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Usage</h3>
+      <div className="space-y-0.5">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Usage</h3>
+        <p className="font-mono text-[11px] text-muted-foreground/80">Account ID {account.accountId}</p>
+      </div>
       <div className="grid grid-cols-2 gap-4">
         <QuotaRow label="Primary" percent={primary} resetAt={account.resetAtPrimary} />
         <QuotaRow label="Secondary" percent={secondary} resetAt={account.resetAtSecondary} />

@@ -84,6 +84,9 @@ export function AccountCard({ account, onAction }: AccountCardProps) {
               {subtitle}
             </p>
           )}
+          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/80" title={account.accountId}>
+            ID {account.accountId}
+          </p>
         </div>
         <StatusBadge status={status} />
       </div>

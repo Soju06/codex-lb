@@ -166,6 +166,34 @@ async def test_stream_chat_chunks_include_usage_chunk():
 
 
 @pytest.mark.asyncio
+async def test_stream_chat_chunks_include_usage_chunk_supports_details():
+    lines = [
+        'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+        (
+            'data: {"type":"response.completed","response":{"id":"r1","usage":'
+            '{"input_tokens":2,"output_tokens":3,"total_tokens":5,'
+            '"input_tokens_details":{"cached_tokens":1},'
+            '"output_tokens_details":{"reasoning_tokens":2}}}}\n\n'
+        ),
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    chunks = [
+        json.loads(chunk[5:].strip())
+        for chunk in [c async for c in stream_chat_chunks(_stream(), model="gpt-5.2", include_usage=True)]
+        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+    ]
+
+    usage = chunks[-1]["usage"]
+    assert usage["total_tokens"] == 5
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 1
+    assert usage["completion_tokens_details"]["reasoning_tokens"] == 2
+
+
+@pytest.mark.asyncio
 async def test_collect_completion_merges_tool_call_arguments():
     lines = [
         (

@@ -77,6 +77,20 @@ def test_openai_compatible_text_verbosity_alias_is_normalized():
     assert "textVerbosity" not in dumped
 
 
+def test_openai_compatible_top_level_verbosity_is_normalized():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "verbosity": "medium",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["text"] == {"verbosity": "medium"}
+    assert "verbosity" not in dumped
+
+
 def test_interleaved_reasoning_fields_are_sanitized_from_input():
     payload = {
         "model": "gpt-5.1",

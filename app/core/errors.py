@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class OpenAIErrorDetail(TypedDict, total=False):
@@ -27,13 +27,13 @@ class DashboardErrorEnvelope(TypedDict):
     error: DashboardErrorDetail
 
 
-class ResponseFailedResponse(TypedDict, total=False):
-    id: str
+class ResponseFailedResponse(TypedDict):
     object: str
-    created_at: int
     status: str
     error: OpenAIErrorDetail
-    incomplete_details: dict[str, str] | None
+    id: NotRequired[str]
+    created_at: NotRequired[int]
+    incomplete_details: NotRequired[dict[str, str] | None]
 
 
 class ResponseFailedEvent(TypedDict):

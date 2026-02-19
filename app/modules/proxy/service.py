@@ -215,6 +215,7 @@ class ProxyService:
         reservation_id = api_key_reservation.reservation_id
         model_name = api_key_reservation.model or settlement.model or ""
 
+        settled: bool = False
         with anyio.CancelScope(shield=True):
             try:
                 async with self._repo_factory() as repos:
@@ -233,7 +234,7 @@ class ProxyService:
                         )
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
-                return True
+                settled = True
             except Exception:
                 logger.warning(
                     "Failed to settle stream API key reservation key_id=%s request_id=%s",
@@ -241,7 +242,9 @@ class ProxyService:
                     request_id,
                     exc_info=True,
                 )
-                return False
+                settled = False
+
+        return settled
 
     async def rate_limit_headers(self) -> dict[str, str]:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
@@ -486,6 +489,7 @@ class ProxyService:
         error_code = None
         error_message = None
         usage = None
+        saw_text_delta = False
 
         try:
             stream = core_stream_responses(
@@ -522,12 +526,24 @@ class ProxyService:
                 usage = event.response.usage if event.response else None
                 if event.type == "response.incomplete":
                     status = "error"
-            yield first
+
+            if event and event.type in ("response.output_text.delta", "response.refusal.delta"):
+                saw_text_delta = True
+            if not (
+                saw_text_delta
+                and event
+                and event.type in ("response.output_text.done", "response.content_part.done")
+            ):
+                yield first
 
             async for line in iterator:
                 event = parse_sse_event(line)
                 if event:
                     event_type = event.type
+                    if event_type in ("response.output_text.delta", "response.refusal.delta"):
+                        saw_text_delta = True
+                    if saw_text_delta and event_type in ("response.output_text.done", "response.content_part.done"):
+                        continue
                     if event_type in ("response.failed", "error"):
                         status = "error"
                         if event_type == "response.failed":

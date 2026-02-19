@@ -399,6 +399,7 @@ def _normalize_openai_compatible_aliases(payload: dict[str, JsonValue]) -> None:
     reasoning_effort = payload.pop("reasoningEffort", None)
     reasoning_summary = payload.pop("reasoningSummary", None)
     text_verbosity = payload.pop("textVerbosity", None)
+    top_level_verbosity = payload.pop("verbosity", None)
 
     reasoning_payload = payload.get("reasoning")
     if is_json_mapping(reasoning_payload):
@@ -421,6 +422,8 @@ def _normalize_openai_compatible_aliases(payload: dict[str, JsonValue]) -> None:
 
     if isinstance(text_verbosity, str) and "verbosity" not in text_map:
         text_map["verbosity"] = text_verbosity
+    if isinstance(top_level_verbosity, str) and "verbosity" not in text_map:
+        text_map["verbosity"] = top_level_verbosity
     if text_map:
         payload["text"] = text_map
 

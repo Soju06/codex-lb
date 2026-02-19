@@ -223,6 +223,46 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         assert log.request_id == request_id
 
 
+@pytest.mark.asyncio
+async def test_v1_responses_stream_filters_done_text_events(async_client, monkeypatch):
+    email = "done-filter@example.com"
+    raw_account_id = "acc_done_filter"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.output_text.delta","delta":"Hey there! "}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"What are we tackling?"}\n\n'
+        yield 'data: {"type":"response.output_text.done","text":"Hey there! What are we tackling?"}\n\n'
+        yield (
+            'data: {"type":"response.content_part.done","part":{"type":"output_text","text":"Hey there! What are we tackling?"}}\n\n'
+        )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "input": "hi", "stream": True}
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event_types: list[str] = []
+    for line in lines:
+        if not line.startswith("data: "):
+            continue
+        data = json.loads(line[6:])
+        event_type = data.get("type")
+        if isinstance(event_type, str):
+            event_types.append(event_type)
+
+    assert "response.output_text.delta" in event_types
+    assert "response.completed" in event_types
+    assert "response.output_text.done" not in event_types
+    assert "response.content_part.done" not in event_types
+
+
 
 @pytest.mark.asyncio
 async def test_v1_responses_sanitizes_interleaved_reasoning_fields(async_client, monkeypatch):

@@ -146,10 +146,15 @@ def _convert_tool_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]
     content = message.get("content")
     if isinstance(content, str):
         output = content
-    elif content is None:
-        output = ""
     elif is_json_list(content):
         output = _concat_text_parts(content)
+        if not output and content:
+            raise ClientPayloadError(
+                "tool message content array contains no valid text parts.",
+                param="messages",
+            )
+    elif content is None:
+        raise ClientPayloadError("tool message content is required.", param="messages")
     else:
         raise ClientPayloadError(
             "tool message content must be a string or array.",

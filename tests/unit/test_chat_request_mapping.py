@@ -328,6 +328,34 @@ def test_chat_tool_message_invalid_content_type_rejected():
         ChatCompletionsRequest.model_validate(payload).to_responses_request()
 
 
+def test_chat_tool_message_null_content_rejected():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "call_1", "content": None},
+        ],
+    }
+    with pytest.raises(ValueError, match="content is required"):
+        ChatCompletionsRequest.model_validate(payload).to_responses_request()
+
+
+def test_chat_tool_message_malformed_text_parts_rejected():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [{"type": "text"}],
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="no valid text parts"):
+        ChatCompletionsRequest.model_validate(payload).to_responses_request()
+
+
 def test_chat_assistant_non_string_tool_call_arguments_rejected():
     payload = {
         "model": "gpt-5.2",

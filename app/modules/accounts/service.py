@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+
+from pydantic import ValidationError
 
 from app.core.auth import (
     DEFAULT_EMAIL,
@@ -25,6 +28,10 @@ from app.modules.usage.updater import UsageUpdater
 
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
+
+
+class InvalidAuthJsonError(Exception):
+    pass
 
 
 class AccountsService:
@@ -74,7 +81,10 @@ class AccountsService:
         )
 
     async def import_account(self, raw: bytes) -> AccountImportResponse:
-        auth = parse_auth_json(raw)
+        try:
+            auth = parse_auth_json(raw)
+        except (json.JSONDecodeError, ValidationError, UnicodeDecodeError, TypeError) as exc:
+            raise InvalidAuthJsonError("Invalid auth.json payload") from exc
         claims = claims_from_auth(auth)
 
         email = claims.email or DEFAULT_EMAIL

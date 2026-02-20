@@ -100,7 +100,15 @@ The Accounts page SHALL display a two-column layout: left panel with searchable 
 #### Scenario: Account import
 
 - **WHEN** a user clicks the import button and uploads an auth.json file
-- **THEN** the app calls `POST /api/accounts/import` and refreshes the account list
+- **THEN** the app calls `POST /api/accounts/import` and refreshes the account list on success
+
+#### Scenario: Ambiguous duplicate identity import conflict
+
+- **WHEN** `importWithoutOverwrite` was previously enabled and duplicate accounts with the same email exist
+- **AND** overwrite mode is enabled again
+- **AND** a new import matches multiple existing accounts by email without an exact ID match
+- **THEN** `POST /api/accounts/import` returns `409` with `error.code=duplicate_identity_conflict`
+- **AND** no existing account is modified
 
 #### Scenario: OAuth add account
 

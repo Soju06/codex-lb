@@ -31,7 +31,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.oauth.schemas import (
     OauthCompleteRequest,
     OauthCompleteResponse,
@@ -266,6 +266,9 @@ class OauthService:
         except OAuthError as exc:
             await self._set_error(exc.message)
             html = _error_html(exc.message)
+        except AccountIdentityConflictError as exc:
+            await self._set_error(str(exc))
+            html = _error_html(str(exc))
 
         asyncio.create_task(self._stop_callback_server())
         return self._html_response(html)
@@ -285,6 +288,8 @@ class OauthService:
             await self._set_error("Device code expired.")
         except OAuthError as exc:
             await self._set_error(exc.message)
+        except AccountIdentityConflictError as exc:
+            await self._set_error(str(exc))
         finally:
             async with self._store.lock:
                 current = asyncio.current_task()

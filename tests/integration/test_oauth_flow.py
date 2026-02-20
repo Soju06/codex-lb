@@ -175,6 +175,108 @@ async def test_device_oauth_flow_keeps_separate_accounts_when_import_without_ove
 
 
 @pytest.mark.asyncio
+async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous_in_overwrite_mode(
+    async_client,
+    monkeypatch,
+):
+    await oauth_module._OAUTH_STORE.reset()
+
+    enable_separate = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "importWithoutOverwrite": True,
+            "totpRequiredOnLogin": False,
+        },
+    )
+    assert enable_separate.status_code == 200
+    assert enable_separate.json()["importWithoutOverwrite"] is True
+
+    email = "oauth-conflict@example.com"
+    raw_account_id = "acc_oauth_conflict_base"
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="ABCD-EFGH",
+            device_auth_id="dev_conflict",
+            interval_seconds=1,
+            expires_in_seconds=30,
+        )
+
+    call_count = {"value": 0}
+
+    async def fake_exchange_device_token(**_):
+        call_count["value"] += 1
+        if call_count["value"] <= 2:
+            account_id = raw_account_id
+            plan_type = "plus" if call_count["value"] == 1 else "team"
+        else:
+            account_id = "acc_oauth_conflict_new"
+            plan_type = "pro"
+        payload = {
+            "email": email,
+            "chatgpt_account_id": account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
+        }
+        return OAuthTokens(
+            access_token=f"access-token-{call_count['value']}",
+            refresh_token=f"refresh-token-{call_count['value']}",
+            id_token=_encode_jwt(payload),
+        )
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_async_sleep", fake_sleep)
+
+    async def _run_device_flow_once() -> dict[str, str | None]:
+        start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+        assert start.status_code == 200
+        assert start.json()["method"] == "device"
+
+        complete = await async_client.post("/api/oauth/complete", json={})
+        assert complete.status_code == 200
+        assert complete.json()["status"] == "pending"
+
+        await asyncio.sleep(0)
+
+        payload: dict[str, str | None] | None = None
+        for _ in range(20):
+            status = await async_client.get("/api/oauth/status")
+            assert status.status_code == 200
+            payload = status.json()
+            if payload["status"] in {"success", "error"}:
+                break
+            await asyncio.sleep(0.05)
+        assert payload is not None
+        return payload
+
+    assert (await _run_device_flow_once())["status"] == "success"
+    assert (await _run_device_flow_once())["status"] == "success"
+
+    enable_overwrite = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "importWithoutOverwrite": False,
+            "totpRequiredOnLogin": False,
+        },
+    )
+    assert enable_overwrite.status_code == 200
+    assert enable_overwrite.json()["importWithoutOverwrite"] is False
+
+    result = await _run_device_flow_once()
+    assert result["status"] == "error"
+    assert result["errorMessage"] is not None
+    assert "multiple matching accounts exist" in str(result["errorMessage"]).lower()
+
+
+@pytest.mark.asyncio
 async def test_oauth_start_with_existing_account_marks_success(async_client):
     await oauth_module._OAUTH_STORE.reset()
 

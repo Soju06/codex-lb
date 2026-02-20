@@ -9,7 +9,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -74,6 +74,18 @@ async def test_accounts_upsert_with_merge_disabled_keeps_duplicate_identity(db_s
         row_ids = {row.id for row in rows}
         assert first.id in row_ids
         assert second.id in row_ids
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_with_merge_enabled_raises_conflict_on_ambiguous_email(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_make_account("acc_same", "dup@example.com"), merge_by_email=False)
+        await repo.upsert(_make_account("acc_same", "dup@example.com"), merge_by_email=False)
+
+        incoming = _make_account("acc_new", "dup@example.com")
+        with pytest.raises(AccountIdentityConflictError):
+            await repo.upsert(incoming, merge_by_email=True)
 
 
 @pytest.mark.asyncio

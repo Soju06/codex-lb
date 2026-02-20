@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.errors import dashboard_error
 from app.dependencies import AccountsContext, get_accounts_context
+from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountDeleteResponse,
     AccountImportResponse,
@@ -13,6 +14,7 @@ from app.modules.accounts.schemas import (
     AccountsResponse,
     AccountTrendsResponse,
 )
+from app.modules.accounts.service import InvalidAuthJsonError
 
 router = APIRouter(prefix="/api/accounts", tags=["dashboard"])
 
@@ -47,10 +49,15 @@ async def import_account(
     raw = await auth_json.read()
     try:
         return await context.service.import_account(raw)
-    except Exception:
+    except InvalidAuthJsonError:
         return JSONResponse(
             status_code=400,
             content=dashboard_error("invalid_auth_json", "Invalid auth.json payload"),
+        )
+    except AccountIdentityConflictError as exc:
+        return JSONResponse(
+            status_code=409,
+            content=dashboard_error("duplicate_identity_conflict", str(exc)),
         )
 
 

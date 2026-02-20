@@ -11,6 +11,15 @@ _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 
 
+class AccountIdentityConflictError(Exception):
+    def __init__(self, email: str) -> None:
+        self.email = email
+        super().__init__(
+            f"Cannot overwrite account for email '{email}' because multiple matching accounts exist. "
+            "Remove duplicates or enable import without overwrite."
+        )
+
+
 class AccountsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -45,8 +54,7 @@ class AccountsRepository:
             account.id = await self._next_available_account_id(account.id)
 
         if merge_by_email:
-            result = await self._session.execute(select(Account).where(Account.email == account.email))
-            existing_by_email = result.scalar_one_or_none()
+            existing_by_email = await self._single_account_by_email(account.email)
             if existing_by_email:
                 _apply_account_updates(existing_by_email, account)
                 await self._session.commit()
@@ -124,6 +132,17 @@ class AccountsRepository:
             candidate = f"{base_id}{_DUPLICATE_ACCOUNT_SUFFIX}{sequence}"
             sequence += 1
         return candidate
+
+    async def _single_account_by_email(self, email: str) -> Account | None:
+        result = await self._session.execute(
+            select(Account).where(Account.email == email).order_by(Account.created_at.asc(), Account.id.asc()).limit(2)
+        )
+        matches = list(result.scalars().all())
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise AccountIdentityConflictError(email)
+        return matches[0]
 
 
 def _apply_account_updates(target: Account, source: Account) -> None:

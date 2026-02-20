@@ -120,14 +120,19 @@ def _decompose_assistant_tool_calls(message: dict[str, JsonValue]) -> list[JsonV
             if not is_json_dict(function):
                 continue
             name = function.get("name")
-            arguments = function.get("arguments")
             if not isinstance(name, str):
                 continue
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str):
+                raise ClientPayloadError(
+                    "tool_calls[].function.arguments must be a string.",
+                    param="messages",
+                )
             item: dict[str, JsonValue] = {
                 "type": "function_call",
                 "call_id": call_id,
                 "name": name,
-                "arguments": arguments if isinstance(arguments, str) else "",
+                "arguments": arguments,
             }
             items.append(item)
     return items
@@ -142,8 +147,13 @@ def _convert_tool_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]
         output = content
     elif content is None:
         output = ""
-    else:
+    elif is_json_list(content):
         output = _content_to_text(content) or ""
+    else:
+        raise ClientPayloadError(
+            "tool message content must be a string or array.",
+            param="messages",
+        )
     return {"type": "function_call_output", "call_id": call_id, "output": output}
 
 

@@ -316,6 +316,40 @@ def test_chat_tool_message_missing_tool_call_id():
         ChatCompletionsRequest.model_validate(payload).to_responses_request()
 
 
+def test_chat_tool_message_invalid_content_type_rejected():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "call_1", "content": 42},
+        ],
+    }
+    with pytest.raises(ValueError, match="must be a string or array"):
+        ChatCompletionsRequest.model_validate(payload).to_responses_request()
+
+
+def test_chat_assistant_non_string_tool_call_arguments_rejected():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "fn", "arguments": {"a": 1}},
+                    }
+                ],
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="arguments must be a string"):
+        ChatCompletionsRequest.model_validate(payload).to_responses_request()
+
+
 @pytest.mark.parametrize("n", [0, -1, 2])
 def test_chat_n_not_1_rejected(n: int):
     payload = {

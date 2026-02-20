@@ -3,4 +3,7 @@ version = 1
 name = "codex-lb"
 
 [setup]
-script = "uv sync"
+script = '''
+uv sync
+cd frontend && bun install
+'''

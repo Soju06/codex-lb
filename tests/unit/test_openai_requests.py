@@ -295,7 +295,6 @@ def test_v1_compact_input_string_passthrough():
     assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
 
 
-
 def test_responses_normalizes_assistant_input_text_to_output_text():
     payload = {
         "model": "gpt-5.1",
@@ -327,7 +326,6 @@ def test_v1_assistant_messages_normalize_to_output_text():
         {"role": "assistant", "content": [{"type": "output_text", "text": "Prior answer"}]},
         {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
     ]
-
 
 
 def test_responses_normalizes_assistant_object_content_to_array():
@@ -415,6 +413,7 @@ def test_v1_assistant_tool_calls_normalize_to_function_call():
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
     assert request.input == [
+        {"role": "assistant", "content": [{"type": "output_text", "text": ""}]},
         {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"q\":\"abc\"}"},
         {"type": "function_call_output", "call_id": "call_1", "output": "{\"ok\":true}"},
         {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
@@ -459,4 +458,3 @@ def test_v1_rejects_unknown_message_role():
     }
     with pytest.raises(ClientPayloadError, match="Unsupported message role"):
         V1ResponsesRequest.model_validate(payload).to_responses_request()
-

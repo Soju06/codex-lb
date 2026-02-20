@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/accounts", label: "Accounts" },
   { to: "/settings", label: "Settings" },
+  { to: "/firewall", label: "Firewall" },
 ] as const;
 
 export type AppHeaderProps = {

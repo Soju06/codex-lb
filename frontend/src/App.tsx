@@ -21,6 +21,10 @@ const SettingsPage = lazy(async () => {
   const module = await import("@/features/settings/components/settings-page");
   return { default: module.SettingsPage };
 });
+const FirewallPage = lazy(async () => {
+  const module = await import("@/features/firewall/components/firewall-page");
+  return { default: module.FirewallPage };
+});
 
 function RouteLoadingFallback() {
   return (
@@ -79,6 +83,14 @@ export default function App() {
               element={
                 <Suspense fallback={<RouteLoadingFallback />}>
                   <SettingsPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/firewall"
+              element={
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <FirewallPage />
                 </Suspense>
               }
             />

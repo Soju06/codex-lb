@@ -88,3 +88,50 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     # At least one trend point should have non-zero request count
     request_values = [p["v"] for p in trends["requests"]]
     assert any(v > 0 for v in request_values)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_plus", "plus@example.com", plan_type="plus"))
+        await accounts_repo.upsert(_make_account("acc_free", "free@example.com", plan_type="free"))
+
+        await usage_repo.add_entry(
+            "acc_plus",
+            20.0,
+            window="primary",
+            window_minutes=300,
+            recorded_at=now - timedelta(minutes=2),
+        )
+        await usage_repo.add_entry(
+            "acc_free",
+            20.0,
+            window="primary",
+            window_minutes=10080,
+            recorded_at=now - timedelta(minutes=1),
+        )
+        await usage_repo.add_entry(
+            "acc_plus",
+            40.0,
+            window="secondary",
+            window_minutes=10080,
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview?requestLimit=10&requestOffset=0")
+    assert response.status_code == 200
+    payload = response.json()
+
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    assert payload["summary"]["primaryWindow"]["windowMinutes"] == 300
+    assert payload["windows"]["primary"]["windowMinutes"] == 300
+    assert payload["summary"]["secondaryWindow"]["windowMinutes"] == 10080
+    assert accounts["acc_free"]["windowMinutesPrimary"] is None
+    assert accounts["acc_free"]["windowMinutesSecondary"] == 10080
+    assert accounts["acc_free"]["usage"]["secondaryRemainingPercent"] == pytest.approx(80.0)

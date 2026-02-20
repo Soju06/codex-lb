@@ -39,6 +39,7 @@ export function useChartColors(): string[] {
   const theme = useThemeStore((s) => s.theme);
   return useMemo(() => {
     if (typeof document === "undefined") return FALLBACK;
+    if (!theme) return FALLBACK;
     const style = getComputedStyle(document.documentElement);
     return CHART_VARS.map((name, i) =>
       resolveColor(style.getPropertyValue(name).trim(), FALLBACK[i]),

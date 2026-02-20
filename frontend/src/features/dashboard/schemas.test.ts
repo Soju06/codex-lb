@@ -129,6 +129,23 @@ describe("UsageWindowSchema", () => {
 
     expect(parsed.accounts[0]?.accountId).toBe("acc-1");
   });
+
+  it("allows nullable remaining percent values", () => {
+    const parsed = UsageWindowSchema.parse({
+      windowKey: "primary",
+      windowMinutes: 300,
+      accounts: [
+        {
+          accountId: "acc-weekly-only",
+          remainingPercentAvg: null,
+          capacityCredits: 0,
+          remainingCredits: 0,
+        },
+      ],
+    });
+
+    expect(parsed.accounts[0]?.remainingPercentAvg).toBeNull();
+  });
 });
 
 describe("AccountSummarySchema light contract", () => {

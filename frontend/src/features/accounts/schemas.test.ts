@@ -22,6 +22,8 @@ describe("AccountSummarySchema", () => {
       },
       resetAtPrimary: ISO,
       resetAtSecondary: null,
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: 10080,
       auth: {
         access: {
           expiresAt: ISO,
@@ -38,6 +40,7 @@ describe("AccountSummarySchema", () => {
 
     expect(parsed.accountId).toBe("acc-1");
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
+    expect(parsed.windowMinutesSecondary).toBe(10080);
   });
 });
 

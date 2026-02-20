@@ -6,7 +6,7 @@ from app.core import usage as usage_core
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.types import UsageTrendBucket
+from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.schemas import (
@@ -48,12 +48,44 @@ def _account_to_summary(
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
-    primary_used_percent = _normalize_used_percent(primary_usage) or 0.0
-    secondary_used_percent = _normalize_used_percent(secondary_usage) or 0.0
-    primary_remaining_percent = usage_core.remaining_percent_from_used(primary_used_percent) or 0.0
-    secondary_remaining_percent = usage_core.remaining_percent_from_used(secondary_used_percent) or 0.0
-    reset_at_primary = from_epoch_seconds(primary_usage.reset_at) if primary_usage is not None else None
-    reset_at_secondary = from_epoch_seconds(secondary_usage.reset_at) if secondary_usage is not None else None
+    effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
+        primary_usage,
+        secondary_usage,
+    )
+    weekly_only_usage = (
+        effective_primary_usage is None
+        and primary_usage is not None
+        and usage_core.is_weekly_window_minutes(primary_usage.window_minutes)
+    )
+    # Keep account payload aligned with UI semantics: weekly-only plans expose
+    # their quota as secondary/7d and omit primary/5h fields.
+    primary_used_percent = _normalize_used_percent(effective_primary_usage)
+    secondary_used_percent = _normalize_used_percent(effective_secondary_usage)
+    primary_remaining_percent = usage_core.remaining_percent_from_used(primary_used_percent)
+    secondary_remaining_percent = usage_core.remaining_percent_from_used(secondary_used_percent)
+
+    if primary_remaining_percent is None and not weekly_only_usage:
+        primary_remaining_percent = 100.0
+    reset_at_primary = (
+        from_epoch_seconds(effective_primary_usage.reset_at) if effective_primary_usage is not None else None
+    )
+    reset_at_secondary = (
+        from_epoch_seconds(effective_secondary_usage.reset_at) if effective_secondary_usage is not None else None
+    )
+    window_minutes_primary = effective_primary_usage.window_minutes if effective_primary_usage is not None else None
+    window_minutes_secondary = (
+        effective_secondary_usage.window_minutes if effective_secondary_usage is not None else None
+    )
+    capacity_primary = usage_core.capacity_for_plan(plan_type, "primary")
+    capacity_secondary = usage_core.capacity_for_plan(plan_type, "secondary")
+    remaining_credits_primary = usage_core.remaining_credits_from_percent(
+        primary_used_percent,
+        capacity_primary,
+    )
+    remaining_credits_secondary = usage_core.remaining_credits_from_percent(
+        secondary_used_percent,
+        capacity_secondary,
+    )
     return AccountSummary(
         account_id=account.id,
         email=account.email,
@@ -66,7 +98,40 @@ def _account_to_summary(
         ),
         reset_at_primary=reset_at_primary,
         reset_at_secondary=reset_at_secondary,
+        window_minutes_primary=window_minutes_primary,
+        window_minutes_secondary=window_minutes_secondary,
+        last_refresh_at=account.last_refresh,
+        capacity_credits_primary=capacity_primary,
+        remaining_credits_primary=remaining_credits_primary,
+        capacity_credits_secondary=capacity_secondary,
+        remaining_credits_secondary=remaining_credits_secondary,
+        deactivation_reason=account.deactivation_reason,
         auth=auth_status,
+    )
+
+
+def _effective_usage_windows(
+    primary_usage: UsageHistory | None,
+    secondary_usage: UsageHistory | None,
+) -> tuple[UsageHistory | None, UsageHistory | None]:
+    if primary_usage is None:
+        return None, secondary_usage
+    if not usage_core.is_weekly_window_minutes(primary_usage.window_minutes):
+        return primary_usage, secondary_usage
+    if secondary_usage is None:
+        return None, primary_usage
+    if usage_core.should_use_weekly_primary(_to_window_row(primary_usage), _to_window_row(secondary_usage)):
+        return None, primary_usage
+    return None, secondary_usage
+
+
+def _to_window_row(entry: UsageHistory) -> UsageWindowRow:
+    return UsageWindowRow(
+        account_id=entry.account_id,
+        used_percent=entry.used_percent,
+        reset_at=entry.reset_at,
+        window_minutes=entry.window_minutes,
+        recorded_at=entry.recorded_at,
     )
 
 

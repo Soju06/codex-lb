@@ -11,6 +11,7 @@ import {
   formatModelLabel,
   formatNumber,
   formatPercent,
+  formatPercentNullable,
   formatPercentValue,
   formatQuotaResetLabel,
   formatQuotaResetMeta,
@@ -59,6 +60,8 @@ describe("formatters", () => {
   it("formats percent and rate values", () => {
     expect(formatPercent(49.6)).toBe("50%");
     expect(formatPercent(null)).toBe("0%");
+    expect(formatPercentNullable(49.6)).toBe("50%");
+    expect(formatPercentNullable(null)).toBe("--");
     expect(formatPercentValue(49.6)).toBe(50);
     expect(formatPercentValue(null)).toBe(0);
     expect(formatRate(0.123)).toBe("12.3%");

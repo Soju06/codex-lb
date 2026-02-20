@@ -38,7 +38,7 @@ class UsageSummaryResponse(DashboardModel):
 
 class UsageHistoryItem(DashboardModel):
     account_id: str
-    remaining_percent_avg: float
+    remaining_percent_avg: float | None = None
     capacity_credits: float
     remaining_credits: float
 

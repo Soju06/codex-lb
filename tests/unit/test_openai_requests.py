@@ -417,6 +417,23 @@ def test_responses_normalizes_tool_role_input_item_preserves_part_order_without_
     assert request.input == [{"type": "function_call_output", "call_id": "call_1", "output": '{"a":1}'}]
 
 
+def test_responses_normalizes_tool_role_input_item_preserves_output_field():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {
+                "role": "tool",
+                "call_id": "call_1",
+                "output": '{"ok":true}',
+            }
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [{"type": "function_call_output", "call_id": "call_1", "output": '{"ok":true}'}]
+
+
 def test_v1_tool_messages_normalize_to_function_call_output():
     payload = {
         "model": "gpt-5.1",

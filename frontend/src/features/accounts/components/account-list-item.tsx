@@ -12,11 +12,15 @@ export type AccountListItemProps = {
   onSelect: (accountId: string) => void;
 };
 
-function MiniQuotaBar({ percent }: { percent: number }) {
+function MiniQuotaBar({ percent }: { percent: number | null }) {
+  if (percent === null) {
+    return <div data-testid="mini-quota-track" className="h-1 flex-1 overflow-hidden rounded-full bg-muted" />;
+  }
   const clamped = Math.max(0, Math.min(100, percent));
   return (
-    <div className={cn("h-1 flex-1 overflow-hidden rounded-full", quotaBarTrack(clamped))}>
+    <div data-testid="mini-quota-track" className={cn("h-1 flex-1 overflow-hidden rounded-full", quotaBarTrack(clamped))}>
       <div
+        data-testid="mini-quota-fill"
         className={cn("h-full rounded-full", quotaBarColor(clamped))}
         style={{ width: `${clamped}%` }}
       />
@@ -33,7 +37,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const subtitle = showAccountId
     ? `${baseSubtitle} | ID ${formatCompactAccountId(account.accountId)}`
     : baseSubtitle;
-  const secondary = account.usage?.secondaryRemainingPercent ?? 0;
+  const secondary = account.usage?.secondaryRemainingPercent ?? null;
 
   return (
     <button

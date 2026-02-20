@@ -5,7 +5,6 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timedelta
 from hashlib import sha256
 from typing import AsyncIterator, Mapping
 
@@ -29,7 +28,6 @@ from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event
-from app.core.utils.time import utcnow
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
@@ -247,46 +245,30 @@ class ProxyService:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
 
     async def _compute_rate_limit_headers(self) -> dict[str, str]:
-        now = utcnow()
         headers: dict[str, str] = {}
         async with self._repo_factory() as repos:
             accounts = await repos.accounts.list_accounts()
-            account_map = {account.id: account for account in accounts}
+            selected_accounts = _select_accounts_for_limits(accounts)
+            if not selected_accounts:
+                return headers
 
-            primary_minutes = await repos.usage.latest_window_minutes("primary")
-            if primary_minutes is None:
-                primary_minutes = usage_core.default_window_minutes("primary")
-            if primary_minutes:
-                primary_rows = await repos.usage.aggregate_since(
-                    now - timedelta(minutes=primary_minutes),
-                    window="primary",
-                )
-                if primary_rows:
-                    summary = usage_core.summarize_usage_window(
-                        [row.to_window_row() for row in primary_rows],
-                        account_map,
-                        "primary",
-                    )
-                    headers.update(_rate_limit_headers("primary", summary))
+            account_map = {account.id: account for account in selected_accounts}
+            primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
+            secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
+            primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
+                primary_rows_raw,
+                secondary_rows_raw,
+            )
 
-            secondary_minutes = await repos.usage.latest_window_minutes("secondary")
-            if secondary_minutes is None:
-                secondary_minutes = usage_core.default_window_minutes("secondary")
-            if secondary_minutes:
-                secondary_rows = await repos.usage.aggregate_since(
-                    now - timedelta(minutes=secondary_minutes),
-                    window="secondary",
-                )
-                if secondary_rows:
-                    summary = usage_core.summarize_usage_window(
-                        [row.to_window_row() for row in secondary_rows],
-                        account_map,
-                        "secondary",
-                    )
-                    headers.update(_rate_limit_headers("secondary", summary))
+            primary_summary = _summarize_window(primary_rows, account_map, "primary")
+            if primary_summary is not None:
+                headers.update(_rate_limit_headers("primary", primary_summary))
 
-            latest_usage = await repos.usage.latest_by_account()
-            headers.update(_credits_headers(latest_usage.values()))
+            secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
+            if secondary_summary is not None:
+                headers.update(_rate_limit_headers("secondary", secondary_summary))
+
+            headers.update(_credits_headers(await self._latest_usage_entries(repos, account_map)))
         return headers
 
     async def get_rate_limit_payload(self) -> RateLimitStatusPayloadData:
@@ -298,8 +280,12 @@ class ProxyService:
                 return RateLimitStatusPayloadData(plan_type="guest")
 
             account_map = {account.id: account for account in selected_accounts}
-            primary_rows = await self._latest_usage_rows(repos, account_map, "primary")
-            secondary_rows = await self._latest_usage_rows(repos, account_map, "secondary")
+            primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
+            secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
+            primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
+                primary_rows_raw,
+                secondary_rows_raw,
+            )
 
             primary_summary = _summarize_window(primary_rows, account_map, "primary")
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
@@ -615,6 +601,7 @@ class ProxyService:
                 used_percent=entry.used_percent,
                 reset_at=entry.reset_at,
                 window_minutes=entry.window_minutes,
+                recorded_at=entry.recorded_at,
             )
             for entry in latest.values()
             if entry.account_id in account_map

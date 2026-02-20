@@ -23,7 +23,7 @@ export type RemainingItem = {
   accountId: string;
   label: string;
   value: number;
-  remainingPercent: number;
+  remainingPercent: number | null;
   color: string;
 };
 
@@ -54,30 +54,46 @@ function buildWindowIndex(window: UsageWindow | null): Map<string, number> {
   return index;
 }
 
+function isWeeklyOnlyAccount(account: AccountSummary): boolean {
+  return account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+}
+
+function accountRemainingPercent(account: AccountSummary, windowKey: "primary" | "secondary"): number | null {
+  if (windowKey === "secondary") {
+    return account.usage?.secondaryRemainingPercent ?? null;
+  }
+  return account.usage?.primaryRemainingPercent ?? null;
+}
+
 export function buildRemainingItems(
   accounts: AccountSummary[],
   window: UsageWindow | null,
+  windowKey: "primary" | "secondary",
   isDark = false,
 ): RemainingItem[] {
   const usageIndex = buildWindowIndex(window);
   const palette = buildDonutPalette(accounts.length, isDark);
   const duplicateAccountIds = buildDuplicateAccountIdSet(accounts);
 
-  return accounts.map((account, index) => {
-    const fallbackPercent = account.usage?.primaryRemainingPercent ?? 0;
-    const remaining = usageIndex.get(account.accountId) ?? 0;
-    const baseLabel = account.displayName || account.email || account.accountId;
-    const label = duplicateAccountIds.has(account.accountId)
-      ? `${baseLabel} (${formatCompactAccountId(account.accountId, 5, 4)})`
-      : baseLabel;
-    return {
-      accountId: account.accountId,
-      label,
-      value: remaining,
-      remainingPercent: fallbackPercent,
-      color: palette[index % palette.length],
-    };
-  });
+  return accounts
+    .map((account, index) => {
+      if (windowKey === "primary" && isWeeklyOnlyAccount(account)) {
+        return null;
+      }
+      const remaining = usageIndex.get(account.accountId) ?? 0;
+      const baseLabel = account.displayName || account.email || account.accountId;
+      const label = duplicateAccountIds.has(account.accountId)
+        ? `${baseLabel} (${formatCompactAccountId(account.accountId, 5, 4)})`
+        : baseLabel;
+      return {
+        accountId: account.accountId,
+        label,
+        value: remaining,
+        remainingPercent: accountRemainingPercent(account, windowKey),
+        color: palette[index % palette.length],
+      };
+    })
+    .filter((item): item is RemainingItem => item !== null);
 }
 
 export function avgPerHour(cost7d: number, hours = 24 * 7): number {
@@ -144,8 +160,8 @@ export function buildDashboardView(
 
   return {
     stats,
-    primaryUsageItems: buildRemainingItems(overview.accounts, primaryWindow, isDark),
-    secondaryUsageItems: buildRemainingItems(overview.accounts, secondaryWindow, isDark),
+    primaryUsageItems: buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark),
+    secondaryUsageItems: buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark),
     requestLogs,
   };
 }

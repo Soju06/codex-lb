@@ -43,6 +43,14 @@ class AccountSummary(DashboardModel):
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
+    window_minutes_primary: int | None = None
+    window_minutes_secondary: int | None = None
+    last_refresh_at: datetime | None = None
+    capacity_credits_primary: float | None = None
+    remaining_credits_primary: float | None = None
+    capacity_credits_secondary: float | None = None
+    remaining_credits_secondary: float | None = None
+    deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
 
 

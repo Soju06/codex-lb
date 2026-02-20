@@ -90,6 +90,14 @@ export function formatPercent(value: unknown): string {
   return `${Math.round(numeric)}%`;
 }
 
+export function formatPercentNullable(value: unknown): string {
+  const numeric = toNumber(value);
+  if (numeric === null) {
+    return "--";
+  }
+  return `${Math.round(numeric)}%`;
+}
+
 export function formatPercentValue(value: unknown): number {
   const numeric = toNumber(value);
   return numeric === null ? 0 : Math.round(numeric);

@@ -179,7 +179,12 @@ def build_usage_history_response(
     window: str,
 ) -> UsageHistoryResponse:
     account_map = {account.id: account for account in accounts}
-    accounts_history = _build_account_history(usage_rows, account_map, window)
+    accounts_history = _build_account_history(
+        usage_rows,
+        account_map,
+        window,
+        missing_remaining_percent=100.0,
+    )
     return UsageHistoryResponse(window_hours=hours, accounts=accounts_history)
 
 
@@ -191,7 +196,12 @@ def build_usage_window_response(
     accounts: list[Account],
 ) -> UsageWindowResponse:
     account_map = {account.id: account for account in accounts}
-    accounts_history = _build_account_history(usage_rows, account_map, window_key)
+    accounts_history = _build_account_history(
+        usage_rows,
+        account_map,
+        window_key,
+        missing_remaining_percent=None,
+    )
     return UsageWindowResponse(
         window_key=window_key,
         window_minutes=window_minutes,
@@ -203,6 +213,8 @@ def _build_account_history(
     usage_rows: list[UsageWindowRow],
     account_map: dict[str, Account],
     window: str,
+    *,
+    missing_remaining_percent: float | None,
 ) -> list[UsageHistoryItem]:
     usage_by_account = {row.account_id: row for row in usage_rows}
 
@@ -210,16 +222,20 @@ def _build_account_history(
     for account_id, account in account_map.items():
         usage = usage_by_account.get(account_id)
         used_percent = usage.used_percent if usage else None
-        used_percent_value = float(used_percent) if used_percent is not None else 0.0
-        remaining_percent = usage_core.remaining_percent_from_used(used_percent_value) or 0.0
+        used_percent_value = float(used_percent) if used_percent is not None else None
+        remaining_percent = usage_core.remaining_percent_from_used(used_percent_value)
+        if remaining_percent is None:
+            remaining_percent = missing_remaining_percent
         capacity = usage_core.capacity_for_plan(account.plan_type, window)
-        remaining_credits = usage_core.remaining_credits_from_percent(used_percent_value, capacity) or 0.0
+        remaining_credits = usage_core.remaining_credits_from_percent(used_percent_value, capacity)
+        if remaining_credits is None and missing_remaining_percent is not None:
+            remaining_credits = capacity
         results.append(
             UsageHistoryItem(
                 account_id=account_id,
                 remaining_percent_avg=remaining_percent,
                 capacity_credits=float(capacity or 0.0),
-                remaining_credits=float(remaining_credits),
+                remaining_credits=float(remaining_credits or 0.0),
             )
         )
     return results

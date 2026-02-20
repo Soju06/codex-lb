@@ -10,6 +10,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.models import UsagePayload
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
@@ -128,6 +129,8 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False)
 
+        await self._sync_plan_type(account, payload)
+
         rate_limit = payload.rate_limit
         if rate_limit is None:
             return AccountRefreshResult(usage_written=False)
@@ -181,6 +184,26 @@ class UsageUpdater:
         await self._auth_manager._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
         account.status = AccountStatus.DEACTIVATED
         account.deactivation_reason = reason
+
+    async def _sync_plan_type(self, account: Account, payload: UsagePayload) -> None:
+        next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
+        if next_plan_type == account.plan_type:
+            return
+
+        account.plan_type = next_plan_type
+        if not self._auth_manager:
+            return
+
+        await self._auth_manager._repo.update_tokens(
+            account.id,
+            access_token_encrypted=account.access_token_encrypted,
+            refresh_token_encrypted=account.refresh_token_encrypted,
+            id_token_encrypted=account.id_token_encrypted,
+            last_refresh=account.last_refresh,
+            plan_type=account.plan_type,
+            email=account.email,
+            chatgpt_account_id=account.chatgpt_account_id,
+        )
 
 
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:

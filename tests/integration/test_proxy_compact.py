@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import timedelta
 
 import pytest
 
@@ -12,6 +13,7 @@ from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -92,6 +94,53 @@ async def test_proxy_compact_success(async_client, monkeypatch):
     assert response.headers.get("x-codex-credits-has-credits") == "true"
     assert response.headers.get("x-codex-credits-unlimited") == "false"
     assert response.headers.get("x-codex-credits-balance") == "12.50"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(async_client, monkeypatch):
+    email = "compact-weekly@example.com"
+    raw_account_id = "acc_compact_weekly"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    now = utcnow()
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=expected_account_id,
+            used_percent=15.0,
+            window="secondary",
+            reset_at=1735689600,
+            window_minutes=10080,
+            recorded_at=now - timedelta(days=2),
+        )
+        await usage_repo.add_entry(
+            account_id=expected_account_id,
+            used_percent=80.0,
+            window="primary",
+            reset_at=1735862400,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    await get_rate_limit_headers_cache().invalidate()
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.headers.get("x-codex-primary-used-percent") is None
+    assert response.headers.get("x-codex-secondary-used-percent") == "80.0"
+    assert response.headers.get("x-codex-secondary-window-minutes") == "10080"
+    assert response.headers.get("x-codex-secondary-reset-at") == "1735862400"
 
 
 @pytest.mark.asyncio

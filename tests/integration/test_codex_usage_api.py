@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from app.core.crypto import TokenEncryptor
@@ -157,3 +159,46 @@ async def test_codex_usage_header_ignored(async_client, db_setup):
     payload = response.json()
     primary = payload["rate_limit"]["primary_window"]
     assert primary["used_percent"] == 50
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_weekly", "weekly@example.com", chatgpt_account_id="workspace_weekly")
+        )
+
+        await usage_repo.add_entry(
+            "acc_weekly",
+            15.0,
+            window="secondary",
+            reset_at=1735689600,
+            window_minutes=10080,
+            recorded_at=now - timedelta(days=2),
+        )
+        await usage_repo.add_entry(
+            "acc_weekly",
+            80.0,
+            window="primary",
+            reset_at=1735862400,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_weekly",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    rate_limit = payload["rate_limit"]
+    assert rate_limit["primary_window"] is None
+    assert rate_limit["secondary_window"]["used_percent"] == 80
+    assert rate_limit["secondary_window"]["reset_at"] == 1735862400

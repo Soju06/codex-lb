@@ -92,6 +92,7 @@ def _rows_from_latest(latest: dict[str, UsageHistory]) -> list[UsageWindowRow]:
             used_percent=entry.used_percent,
             reset_at=entry.reset_at,
             window_minutes=entry.window_minutes,
+            recorded_at=entry.recorded_at,
         )
         for entry in latest.values()
     ]

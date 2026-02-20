@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 from app.core.plan_types import normalize_account_plan_type
@@ -177,21 +178,50 @@ def normalize_weekly_only_rows(
     # primary slot. Re-map those rows into secondary so downstream 5h/7d
     # consumers operate on consistent semantics.
     primary_by_account = {row.account_id: row for row in primary_rows}
-    secondary_by_account = {row.account_id: row for row in secondary_rows}
+    normalized_secondary_by_account = {row.account_id: row for row in secondary_rows}
 
     normalized_primary: list[UsageWindowRow] = []
-    normalized_secondary = list(secondary_by_account.values())
 
     for account_id, primary_row in primary_by_account.items():
-        if account_id in secondary_by_account:
-            normalized_primary.append(primary_row)
-            continue
         if is_weekly_window_minutes(primary_row.window_minutes):
-            normalized_secondary.append(primary_row)
+            secondary_row = normalized_secondary_by_account.get(account_id)
+            if secondary_row is None or _should_prefer_primary_row(primary_row, secondary_row):
+                normalized_secondary_by_account[account_id] = primary_row
             continue
         normalized_primary.append(primary_row)
 
-    return normalized_primary, normalized_secondary
+    return normalized_primary, list(normalized_secondary_by_account.values())
+
+
+def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: UsageWindowRow) -> bool:
+    primary_recorded_at = _normalize_recorded_at(primary_row.recorded_at)
+    secondary_recorded_at = _normalize_recorded_at(secondary_row.recorded_at)
+    if primary_recorded_at is not None and secondary_recorded_at is not None:
+        if primary_recorded_at != secondary_recorded_at:
+            return primary_recorded_at > secondary_recorded_at
+    elif primary_recorded_at is not None:
+        return True
+    elif secondary_recorded_at is not None:
+        return False
+
+    if primary_row.reset_at is not None and secondary_row.reset_at is not None:
+        if primary_row.reset_at != secondary_row.reset_at:
+            return primary_row.reset_at > secondary_row.reset_at
+    elif primary_row.reset_at is not None:
+        return True
+    elif secondary_row.reset_at is not None:
+        return False
+
+    # Keep weekly-only semantics stable when timestamps are unavailable.
+    return True
+
+
+def _normalize_recorded_at(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _resolve_window_minutes(window: str, values: set[int]) -> int | None:

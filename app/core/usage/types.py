@@ -10,6 +10,7 @@ class UsageWindowRow:
     used_percent: float | None
     reset_at: int | None = None
     window_minutes: int | None = None
+    recorded_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class UsageAggregateRow:
             used_percent=self.used_percent_avg,
             reset_at=self.reset_at_max,
             window_minutes=self.window_minutes_max,
+            recorded_at=self.last_recorded_at,
         )
 
 

@@ -265,6 +265,45 @@ async def test_v1_responses_stream_filters_done_text_events(async_client, monkey
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_stream_keeps_non_text_content_part_done_events(async_client, monkeypatch):
+    email = "done-filter-non-text@example.com"
+    raw_account_id = "acc_done_filter_non_text"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.output_text.delta","delta":"First line"}\n\n'
+        yield (
+            'data: {"type":"response.content_part.done","part":{"type":"output_image",'
+            '"image_url":"https://example.com/a.png"}}\n\n'
+        )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "input": "hi", "stream": True}
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    content_part_events: list[dict[str, object]] = []
+    for line in lines:
+        if not line.startswith("data: "):
+            continue
+        raw_payload = line[6:]
+        if raw_payload == "[DONE]":
+            continue
+        data = json.loads(raw_payload)
+        if data.get("type") == "response.content_part.done":
+            content_part_events.append(data)
+
+    assert content_part_events
+    assert content_part_events[0]["part"] == {"type": "output_image", "image_url": "https://example.com/a.png"}
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_stream_preserves_done_text_events(async_client, monkeypatch):
     email = "done-preserve@example.com"
     raw_account_id = "acc_done_preserve"
@@ -608,6 +647,27 @@ async def test_v1_responses_compact_invalid_messages_returns_openai_400(async_cl
     assert body["error"]["type"] == "invalid_request_error"
     assert body["error"]["code"] == "invalid_request_error"
     assert body["error"]["param"] == "messages"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_invalid_tool_calls_returns_openai_400(async_client):
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"arguments": "{}"}}],
+            },
+            {"role": "user", "content": "continue"},
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "invalid_request_error"
 
 
 @pytest.mark.asyncio

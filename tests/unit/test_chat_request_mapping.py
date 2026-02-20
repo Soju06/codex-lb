@@ -239,7 +239,7 @@ def test_chat_tool_message_maps_to_function_call_output():
         "model": "gpt-5.2",
         "messages": [
             {"role": "assistant", "content": "Running tool."},
-            {"role": "tool", "tool_call_id": "call_1", "content": "{\"ok\":true}"},
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"ok":true}'},
             {"role": "user", "content": "continue"},
         ],
     }
@@ -248,7 +248,7 @@ def test_chat_tool_message_maps_to_function_call_output():
 
     assert responses.input == [
         {"role": "assistant", "content": [{"type": "output_text", "text": "Running tool."}]},
-        {"type": "function_call_output", "call_id": "call_1", "output": "{\"ok\":true}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": '{"ok":true}'},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
 
@@ -264,11 +264,11 @@ def test_chat_tool_calls_history_maps_to_function_call_and_output():
                     {
                         "id": "call_1",
                         "type": "function",
-                        "function": {"name": "lookup", "arguments": "{\"q\":\"abc\"}"},
+                        "function": {"name": "lookup", "arguments": '{"q":"abc"}'},
                     }
                 ],
             },
-            {"role": "tool", "tool_call_id": "call_1", "content": "{\"ok\":true}"},
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"ok":true}'},
             {"role": "user", "content": "continue"},
         ],
     }
@@ -277,17 +277,33 @@ def test_chat_tool_calls_history_maps_to_function_call_and_output():
     responses = req.to_responses_request()
 
     assert responses.input == [
-        {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"q\":\"abc\"}"},
-        {"type": "function_call_output", "call_id": "call_1", "output": "{\"ok\":true}"},
+        {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": '{"q":"abc"}'},
+        {"type": "function_call_output", "call_id": "call_1", "output": '{"ok":true}'},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
+
+
+def test_chat_assistant_tool_calls_require_function_name():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"arguments": "{}"}}],
+            },
+            {"role": "user", "content": "continue"},
+        ],
+    }
+    with pytest.raises(ValidationError, match=r"assistant tool_calls\[0\]\.function must include a non-empty 'name'"):
+        ChatCompletionsRequest.model_validate(payload)
 
 
 def test_chat_tool_message_requires_tool_call_id():
     payload = {
         "model": "gpt-5.2",
         "messages": [
-            {"role": "tool", "content": "{\"ok\":true}"},
+            {"role": "tool", "content": '{"ok":true}'},
             {"role": "user", "content": "continue"},
         ],
     }

@@ -220,6 +220,9 @@ async def v1_chat_completions(
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
         responses_payload = payload.to_responses_request()
+    except ClientPayloadError as exc:
+        error = _openai_invalid_payload_error(exc.param)
+        return JSONResponse(status_code=400, content=error, headers=rate_limit_headers)
     except ValidationError as exc:
         error = _openai_validation_error(exc)
         return JSONResponse(status_code=400, content=error, headers=rate_limit_headers)

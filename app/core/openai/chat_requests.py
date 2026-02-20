@@ -88,6 +88,8 @@ class ChatCompletionsRequest(BaseModel):
                 _ensure_text_only_content(content, role_name)
             elif role_name == "user":
                 _validate_user_content(content)
+            elif role_name == "assistant":
+                _validate_assistant_tool_calls(message)
             elif role_name == "tool":
                 _validate_tool_message(message)
         return self
@@ -330,6 +332,26 @@ def _validate_tool_message(message: Mapping[str, JsonValue]) -> None:
         resolved_call_id = call_id
     if not isinstance(resolved_call_id, str) or not resolved_call_id:
         raise ValueError("tool messages must include 'tool_call_id'.")
+
+
+def _validate_assistant_tool_calls(message: Mapping[str, JsonValue]) -> None:
+    tool_calls = message.get("tool_calls")
+    if tool_calls is None:
+        return
+    if not is_json_list(tool_calls):
+        raise ValueError("assistant message 'tool_calls' must be an array.")
+    for index, tool_call in enumerate(tool_calls):
+        if not is_json_mapping(tool_call):
+            raise ValueError(f"assistant tool_calls[{index}] must be an object.")
+        call_id = tool_call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            raise ValueError(f"assistant tool_calls[{index}] must include a non-empty 'id'.")
+        function = tool_call.get("function")
+        if not is_json_mapping(function):
+            raise ValueError(f"assistant tool_calls[{index}] must include a 'function' object.")
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"assistant tool_calls[{index}].function must include a non-empty 'name'.")
 
 
 def _sanitize_user_messages(messages: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:

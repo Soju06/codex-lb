@@ -42,7 +42,7 @@ def stub_codex_usage_caller_validation(monkeypatch):
         assert account_id is not None
         return UsagePayload.model_validate({"plan_type": "plus"})
 
-    monkeypatch.setattr("app.core.middleware.dashboard_auth.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
 
 
 @pytest.mark.asyncio

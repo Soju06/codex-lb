@@ -21,7 +21,15 @@ from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 
-IGNORE_INBOUND_HEADERS = {"authorization", "chatgpt-account-id", "content-length", "host"}
+IGNORE_INBOUND_HEADERS = {
+    "authorization",
+    "chatgpt-account-id",
+    "content-length",
+    "host",
+    "forwarded",
+    "x-real-ip",
+    "true-client-ip",
+}
 
 _ERROR_TYPE_CODE_MAP = {
     "rate_limit_exceeded": "rate_limit_exceeded",
@@ -93,8 +101,19 @@ class ProxyResponseError(Exception):
         self.payload = payload
 
 
+def _should_drop_inbound_header(name: str) -> bool:
+    normalized = name.lower()
+    if normalized in IGNORE_INBOUND_HEADERS:
+        return True
+    if normalized.startswith("x-forwarded-"):
+        return True
+    if normalized.startswith("cf-"):
+        return True
+    return False
+
+
 def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    return {key: value for key, value in headers.items() if key.lower() not in IGNORE_INBOUND_HEADERS}
+    return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
 
 
 def _build_upstream_headers(

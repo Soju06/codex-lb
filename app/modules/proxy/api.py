@@ -3,12 +3,18 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi import APIRouter, Body, Depends, Request, Response, Security
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
+from app.core.auth.dependencies import (
+    set_openai_error_format,
+    validate_codex_usage_identity,
+    validate_proxy_api_key,
+)
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.exceptions import ProxyAuthError, ProxyModelNotAllowed, ProxyRateLimitError
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
 from app.core.openai.exceptions import ClientPayloadError
@@ -26,7 +32,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.sse import parse_sse_data_json
-from app.db.session import SessionLocal
+from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
@@ -44,9 +50,20 @@ from app.modules.proxy.schemas import (
     ReasoningLevelSchema,
 )
 
-router = APIRouter(prefix="/backend-api/codex", tags=["proxy"])
-v1_router = APIRouter(prefix="/v1", tags=["proxy"])
-usage_router = APIRouter(tags=["proxy"])
+router = APIRouter(
+    prefix="/backend-api/codex",
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
+v1_router = APIRouter(
+    prefix="/v1",
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
+usage_router = APIRouter(
+    tags=["proxy"],
+    dependencies=[Depends(validate_codex_usage_identity), Depends(set_openai_error_format)],
+)
 
 
 @router.post(
@@ -65,8 +82,9 @@ async def responses(
     request: Request,
     payload: ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _stream_responses(request, payload, context)
+    return await _stream_responses(request, payload, context, api_key)
 
 
 @v1_router.post(
@@ -86,6 +104,7 @@ async def v1_responses(
     request: Request,
     payload: V1ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     try:
         responses_payload = payload.to_responses_request()
@@ -96,26 +115,27 @@ async def v1_responses(
         error = _openai_validation_error(exc)
         return JSONResponse(status_code=400, content=error)
     if responses_payload.stream:
-        return await _stream_responses(request, responses_payload, context)
-    return await _collect_responses(request, responses_payload, context)
+        return await _stream_responses(request, responses_payload, context, api_key)
+    return await _collect_responses(request, responses_payload, context, api_key)
 
 
 @router.get("/models", response_model=ModelListResponse)
-async def models(request: Request) -> Response:
-    return await _build_models_response(request)
+async def models(
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _build_models_response(api_key)
 
 
 @v1_router.get("/models", response_model=ModelListResponse)
-async def v1_models(request: Request) -> Response:
-    return await _build_models_response(request)
+async def v1_models(
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _build_models_response(api_key)
 
 
-async def _build_models_response(request: Request) -> Response:
-    blocked_limits = await _enforce_request_limits(request, request_model=None)
-    if blocked_limits is not None:
-        return blocked_limits
+async def _build_models_response(api_key: ApiKeyData | None) -> Response:
+    reservation = await _enforce_request_limits(api_key, request_model=None)
 
-    api_key = _request_api_key(request)
     allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     created = int(time.time())
 
@@ -123,7 +143,7 @@ async def _build_models_response(request: Request) -> Response:
     snapshot = registry.get_snapshot()
 
     if snapshot is None:
-        await _release_request_reservation(request)
+        await _release_reservation(reservation)
         return JSONResponse(content=ModelListResponse(data=[]).model_dump(mode="json"))
 
     items: list[ModelListItem] = []
@@ -138,7 +158,7 @@ async def _build_models_response(request: Request) -> Response:
                 metadata=_to_model_metadata(model),
             )
         )
-    await _release_request_reservation(request)
+    await _release_reservation(reservation)
     return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
 
 
@@ -181,27 +201,27 @@ async def v1_chat_completions(
     request: Request,
     payload: ChatCompletionsRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    blocked = _validate_model_access(request, payload.model)
-    if blocked is not None:
-        return blocked
+    _validate_model_access(api_key, payload.model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
         responses_payload = payload.to_responses_request()
+    except ClientPayloadError as exc:
+        error = _openai_invalid_payload_error(exc.param)
+        return JSONResponse(status_code=400, content=error, headers=rate_limit_headers)
     except ValidationError as exc:
         error = _openai_validation_error(exc)
         return JSONResponse(status_code=400, content=error, headers=rate_limit_headers)
-    blocked_limits = await _enforce_request_limits(request, request_model=payload.model)
-    if blocked_limits is not None:
-        return blocked_limits
+    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
     responses_payload.stream = True
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
         propagate_http_errors=True,
-        api_key=_request_api_key(request),
-        api_key_reservation=_request_api_key_reservation(request),
+        api_key=api_key,
+        api_key_reservation=reservation,
     )
     try:
         first = await stream.__anext__()
@@ -241,13 +261,10 @@ async def _stream_responses(
     request: Request,
     payload: ResponsesRequest,
     context: ProxyContext,
+    api_key: ApiKeyData | None,
 ) -> Response:
-    blocked = _validate_model_access(request, payload.model)
-    if blocked is not None:
-        return blocked
-    blocked_limits = await _enforce_request_limits(request, request_model=payload.model)
-    if blocked_limits is not None:
-        return blocked_limits
+    _validate_model_access(api_key, payload.model)
+    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
@@ -255,8 +272,8 @@ async def _stream_responses(
         payload,
         request.headers,
         propagate_http_errors=True,
-        api_key=_request_api_key(request),
-        api_key_reservation=_request_api_key_reservation(request),
+        api_key=api_key,
+        api_key_reservation=reservation,
     )
     try:
         first = await stream.__anext__()
@@ -267,7 +284,7 @@ async def _stream_responses(
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
     except ProxyResponseError as exc:
-        await _release_request_reservation(request)
+        await _release_reservation(reservation)
         return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=rate_limit_headers)
     return StreamingResponse(
         _prepend_first(first, stream),
@@ -280,13 +297,10 @@ async def _collect_responses(
     request: Request,
     payload: ResponsesRequest,
     context: ProxyContext,
+    api_key: ApiKeyData | None,
 ) -> Response:
-    blocked = _validate_model_access(request, payload.model)
-    if blocked is not None:
-        return blocked
-    blocked_limits = await _enforce_request_limits(request, request_model=payload.model)
-    if blocked_limits is not None:
-        return blocked_limits
+    _validate_model_access(api_key, payload.model)
+    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
@@ -294,13 +308,13 @@ async def _collect_responses(
         payload,
         request.headers,
         propagate_http_errors=True,
-        api_key=_request_api_key(request),
-        api_key_reservation=_request_api_key_reservation(request),
+        api_key=api_key,
+        api_key_reservation=reservation,
     )
     try:
         response_payload = await _collect_responses_payload(stream)
     except ProxyResponseError as exc:
-        await _release_request_reservation(request)
+        await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
         return JSONResponse(
             status_code=exc.status_code,
@@ -333,8 +347,9 @@ async def responses_compact(
     request: Request,
     payload: ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    return await _compact_responses(request, payload, context)
+    return await _compact_responses(request, payload, context, api_key)
 
 
 @v1_router.post("/responses/compact", response_model=OpenAIResponseResult)
@@ -342,6 +357,7 @@ async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
     try:
         compact_payload = payload.to_compact_request()
@@ -351,28 +367,25 @@ async def v1_responses_compact(
     except ValidationError as exc:
         error = _openai_validation_error(exc)
         return JSONResponse(status_code=400, content=error)
-    return await _compact_responses(request, compact_payload, context)
+    return await _compact_responses(request, compact_payload, context, api_key)
 
 
 async def _compact_responses(
     request: Request,
     payload: ResponsesCompactRequest,
     context: ProxyContext,
+    api_key: ApiKeyData | None,
 ) -> JSONResponse:
-    blocked = _validate_model_access(request, payload.model)
-    if blocked is not None:
-        return blocked
-    blocked_limits = await _enforce_request_limits(request, request_model=payload.model)
-    if blocked_limits is not None:
-        return blocked_limits
+    _validate_model_access(api_key, payload.model)
+    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
         result = await context.service.compact_responses(
             payload,
             request.headers,
-            api_key=_request_api_key(request),
-            api_key_reservation=_request_api_key_reservation(request),
+            api_key=api_key,
+            api_key_reservation=reservation,
         )
     except NotImplementedError:
         error = OpenAIErrorEnvelopeModel(
@@ -395,7 +408,7 @@ async def _compact_responses(
             headers=rate_limit_headers,
         )
     finally:
-        await _release_request_reservation(request)
+        await _release_reservation(reservation)
     return JSONResponse(
         content=result.model_dump(mode="json", exclude_none=True),
         headers=rate_limit_headers,
@@ -403,6 +416,7 @@ async def _compact_responses(
 
 
 @usage_router.get("/api/codex/usage", response_model=RateLimitStatusPayload)
+@usage_router.get("/api/codex/usage/", response_model=RateLimitStatusPayload, include_in_schema=False)
 async def codex_usage(
     context: ProxyContext = Depends(get_proxy_context),
 ) -> RateLimitStatusPayload:
@@ -421,79 +435,45 @@ def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
     return parse_sse_data_json(line)
 
 
-def _request_api_key(request: Request) -> ApiKeyData | None:
-    value = getattr(request.state, "api_key", None)
-    if isinstance(value, ApiKeyData):
-        return value
-    return None
-
-
-def _request_api_key_reservation(request: Request) -> ApiKeyUsageReservationData | None:
-    value = getattr(request.state, "api_key_reservation", None)
-    if isinstance(value, ApiKeyUsageReservationData):
-        return value
-    return None
-
-
 async def _enforce_request_limits(
-    request: Request,
+    api_key: ApiKeyData | None,
     *,
     request_model: str | None,
-) -> JSONResponse | None:
-    api_key = _request_api_key(request)
+) -> ApiKeyUsageReservationData | None:
     if api_key is None:
         return None
 
-    async with SessionLocal() as session:
+    async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         try:
-            reservation = await service.enforce_limits_for_request(
+            return await service.enforce_limits_for_request(
                 api_key.id,
                 request_model=request_model,
             )
         except ApiKeyRateLimitExceededError as exc:
             message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
-            return JSONResponse(
-                status_code=429,
-                content=openai_error("rate_limit_exceeded", message, error_type="rate_limit_error"),
-            )
+            raise ProxyRateLimitError(message) from exc
         except ApiKeyInvalidError as exc:
-            return JSONResponse(
-                status_code=401,
-                content=openai_error("invalid_api_key", str(exc), error_type="authentication_error"),
-            )
-
-    request.state.api_key_reservation = reservation
-    return None
+            raise ProxyAuthError(str(exc)) from exc
 
 
-async def _release_request_reservation(request: Request) -> None:
-    reservation = _request_api_key_reservation(request)
+async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -> None:
     if reservation is None:
         return
-    async with SessionLocal() as session:
+    async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         await service.release_usage_reservation(reservation.reservation_id)
-    request.state.api_key_reservation = None
 
 
-def _validate_model_access(request: Request, model: str | None) -> JSONResponse | None:
-    api_key = _request_api_key(request)
+def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
     if api_key is None:
-        return None
+        return
     allowed_models = api_key.allowed_models
     if not allowed_models:
-        return None
+        return
     if model is None or model in allowed_models:
-        return None
-    return JSONResponse(
-        status_code=403,
-        content=openai_error(
-            "model_not_allowed",
-            f"This API key does not have access to model '{model}'",
-            error_type="permission_error",
-        ),
-    )
+        return
+    raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:

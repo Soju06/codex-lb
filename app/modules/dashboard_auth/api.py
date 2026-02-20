@@ -3,8 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
+from app.core.auth.dependencies import set_dashboard_error_format
 from app.core.config.settings_cache import get_settings_cache
-from app.core.errors import dashboard_error
+from app.core.exceptions import (
+    DashboardAuthError,
+    DashboardBadRequestError,
+    DashboardConflictError,
+    DashboardRateLimitError,
+    DashboardValidationError,
+)
 from app.dependencies import DashboardAuthContext, get_dashboard_auth_context
 from app.modules.dashboard_auth.schemas import (
     DashboardAuthSessionResponse,
@@ -31,7 +38,11 @@ from app.modules.dashboard_auth.service import (
     get_totp_rate_limiter,
 )
 
-router = APIRouter(prefix="/api/dashboard-auth", tags=["dashboard"])
+router = APIRouter(
+    prefix="/api/dashboard-auth",
+    tags=["dashboard"],
+    dependencies=[Depends(set_dashboard_error_format)],
+)
 
 
 def _session_client_key(request: Request, *, prefix: str) -> str:
@@ -46,22 +57,18 @@ async def _has_active_password_session(request: Request, context: DashboardAuthC
     return get_dashboard_session_store().is_password_verified(session_id)
 
 
-async def _validate_password_management_session(request: Request) -> JSONResponse | None:
+async def _validate_password_management_session(request: Request) -> None:
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     session_state = get_dashboard_session_store().get(session_id)
     if session_state is None or not session_state.password_verified:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", "Authentication is required"),
-        )
+        raise DashboardAuthError("Authentication is required")
 
     settings = await get_settings_cache().get()
     if settings.totp_required_on_login and not session_state.totp_verified:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("totp_required", "TOTP verification is required for dashboard access"),
+        raise DashboardAuthError(
+            "TOTP verification is required for dashboard access",
+            code="totp_required",
         )
-    return None
 
 
 @router.get("/session", response_model=DashboardAuthSessionResponse)
@@ -81,17 +88,11 @@ async def setup_password(
 ) -> DashboardAuthSessionResponse | JSONResponse:
     password = payload.password.strip()
     if len(password) < 8:
-        return JSONResponse(
-            status_code=422,
-            content=dashboard_error("validation_error", "Password must be at least 8 characters"),
-        )
+        raise DashboardValidationError("Password must be at least 8 characters")
     try:
         await context.service.setup_password(password)
     except PasswordAlreadyConfiguredError as exc:
-        return JSONResponse(
-            status_code=409,
-            content=dashboard_error("password_already_configured", str(exc)),
-        )
+        raise DashboardConflictError(str(exc), code="password_already_configured") from exc
 
     await get_settings_cache().invalidate()
     session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
@@ -111,10 +112,10 @@ async def login_password(
     rate_key = _session_client_key(request, prefix="password_login")
     retry_after = limiter.check(rate_key)
     if retry_after is not None:
-        return JSONResponse(
-            status_code=429,
-            headers={"Retry-After": str(retry_after)},
-            content=dashboard_error("password_rate_limited", f"Too many attempts. Try again in {retry_after} seconds."),
+        raise DashboardRateLimitError(
+            f"Too many attempts. Try again in {retry_after} seconds.",
+            retry_after=retry_after,
+            code="password_rate_limited",
         )
 
     try:
@@ -122,15 +123,9 @@ async def login_password(
         limiter.reset(rate_key)
     except InvalidCredentialsError as exc:
         limiter.record_failure(rate_key)
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("invalid_credentials", str(exc)),
-        )
+        raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
     except PasswordNotConfiguredError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("password_not_configured", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
 
     session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
     response = await context.service.get_session_state(session_id)
@@ -145,29 +140,18 @@ async def change_password(
     payload: PasswordChangeRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
-    blocked = await _validate_password_management_session(request)
-    if blocked is not None:
-        return blocked
+    await _validate_password_management_session(request)
 
     new_password = payload.new_password.strip()
     if len(new_password) < 8:
-        return JSONResponse(
-            status_code=422,
-            content=dashboard_error("validation_error", "Password must be at least 8 characters"),
-        )
+        raise DashboardValidationError("Password must be at least 8 characters")
 
     try:
         await context.service.change_password(payload.current_password, new_password)
     except PasswordNotConfiguredError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("password_not_configured", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
     except InvalidCredentialsError as exc:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("invalid_credentials", str(exc)),
-        )
+        raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
 
     await get_settings_cache().invalidate()
     return JSONResponse(status_code=200, content={"status": "ok"})
@@ -179,22 +163,14 @@ async def remove_password(
     payload: PasswordRemoveRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
-    blocked = await _validate_password_management_session(request)
-    if blocked is not None:
-        return blocked
+    await _validate_password_management_session(request)
 
     try:
         await context.service.remove_password(payload.password)
     except PasswordNotConfiguredError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("password_not_configured", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
     except InvalidCredentialsError as exc:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("invalid_credentials", str(exc)),
-        )
+        raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
 
     await get_settings_cache().invalidate()
     response = JSONResponse(status_code=200, content={"status": "ok"})
@@ -206,25 +182,16 @@ async def remove_password(
 async def start_totp_setup(
     request: Request,
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
-) -> TotpSetupStartResponse | JSONResponse:
+) -> TotpSetupStartResponse:
     if not await _has_active_password_session(request, context):
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", "Authentication is required"),
-        )
+        raise DashboardAuthError("Authentication is required")
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     try:
         return await context.service.start_totp_setup(session_id=session_id)
     except PasswordSessionRequiredError as exc:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", str(exc)),
-        )
+        raise DashboardAuthError(str(exc)) from exc
     except TotpAlreadyConfiguredError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_setup", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_setup") from exc
 
 
 @router.post("/totp/setup/confirm")
@@ -234,19 +201,16 @@ async def confirm_totp_setup(
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
     if not await _has_active_password_session(request, context):
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", "Authentication is required"),
-        )
+        raise DashboardAuthError("Authentication is required")
 
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_setup_confirm")
     retry_after = limiter.check(rate_key)
     if retry_after is not None:
-        return JSONResponse(
-            status_code=429,
-            headers={"Retry-After": str(retry_after)},
-            content=dashboard_error("totp_rate_limited", f"Too many attempts. Try again in {retry_after} seconds."),
+        raise DashboardRateLimitError(
+            f"Too many attempts. Try again in {retry_after} seconds.",
+            retry_after=retry_after,
+            code="totp_rate_limited",
         )
 
     try:
@@ -254,27 +218,15 @@ async def confirm_totp_setup(
         await context.service.confirm_totp_setup(session_id=session_id, secret=payload.secret, code=payload.code)
         limiter.reset(rate_key)
     except PasswordSessionRequiredError as exc:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", str(exc)),
-        )
+        raise DashboardAuthError(str(exc)) from exc
     except TotpInvalidCodeError as exc:
         limiter.record_failure(rate_key)
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_code", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
     except TotpInvalidSetupError as exc:
         limiter.record_failure(rate_key)
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_setup", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_setup") from exc
     except TotpAlreadyConfiguredError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_setup", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_setup") from exc
 
     await get_settings_cache().invalidate()
     return JSONResponse(status_code=200, content={"status": "ok"})
@@ -290,31 +242,22 @@ async def verify_totp(
     rate_key = _session_client_key(request, prefix="totp_verify")
     retry_after = limiter.check(rate_key)
     if retry_after is not None:
-        return JSONResponse(
-            status_code=429,
-            headers={"Retry-After": str(retry_after)},
-            content=dashboard_error("totp_rate_limited", f"Too many attempts. Try again in {retry_after} seconds."),
+        raise DashboardRateLimitError(
+            f"Too many attempts. Try again in {retry_after} seconds.",
+            retry_after=retry_after,
+            code="totp_rate_limited",
         )
     try:
         current_session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
         session_id = await context.service.verify_totp(session_id=current_session_id, code=payload.code)
         limiter.reset(rate_key)
     except PasswordSessionRequiredError as exc:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", str(exc)),
-        )
+        raise DashboardAuthError(str(exc)) from exc
     except TotpInvalidCodeError as exc:
         limiter.record_failure(rate_key)
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_code", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
     except TotpNotConfiguredError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_code", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
 
     response = await context.service.get_session_state(session_id)
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
@@ -332,31 +275,22 @@ async def disable_totp(
     rate_key = _session_client_key(request, prefix="totp_disable")
     retry_after = limiter.check(rate_key)
     if retry_after is not None:
-        return JSONResponse(
-            status_code=429,
-            headers={"Retry-After": str(retry_after)},
-            content=dashboard_error("totp_rate_limited", f"Too many attempts. Try again in {retry_after} seconds."),
+        raise DashboardRateLimitError(
+            f"Too many attempts. Try again in {retry_after} seconds.",
+            retry_after=retry_after,
+            code="totp_rate_limited",
         )
     try:
         session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
         await context.service.disable_totp(session_id=session_id, code=payload.code)
         limiter.reset(rate_key)
     except PasswordSessionRequiredError as exc:
-        return JSONResponse(
-            status_code=401,
-            content=dashboard_error("authentication_required", str(exc)),
-        )
+        raise DashboardAuthError(str(exc)) from exc
     except TotpInvalidCodeError as exc:
         limiter.record_failure(rate_key)
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_code", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
     except TotpNotConfiguredError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_code", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
 
     await get_settings_cache().invalidate()
     return JSONResponse(status_code=200, content={"status": "ok"})

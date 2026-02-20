@@ -97,21 +97,35 @@ The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings
 - **WHEN** admin enables API key auth but no keys exist
 - **THEN** all proxy requests are rejected with 401 (the system SHALL NOT prevent enabling even if no keys exist)
 
-### Requirement: API Key Bearer authentication middleware
+### Requirement: API Key Bearer authentication guard
 
-The system SHALL validate API keys on proxy routes (`/v1/*`, `/backend-api/codex/*`) when `api_key_auth_enabled` is true. Validation MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
+The system SHALL validate API keys on proxy routes (`/v1/*`, `/backend-api/codex/*`) when `api_key_auth_enabled` is true. Validation MUST be implemented as a router-level `Security` dependency, not ASGI middleware. The dependency MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
 
-`/api/codex/usage` SHALL NOT be covered by API key middleware scope.
+The dependency SHALL return a typed `ApiKeyData` value directly to the route handler. Route handlers MUST NOT access API key data via `request.state`.
 
-#### Scenario: API key middleware route scope
+`/api/codex/usage` SHALL NOT be covered by the API key auth guard scope.
+
+The dependency SHALL raise a domain exception on validation failure. The exception handler SHALL format the response using the OpenAI error envelope.
+
+#### Scenario: API key guard route scope
 
 - **WHEN** `api_key_auth_enabled` is true and a request is made to `/v1/responses` or `/backend-api/codex/responses`
-- **THEN** API key middleware validation is applied
+- **THEN** the API key guard validation is applied
 
-#### Scenario: Codex usage excluded from API key middleware scope
+#### Scenario: Codex usage excluded from API key guard scope
 
 - **WHEN** `api_key_auth_enabled` is true and a request is made to `/api/codex/usage`
-- **THEN** API key middleware validation is not applied
+- **THEN** API key guard validation is not applied
+
+#### Scenario: Valid API key injected into handler
+
+- **WHEN** `api_key_auth_enabled` is true and a valid Bearer token is provided
+- **THEN** the route handler receives a typed `ApiKeyData` parameter (not `request.state`)
+
+#### Scenario: API key auth disabled returns None
+
+- **WHEN** `api_key_auth_enabled` is false
+- **THEN** the dependency returns `None` and the request proceeds without authentication
 
 ### Requirement: Model restriction enforcement
 
@@ -200,7 +214,7 @@ The SPA settings page SHALL include an API Key management section with: a toggle
 
 ### Requirement: Model-scoped limit enforcement
 
-The system SHALL separate authentication validation from quota enforcement. `validate_key()` in the middleware SHALL only verify key validity (existence, active status, expiry, basic reset). Quota enforcement SHALL occur at a point where the request model is known.
+The system SHALL separate authentication validation from quota enforcement. `validate_key()` in the auth guard SHALL only verify key validity (existence, active status, expiry, basic reset). Quota enforcement SHALL occur at a point where the request model is known.
 
 Limit applicability rules:
 - `limit.model_filter is None` → always applies (global limit)

@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 
 from app.core.config.settings import get_settings
-from app.db.session import SessionLocal, _safe_close, _safe_rollback
+from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import UsageRepository
@@ -50,21 +50,17 @@ class UsageRefreshScheduler:
 
     async def _refresh_once(self) -> None:
         async with self._lock:
-            session = SessionLocal()
             try:
-                usage_repo = UsageRepository(session)
-                accounts_repo = AccountsRepository(session)
-                latest_usage = await usage_repo.latest_by_account(window="primary")
-                accounts = await accounts_repo.list_accounts()
-                updater = UsageUpdater(usage_repo, accounts_repo)
-                await updater.refresh_accounts(accounts, latest_usage)
-                await get_rate_limit_headers_cache().invalidate()
+                async with get_background_session() as session:
+                    usage_repo = UsageRepository(session)
+                    accounts_repo = AccountsRepository(session)
+                    latest_usage = await usage_repo.latest_by_account(window="primary")
+                    accounts = await accounts_repo.list_accounts()
+                    updater = UsageUpdater(usage_repo, accounts_repo)
+                    await updater.refresh_accounts(accounts, latest_usage)
+                    await get_rate_limit_headers_cache().invalidate()
             except Exception:
                 logger.exception("Usage refresh loop failed")
-            finally:
-                if session.in_transaction():
-                    await _safe_rollback(session)
-                await _safe_close(session)
 
 
 def build_usage_refresh_scheduler() -> UsageRefreshScheduler:

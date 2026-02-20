@@ -10,8 +10,6 @@ from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
 from app.core.middleware import (
-    add_api_unhandled_error_middleware,
-    add_auth_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
 )
@@ -54,12 +52,15 @@ async def lifespan(_: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="codex-lb", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="codex-lb",
+        version="0.1.0",
+        lifespan=lifespan,
+        swagger_ui_parameters={"persistAuthorization": True},
+    )
 
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
-    add_auth_middleware(app)
-    add_api_unhandled_error_middleware(app)
     add_exception_handlers(app)
 
     app.include_router(proxy_api.router)

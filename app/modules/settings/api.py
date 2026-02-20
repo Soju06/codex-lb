@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends
-from fastapi.responses import JSONResponse
 
+from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.config.settings_cache import get_settings_cache
-from app.core.errors import dashboard_error
+from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import SettingsContext, get_settings_context
 from app.modules.settings.schemas import DashboardSettingsResponse, DashboardSettingsUpdateRequest
 from app.modules.settings.service import DashboardSettingsUpdateData
 
-router = APIRouter(prefix="/api/settings", tags=["dashboard"])
+router = APIRouter(
+    prefix="/api/settings",
+    tags=["dashboard"],
+    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+)
 
 
 @router.get("", response_model=DashboardSettingsResponse)
@@ -31,7 +35,7 @@ async def get_settings(
 async def update_settings(
     payload: DashboardSettingsUpdateRequest = Body(...),
     context: SettingsContext = Depends(get_settings_context),
-) -> DashboardSettingsResponse | JSONResponse:
+) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
     try:
         updated = await context.service.update_settings(
@@ -56,10 +60,7 @@ async def update_settings(
             )
         )
     except ValueError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=dashboard_error("invalid_totp_config", str(exc)),
-        )
+        raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
 
     await get_settings_cache().invalidate()
     return DashboardSettingsResponse(

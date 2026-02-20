@@ -262,6 +262,7 @@ class ApiKeyUsageReservationItem(Base):
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
+Index("idx_accounts_email", Account.email)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_sticky_account", StickySession.account_id)

@@ -318,6 +318,21 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
 
         async with session_factory() as session:
             await session.execute(text("PRAGMA foreign_keys=ON"))
+            index_rows = (await session.execute(text("PRAGMA index_list(accounts)"))).fetchall()
+            has_email_non_unique_index = False
+            for row in index_rows:
+                if len(row) < 3:
+                    continue
+                index_name = str(row[1])
+                is_unique = bool(row[2])
+                escaped_name = index_name.replace('"', '""')
+                index_info_rows = (await session.execute(text(f'PRAGMA index_info("{escaped_name}")'))).fetchall()
+                column_names = [str(info[2]) for info in index_info_rows if len(info) > 2]
+                if column_names == ["email"] and not is_unique:
+                    has_email_non_unique_index = True
+                    break
+            assert has_email_non_unique_index
+
             await session.execute(
                 text(
                     """

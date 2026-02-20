@@ -20,6 +20,7 @@ branch_labels = None
 depends_on = None
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ACCOUNTS_EMAIL_INDEX = "idx_accounts_email"
 
 
 def _table_exists(connection: Connection, table_name: str) -> bool:
@@ -32,6 +33,14 @@ def _columns(connection: Connection, table_name: str) -> set[str]:
     if not inspector.has_table(table_name):
         return set()
     return {str(column["name"]) for column in inspector.get_columns(table_name) if column.get("name") is not None}
+
+
+def _index_exists(connection: Connection, index_name: str, table_name: str) -> bool:
+    inspector = sa.inspect(connection)
+    if not inspector.has_table(table_name):
+        return False
+    indexes = inspector.get_indexes(table_name)
+    return any(idx["name"] == index_name for idx in indexes)
 
 
 def _is_safe_identifier(name: str) -> bool:
@@ -144,6 +153,14 @@ def _sqlite_drop_accounts_email_unique(connection: Connection) -> None:
         connection.execute(sa.text(f"DROP TABLE IF EXISTS {backup_table}"))
 
 
+def _ensure_accounts_email_index(connection: Connection) -> None:
+    if not _table_exists(connection, "accounts"):
+        return
+    if _index_exists(connection, _ACCOUNTS_EMAIL_INDEX, "accounts"):
+        return
+    op.create_index(_ACCOUNTS_EMAIL_INDEX, "accounts", ["email"], unique=False)
+
+
 def upgrade() -> None:
     bind = op.get_bind()
 
@@ -164,15 +181,16 @@ def upgrade() -> None:
 
     if bind.dialect.name == "sqlite":
         _sqlite_drop_accounts_email_unique(bind)
-        return
-
-    if bind.dialect.name == "postgresql":
+    elif bind.dialect.name == "postgresql":
         inspector = sa.inspect(bind)
         for unique_constraint in inspector.get_unique_constraints("accounts"):
             if unique_constraint.get("column_names") == ["email"] and unique_constraint.get("name"):
                 op.drop_constraint(str(unique_constraint["name"]), "accounts", type_="unique")
-                return
-        op.execute(sa.text("ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_email_key"))
+                break
+        else:
+            op.execute(sa.text("ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_email_key"))
+
+    _ensure_accounts_email_index(bind)
 
 
 def downgrade() -> None:

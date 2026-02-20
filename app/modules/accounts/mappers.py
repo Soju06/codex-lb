@@ -6,7 +6,7 @@ from app.core import usage as usage_core
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.types import UsageTrendBucket
+from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.schemas import (
@@ -48,14 +48,17 @@ def _account_to_summary(
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
-    weekly_only_usage = _is_weekly_only_usage(primary_usage, secondary_usage)
+    effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
+        primary_usage,
+        secondary_usage,
+    )
+    weekly_only_usage = (
+        effective_primary_usage is None
+        and primary_usage is not None
+        and usage_core.is_weekly_window_minutes(primary_usage.window_minutes)
+    )
     # Keep account payload aligned with UI semantics: weekly-only plans expose
     # their quota as secondary/7d and omit primary/5h fields.
-    effective_primary_usage = None if weekly_only_usage else primary_usage
-    effective_secondary_usage = (
-        secondary_usage if secondary_usage is not None else primary_usage if weekly_only_usage else None
-    )
-
     primary_used_percent = _normalize_used_percent(effective_primary_usage)
     secondary_used_percent = _normalize_used_percent(effective_secondary_usage)
     primary_remaining_percent = usage_core.remaining_percent_from_used(primary_used_percent)
@@ -107,13 +110,29 @@ def _account_to_summary(
     )
 
 
-def _is_weekly_only_usage(
+def _effective_usage_windows(
     primary_usage: UsageHistory | None,
     secondary_usage: UsageHistory | None,
-) -> bool:
-    if primary_usage is None or secondary_usage is not None:
-        return False
-    return usage_core.is_weekly_window_minutes(primary_usage.window_minutes)
+) -> tuple[UsageHistory | None, UsageHistory | None]:
+    if primary_usage is None:
+        return None, secondary_usage
+    if not usage_core.is_weekly_window_minutes(primary_usage.window_minutes):
+        return primary_usage, secondary_usage
+    if secondary_usage is None:
+        return None, primary_usage
+    if usage_core.should_use_weekly_primary(_to_window_row(primary_usage), _to_window_row(secondary_usage)):
+        return None, primary_usage
+    return None, secondary_usage
+
+
+def _to_window_row(entry: UsageHistory) -> UsageWindowRow:
+    return UsageWindowRow(
+        account_id=entry.account_id,
+        used_percent=entry.used_percent,
+        reset_at=entry.reset_at,
+        window_minutes=entry.window_minutes,
+        recorded_at=entry.recorded_at,
+    )
 
 
 def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAuthStatus:

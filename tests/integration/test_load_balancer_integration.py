@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timezone
+from datetime import timedelta, timezone
 
 import pytest
 
@@ -207,6 +207,88 @@ async def test_load_balancer_treats_weekly_only_primary_as_quota_window(db_setup
             window="primary",
             reset_at=weekly_reset,
             window_minutes=10080,
+        )
+        await usage_repo.add_entry(
+            account_id=plus_account.id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=plus_primary_reset,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=plus_account.id,
+            used_percent=20.0,
+            window="secondary",
+            reset_at=plus_secondary_reset,
+            window_minutes=10080,
+        )
+
+        balancer = LoadBalancer(_repo_factory)
+        selection = await balancer.select_account()
+
+        assert selection.account is not None
+        assert selection.account.id == plus_account.id
+
+        refreshed_free = await session.get(Account, free_account.id)
+        assert refreshed_free is not None
+        await session.refresh(refreshed_free)
+        assert refreshed_free.status == AccountStatus.QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_prefers_newer_weekly_primary_over_stale_secondary(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    stale_reset = now_epoch + 1800
+    weekly_reset = now_epoch + 7200
+    plus_primary_reset = now_epoch + 3600
+    plus_secondary_reset = now_epoch + 7200
+
+    free_account = Account(
+        id="acc_free_weekly_stale_secondary",
+        email="free_weekly_stale_secondary@example.com",
+        plan_type="free",
+        access_token_encrypted=encryptor.encrypt("free-stale-access"),
+        refresh_token_encrypted=encryptor.encrypt("free-stale-refresh"),
+        id_token_encrypted=encryptor.encrypt("free-stale-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    plus_account = Account(
+        id="acc_plus_weekly_control",
+        email="plus_weekly_control@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("plus-control-access"),
+        refresh_token_encrypted=encryptor.encrypt("plus-control-refresh"),
+        id_token_encrypted=encryptor.encrypt("plus-control-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(free_account)
+        await accounts_repo.upsert(plus_account)
+
+        await usage_repo.add_entry(
+            account_id=free_account.id,
+            used_percent=15.0,
+            window="secondary",
+            reset_at=stale_reset,
+            window_minutes=10080,
+            recorded_at=now - timedelta(days=2),
+        )
+        await usage_repo.add_entry(
+            account_id=free_account.id,
+            used_percent=100.0,
+            window="primary",
+            reset_at=weekly_reset,
+            window_minutes=10080,
+            recorded_at=now,
         )
         await usage_repo.add_entry(
             account_id=plus_account.id,

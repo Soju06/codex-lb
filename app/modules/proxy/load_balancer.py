@@ -16,6 +16,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
+from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
@@ -244,9 +245,12 @@ def _state_from_account(
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
+    primary_row = _usage_entry_to_window_row(primary_entry) if primary_entry is not None else None
+    secondary_row = _usage_entry_to_window_row(secondary_entry) if secondary_entry is not None else None
     # Weekly-only accounts may not emit a dedicated secondary row; treat the
-    # weekly primary row as quota-window input for balancer decisions.
-    if effective_secondary_entry is None and usage_core.is_weekly_window_minutes(primary_window_minutes):
+    # weekly primary row as quota-window input for balancer decisions. When
+    # both rows exist, prefer the newer weekly snapshot.
+    if primary_row is not None and usage_core.should_use_weekly_primary(primary_row, secondary_row):
         effective_secondary_entry = primary_entry
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
@@ -287,6 +291,16 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
     if allowed_plans is None:
         return accounts
     return [a for a in accounts if a.plan_type in allowed_plans]
+
+
+def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
+    return UsageWindowRow(
+        account_id=entry.account_id,
+        used_percent=entry.used_percent,
+        reset_at=entry.reset_at,
+        window_minutes=entry.window_minutes,
+        recorded_at=entry.recorded_at,
+    )
 
 
 def _clone_account(account: Account) -> Account:

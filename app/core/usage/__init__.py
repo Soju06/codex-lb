@@ -170,6 +170,17 @@ def is_weekly_window_minutes(window_minutes: int | None) -> bool:
     return window_minutes == secondary_default
 
 
+def should_use_weekly_primary(
+    primary_row: UsageWindowRow,
+    secondary_row: UsageWindowRow | None,
+) -> bool:
+    if not is_weekly_window_minutes(primary_row.window_minutes):
+        return False
+    if secondary_row is None:
+        return True
+    return _should_prefer_primary_row(primary_row, secondary_row)
+
+
 def normalize_weekly_only_rows(
     primary_rows: Iterable[UsageWindowRow],
     secondary_rows: Iterable[UsageWindowRow],
@@ -185,7 +196,7 @@ def normalize_weekly_only_rows(
     for account_id, primary_row in primary_by_account.items():
         if is_weekly_window_minutes(primary_row.window_minutes):
             secondary_row = normalized_secondary_by_account.get(account_id)
-            if secondary_row is None or _should_prefer_primary_row(primary_row, secondary_row):
+            if should_use_weekly_primary(primary_row, secondary_row):
                 normalized_secondary_by_account[account_id] = primary_row
             continue
         normalized_primary.append(primary_row)

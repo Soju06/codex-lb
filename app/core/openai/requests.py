@@ -178,7 +178,8 @@ def _normalize_tool_input_item(value: Mapping[str, JsonValue]) -> JsonValue:
         resolved_call_id = call_id
     if not isinstance(resolved_call_id, str) or not resolved_call_id:
         raise ValueError("tool input items must include 'tool_call_id'")
-    output_value = value.get("output") if "output" in value else value.get("content")
+    output = value.get("output")
+    output_value = output if output is not None else value.get("content")
     return {
         "type": "function_call_output",
         "call_id": resolved_call_id,

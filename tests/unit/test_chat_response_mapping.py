@@ -266,3 +266,20 @@ async def test_collect_completion_content_and_refusal_both_present():
     message = result.choices[0].message
     assert message.content == "hi"
     assert message.refusal == "no"
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_zero_token_preserves_empty_content():
+    lines = [
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    message = result.choices[0].message
+    assert message.content == ""
+    assert message.refusal is None

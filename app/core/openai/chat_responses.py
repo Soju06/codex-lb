@@ -375,12 +375,12 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
                 if event_type == "response.incomplete":
                     incomplete_reason = _finish_reason_from_incomplete(response)
 
-    message_content = "".join(content_parts) or None
+    message_content: str | None = "".join(content_parts)
     message_refusal = "".join(refusal_parts) or None
     message_tool_calls = _compact_tool_calls(tool_calls)
     has_tool_calls = bool(message_tool_calls)
     finish_reason = "tool_calls" if has_tool_calls else (incomplete_reason or "stop")
-    if has_tool_calls and not message_content:
+    if (has_tool_calls or message_refusal) and not message_content:
         message_content = None
     message = ChatCompletionMessage(
         role="assistant",

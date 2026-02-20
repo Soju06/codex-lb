@@ -53,7 +53,8 @@
       "contributions": [
         "code",
         "test",
-        "maintenance"
+        "maintenance",
+        "bug"
       ]
     },
     {

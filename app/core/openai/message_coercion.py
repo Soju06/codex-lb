@@ -112,29 +112,30 @@ def _decompose_assistant_tool_calls(message: dict[str, JsonValue]) -> list[JsonV
     if is_json_list(tool_calls):
         for tc in tool_calls:
             if not is_json_dict(tc):
-                continue
+                raise ClientPayloadError("tool_calls entries must be objects.", param="messages")
             call_id = tc.get("id")
-            if not isinstance(call_id, str):
-                continue
+            if not isinstance(call_id, str) or not call_id:
+                raise ClientPayloadError("tool_calls[].id is required.", param="messages")
             function = tc.get("function")
             if not is_json_dict(function):
-                continue
+                raise ClientPayloadError("tool_calls[].function is required.", param="messages")
             name = function.get("name")
-            if not isinstance(name, str):
-                continue
+            if not isinstance(name, str) or not name:
+                raise ClientPayloadError("tool_calls[].function.name is required.", param="messages")
             arguments = function.get("arguments")
             if not isinstance(arguments, str):
                 raise ClientPayloadError(
                     "tool_calls[].function.arguments must be a string.",
                     param="messages",
                 )
-            item: dict[str, JsonValue] = {
-                "type": "function_call",
-                "call_id": call_id,
-                "name": name,
-                "arguments": arguments,
-            }
-            items.append(item)
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }
+            )
     return items
 
 
@@ -148,13 +149,25 @@ def _convert_tool_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]
     elif content is None:
         output = ""
     elif is_json_list(content):
-        output = _content_to_text(content) or ""
+        output = _concat_text_parts(content)
     else:
         raise ClientPayloadError(
             "tool message content must be a string or array.",
             param="messages",
         )
     return {"type": "function_call_output", "call_id": call_id, "output": output}
+
+
+def _concat_text_parts(content: list[JsonValue]) -> str:
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+        elif is_json_dict(part):
+            text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
 
 
 def _normalize_message_content(message: dict[str, JsonValue]) -> dict[str, JsonValue]:

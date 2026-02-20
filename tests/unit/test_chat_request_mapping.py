@@ -350,6 +350,48 @@ def test_chat_assistant_non_string_tool_call_arguments_rejected():
         ChatCompletionsRequest.model_validate(payload).to_responses_request()
 
 
+@pytest.mark.parametrize(
+    ("field", "tool_call"),
+    [
+        ("id", {"type": "function", "function": {"name": "fn", "arguments": "{}"}}),
+        ("function", {"id": "call_1", "type": "function"}),
+        ("function.name", {"id": "call_1", "type": "function", "function": {"arguments": "{}"}}),
+    ],
+)
+def test_chat_assistant_malformed_tool_call_rejected(field: str, tool_call: dict):
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+        ],
+    }
+    with pytest.raises(ValueError):
+        ChatCompletionsRequest.model_validate(payload).to_responses_request()
+
+
+def test_chat_tool_message_multi_part_content_concatenated():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": '{"a":1'},
+                    {"type": "text", "text": "}"},
+                ],
+            },
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[1] == {"type": "function_call_output", "call_id": "call_1", "output": '{"a":1}'}
+
+
 @pytest.mark.parametrize("n", [0, -1, 2])
 def test_chat_n_not_1_rejected(n: int):
     payload = {

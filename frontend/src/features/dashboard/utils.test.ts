@@ -26,6 +26,7 @@ describe("buildRemainingItems", () => {
         account({ accountId: "acc-2", email: "two@example.com" }),
       ],
       null,
+      "primary",
     );
 
     expect(items[0].label).toBe("one@example.com");
@@ -42,6 +43,7 @@ describe("buildRemainingItems", () => {
         account({ accountId: "acc-3", email: "unique@example.com" }),
       ],
       null,
+      "primary",
     );
 
     expect(items[0].label).toBe(`dup@example.com (${formatCompactAccountId(duplicateA, 5, 4)})`);

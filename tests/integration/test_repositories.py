@@ -120,6 +120,28 @@ async def test_accounts_upsert_with_merge_enabled_serializes_concurrent_same_ema
 
 
 @pytest.mark.asyncio
+async def test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgresql(db_setup, monkeypatch):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        acquired_identity_locks: list[str] = []
+
+        monkeypatch.setattr(repo, "_dialect_name", lambda: "postgresql")
+
+        async def _record_identity_lock(account_id: str) -> None:
+            acquired_identity_locks.append(account_id)
+
+        async def _fail_merge_lock(_: str) -> None:
+            raise AssertionError("merge lock should not be used when merge_by_email is disabled")
+
+        monkeypatch.setattr(repo, "_acquire_postgresql_identity_lock", _record_identity_lock)
+        monkeypatch.setattr(repo, "_acquire_postgresql_merge_lock", _fail_merge_lock)
+
+        await repo.upsert(_make_account("acc_non_merge_lock", "non-merge-lock@example.com"), merge_by_email=False)
+
+        assert acquired_identity_locks == ["acc_non_merge_lock"]
+
+
+@pytest.mark.asyncio
 async def test_usage_repository_aggregate(db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

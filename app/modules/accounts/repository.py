@@ -45,11 +45,10 @@ class AccountsRepository:
     async def upsert(self, account: Account, *, merge_by_email: bool | None = None) -> Account:
         dialect_name = self._dialect_name()
         sqlite_lock_acquired = False
-        if merge_by_email is None and dialect_name == "sqlite":
-            await self._acquire_sqlite_merge_lock()
-            sqlite_lock_acquired = True
-            merge_by_email = await self._merge_by_email_enabled()
-        elif merge_by_email is None:
+        if merge_by_email is None:
+            if dialect_name == "sqlite":
+                await self._acquire_sqlite_merge_lock()
+                sqlite_lock_acquired = True
             merge_by_email = await self._merge_by_email_enabled()
 
         if merge_by_email:
@@ -57,6 +56,11 @@ class AccountsRepository:
                 await self._acquire_sqlite_merge_lock()
             elif dialect_name == "postgresql":
                 await self._acquire_postgresql_merge_lock(account.email)
+        else:
+            if dialect_name == "sqlite" and not sqlite_lock_acquired:
+                await self._acquire_sqlite_merge_lock()
+            elif dialect_name == "postgresql":
+                await self._acquire_postgresql_identity_lock(account.id)
 
         existing = await self._session.get(Account, account.id)
         if existing:
@@ -173,7 +177,14 @@ class AccountsRepository:
             await self._session.execute(text("UPDATE accounts SET id = id WHERE 1 = 0"))
 
     async def _acquire_postgresql_merge_lock(self, email: str) -> None:
-        lock_key = _advisory_lock_key(email)
+        lock_key = _advisory_lock_key("merge-email", email)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
+    async def _acquire_postgresql_identity_lock(self, account_id: str) -> None:
+        lock_key = _advisory_lock_key("account-id", account_id)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": lock_key},
@@ -192,6 +203,6 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.deactivation_reason = source.deactivation_reason
 
 
-def _advisory_lock_key(email: str) -> int:
-    digest = hashlib.sha256(email.encode("utf-8")).digest()
+def _advisory_lock_key(scope: str, value: str) -> int:
+    digest = hashlib.sha256(f"{scope}:{value}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)

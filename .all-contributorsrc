@@ -85,6 +85,17 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "azkore",
+      "name": "Eugene Korekin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/7746783?v=4",
+      "profile": "https://github.com/azkore",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -29,7 +28,7 @@ class ChatCompletionsRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     stop: str | list[str] | None = None
-    n: int | None = None
+    n: int | None = Field(default=None, ge=1, le=1)
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
     logprobs: bool | None = None
@@ -40,13 +39,6 @@ class ChatCompletionsRequest(BaseModel):
     max_completion_tokens: int | None = None
     store: bool | None = None
     stream_options: ChatStreamOptions | None = None
-
-    @field_validator("n")
-    @classmethod
-    def _validate_n(cls, value: int | None) -> int | None:
-        if value is not None and value != 1:
-            raise ValueError("n must be 1")
-        return value
 
     @field_validator("tools")
     @classmethod
@@ -124,18 +116,9 @@ class ChatCompletionsRequest(BaseModel):
 class ChatResponseFormatJsonSchema(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    name: str | None = None
+    name: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
     schema_: JsonValue | None = Field(default=None, alias="schema")
     strict: bool | None = None
-
-    @field_validator("name")
-    @classmethod
-    def _validate_name(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
-            raise ValueError("response_format.json_schema.name must match [A-Za-z0-9_-]{1,64}")
-        return value
 
 
 class ChatResponseFormat(BaseModel):

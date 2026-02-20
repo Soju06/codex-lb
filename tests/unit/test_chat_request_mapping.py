@@ -323,7 +323,7 @@ def test_chat_n_not_1_rejected(n: int):
         "messages": [{"role": "user", "content": "hi"}],
         "n": n,
     }
-    with pytest.raises(ValidationError, match="n must be 1"):
+    with pytest.raises(ValidationError):
         ChatCompletionsRequest.model_validate(payload)
 
 

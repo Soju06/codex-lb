@@ -316,13 +316,14 @@ def test_chat_tool_message_missing_tool_call_id():
         ChatCompletionsRequest.model_validate(payload).to_responses_request()
 
 
-def test_chat_n_greater_than_1_rejected():
+@pytest.mark.parametrize("n", [0, -1, 2])
+def test_chat_n_not_1_rejected(n: int):
     payload = {
         "model": "gpt-5.2",
         "messages": [{"role": "user", "content": "hi"}],
-        "n": 2,
+        "n": n,
     }
-    with pytest.raises(ValidationError, match="n > 1 is not supported"):
+    with pytest.raises(ValidationError, match="n must be 1"):
         ChatCompletionsRequest.model_validate(payload)
 
 

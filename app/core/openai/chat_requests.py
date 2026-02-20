@@ -44,8 +44,8 @@ class ChatCompletionsRequest(BaseModel):
     @field_validator("n")
     @classmethod
     def _validate_n(cls, value: int | None) -> int | None:
-        if value is not None and value > 1:
-            raise ValueError("n > 1 is not supported")
+        if value is not None and value != 1:
+            raise ValueError("n must be 1")
         return value
 
     @field_validator("tools")

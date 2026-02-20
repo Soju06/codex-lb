@@ -64,18 +64,12 @@ def _account_to_summary(
     if primary_remaining_percent is None and not weekly_only_usage:
         primary_remaining_percent = 100.0
     reset_at_primary = (
-        from_epoch_seconds(effective_primary_usage.reset_at)
-        if effective_primary_usage is not None
-        else None
+        from_epoch_seconds(effective_primary_usage.reset_at) if effective_primary_usage is not None else None
     )
     reset_at_secondary = (
-        from_epoch_seconds(effective_secondary_usage.reset_at)
-        if effective_secondary_usage is not None
-        else None
+        from_epoch_seconds(effective_secondary_usage.reset_at) if effective_secondary_usage is not None else None
     )
-    window_minutes_primary = (
-        effective_primary_usage.window_minutes if effective_primary_usage is not None else None
-    )
+    window_minutes_primary = effective_primary_usage.window_minutes if effective_primary_usage is not None else None
     window_minutes_secondary = (
         effective_secondary_usage.window_minutes if effective_secondary_usage is not None else None
     )

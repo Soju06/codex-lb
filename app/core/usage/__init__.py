@@ -156,11 +156,7 @@ def default_window_minutes(window: str) -> int | None:
 
 
 def resolve_window_minutes(window: str, rows: Iterable[UsageWindowRow]) -> int | None:
-    values = {
-        row.window_minutes
-        for row in rows
-        if row.window_minutes is not None and row.window_minutes > 0
-    }
+    values = {row.window_minutes for row in rows if row.window_minutes is not None and row.window_minutes > 0}
     return _resolve_window_minutes(window, values)
 
 

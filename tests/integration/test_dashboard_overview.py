@@ -89,6 +89,7 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     request_values = [p["v"] for p in trends["requests"]]
     assert any(v > 0 for v in request_values)
 
+
 @pytest.mark.asyncio
 async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_client, db_setup):
     now = utcnow().replace(microsecond=0)

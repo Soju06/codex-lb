@@ -207,6 +207,137 @@ def test_chat_oversized_image_is_dropped():
     ]
 
 
+def test_chat_assistant_tool_calls_decomposed():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "weather?"},
+            {
+                "role": "assistant",
+                "content": "Let me check",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"loc":"NYC"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "72F"},
+            {"role": "user", "content": "thanks"},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[0] == {"role": "user", "content": [{"type": "input_text", "text": "weather?"}]}
+    assert items[1] == {"role": "assistant", "content": [{"type": "output_text", "text": "Let me check"}]}
+    assert items[2] == {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": '{"loc":"NYC"}',
+    }
+    assert items[3] == {"type": "function_call_output", "call_id": "call_1", "output": "72F"}
+    assert items[4] == {"role": "user", "content": [{"type": "input_text", "text": "thanks"}]}
+
+
+def test_chat_assistant_tool_calls_no_content():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "weather?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert len(items) == 2
+    assert items[0] == {"role": "user", "content": [{"type": "input_text", "text": "weather?"}]}
+    assert items[1] == {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}"}
+
+
+def test_chat_tool_message_to_function_call_output():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "result data"},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[1] == {"type": "function_call_output", "call_id": "call_1", "output": "result data"}
+
+
+def test_chat_tool_message_array_content():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [{"type": "text", "text": "result"}],
+            },
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[1] == {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+
+
+def test_chat_tool_message_missing_tool_call_id():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "content": "result"},
+        ],
+    }
+    with pytest.raises(ValueError):
+        ChatCompletionsRequest.model_validate(payload).to_responses_request()
+
+
+def test_chat_n_greater_than_1_rejected():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "n": 2,
+    }
+    with pytest.raises(ValidationError, match="n > 1 is not supported"):
+        ChatCompletionsRequest.model_validate(payload)
+
+
+def test_chat_n_equals_1_accepted():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "n": 1,
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+    assert "n" not in dumped
+
+
 def test_chat_image_detail_is_preserved_when_mapping_to_input_image():
     payload = {
         "model": "gpt-5.2",
@@ -232,3 +363,73 @@ def test_chat_image_detail_is_preserved_when_mapping_to_input_image():
             "content": [{"type": "input_image", "image_url": "https://example.com/a.png", "detail": "high"}],
         }
     ]
+
+
+def test_chat_assistant_refusal_converts_to_content_part():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "do something bad"},
+            {"role": "assistant", "content": None, "refusal": "I can't help with that"},
+            {"role": "user", "content": "ok"},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[1] == {
+        "role": "assistant",
+        "content": [{"type": "refusal", "refusal": "I can't help with that"}],
+    }
+
+
+def test_chat_assistant_content_and_refusal_both_converted():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "partial", "refusal": "but I must refuse"},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[1] == {
+        "role": "assistant",
+        "content": [
+            {"type": "output_text", "text": "partial"},
+            {"type": "refusal", "refusal": "but I must refuse"},
+        ],
+    }
+
+
+def test_chat_assistant_tool_calls_with_refusal():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "refusal": "nope",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "fn", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[1] == {
+        "role": "assistant",
+        "content": [{"type": "refusal", "refusal": "nope"}],
+    }
+    assert items[2] == {"type": "function_call", "call_id": "call_1", "name": "fn", "arguments": "{}"}

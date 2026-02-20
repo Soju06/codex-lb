@@ -21,6 +21,16 @@ def coerce_messages(existing_instructions: str, messages: Sequence[JsonValue]) -
             if content_text:
                 instruction_parts.append(content_text)
             continue
+        if role == "assistant":
+            tool_calls = message.get("tool_calls")
+            if is_json_list(tool_calls) and tool_calls:
+                input_messages.extend(_decompose_assistant_tool_calls(message))
+            else:
+                input_messages.append(_normalize_message_content(message))
+            continue
+        if role == "tool":
+            input_messages.append(_convert_tool_message(message))
+            continue
         input_messages.append(_normalize_message_content(message))
     merged = _merge_instructions(existing_instructions, instruction_parts)
     return merged, input_messages
@@ -88,44 +98,128 @@ def _ensure_text_only_content(content: JsonValue, role: str) -> None:
     raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
 
 
+def _decompose_assistant_tool_calls(message: dict[str, JsonValue]) -> list[JsonValue]:
+    items: list[JsonValue] = []
+    content = message.get("content")
+    refusal = _get_assistant_refusal(message)
+    if content is not None or refusal is not None:
+        parts = _to_content_list(_normalize_content_parts(content, "assistant")) if content is not None else []
+        if refusal is not None:
+            parts.append({"type": "refusal", "refusal": refusal})
+        msg_item: dict[str, JsonValue] = {"role": "assistant", "content": parts}
+        items.append(msg_item)
+    tool_calls = message.get("tool_calls")
+    if is_json_list(tool_calls):
+        for tc in tool_calls:
+            if not is_json_dict(tc):
+                continue
+            call_id = tc.get("id")
+            if not isinstance(call_id, str):
+                continue
+            function = tc.get("function")
+            if not is_json_dict(function):
+                continue
+            name = function.get("name")
+            arguments = function.get("arguments")
+            if not isinstance(name, str):
+                continue
+            item: dict[str, JsonValue] = {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments if isinstance(arguments, str) else "",
+            }
+            items.append(item)
+    return items
+
+
+def _convert_tool_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    call_id = message.get("tool_call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise ClientPayloadError("tool messages must include 'tool_call_id'.", param="messages")
+    content = message.get("content")
+    if isinstance(content, str):
+        output = content
+    elif content is None:
+        output = ""
+    else:
+        output = _content_to_text(content) or ""
+    return {"type": "function_call_output", "call_id": call_id, "output": output}
+
+
 def _normalize_message_content(message: dict[str, JsonValue]) -> dict[str, JsonValue]:
     content = message.get("content")
-    if content is None:
+    role = message.get("role")
+    role_str = role if isinstance(role, str) else "user"
+    refusal = _get_assistant_refusal(message) if role_str == "assistant" else None
+    if content is None and refusal is None:
         return message
-    normalized = _normalize_content_parts(content)
-    if normalized is content:
+    if content is not None:
+        normalized = _normalize_content_parts(content, role_str)
+    else:
+        normalized = []
+    if refusal is not None:
+        parts = _to_content_list(normalized)
+        parts.append({"type": "refusal", "refusal": refusal})
+        normalized = parts
+    if normalized is content and refusal is None:
         return message
     updated = dict(message)
     updated["content"] = normalized
+    if refusal is not None:
+        updated.pop("refusal", None)
     return updated
 
 
-def _normalize_content_parts(content: JsonValue) -> JsonValue:
+def _get_assistant_refusal(message: dict[str, JsonValue]) -> str | None:
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal:
+        return refusal
+    return None
+
+
+def _to_content_list(normalized: JsonValue) -> list[JsonValue]:
+    if is_json_list(normalized):
+        return list(normalized)
+    if normalized is None or normalized == "":
+        return []
+    return [normalized]
+
+
+def _text_type_for_role(role: str) -> str:
+    return "output_text" if role == "assistant" else "input_text"
+
+
+def _normalize_content_parts(content: JsonValue, role: str = "user") -> JsonValue:
     if content is None:
         return content
+    text_type = _text_type_for_role(role)
     if isinstance(content, str):
-        return [{"type": "input_text", "text": content}]
+        return [{"type": text_type, "text": content}]
     parts = content if is_json_list(content) else [content]
     normalized_parts: list[JsonValue] = []
     for part in parts:
         if isinstance(part, str):
-            normalized_parts.append({"type": "input_text", "text": part})
+            normalized_parts.append({"type": text_type, "text": part})
             continue
         if not is_json_dict(part):
             normalized_parts.append(part)
             continue
-        normalized_parts.append(_normalize_content_part(part))
+        normalized_parts.append(_normalize_content_part(part, role))
     if is_json_list(content):
         return normalized_parts
     return normalized_parts[0] if normalized_parts else ""
 
 
-def _normalize_content_part(part: dict[str, JsonValue]) -> JsonValue:
+def _normalize_content_part(part: dict[str, JsonValue], role: str = "user") -> JsonValue:
     part_type = part.get("type") or ("text" if "text" in part else None)
-    if part_type in ("text", "input_text"):
+    text_type = _text_type_for_role(role)
+    if part_type in ("text", "input_text", "output_text"):
         text = part.get("text")
         if isinstance(text, str):
-            return {"type": "input_text", "text": text}
+            return {"type": text_type, "text": text}
+        return part
+    if role == "assistant":
         return part
     if part_type == "image_url":
         image_url = part.get("image_url")

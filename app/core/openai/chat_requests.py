@@ -41,6 +41,13 @@ class ChatCompletionsRequest(BaseModel):
     store: bool | None = None
     stream_options: ChatStreamOptions | None = None
 
+    @field_validator("n")
+    @classmethod
+    def _validate_n(cls, value: int | None) -> int | None:
+        if value is not None and value > 1:
+            raise ValueError("n > 1 is not supported")
+        return value
+
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
@@ -89,6 +96,7 @@ class ChatCompletionsRequest(BaseModel):
         messages = data.pop("messages")
         messages = _sanitize_user_messages(messages)
         data.pop("store", None)
+        data.pop("n", None)
         data.pop("max_tokens", None)
         data.pop("max_completion_tokens", None)
         response_format = data.pop("response_format", None)

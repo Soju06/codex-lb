@@ -226,4 +226,43 @@ async def test_collect_completion_includes_refusal_delta():
     result = await collect_chat_completion(_stream(), model="gpt-5.2")
     assert isinstance(result, ChatCompletion)
     message = result.choices[0].message
-    assert message.content == "no"
+    assert message.refusal == "no"
+    assert message.content is None
+
+
+def test_refusal_delta_populates_refusal_field_streaming():
+    lines = [
+        'data: {"type":"response.refusal.delta","delta":"I cannot"}\n\n',
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+    parsed = [
+        json.loads(chunk[5:].strip())
+        for chunk in chunks
+        if chunk.startswith("data: ") and "chat.completion.chunk" in chunk
+    ]
+    refusal_deltas = [
+        item["choices"][0]["delta"] for item in parsed if item["choices"][0]["delta"].get("refusal") is not None
+    ]
+    assert refusal_deltas
+    assert refusal_deltas[0]["refusal"] == "I cannot"
+    assert refusal_deltas[0].get("content") is None
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_content_and_refusal_both_present():
+    lines = [
+        'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+        'data: {"type":"response.refusal.delta","delta":"no"}\n\n',
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    message = result.choices[0].message
+    assert message.content == "hi"
+    assert message.refusal == "no"

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
@@ -41,8 +43,20 @@ class AccountsRepository:
         return result.scalar_one_or_none() is not None
 
     async def upsert(self, account: Account, *, merge_by_email: bool | None = None) -> Account:
-        if merge_by_email is None:
+        dialect_name = self._dialect_name()
+        sqlite_lock_acquired = False
+        if merge_by_email is None and dialect_name == "sqlite":
+            await self._acquire_sqlite_merge_lock()
+            sqlite_lock_acquired = True
             merge_by_email = await self._merge_by_email_enabled()
+        elif merge_by_email is None:
+            merge_by_email = await self._merge_by_email_enabled()
+
+        if merge_by_email:
+            if dialect_name == "sqlite" and not sqlite_lock_acquired:
+                await self._acquire_sqlite_merge_lock()
+            elif dialect_name == "postgresql":
+                await self._acquire_postgresql_merge_lock(account.email)
 
         existing = await self._session.get(Account, account.id)
         if existing:
@@ -144,6 +158,27 @@ class AccountsRepository:
             raise AccountIdentityConflictError(email)
         return matches[0]
 
+    def _dialect_name(self) -> str:
+        return self._session.get_bind().dialect.name
+
+    async def _acquire_sqlite_merge_lock(self) -> None:
+        try:
+            await self._session.execute(text("BEGIN IMMEDIATE"))
+        except OperationalError as exc:
+            message = str(exc).lower()
+            if "within a transaction" not in message:
+                raise
+            # A no-op write escalates the current deferred transaction to a write
+            # transaction, serializing concurrent writers.
+            await self._session.execute(text("UPDATE accounts SET id = id WHERE 1 = 0"))
+
+    async def _acquire_postgresql_merge_lock(self, email: str) -> None:
+        lock_key = _advisory_lock_key(email)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
 
 def _apply_account_updates(target: Account, source: Account) -> None:
     target.chatgpt_account_id = source.chatgpt_account_id
@@ -155,3 +190,8 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.last_refresh = source.last_refresh
     target.status = source.status
     target.deactivation_reason = source.deactivation_reason
+
+
+def _advisory_lock_key(email: str) -> int:
+    digest = hashlib.sha256(email.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)

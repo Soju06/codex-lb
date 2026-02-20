@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -86,6 +87,36 @@ async def test_accounts_upsert_with_merge_enabled_raises_conflict_on_ambiguous_e
         incoming = _make_account("acc_new", "dup@example.com")
         with pytest.raises(AccountIdentityConflictError):
             await repo.upsert(incoming, merge_by_email=True)
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_with_merge_enabled_serializes_concurrent_same_email(db_setup):
+    email = "race@example.com"
+    barrier = asyncio.Barrier(2)
+
+    async def _worker(account_id: str, plan_type: str) -> str:
+        async with SessionLocal() as session:
+            repo = AccountsRepository(session)
+            await barrier.wait()
+            incoming = _make_account(account_id, email)
+            incoming.plan_type = plan_type
+            saved = await repo.upsert(incoming, merge_by_email=True)
+            return saved.id
+
+    first_id, second_id = await asyncio.gather(
+        _worker("acc_race_a", "plus"),
+        _worker("acc_race_b", "team"),
+    )
+
+    assert first_id in {"acc_race_a", "acc_race_b"}
+    assert second_id in {"acc_race_a", "acc_race_b"}
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(Account).where(Account.email == email))
+        rows = list(result.scalars().all())
+        assert len(rows) == 1
+        assert rows[0].id in {"acc_race_a", "acc_race_b"}
+        assert rows[0].plan_type in {"plus", "team"}
 
 
 @pytest.mark.asyncio

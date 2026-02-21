@@ -215,7 +215,10 @@ async def exchange_device_token(
 ) -> OAuthTokens | None:
     settings = get_settings()
     url = f"{(base_url or settings.auth_base_url).rstrip('/')}/api/accounts/deviceauth/token"
-    payload = {"device_auth_id": device_auth_id, "user_code": user_code}
+    payload = {
+        "device_auth_id": device_auth_id,
+        "user_code": _normalize_device_user_code(user_code),
+    }
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
 
     client_session = session or get_http_client().session
@@ -338,3 +341,7 @@ def _expires_in_seconds(expires_at: str | None) -> int | None:
     if delta <= 0:
         return None
     return int(delta)
+
+
+def _normalize_device_user_code(value: str) -> str:
+    return "".join(ch for ch in value.upper() if ch.isalnum())

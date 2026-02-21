@@ -87,6 +87,16 @@ export function useOauth() {
         errorMessage: null,
       });
       setState(nextState);
+      if (
+        nextState.method === "device" &&
+        nextState.deviceAuthId &&
+        nextState.userCode
+      ) {
+        await completeOauth({
+          deviceAuthId: nextState.deviceAuthId,
+          userCode: nextState.userCode,
+        });
+      }
       return nextState;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to start OAuth";

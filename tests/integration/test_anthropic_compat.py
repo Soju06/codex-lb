@@ -474,3 +474,31 @@ async def test_anthropic_auth_accepts_x_api_key_and_bearer(async_client, monkeyp
         headers={"x-api-key": created.key},
     )
     assert x_api_key.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_malformed_json_returns_anthropic_error(async_client):
+    response = await async_client.post(
+        "/v1/messages",
+        content='{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["message"] == "Invalid request payload"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_count_tokens_malformed_json_returns_anthropic_error(async_client):
+    response = await async_client.post(
+        "/v1/messages/count_tokens",
+        content='{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["message"] == "Invalid request payload"

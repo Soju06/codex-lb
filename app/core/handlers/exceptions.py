@@ -44,6 +44,18 @@ _DASHBOARD_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     DashboardRateLimitError,
 )
 
+_ANTHROPIC_V1_PATH_PREFIXES: tuple[str, ...] = (
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+)
+
+
+def _is_anthropic_v1_path(path: str) -> bool:
+    for prefix in _ANTHROPIC_V1_PATH_PREFIXES:
+        if path == prefix or path.startswith(f"{prefix}/"):
+            return True
+    return False
+
 
 def _error_format(request: Request) -> str | None:
     fmt = getattr(request.state, "error_format", None)
@@ -54,6 +66,8 @@ def _error_format(request: Request) -> str | None:
     if path.startswith("/api/"):
         return "dashboard"
     if path.startswith("/anthropic/"):
+        return "anthropic"
+    if _is_anthropic_v1_path(path):
         return "anthropic"
     if path.startswith("/v1/") or path.startswith("/backend-api/"):
         return "openai"

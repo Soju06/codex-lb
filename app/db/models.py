@@ -83,6 +83,8 @@ class RequestLog(Base):
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
+    codex_session_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    codex_conversation_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.errors import dashboard_error, openai_error
+from app.core.errors import anthropic_error, dashboard_error, openai_error
 from app.core.exceptions import (
     AppError,
     DashboardAuthError,
@@ -53,6 +53,8 @@ def _error_format(request: Request) -> str | None:
     path = request.url.path
     if path.startswith("/api/"):
         return "dashboard"
+    if path.startswith("/anthropic/"):
+        return "anthropic"
     if path.startswith("/v1/") or path.startswith("/backend-api/"):
         return "openai"
     return None
@@ -99,6 +101,11 @@ def add_exception_handlers(app: FastAPI) -> None:
                 status_code=422,
                 content=dashboard_error("validation_error", "Invalid request payload"),
             )
+        if fmt == "anthropic":
+            return JSONResponse(
+                status_code=400,
+                content=anthropic_error("invalid_request_error", "Invalid request payload"),
+            )
         if fmt == "openai":
             error = openai_error("invalid_request_error", "Invalid request payload", error_type="invalid_request_error")
             if exc.errors():
@@ -123,6 +130,17 @@ def add_exception_handlers(app: FastAPI) -> None:
                 status_code=exc.status_code,
                 content=dashboard_error(f"http_{exc.status_code}", detail),
             )
+        if fmt == "anthropic":
+            error_type = "invalid_request_error"
+            if exc.status_code == 401:
+                error_type = "authentication_error"
+            elif exc.status_code == 403:
+                error_type = "permission_error"
+            elif exc.status_code == 429:
+                error_type = "rate_limit_error"
+            elif exc.status_code >= 500:
+                error_type = "api_error"
+            return JSONResponse(status_code=exc.status_code, content=anthropic_error(error_type, detail))
         if fmt == "openai":
             error_type = "invalid_request_error"
             code = "invalid_request_error"
@@ -154,6 +172,11 @@ def add_exception_handlers(app: FastAPI) -> None:
             return JSONResponse(
                 status_code=500,
                 content=dashboard_error("internal_error", "Unexpected error"),
+            )
+        if fmt == "anthropic":
+            return JSONResponse(
+                status_code=500,
+                content=anthropic_error("api_error", "Internal server error"),
             )
         if fmt == "openai":
             return JSONResponse(

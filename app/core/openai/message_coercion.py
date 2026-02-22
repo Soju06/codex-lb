@@ -258,7 +258,12 @@ def _normalize_content_part(part: dict[str, JsonValue], role: str = "user") -> J
     if part_type in ("text", "input_text", "output_text"):
         text = part.get("text")
         if isinstance(text, str):
-            return {"type": text_type, "text": text}
+            # Preserve cache-related and metadata fields while normalizing
+            # text part type for the target role.
+            normalized = dict(part)
+            normalized["type"] = text_type
+            normalized["text"] = text
+            return normalized
         return part
     if role == "assistant":
         return part

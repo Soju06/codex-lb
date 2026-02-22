@@ -78,3 +78,34 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["status"] == "ok"
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_returns_codex_session_hashes(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_logs_hashes", "logs-hashes@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_logs_hashes",
+            request_id="req_logs_hash_1",
+            model="gpt-5.3-codex",
+            input_tokens=100,
+            output_tokens=200,
+            latency_ms=1200,
+            status="success",
+            error_code=None,
+            codex_session_hash="sha256:111111111111",
+            codex_conversation_hash="sha256:222222222222",
+        )
+
+    response = await async_client.get("/api/request-logs?limit=1")
+    assert response.status_code == 200
+    body = response.json()
+    payload = body["requests"]
+    assert len(payload) == 1
+    latest = payload[0]
+    assert latest["requestId"] == "req_logs_hash_1"
+    assert latest["codexSessionHash"] == "sha256:111111111111"
+    assert latest["codexConversationHash"] == "sha256:222222222222"

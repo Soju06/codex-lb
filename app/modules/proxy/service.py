@@ -479,6 +479,8 @@ class ProxyService:
         account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
+        codex_session_hash = _hashed_header_value(headers, "x-codex-session-id")
+        codex_conversation_hash = _hashed_header_value(headers, "x-codex-conversation-id")
         start = time.monotonic()
         status = "success"
         error_code = None
@@ -602,6 +604,8 @@ class ProxyService:
                             cached_input_tokens=cached_input_tokens,
                             reasoning_tokens=reasoning_tokens,
                             reasoning_effort=reasoning_effort,
+                            codex_session_hash=codex_session_hash,
+                            codex_conversation_hash=codex_conversation_hash,
                             latency_ms=latency_ms,
                             status=status,
                             error_code=error_code,
@@ -804,6 +808,25 @@ def _maybe_log_proxy_request_payload(
 def _hash_identifier(value: str) -> str:
     digest = sha256(value.encode("utf-8")).hexdigest()
     return f"sha256:{digest[:12]}"
+
+
+def _header_value(headers: Mapping[str, str], target_header: str) -> str | None:
+    normalized_target = target_header.lower()
+    for header_name, header_value in headers.items():
+        if header_name.lower() != normalized_target:
+            continue
+        normalized_value = header_value.strip()
+        if normalized_value:
+            return normalized_value
+        return None
+    return None
+
+
+def _hashed_header_value(headers: Mapping[str, str], target_header: str) -> str | None:
+    header_value = _header_value(headers, target_header)
+    if header_value is None:
+        return None
+    return _hash_identifier(header_value)
 
 
 def _summarize_input(items: JsonValue) -> str:

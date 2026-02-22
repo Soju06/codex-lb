@@ -47,6 +47,19 @@ def test_extra_fields_are_preserved():
     assert "max_output_tokens" not in dumped
 
 
+def test_responses_accepts_prompt_cache_retention():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "prompt_cache_retention": "24h",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["prompt_cache_retention"] == "24h"
+
+
 def test_openai_compatible_reasoning_aliases_are_normalized():
     payload = {
         "model": "gpt-5.1",
@@ -291,6 +304,17 @@ def test_v1_input_string_passthrough():
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
     assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+
+
+def test_v1_prompt_cache_retention_passthrough():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "prompt_cache_retention": "in-memory",
+    }
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    assert request.prompt_cache_retention == "in-memory"
 
 
 def test_v1_rejects_builtin_tools():

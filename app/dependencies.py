@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_background_session, get_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
+from app.modules.anthropic_compat.service import AnthropicCompatService
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
 from app.modules.dashboard.repository import DashboardRepository
@@ -64,6 +65,11 @@ class ApiKeysContext:
     session: AsyncSession
     repository: ApiKeysRepository
     service: ApiKeysService
+
+
+@dataclass(slots=True)
+class AnthropicCompatContext:
+    service: AnthropicCompatService
 
 
 @dataclass(slots=True)
@@ -162,6 +168,12 @@ def get_api_keys_context(
     repository = ApiKeysRepository(session)
     service = ApiKeysService(repository)
     return ApiKeysContext(session=session, repository=repository, service=service)
+
+
+def get_anthropic_compat_context() -> AnthropicCompatContext:
+    proxy_service = ProxyService(repo_factory=_proxy_repo_context)
+    service = AnthropicCompatService(proxy_service)
+    return AnthropicCompatContext(service=service)
 
 
 def get_request_logs_context(

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
+from app.core.errors import OpenAIErrorEnvelope as UpstreamOpenAIErrorEnvelope
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.message_coercion import coerce_messages
 from app.core.openai.requests import ResponsesRequest
@@ -28,6 +29,7 @@ from app.modules.anthropic_compat.schemas import (
     AnthropicToolResultBlock,
     AnthropicToolResultTextBlock,
     AnthropicToolUseBlock,
+    AnthropicUsage,
 )
 
 
@@ -35,6 +37,9 @@ class AnthropicTranslationError(ValueError):
     def __init__(self, message: str, *, param: str | None = None) -> None:
         super().__init__(message)
         self.param = param
+
+
+type AnthropicStopReason = Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]
 
 
 @dataclass(slots=True)
@@ -82,7 +87,7 @@ class _CollectedResponseState:
     response_id: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
-    stop_reason: str | None = None
+    stop_reason: AnthropicStopReason | None = None
     stop_sequence: str | None = None
     text_parts: list[str] = field(default_factory=list)
     tool_calls: list[_ToolCallState] = field(default_factory=list)
@@ -99,7 +104,7 @@ class _StreamState:
     next_block_index: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
-    stop_reason: str | None = None
+    stop_reason: AnthropicStopReason | None = None
     stop_sequence: str | None = None
     tool_calls: list[_ToolCallState] = field(default_factory=list)
 
@@ -159,7 +164,7 @@ def to_responses_request_with_cache_resolution(
     if payload.top_k is not None:
         translated_payload["top_k"] = payload.top_k
     if payload.stop_sequences is not None:
-        translated_payload["stop"] = payload.stop_sequences
+        translated_payload["stop"] = _json_array_from_strings(payload.stop_sequences)
     if payload.max_tokens is not None:
         translated_payload["max_output_tokens"] = payload.max_tokens
     prompt_cache_resolution = resolve_prompt_cache_key(payload)
@@ -182,7 +187,7 @@ def anthropic_error(error_type: str, message: str) -> AnthropicErrorEnvelope:
 
 
 def anthropic_error_from_openai_payload(
-    payload: Mapping[str, JsonValue] | None,
+    payload: Mapping[str, JsonValue] | UpstreamOpenAIErrorEnvelope | None,
     *,
     fallback_message: str,
     status_code: int | None = None,
@@ -595,7 +600,7 @@ def _derive_prompt_cache_key_from_conversation_anchor(payload: AnthropicMessages
     if first_user_text:
         anchor["first_user"] = first_user_text
     if tool_signature:
-        anchor["tools"] = tool_signature
+        anchor["tools"] = _json_array_from_objects(tool_signature)
 
     if not anchor:
         return None
@@ -677,6 +682,14 @@ def _tool_signature_from_dump(tools_value: JsonValue) -> list[dict[str, JsonValu
     return signatures
 
 
+def _json_array_from_strings(values: list[str]) -> list[JsonValue]:
+    return [value for value in values]
+
+
+def _json_array_from_objects(values: list[dict[str, JsonValue]]) -> list[JsonValue]:
+    return [value for value in values]
+
+
 def _normalize_prompt_cache_key_value(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -706,7 +719,7 @@ def _system_message_to_openai(message: AnthropicMessage) -> list[dict[str, JsonV
     if isinstance(message.content, str):
         return [{"role": "system", "content": message.content}]
 
-    text_parts: list[dict[str, JsonValue]] = []
+    text_parts: list[JsonValue] = []
     for block in message.content:
         text_part = _text_content_part_from_block(block)
         if text_part is not None:
@@ -721,8 +734,8 @@ def _assistant_message_to_openai(message: AnthropicMessage) -> list[dict[str, Js
     if isinstance(message.content, str):
         return [{"role": "assistant", "content": message.content}]
 
-    text_parts: list[dict[str, JsonValue]] = []
-    tool_calls: list[dict[str, JsonValue]] = []
+    text_parts: list[JsonValue] = []
+    tool_calls: list[JsonValue] = []
     for block in message.content:
         block_type = _block_type(block)
         if block_type in ("thinking", "redacted_thinking"):
@@ -1058,10 +1071,10 @@ def _build_anthropic_response(state: _CollectedResponseState) -> AnthropicMessag
         content=content_blocks,
         stop_reason=stop_reason,
         stop_sequence=state.stop_sequence,
-        usage={
-            "input_tokens": state.input_tokens or 0,
-            "output_tokens": state.output_tokens or 0,
-        },
+        usage=AnthropicUsage(
+            input_tokens=state.input_tokens or 0,
+            output_tokens=state.output_tokens or 0,
+        ),
     )
 
 
@@ -1193,7 +1206,7 @@ def _extract_stop_reason(
     *,
     event_type: JsonValue,
     has_tool_use: bool,
-) -> tuple[str, str | None]:
+) -> tuple[AnthropicStopReason, str | None]:
     stop_sequence: str | None = None
     if response_payload is not None:
         raw_stop_sequence = response_payload.get("stop_sequence")

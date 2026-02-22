@@ -28,7 +28,6 @@ from app.modules.anthropic_compat.schemas import (
 from app.modules.anthropic_compat.translator import (
     AnthropicTranslationError,
     PromptCacheKeyResolution,
-    anthropic_error,
     anthropic_error_from_openai_payload,
     collect_anthropic_response_from_openai_stream,
     stream_anthropic_events_from_openai_stream,

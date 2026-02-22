@@ -21,9 +21,7 @@ def test_anthropic_request_maps_tool_use_and_tool_result():
                 {"role": "user", "content": [{"type": "text", "text": "weather?"}]},
                 {
                     "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "NYC"}}
-                    ],
+                    "content": [{"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "NYC"}}],
                 },
                 {
                     "role": "user",

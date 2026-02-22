@@ -347,9 +347,7 @@ async def stream_anthropic_events_from_openai_stream(
 
             completed_tool_blocks = _content_blocks_from_response_output(response_map)
             tool_use_blocks = [
-                block
-                for block in completed_tool_blocks
-                if isinstance(block, AnthropicResponseToolUseBlock)
+                block for block in completed_tool_blocks if isinstance(block, AnthropicResponseToolUseBlock)
             ]
             if not tool_use_blocks:
                 tool_use_blocks = _tool_use_blocks_from_call_states(state.tool_calls)

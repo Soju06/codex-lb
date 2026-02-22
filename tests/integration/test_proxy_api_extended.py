@@ -137,10 +137,7 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
         assert log.cached_input_tokens == 3
         assert log.reasoning_tokens == 2
         assert log.codex_session_hash == f"sha256:{sha256(codex_session_id.encode('utf-8')).hexdigest()[:12]}"
-        assert (
-            log.codex_conversation_hash
-            == f"sha256:{sha256(codex_conversation_id.encode('utf-8')).hexdigest()[:12]}"
-        )
+        assert log.codex_conversation_hash == f"sha256:{sha256(codex_conversation_id.encode('utf-8')).hexdigest()[:12]}"
         assert log.status == "success"
 
 

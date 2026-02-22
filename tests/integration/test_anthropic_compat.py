@@ -115,9 +115,7 @@ async def test_anthropic_messages_non_stream(async_client, monkeypatch):
 
     seen_payload = seen["payload"]
     assert getattr(seen_payload, "instructions", None) == ""
-    assert getattr(seen_payload, "input", None) == [
-        {"role": "user", "content": [{"type": "input_text", "text": "hi"}]}
-    ]
+    assert getattr(seen_payload, "input", None) == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 @pytest.mark.asyncio
@@ -141,9 +139,7 @@ async def test_anthropic_messages_accept_system_role_and_cache_control(async_cli
         "messages": [
             {
                 "role": "system",
-                "content": [
-                    {"type": "text", "text": "Use concise answers", "cache_control": {"type": "ephemeral"}}
-                ],
+                "content": [{"type": "text", "text": "Use concise answers", "cache_control": {"type": "ephemeral"}}],
             },
             {
                 "role": "user",
@@ -158,9 +154,7 @@ async def test_anthropic_messages_accept_system_role_and_cache_control(async_cli
 
     seen_payload = seen["payload"]
     assert getattr(seen_payload, "instructions", None) == "Use concise answers"
-    assert getattr(seen_payload, "input", None) == [
-        {"role": "user", "content": [{"type": "input_text", "text": "hi"}]}
-    ]
+    assert getattr(seen_payload, "input", None) == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 @pytest.mark.asyncio

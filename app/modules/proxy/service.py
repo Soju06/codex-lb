@@ -529,14 +529,14 @@ class ProxyService:
                     event_type,
                 )
                 first_sanitized = True
-            text_delta = _extract_text_delta(event_type, first_payload)
-            if _is_internal_tool_trace_text(text_delta):
+            text_output = _extract_stream_text_output(event_type, first_payload)
+            if _is_internal_tool_trace_text(text_output):
                 logger.warning(
-                    "Sanitized tool-trace text delta account_id=%s request_id=%s model=%s sample=%s",
+                    "Sanitized tool-trace stream text account_id=%s request_id=%s model=%s sample=%s",
                     account_id_value,
                     request_id,
                     payload.model,
-                    _truncate_message(text_delta),
+                    _truncate_message(text_output),
                 )
                 first_sanitized = True
 
@@ -589,14 +589,14 @@ class ProxyService:
                         event_type,
                     )
                     continue
-                text_delta = _extract_text_delta(event_type, event_payload)
-                if _is_internal_tool_trace_text(text_delta):
+                text_output = _extract_stream_text_output(event_type, event_payload)
+                if _is_internal_tool_trace_text(text_output):
                     logger.warning(
-                        "Sanitized tool-trace text delta account_id=%s request_id=%s model=%s sample=%s",
+                        "Sanitized tool-trace stream text account_id=%s request_id=%s model=%s sample=%s",
                         account_id_value,
                         request_id,
                         payload.model,
-                        _truncate_message(text_delta),
+                        _truncate_message(text_output),
                     )
                     continue
                 if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
@@ -788,6 +788,30 @@ def _extract_text_delta(event_type: str | None, payload: dict[str, JsonValue] | 
         return None
     delta = payload.get("delta")
     return delta if isinstance(delta, str) else None
+
+
+def _extract_stream_text_output(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
+    text_delta = _extract_text_delta(event_type, payload)
+    if text_delta is not None:
+        return text_delta
+    if payload is None:
+        return None
+    if event_type == "response.output_text.done":
+        text = payload.get("text")
+        return text if isinstance(text, str) else None
+    if event_type != "response.content_part.done":
+        return None
+    part = payload.get("part")
+    if not isinstance(part, dict):
+        return None
+    part_type = part.get("type")
+    if not isinstance(part_type, str) or part_type not in _TEXT_DONE_CONTENT_PART_TYPES:
+        return None
+    part_text = part.get("text")
+    if isinstance(part_text, str):
+        return part_text
+    part_refusal = part.get("refusal")
+    return part_refusal if isinstance(part_refusal, str) else None
 
 
 def _should_hide_reasoning_for_stream(*, headers: Mapping[str, str], mode: str) -> bool:

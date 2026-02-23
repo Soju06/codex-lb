@@ -348,6 +348,53 @@ async def test_backend_responses_stream_preserves_done_text_events(async_client,
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_stream_sanitizes_tool_trace_done_text(async_client, monkeypatch):
+    email = "done-sanitize@example.com"
+    raw_account_id = "acc_done_sanitize"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    leak_text = (
+        'assistant to=functions.bash commentary {"command":"uv run pytest","timeout":1800000,'
+        '"workdir":"C:\\\\Users\\\\youca\\\\codexlb-new\\\\codex-lb"}'
+    )
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.output_text.delta","delta":"normal text"}\n\n'
+        done_text_event = {"type": "response.output_text.done", "text": leak_text}
+        done_part_event = {"type": "response.content_part.done", "part": {"type": "output_text", "text": leak_text}}
+        yield f"data: {json.dumps(done_text_event, separators=(',', ':'))}\n\n"
+        yield f"data: {json.dumps(done_part_event, separators=(',', ':'))}\n\n"
+        yield 'data: {"type":"response.completed","response":{"id":"resp_sanitize_done"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "input": "hi", "stream": True}
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event_types: list[str] = []
+    for line in lines:
+        if not line.startswith("data: "):
+            continue
+        raw_payload = line[6:]
+        if raw_payload == "[DONE]":
+            continue
+        data = json.loads(raw_payload)
+        event_type = data.get("type")
+        if isinstance(event_type, str):
+            event_types.append(event_type)
+
+    assert "response.output_text.delta" in event_types
+    assert "response.completed" in event_types
+    assert "response.output_text.done" not in event_types
+    assert "response.content_part.done" not in event_types
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_stream_drops_reasoning_for_opencode(async_client, monkeypatch):
     email = "reasoning-opencode@example.com"
     raw_account_id = "acc_reasoning_opencode"

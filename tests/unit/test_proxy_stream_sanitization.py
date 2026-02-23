@@ -4,6 +4,7 @@ import pytest
 
 from app.core.types import JsonValue
 from app.modules.proxy.service import (
+    _extract_stream_text_output,
     _extract_text_delta,
     _is_internal_tool_trace_text,
     _is_reasoning_stream_event,
@@ -19,6 +20,21 @@ def test_extract_text_delta_reads_delta_text() -> None:
     assert _extract_text_delta("response.output_text.delta", payload) == "hello world"
     assert _extract_text_delta("response.refusal.delta", payload) == "hello world"
     assert _extract_text_delta("response.completed", payload) is None
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "expected"),
+    [
+        ("response.output_text.delta", {"delta": "delta text"}, "delta text"),
+        ("response.output_text.done", {"text": "done text"}, "done text"),
+        ("response.content_part.done", {"part": {"type": "output_text", "text": "part text"}}, "part text"),
+        ("response.content_part.done", {"part": {"type": "refusal", "refusal": "cannot do that"}}, "cannot do that"),
+        ("response.content_part.done", {"part": {"type": "output_image", "image_url": "https://x"}}, None),
+        ("response.completed", {"response": {"id": "r1"}}, None),
+    ],
+)
+def test_extract_stream_text_output(event_type: str, payload: dict[str, JsonValue], expected: str | None) -> None:
+    assert _extract_stream_text_output(event_type, payload) == expected
 
 
 @pytest.mark.parametrize(

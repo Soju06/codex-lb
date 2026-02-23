@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
+_REASONING_EVENT_MARKERS = ("reasoning", "summary")
+_OPENCODE_REASONING_FILTER_MODES = frozenset({"auto", "on", "off"})
+_LIFECYCLE_STREAM_EVENT_TYPES = frozenset({"response.completed", "response.incomplete", "response.failed", "error"})
 
 
 class ProxyService:
@@ -77,6 +80,11 @@ class ProxyService:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         _maybe_log_proxy_request_shape("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
+        settings = get_settings()
+        hide_reasoning_for_opencode = _should_hide_reasoning_for_stream(
+            headers=headers,
+            mode=settings.opencode_reasoning_filter_mode,
+        )
         return self._stream_with_retry(
             payload,
             filtered,
@@ -84,6 +92,7 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
+            hide_reasoning_for_opencode=hide_reasoning_for_opencode,
         )
 
     async def compact_responses(
@@ -317,6 +326,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
+        hide_reasoning_for_opencode: bool,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         settings = await get_settings_cache().get()
@@ -356,6 +366,7 @@ class ProxyService:
                         api_key=api_key,
                         settlement=settlement,
                         suppress_text_done_events=suppress_text_done_events,
+                        hide_reasoning_for_opencode=hide_reasoning_for_opencode,
                     ):
                         yield line
                     settled = await self._settle_stream_api_key_usage(
@@ -386,6 +397,7 @@ class ProxyService:
                             api_key=api_key,
                             settlement=settlement,
                             suppress_text_done_events=suppress_text_done_events,
+                            hide_reasoning_for_opencode=hide_reasoning_for_opencode,
                         ):
                             yield line
                         settled = await self._settle_stream_api_key_usage(
@@ -473,6 +485,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
+        hide_reasoning_for_opencode: bool,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -502,6 +515,31 @@ class ProxyService:
             first_payload = parse_sse_data_json(first)
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
+            first_sanitized = False
+            if (
+                hide_reasoning_for_opencode
+                and not _is_lifecycle_stream_event(event_type)
+                and _is_reasoning_stream_event(event_type, first_payload)
+            ):
+                logger.warning(
+                    "Sanitized reasoning stream event account_id=%s request_id=%s model=%s event_type=%s",
+                    account_id_value,
+                    request_id,
+                    payload.model,
+                    event_type,
+                )
+                first_sanitized = True
+            text_delta = _extract_text_delta(event_type, first_payload)
+            if _is_internal_tool_trace_text(text_delta):
+                logger.warning(
+                    "Sanitized tool-trace text delta account_id=%s request_id=%s model=%s sample=%s",
+                    account_id_value,
+                    request_id,
+                    payload.model,
+                    _truncate_message(text_delta),
+                )
+                first_sanitized = True
+
             if event and event.type in ("response.failed", "error"):
                 if event.type == "response.failed":
                     response = event.response
@@ -526,7 +564,7 @@ class ProxyService:
 
             if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
                 saw_text_delta = True
-            if not _should_suppress_text_done_event(
+            if not first_sanitized and not _should_suppress_text_done_event(
                 event_type=event_type,
                 payload=first_payload,
                 suppress_text_done_events=suppress_text_done_events,
@@ -538,6 +576,29 @@ class ProxyService:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
+                if (
+                    hide_reasoning_for_opencode
+                    and not _is_lifecycle_stream_event(event_type)
+                    and _is_reasoning_stream_event(event_type, event_payload)
+                ):
+                    logger.warning(
+                        "Sanitized reasoning stream event account_id=%s request_id=%s model=%s event_type=%s",
+                        account_id_value,
+                        request_id,
+                        payload.model,
+                        event_type,
+                    )
+                    continue
+                text_delta = _extract_text_delta(event_type, event_payload)
+                if _is_internal_tool_trace_text(text_delta):
+                    logger.warning(
+                        "Sanitized tool-trace text delta account_id=%s request_id=%s model=%s sample=%s",
+                        account_id_value,
+                        request_id,
+                        payload.model,
+                        _truncate_message(text_delta),
+                    )
+                    continue
                 if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _should_suppress_text_done_event(
@@ -720,6 +781,76 @@ def _should_suppress_text_done_event(
     if event_type == "response.content_part.done":
         return _is_text_content_part(payload)
     return False
+
+
+def _extract_text_delta(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
+    if payload is None or event_type not in _TEXT_DELTA_EVENT_TYPES:
+        return None
+    delta = payload.get("delta")
+    return delta if isinstance(delta, str) else None
+
+
+def _should_hide_reasoning_for_stream(*, headers: Mapping[str, str], mode: str) -> bool:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in _OPENCODE_REASONING_FILTER_MODES:
+        normalized_mode = "auto"
+    if normalized_mode == "on":
+        return True
+    if normalized_mode == "off":
+        return False
+    return _is_opencode_request(headers)
+
+
+def _is_opencode_request(headers: Mapping[str, str]) -> bool:
+    for key, value in headers.items():
+        key_l = key.lower()
+        if key_l not in ("user-agent", "x-openai-client-user-agent"):
+            continue
+        if "opencode" in value.lower():
+            return True
+    return False
+
+
+def _is_reasoning_stream_event(event_type: str | None, payload: dict[str, JsonValue] | None) -> bool:
+    del payload
+    if isinstance(event_type, str):
+        lowered = event_type.lower()
+        if any(marker in lowered for marker in _REASONING_EVENT_MARKERS):
+            return True
+    return False
+
+
+def _is_lifecycle_stream_event(event_type: str | None) -> bool:
+    return event_type in _LIFECYCLE_STREAM_EVENT_TYPES
+
+
+def _is_internal_tool_trace_text(text: str | None) -> bool:
+    if not text:
+        return False
+    normalized = text.lstrip().lower()
+    markers = (
+        "to=functions.",
+        "to=multi_tool_use.",
+        "to=functions_",
+        "*** begin patch",
+        "*** add file:",
+        "*** update file:",
+        "*** delete file:",
+        '"tool_uses"',
+        "tool_uses",
+        '"recipient_name"',
+        "recipient_name",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _truncate_message(value: str | None, *, max_len: int = 220) -> str:
+    if not value:
+        return ""
+    stripped = value.strip()
+    if len(stripped) <= max_len:
+        return stripped
+    return stripped[: max_len - 3] + "..."
 
 
 def _is_text_content_part(payload: dict[str, JsonValue] | None) -> bool:

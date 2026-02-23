@@ -348,6 +348,92 @@ async def test_backend_responses_stream_preserves_done_text_events(async_client,
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_stream_drops_reasoning_for_opencode(async_client, monkeypatch):
+    email = "reasoning-opencode@example.com"
+    raw_account_id = "acc_reasoning_opencode"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.reasoning.delta","delta":"hidden"}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_reasoning_1","summary":"auto"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"User-Agent": "OpenCode/1.0"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event_types: list[str] = []
+    for line in lines:
+        if not line.startswith("data: "):
+            continue
+        raw_payload = line[6:]
+        if raw_payload == "[DONE]":
+            continue
+        data = json.loads(raw_payload)
+        event_type = data.get("type")
+        if isinstance(event_type, str):
+            event_types.append(event_type)
+
+    assert "response.output_text.delta" in event_types
+    assert "response.completed" in event_types
+    assert "response.reasoning.delta" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_stream_preserves_reasoning_for_non_opencode(async_client, monkeypatch):
+    email = "reasoning-non-opencode@example.com"
+    raw_account_id = "acc_reasoning_non_opencode"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.reasoning.delta","delta":"visible"}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_reasoning_2"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"User-Agent": "Mozilla/5.0"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event_types: list[str] = []
+    for line in lines:
+        if not line.startswith("data: "):
+            continue
+        raw_payload = line[6:]
+        if raw_payload == "[DONE]":
+            continue
+        data = json.loads(raw_payload)
+        event_type = data.get("type")
+        if isinstance(event_type, str):
+            event_types.append(event_type)
+
+    assert "response.reasoning.delta" in event_types
+    assert "response.output_text.delta" in event_types
+    assert "response.completed" in event_types
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_sanitizes_interleaved_reasoning_fields(async_client, monkeypatch):
     email = "reasoning-sanitize@example.com"
     raw_account_id = "acc_reasoning_sanitize"

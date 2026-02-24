@@ -389,10 +389,9 @@ def _apply_claude_prompt_cache_policy(
     if not normalized_model.startswith("claude-"):
         return responses_payload, cache_resolution
 
-    # Preserve stable caller-provided keys. Keep anchor-derived keys in the
-    # shared Claude lane because some clients send only per-turn user text and
-    # rely on a conversation-wide cache key for stable system-prefix reuse.
-    if cache_resolution.source in {"explicit", "metadata", "cache_control"} and responses_payload.prompt_cache_key:
+    # Preserve only explicit caller-provided keys. All other sources are
+    # normalized into the shared Claude lane to keep cache routing stable.
+    if cache_resolution.source == "explicit" and responses_payload.prompt_cache_key:
         return responses_payload, cache_resolution
 
     shared_key = _build_claude_shared_prompt_cache_key(payload, api_key)

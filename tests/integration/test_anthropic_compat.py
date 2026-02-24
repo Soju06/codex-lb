@@ -200,7 +200,7 @@ async def test_anthropic_messages_forces_claude_model_and_reasoning_effort(async
     assert seen["model"] == "gpt-5.3-codex"
     assert seen["reasoning_effort"] == "xhigh"
     assert isinstance(seen["prompt_cache_key"], str)
-    assert seen["prompt_cache_key"].startswith("anthropic-cache:")
+    assert seen["prompt_cache_key"].startswith("claude-shared:")
     assert seen["temperature"] is None
     assert seen["top_p"] is None
     assert seen["top_k"] is None

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import require_admin_principal, set_dashboard_error_format, validate_dashboard_session
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import SettingsContext, get_settings_context
@@ -12,7 +12,11 @@ from app.modules.settings.service import DashboardSettingsUpdateData
 router = APIRouter(
     prefix="/api/settings",
     tags=["dashboard"],
-    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+    dependencies=[
+        Depends(validate_dashboard_session),
+        Depends(require_admin_principal),
+        Depends(set_dashboard_error_format),
+    ],
 )
 
 

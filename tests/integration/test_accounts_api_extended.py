@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
+from app.core.clients.oauth import OAuthTokens
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -337,6 +338,68 @@ async def test_accounts_list_includes_per_account_reset_times(async_client, db_s
     assert accounts["acc_reset_b"]["windowMinutesPrimary"] == 300
     assert accounts["acc_reset_a"]["windowMinutesSecondary"] == 10080
     assert accounts["acc_reset_b"]["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_import_credentials_batch_success(async_client, monkeypatch):
+    async def _fake_authorize(
+        self,
+        email: str,
+        password: str,
+        totp_secret: str,
+    ) -> OAuthTokens:
+        assert password
+        assert totp_secret
+        payload = {
+            "email": email,
+            "chatgpt_account_id": f"acc_{email.split('@', 1)[0]}",
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token=f"access-{email}",
+            refresh_token=f"refresh-{email}",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(
+        "app.modules.accounts.credential_automator.CredentialAuthAutomator.authorize",
+        _fake_authorize,
+    )
+
+    response = await async_client.post(
+        "/api/accounts/import-credentials",
+        json={
+            "credentialsText": (
+                "alpha@example.com:passA:JBSWY3DPEHPK3PXP\n"
+                "beta@example.com:passB:JBSWY3DPEHPK3PXP"
+            ),
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert payload["imported"] == 2
+    assert payload["failed"] == 0
+    assert len(payload["results"]) == 2
+    assert all(item["status"] == "imported" for item in payload["results"])
+    assert all(item["accountId"] for item in payload["results"])
+
+    accounts_response = await async_client.get("/api/accounts")
+    assert accounts_response.status_code == 200
+    emails = {item["email"] for item in accounts_response.json()["accounts"]}
+    assert "alpha@example.com" in emails
+    assert "beta@example.com" in emails
+
+
+@pytest.mark.asyncio
+async def test_import_credentials_invalid_format_returns_400(async_client):
+    response = await async_client.post(
+        "/api/accounts/import-credentials",
+        json={"credentialsText": "bad-line-without-delimiters"},
+    )
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_credentials_format"
 
 
 @pytest.mark.asyncio

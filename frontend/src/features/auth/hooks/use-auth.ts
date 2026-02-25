@@ -7,18 +7,19 @@ import {
   logout as logoutRequest,
   verifyTotp as verifyTotpRequest,
 } from "@/features/auth/api";
-import type { AuthSession } from "@/features/auth/schemas";
+import type { AuthSession, AuthUser } from "@/features/auth/schemas";
 
 type AuthState = {
   passwordRequired: boolean;
   authenticated: boolean;
   totpRequiredOnLogin: boolean;
   totpConfigured: boolean;
+  user: AuthUser | null;
   loading: boolean;
   initialized: boolean;
   error: string | null;
   refreshSession: () => Promise<AuthSession>;
-  login: (password: string) => Promise<AuthSession>;
+  login: (username: string, password: string) => Promise<AuthSession>;
   logout: () => Promise<void>;
   verifyTotp: (code: string) => Promise<AuthSession>;
   clearError: () => void;
@@ -30,6 +31,7 @@ function applySession(set: (next: Partial<AuthState>) => void, session: AuthSess
     authenticated: session.authenticated,
     totpRequiredOnLogin: session.totpRequiredOnLogin,
     totpConfigured: session.totpConfigured,
+    user: session.user ?? null,
     initialized: true,
     error: null,
   });
@@ -41,6 +43,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   authenticated: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
+  user: null,
   loading: false,
   initialized: false,
   error: null,
@@ -58,10 +61,10 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ loading: false, initialized: true });
     }
   },
-  login: async (password) => {
+  login: async (username, password) => {
     set({ loading: true, error: null });
     try {
-      const session = await loginPassword({ password });
+      const session = await loginPassword({ username, password });
       return applySession(set, session);
     } catch (error) {
       set({
@@ -79,6 +82,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({
         authenticated: false,
         totpRequiredOnLogin: false,
+        user: null,
       });
       await useAuthStore.getState().refreshSession();
     } finally {
@@ -107,6 +111,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 setUnauthorizedHandler(() => {
   useAuthStore.setState({
     authenticated: false,
+    user: null,
     initialized: true,
     error: null,
   });

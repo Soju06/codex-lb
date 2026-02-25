@@ -13,7 +13,7 @@ describe("LoginForm", () => {
     });
   });
 
-  it("renders and submits password", async () => {
+  it("renders and submits username/password", async () => {
     const user = userEvent.setup();
     const clearError = vi.fn();
     const login = vi.fn().mockResolvedValue(undefined);
@@ -27,11 +27,13 @@ describe("LoginForm", () => {
 
     render(<LoginForm />);
 
+    await user.clear(screen.getByLabelText("Username"));
+    await user.type(screen.getByLabelText("Username"), "admin");
     await user.type(screen.getByLabelText("Password"), "secret-pass");
     await user.click(screen.getByRole("button", { name: "Sign In" }));
 
     expect(clearError).toHaveBeenCalledTimes(1);
-    expect(login).toHaveBeenCalledWith("secret-pass");
+    expect(login).toHaveBeenCalledWith("admin", "secret-pass");
   });
 
   it("shows error message when present", () => {
@@ -51,6 +53,7 @@ describe("LoginForm", () => {
     });
 
     render(<LoginForm />);
+    expect(screen.getByLabelText("Username")).toBeDisabled();
     expect(screen.getByLabelText("Password")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Sign In" })).toBeDisabled();
   });

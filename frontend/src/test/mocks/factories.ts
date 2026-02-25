@@ -32,6 +32,8 @@ import {
   ApiKeyCreateResponseSchema,
 } from "@/features/api-keys/schemas";
 import type { ApiKey, ApiKeyCreateResponse } from "@/features/api-keys/schemas";
+import { DashboardUserSchema } from "@/features/users/schemas";
+import type { DashboardUser } from "@/features/users/schemas";
 import { z } from "zod";
 
 // Backward-compatible type aliases
@@ -50,6 +52,7 @@ export type {
   OauthStatusResponse,
   ApiKey,
   ApiKeyCreateResponse,
+  DashboardUser,
 };
 
 const BASE_TIME = new Date("2026-01-01T12:00:00Z");
@@ -94,6 +97,31 @@ export function createDefaultAccounts(): AccountSummary[] {
         primaryRemainingPercent: 45,
         secondaryRemainingPercent: 12,
       },
+    }),
+  ];
+}
+
+export function createDashboardUser(overrides: Partial<DashboardUser> = {}): DashboardUser {
+  return DashboardUserSchema.parse({
+    id: "dashboard-user-admin-default",
+    username: "admin",
+    role: "admin",
+    isActive: true,
+    createdAt: offsetIso(-24 * 60),
+    updatedAt: offsetIso(-12 * 60),
+    ...overrides,
+  });
+}
+
+export function createDefaultDashboardUsers(): DashboardUser[] {
+  return [
+    createDashboardUser(),
+    createDashboardUser({
+      id: "dashboard-user-1",
+      username: "alice",
+      role: "user",
+      createdAt: offsetIso(-20 * 60),
+      updatedAt: offsetIso(-2 * 60),
     }),
   ];
 }
@@ -249,6 +277,11 @@ export function createDashboardAuthSession(
     passwordRequired: true,
     totpRequiredOnLogin: false,
     totpConfigured: true,
+    user: {
+      id: "dashboard-user-admin-default",
+      username: "admin",
+      role: "admin",
+    },
     ...overrides,
   });
 }
@@ -303,6 +336,7 @@ export function createOauthCompleteResponse(
 export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
   return ApiKeySchema.parse({
     id: "key_1",
+    ownerUserId: "dashboard-user-admin-default",
     name: "Default key",
     keyPrefix: "sk-test",
     allowedModels: ["gpt-5.1"],

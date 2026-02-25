@@ -5,6 +5,7 @@ import {
   deleteAccount,
   getAccountTrends,
   importAccount,
+  importCredentials,
   listAccounts,
   pauseAccount,
   reactivateAccount,
@@ -31,6 +32,25 @@ export function useAccountMutations() {
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
+    },
+  });
+
+  const importCredentialsMutation = useMutation({
+    mutationFn: importCredentials,
+    onSuccess: (payload) => {
+      if (payload.failed === 0) {
+        toast.success(`Imported ${payload.imported} account${payload.imported === 1 ? "" : "s"}`);
+      } else if (payload.imported === 0) {
+        toast.error(`Failed to import ${payload.failed} account${payload.failed === 1 ? "" : "s"}`);
+      } else {
+        toast.warning(
+          `Imported ${payload.imported} account${payload.imported === 1 ? "" : "s"}, failed ${payload.failed}`,
+        );
+      }
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Credentials import failed");
     },
   });
 
@@ -67,7 +87,7 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  return { importMutation, importCredentialsMutation, pauseMutation, resumeMutation, deleteMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {
@@ -81,10 +101,10 @@ export function useAccountTrends(accountId: string | null) {
   });
 }
 
-export function useAccounts() {
+export function useAccounts(ownerUserId?: string) {
   const accountsQuery = useQuery({
-    queryKey: ["accounts", "list"],
-    queryFn: listAccounts,
+    queryKey: ["accounts", "list", ownerUserId ?? "all"],
+    queryFn: () => listAccounts(ownerUserId),
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

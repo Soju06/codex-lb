@@ -22,11 +22,11 @@ class DashboardService:
         self._repo = repo
         self._encryptor = TokenEncryptor()
 
-    async def get_overview(self) -> DashboardOverviewResponse:
+    async def get_overview(self, *, owner_user_id: str | None = None) -> DashboardOverviewResponse:
         now = utcnow()
-        accounts = await self._repo.list_accounts()
-        primary_usage = await self._repo.latest_usage_by_account("primary")
-        secondary_usage = await self._repo.latest_usage_by_account("secondary")
+        accounts = await self._repo.list_accounts(owner_user_id=owner_user_id)
+        primary_usage = await self._repo.latest_usage_by_account("primary", owner_user_id=owner_user_id)
+        secondary_usage = await self._repo.latest_usage_by_account("secondary", owner_user_id=owner_user_id)
 
         account_summaries = build_account_summaries(
             accounts=accounts,
@@ -47,7 +47,7 @@ class DashboardService:
 
         # Use bucket aggregation instead of loading all logs
         bucket_since = now - timedelta(minutes=secondary_minutes) if secondary_minutes else now - timedelta(days=7)
-        bucket_rows = await self._repo.aggregate_logs_by_bucket(bucket_since)
+        bucket_rows = await self._repo.aggregate_logs_by_bucket(bucket_since, owner_user_id=owner_user_id)
         trends, bucket_metrics, bucket_cost = build_trends_from_buckets(bucket_rows, bucket_since)
 
         summary = build_usage_summary_response(

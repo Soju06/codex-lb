@@ -88,6 +88,7 @@ def _account_to_summary(
     )
     return AccountSummary(
         account_id=account.id,
+        owner_user_id=account.owner_user_id,
         email=account.email,
         display_name=account.email,
         plan_type=plan_type,

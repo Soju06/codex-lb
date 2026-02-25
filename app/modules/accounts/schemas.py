@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 from pydantic import Field
 
@@ -36,6 +36,7 @@ class AccountAuthStatus(DashboardModel):
 
 class AccountSummary(DashboardModel):
     account_id: str
+    owner_user_id: str | None = None
     email: str
     display_name: str
     plan_type: str
@@ -63,6 +64,25 @@ class AccountImportResponse(DashboardModel):
     email: str
     plan_type: str
     status: str
+
+
+class CredentialsImportRequest(DashboardModel):
+    credentials_text: str
+
+
+class CredentialImportResult(DashboardModel):
+    line: int
+    email: str
+    status: Literal["imported", "failed"]
+    account_id: str | None = None
+    error: str | None = None
+
+
+class CredentialsImportResponse(DashboardModel):
+    total: int
+    imported: int
+    failed: int
+    results: list[CredentialImportResult] = Field(default_factory=list)
 
 
 class AccountPauseResponse(DashboardModel):

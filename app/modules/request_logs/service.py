@@ -57,6 +57,7 @@ class RequestLogsService:
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         status: list[str] | None = None,
+        owner_user_id: str | None = None,
     ) -> RequestLogsPage:
         status_filter = _map_status_filter(status)
         normalized_model_options = (
@@ -76,6 +77,7 @@ class RequestLogsService:
             include_error_other=status_filter.include_error_other,
             error_codes_in=status_filter.error_codes_in,
             error_codes_excluding=status_filter.error_codes_excluding,
+            owner_user_id=owner_user_id,
         )
         requests = [to_request_log_entry(log) for log in logs]
         return RequestLogsPage(
@@ -92,6 +94,7 @@ class RequestLogsService:
         model_options: list[RequestLogModelOption] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        owner_user_id: str | None = None,
     ) -> RequestLogFilterOptions:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
@@ -103,6 +106,7 @@ class RequestLogsService:
             model_options=normalized_model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            owner_user_id=owner_user_id,
         )
         return RequestLogFilterOptions(
             account_ids=option_account_ids,

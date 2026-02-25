@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, Response
+from fastapi import APIRouter, Body, Depends, Query, Response
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    DashboardPrincipal,
+    get_dashboard_principal,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.schemas import (
@@ -30,6 +35,7 @@ router = APIRouter(
 def _to_response(row: ApiKeyData) -> ApiKeyResponse:
     return ApiKeyResponse(
         id=row.id,
+        owner_user_id=row.owner_user_id,
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=row.allowed_models,
@@ -85,13 +91,16 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
 @router.post("/", response_model=ApiKeyCreateResponse)
 async def create_api_key(
     payload: ApiKeyCreateRequest = Body(...),
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse:
     limit_inputs = _build_limit_inputs(payload)
+    target_owner_user_id = payload.owner_user_id if (principal.is_admin and payload.owner_user_id) else principal.user_id
 
     try:
         created = await context.service.create_key(
             ApiKeyCreateData(
+                owner_user_id=target_owner_user_id,
                 name=payload.name,
                 allowed_models=payload.allowed_models,
                 expires_at=payload.expires_at,
@@ -109,9 +118,12 @@ async def create_api_key(
 
 @router.get("/", response_model=list[ApiKeyResponse])
 async def list_api_keys(
+    owner_user_id: str | None = Query(default=None, alias="ownerUserId"),
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> list[ApiKeyResponse]:
-    rows = await context.service.list_keys()
+    scoped_owner_user_id = owner_user_id if principal.is_admin else principal.user_id
+    rows = await context.service.list_keys(owner_user_id=scoped_owner_user_id)
     return [_to_response(row) for row in rows]
 
 
@@ -119,6 +131,7 @@ async def list_api_keys(
 async def update_api_key(
     key_id: str,
     payload: ApiKeyUpdateRequest = Body(...),
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyResponse:
     fields = payload.model_fields_set
@@ -140,7 +153,11 @@ async def update_api_key(
         reset_usage=bool(payload.reset_usage),
     )
     try:
-        row = await context.service.update_key(key_id, update)
+        row = await context.service.update_key(
+            key_id,
+            update,
+            owner_scope_user_id=(None if principal.is_admin else principal.user_id),
+        )
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
     except ValueError as exc:
@@ -151,10 +168,11 @@ async def update_api_key(
 @router.delete("/{key_id}")
 async def delete_api_key(
     key_id: str,
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> Response:
     try:
-        await context.service.delete_key(key_id)
+        await context.service.delete_key(key_id, owner_scope_user_id=(None if principal.is_admin else principal.user_id))
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
     return Response(status_code=204)
@@ -163,10 +181,14 @@ async def delete_api_key(
 @router.post("/{key_id}/regenerate", response_model=ApiKeyCreateResponse)
 async def regenerate_api_key(
     key_id: str,
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse:
     try:
-        row = await context.service.regenerate_key(key_id)
+        row = await context.service.regenerate_key(
+            key_id,
+            owner_scope_user_id=(None if principal.is_admin else principal.user_id),
+        )
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
     resp = _to_response(row)

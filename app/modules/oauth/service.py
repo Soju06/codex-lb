@@ -10,13 +10,6 @@ from typing import Awaitable, Callable
 
 from aiohttp import web
 
-from app.core.auth import (
-    DEFAULT_EMAIL,
-    DEFAULT_PLAN,
-    OpenAIAuthClaims,
-    extract_id_token_claims,
-    generate_unique_account_id,
-)
 from app.core.clients.oauth import (
     OAuthError,
     OAuthTokens,
@@ -28,10 +21,9 @@ from app.core.clients.oauth import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
+from app.modules.accounts.token_factory import PersistableTokenPayload, account_from_token_payload
 from app.modules.oauth.schemas import (
     OauthCompleteRequest,
     OauthCompleteResponse,
@@ -121,9 +113,11 @@ class OauthService:
     def __init__(
         self,
         accounts_repo: AccountsRepository,
+        owner_user_id: str,
         repo_factory: Callable[[], AbstractAsyncContextManager[AccountsRepository]] | None = None,
     ) -> None:
         self._accounts_repo = accounts_repo
+        self._owner_user_id = owner_user_id
         self._encryptor = TokenEncryptor()
         self._store = _OAUTH_STORE
         self._repo_factory = repo_factory
@@ -131,7 +125,7 @@ class OauthService:
     async def start_oauth(self, request: OauthStartRequest) -> OauthStartResponse:
         force_method = (request.force_method or "").lower()
         if not force_method:
-            accounts = await self._accounts_repo.list_accounts()
+            accounts = await self._accounts_repo.list_accounts(owner_user_id=self._owner_user_id)
             if accounts:
                 async with self._store.lock:
                     await self._store._cleanup_locked()
@@ -297,33 +291,20 @@ class OauthService:
                     self._store.state.poll_task = None
 
     async def _persist_tokens(self, tokens: OAuthTokens) -> None:
-        claims = extract_id_token_claims(tokens.id_token)
-        auth_claims = claims.auth or OpenAIAuthClaims()
-        raw_account_id = auth_claims.chatgpt_account_id or claims.chatgpt_account_id
-        email = claims.email or DEFAULT_EMAIL
-        account_id = generate_unique_account_id(raw_account_id, email)
-        plan_type = coerce_account_plan_type(
-            auth_claims.chatgpt_plan_type or claims.chatgpt_plan_type,
-            DEFAULT_PLAN,
-        )
-
-        account = Account(
-            id=account_id,
-            chatgpt_account_id=raw_account_id,
-            email=email,
-            plan_type=plan_type,
-            access_token_encrypted=self._encryptor.encrypt(tokens.access_token),
-            refresh_token_encrypted=self._encryptor.encrypt(tokens.refresh_token),
-            id_token_encrypted=self._encryptor.encrypt(tokens.id_token),
-            last_refresh=utcnow(),
-            status=AccountStatus.ACTIVE,
-            deactivation_reason=None,
+        account = account_from_token_payload(
+            PersistableTokenPayload(
+                access_token=tokens.access_token,
+                refresh_token=tokens.refresh_token,
+                id_token=tokens.id_token,
+                last_refresh=utcnow(),
+            ),
+            encryptor=self._encryptor,
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                await repo.upsert(account)
+                await repo.upsert(account, owner_user_id=self._owner_user_id)
         else:
-            await self._accounts_repo.upsert(account)
+            await self._accounts_repo.upsert(account, owner_user_id=self._owner_user_id)
 
     async def _set_success(self) -> None:
         async with self._store.lock:

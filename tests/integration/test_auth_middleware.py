@@ -1,20 +1,29 @@
 from __future__ import annotations
 
-import logging
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKeyLimit, DashboardSettings, LimitType, LimitWindow
+from app.db.models import (
+    Account,
+    AccountStatus,
+    ApiKeyLimit,
+    DashboardSettings,
+    DashboardUser,
+    LimitType,
+    LimitWindow,
+)
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
+from tests.support.auth import BOOTSTRAP_ADMIN_PASSWORD
 
 pytestmark = pytest.mark.integration
 
@@ -57,47 +66,62 @@ async def _set_migration_inconsistent_totp_only_mode() -> None:
     await get_settings_cache().invalidate()
 
 
+async def _login_admin(async_client) -> None:
+    response = await async_client.post(
+        "/api/dashboard-auth/password/login",
+        json={"username": "admin", "password": BOOTSTRAP_ADMIN_PASSWORD},
+    )
+    assert response.status_code == 200
+
+
+async def _get_admin_user() -> dict[str, str]:
+    async with SessionLocal() as session:
+        result = await session.execute(select(DashboardUser).where(DashboardUser.username == "admin"))
+        user = result.scalar_one_or_none()
+    assert user is not None
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role.value if hasattr(user.role, "value") else str(user.role),
+    }
+
+
 @pytest.mark.asyncio
 async def test_session_branch_allows_without_password_and_blocks_without_session(async_client):
     public_mode = await async_client.get("/api/settings")
     assert public_mode.status_code == 200
-
-    setup = await async_client.post(
-        "/api/dashboard-auth/password/setup",
-        json={"password": "password123"},
-    )
-    assert setup.status_code == 200
 
     await async_client.post("/api/dashboard-auth/logout", json={})
     blocked = await async_client.get("/api/settings")
     assert blocked.status_code == 401
     assert blocked.json()["error"]["code"] == "authentication_required"
 
-    login = await async_client.post(
-        "/api/dashboard-auth/password/login",
-        json={"password": "password123"},
-    )
-    assert login.status_code == 200
+    await _login_admin(async_client)
     allowed = await async_client.get("/api/settings")
     assert allowed.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_totp_only_mode_requires_session_even_when_password_hash_is_null(async_client, caplog):
+async def test_totp_only_mode_requires_session_even_when_password_hash_is_null(async_client):
     await _set_migration_inconsistent_totp_only_mode()
 
-    caplog.set_level(logging.WARNING, logger="app.core.auth.dependencies")
     blocked = await async_client.get("/api/settings")
     assert blocked.status_code == 401
-    assert blocked.json()["error"]["code"] == "authentication_required"
-    assert any("dashboard_auth_migration_inconsistency" in record.getMessage() for record in caplog.records)
+    assert blocked.json()["error"]["code"] == "totp_required"
 
 
 @pytest.mark.asyncio
 async def test_totp_only_mode_accepts_totp_verified_session(async_client):
     await _set_migration_inconsistent_totp_only_mode()
 
-    session_id = get_dashboard_session_store().create(password_verified=False, totp_verified=True)
+    user = await _get_admin_user()
+    session_id = get_dashboard_session_store().create(
+        user_id=user["id"],
+        username=user["username"],
+        role=user["role"],
+        password_verified=True,
+        totp_verified=True,
+    )
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
     allowed = await async_client.get("/api/settings")
@@ -108,7 +132,14 @@ async def test_totp_only_mode_accepts_totp_verified_session(async_client):
 async def test_totp_only_mode_rejects_missing_totp_verification(async_client):
     await _set_migration_inconsistent_totp_only_mode()
 
-    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
+    user = await _get_admin_user()
+    session_id = get_dashboard_session_store().create(
+        user_id=user["id"],
+        username=user["username"],
+        role=user["role"],
+        password_verified=True,
+        totp_verified=False,
+    )
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
     blocked = await async_client.get("/api/settings")
@@ -192,12 +223,6 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
 
 @pytest.mark.asyncio
 async def test_codex_usage_does_not_allow_dashboard_session_without_caller_identity(async_client):
-    setup = await async_client.post(
-        "/api/dashboard-auth/password/setup",
-        json={"password": "password123"},
-    )
-    assert setup.status_code == 200
-
     blocked = await async_client.get("/api/codex/usage")
     assert blocked.status_code == 401
     assert blocked.json()["error"]["code"] == "invalid_api_key"
@@ -205,12 +230,6 @@ async def test_codex_usage_does_not_allow_dashboard_session_without_caller_ident
 
 @pytest.mark.asyncio
 async def test_codex_usage_trailing_slash_uses_caller_identity_validation(async_client):
-    setup = await async_client.post(
-        "/api/dashboard-auth/password/setup",
-        json={"password": "password123"},
-    )
-    assert setup.status_code == 200
-
     await async_client.post("/api/dashboard-auth/logout", json={})
     blocked = await async_client.get("/api/codex/usage/")
     assert blocked.status_code == 401
@@ -219,12 +238,6 @@ async def test_codex_usage_trailing_slash_uses_caller_identity_validation(async_
 
 @pytest.mark.asyncio
 async def test_codex_usage_allows_registered_chatgpt_account_id_with_bearer(async_client, monkeypatch):
-    setup = await async_client.post(
-        "/api/dashboard-auth/password/setup",
-        json={"password": "password123"},
-    )
-    assert setup.status_code == 200
-
     raw_chatgpt_account_id = "workspace_shared"
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
@@ -257,12 +270,6 @@ async def test_codex_usage_allows_registered_chatgpt_account_id_with_bearer(asyn
 
 @pytest.mark.asyncio
 async def test_codex_usage_blocks_unregistered_chatgpt_account_id(async_client, monkeypatch):
-    setup = await async_client.post(
-        "/api/dashboard-auth/password/setup",
-        json={"password": "password123"},
-    )
-    assert setup.status_code == 200
-
     async def should_not_call_fetch_usage(**_: object) -> UsagePayload:
         raise AssertionError("fetch_usage should not be called for unknown chatgpt-account-id")
 

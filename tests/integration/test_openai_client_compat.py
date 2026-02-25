@@ -36,7 +36,7 @@ def _make_auth_json(account_id: str, email: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_openai_client_responses_create(app_instance, monkeypatch):
+async def test_openai_client_responses_create(app_instance, async_client, monkeypatch):
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
@@ -45,13 +45,12 @@ async def test_openai_client_responses_create(app_instance, monkeypatch):
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    transport = ASGITransport(app=app_instance)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as admin_client:
-        auth_json = _make_auth_json("acc_openai_resp", "openai-resp@example.com")
-        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
-        response = await admin_client.post("/api/accounts/import", files=files)
-        assert response.status_code == 200
+    auth_json = _make_auth_json("acc_openai_resp", "openai-resp@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
 
+    transport = ASGITransport(app=app_instance)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver/v1") as http_client:
         client = openai.AsyncOpenAI(api_key="test", base_url="http://testserver/v1", http_client=http_client)
         result = await client.responses.create(model="gpt-5.1", input="hi")
@@ -61,20 +60,19 @@ async def test_openai_client_responses_create(app_instance, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_openai_client_chat_completions_create(app_instance, monkeypatch):
+async def test_openai_client_chat_completions_create(app_instance, async_client, monkeypatch):
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield 'data: {"type":"response.completed","response":{"id":"resp_2"}}\n\n'
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    transport = ASGITransport(app=app_instance)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as admin_client:
-        auth_json = _make_auth_json("acc_openai_chat", "openai-chat@example.com")
-        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
-        response = await admin_client.post("/api/accounts/import", files=files)
-        assert response.status_code == 200
+    auth_json = _make_auth_json("acc_openai_chat", "openai-chat@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
 
+    transport = ASGITransport(app=app_instance)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver/v1") as http_client:
         client = openai.AsyncOpenAI(api_key="test", base_url="http://testserver/v1", http_client=http_client)
         result = await client.chat.completions.create(

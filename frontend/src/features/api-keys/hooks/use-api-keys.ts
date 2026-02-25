@@ -13,12 +13,12 @@ import type {
   ApiKeyUpdateRequest,
 } from "@/features/api-keys/schemas";
 
-export function useApiKeys() {
+export function useApiKeys(ownerUserId?: string) {
   const queryClient = useQueryClient();
 
   const apiKeysQuery = useQuery({
-    queryKey: ["api-keys", "list"],
-    queryFn: listApiKeys,
+    queryKey: ["api-keys", "list", ownerUserId ?? "all"],
+    queryFn: () => listApiKeys(ownerUserId),
   });
 
   const invalidate = () => {

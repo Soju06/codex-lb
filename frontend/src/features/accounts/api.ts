@@ -4,6 +4,7 @@ import {
   AccountActionResponseSchema,
   AccountImportResponseSchema,
   AccountsResponseSchema,
+  CredentialsImportResponseSchema,
   AccountTrendsResponseSchema,
   OauthCompleteRequestSchema,
   OauthCompleteResponseSchema,
@@ -15,8 +16,13 @@ import {
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
 
-export function listAccounts() {
-  return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
+export function listAccounts(ownerUserId?: string) {
+  const query = new URLSearchParams();
+  if (ownerUserId) {
+    query.set("ownerUserId", ownerUserId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return get(`${ACCOUNTS_BASE_PATH}${suffix}`, AccountsResponseSchema);
 }
 
 export function importAccount(file: File) {
@@ -24,6 +30,14 @@ export function importAccount(file: File) {
   formData.append("auth_json", file);
   return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
     body: formData,
+  });
+}
+
+export function importCredentials(credentialsText: string) {
+  return post(`${ACCOUNTS_BASE_PATH}/import-credentials`, CredentialsImportResponseSchema, {
+    body: {
+      credentialsText,
+    },
   });
 }
 

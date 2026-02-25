@@ -29,6 +29,7 @@ const EXPECTED_ENDPOINTS = [
   // accounts
   "GET /api/accounts",
   "POST /api/accounts/import",
+  "POST /api/accounts/import-credentials",
   "POST /api/accounts/:accountId/pause",
   "POST /api/accounts/:accountId/reactivate",
   "GET /api/accounts/:accountId/trends",
@@ -48,6 +49,11 @@ const EXPECTED_ENDPOINTS = [
   "POST /api/dashboard-auth/totp/verify",
   "POST /api/dashboard-auth/totp/disable",
   "POST /api/dashboard-auth/logout",
+  // users
+  "GET /api/users",
+  "POST /api/users",
+  "PATCH /api/users/:userId",
+  "DELETE /api/users/:userId",
   // settings
   "GET /api/settings",
   "PUT /api/settings",

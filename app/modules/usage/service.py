@@ -31,12 +31,12 @@ class UsageService:
         self._logs_repo = logs_repo
         self._accounts_repo = accounts_repo
 
-    async def get_usage_summary(self) -> UsageSummaryResponse:
+    async def get_usage_summary(self, *, owner_user_id: str | None = None) -> UsageSummaryResponse:
         now = utcnow()
-        accounts = await self._accounts_repo.list_accounts()
+        accounts = await self._accounts_repo.list_accounts(owner_user_id=owner_user_id)
 
-        primary_rows_raw = await self._latest_usage_rows("primary")
-        secondary_rows_raw = await self._latest_usage_rows("secondary")
+        primary_rows_raw = await self._latest_usage_rows("primary", owner_user_id=owner_user_id)
+        secondary_rows_raw = await self._latest_usage_rows("secondary", owner_user_id=owner_user_id)
         primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
             primary_rows_raw,
             secondary_rows_raw,
@@ -45,7 +45,10 @@ class UsageService:
         secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)
         logs_secondary = []
         if secondary_minutes:
-            logs_secondary = await self._logs_repo.list_since(now - timedelta(minutes=secondary_minutes))
+            logs_secondary = await self._logs_repo.list_since(
+                now - timedelta(minutes=secondary_minutes),
+                owner_user_id=owner_user_id,
+            )
         return build_usage_summary_response(
             accounts=accounts,
             primary_rows=primary_rows,
@@ -53,11 +56,14 @@ class UsageService:
             logs_secondary=logs_secondary,
         )
 
-    async def get_usage_history(self, hours: int) -> UsageHistoryResponse:
+    async def get_usage_history(self, hours: int, *, owner_user_id: str | None = None) -> UsageHistoryResponse:
         now = utcnow()
         since = now - timedelta(hours=hours)
-        accounts = await self._accounts_repo.list_accounts()
-        usage_rows = [row.to_window_row() for row in await self._usage_repo.aggregate_since(since, window="primary")]
+        accounts = await self._accounts_repo.list_accounts(owner_user_id=owner_user_id)
+        usage_rows = [
+            row.to_window_row()
+            for row in await self._usage_repo.aggregate_since(since, window="primary", owner_user_id=owner_user_id)
+        ]
 
         return build_usage_history_response(
             hours=hours,
@@ -66,13 +72,13 @@ class UsageService:
             window="primary",
         )
 
-    async def get_usage_window(self, window: str) -> UsageWindowResponse:
+    async def get_usage_window(self, window: str, *, owner_user_id: str | None = None) -> UsageWindowResponse:
         window_key = (window or "").lower()
         if window_key not in {"primary", "secondary"}:
             raise ValueError("window must be 'primary' or 'secondary'")
-        accounts = await self._accounts_repo.list_accounts()
-        primary_rows_raw = await self._latest_usage_rows("primary")
-        secondary_rows_raw = await self._latest_usage_rows("secondary")
+        accounts = await self._accounts_repo.list_accounts(owner_user_id=owner_user_id)
+        primary_rows_raw = await self._latest_usage_rows("primary", owner_user_id=owner_user_id)
+        secondary_rows_raw = await self._latest_usage_rows("secondary", owner_user_id=owner_user_id)
         primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
             primary_rows_raw,
             secondary_rows_raw,
@@ -86,8 +92,8 @@ class UsageService:
             accounts=accounts,
         )
 
-    async def _latest_usage_rows(self, window: str) -> list[UsageWindowRow]:
-        latest = await self._usage_repo.latest_by_account(window=window)
+    async def _latest_usage_rows(self, window: str, *, owner_user_id: str | None = None) -> list[UsageWindowRow]:
+        latest = await self._usage_repo.latest_by_account(window=window, owner_user_id=owner_user_id)
         return [
             UsageWindowRow(
                 account_id=entry.account_id,

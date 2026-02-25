@@ -55,6 +55,11 @@ class DashboardNotFoundError(AppError):
     code = "not_found"
 
 
+class DashboardForbiddenError(AppError):
+    status_code = 403
+    code = "forbidden"
+
+
 class DashboardConflictError(AppError):
     status_code = 409
     code = "conflict"

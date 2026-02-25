@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from app.core.auth.dependencies import (
+    require_codex_api_key,
     set_openai_error_format,
     validate_codex_usage_identity,
     validate_proxy_api_key,
@@ -53,7 +54,7 @@ from app.modules.proxy.schemas import (
 router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],
-    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+    dependencies=[Depends(set_openai_error_format)],
 )
 v1_router = APIRouter(
     prefix="/v1",
@@ -82,7 +83,7 @@ async def responses(
     request: Request,
     payload: ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData = Security(require_codex_api_key),
 ) -> Response:
     return await _stream_responses(request, payload, context, api_key)
 
@@ -121,7 +122,7 @@ async def v1_responses(
 
 @router.get("/models", response_model=ModelListResponse)
 async def models(
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData = Security(require_codex_api_key),
 ) -> Response:
     return await _build_models_response(api_key)
 
@@ -354,7 +355,7 @@ async def responses_compact(
     request: Request,
     payload: ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData = Security(require_codex_api_key),
 ) -> JSONResponse:
     return await _compact_responses(request, payload, context, api_key)
 

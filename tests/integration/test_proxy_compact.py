@@ -42,16 +42,20 @@ def _make_auth_json(account_id: str, email: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_no_accounts(async_client):
+async def test_proxy_compact_no_accounts(async_client, codex_auth_headers):
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers=codex_auth_headers,
+        json=payload,
+    )
     assert response.status_code == 503
     error = response.json()["error"]
     assert error["code"] == "no_accounts"
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_success(async_client, monkeypatch):
+async def test_proxy_compact_success(async_client, codex_auth_headers, monkeypatch):
     email = "compact@example.com"
     raw_account_id = "acc_compact"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -83,7 +87,11 @@ async def test_proxy_compact_success(async_client, monkeypatch):
         )
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers=codex_auth_headers,
+        json=payload,
+    )
     assert response.status_code == 200
     assert response.json()["output"] == []
     assert seen["access_token"] == "access-token"
@@ -97,7 +105,11 @@ async def test_proxy_compact_success(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(async_client, monkeypatch):
+async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
+    async_client,
+    codex_auth_headers,
+    monkeypatch,
+):
     email = "compact-weekly@example.com"
     raw_account_id = "acc_compact_weekly"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -135,7 +147,11 @@ async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
     await get_rate_limit_headers_cache().invalidate()
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers=codex_auth_headers,
+        json=payload,
+    )
     assert response.status_code == 200
     assert response.headers.get("x-codex-primary-used-percent") is None
     assert response.headers.get("x-codex-secondary-used-percent") == "80.0"
@@ -144,7 +160,7 @@ async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch):
+async def test_proxy_compact_usage_limit_marks_account(async_client, codex_auth_headers, monkeypatch):
     email = "limit@example.com"
     raw_account_id = "acc_limit"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -170,7 +186,11 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers=codex_auth_headers,
+        json=payload,
+    )
     assert response.status_code == 429
     error = response.json()["error"]
     assert error["type"] == "usage_limit_reached"

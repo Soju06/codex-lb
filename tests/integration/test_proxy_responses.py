@@ -45,14 +45,14 @@ def _extract_first_event(lines: list[str]) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_no_accounts(async_client):
+async def test_proxy_responses_no_accounts(async_client, codex_auth_headers):
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     request_id = "req_stream_123"
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers={"x-request-id": request_id},
+        headers={**codex_auth_headers, "x-request-id": request_id},
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -66,9 +66,9 @@ async def test_proxy_responses_no_accounts(async_client):
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_requires_instructions(async_client):
+async def test_proxy_responses_requires_instructions(async_client, codex_auth_headers):
     payload = {"model": "gpt-5.1", "input": []}
-    resp = await async_client.post("/backend-api/codex/responses", json=payload)
+    resp = await async_client.post("/backend-api/codex/responses", headers=codex_auth_headers, json=payload)
 
     assert resp.status_code == 400
 
@@ -175,7 +175,7 @@ async def test_v1_responses_non_streaming_failed_returns_error(async_client):
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
+async def test_proxy_responses_streams_upstream(async_client, codex_auth_headers, monkeypatch):
     email = "streamer@example.com"
     raw_account_id = "acc_live"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -202,7 +202,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers={"x-request-id": request_id},
+        headers={**codex_auth_headers, "x-request-id": request_id},
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -304,7 +304,7 @@ async def test_v1_responses_stream_keeps_non_text_content_part_done_events(async
 
 
 @pytest.mark.asyncio
-async def test_backend_responses_stream_preserves_done_text_events(async_client, monkeypatch):
+async def test_backend_responses_stream_preserves_done_text_events(async_client, codex_auth_headers, monkeypatch):
     email = "done-preserve@example.com"
     raw_account_id = "acc_done_preserve"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -325,7 +325,12 @@ async def test_backend_responses_stream_preserves_done_text_events(async_client,
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.2", "instructions": "hi", "input": [], "stream": True}
-    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers=codex_auth_headers,
+        json=payload,
+    ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
 
@@ -399,7 +404,7 @@ async def test_v1_responses_sanitizes_interleaved_reasoning_fields(async_client,
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_forces_stream(async_client, monkeypatch):
+async def test_proxy_responses_forces_stream(async_client, codex_auth_headers, monkeypatch):
     email = "stream-force@example.com"
     raw_account_id = "acc_stream_force"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -416,7 +421,12 @@ async def test_proxy_responses_forces_stream(async_client, monkeypatch):
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": False}
-    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers=codex_auth_headers,
+        json=payload,
+    ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
 
@@ -427,7 +437,7 @@ async def test_proxy_responses_forces_stream(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_type", ["web_search", "web_search_preview"])
-async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, tool_type):
+async def test_proxy_responses_accepts_builtin_tools(async_client, codex_auth_headers, monkeypatch, tool_type):
     email = "tools@example.com"
     raw_account_id = "acc_tools"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -453,6 +463,7 @@ async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, 
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
+        headers=codex_auth_headers,
         json=payload,
     ) as resp:
         assert resp.status_code == 200
@@ -492,7 +503,7 @@ async def test_v1_responses_streams_event_sequence(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_stream_large_event_line(async_client, monkeypatch):
+async def test_proxy_responses_stream_large_event_line(async_client, codex_auth_headers, monkeypatch):
     email = "stream-large@example.com"
     raw_account_id = "acc_stream_large"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -513,7 +524,7 @@ async def test_proxy_responses_stream_large_event_line(async_client, monkeypatch
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers={"x-request-id": request_id},
+        headers={**codex_auth_headers, "x-request-id": request_id},
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]

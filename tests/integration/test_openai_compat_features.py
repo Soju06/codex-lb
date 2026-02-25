@@ -244,7 +244,7 @@ async def test_v1_responses_allows_web_search(async_client, monkeypatch, tool_ty
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_type", ["web_search", "web_search_preview"])
-async def test_backend_responses_allows_web_search(async_client, monkeypatch, tool_type):
+async def test_backend_responses_allows_web_search(async_client, codex_auth_headers, monkeypatch, tool_type):
     await _import_account(async_client, "acc_backend_web_search", "backend-web-search@example.com")
 
     seen = {}
@@ -261,7 +261,7 @@ async def test_backend_responses_allows_web_search(async_client, monkeypatch, to
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "Search"}]}],
         "tools": [{"type": tool_type}],
     }
-    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    resp = await async_client.post("/backend-api/codex/responses", headers=codex_auth_headers, json=request_payload)
     assert resp.status_code == 200
     assert seen["payload"].tools == [{"type": "web_search"}]
 

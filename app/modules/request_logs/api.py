@@ -4,7 +4,12 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    DashboardPrincipal,
+    get_dashboard_principal,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
     RequestLogFilterOptionsResponse,
@@ -46,8 +51,10 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    owner_user_id: str | None = Query(default=None, alias="ownerUserId"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogsResponse:
     parsed_options: list[ServiceRequestLogModelOption] | None = None
@@ -65,6 +72,7 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
+        owner_user_id=(owner_user_id if principal.is_admin else principal.user_id),
     )
     return RequestLogsResponse(
         requests=page.requests,
@@ -80,8 +88,10 @@ async def list_request_log_filter_options(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    owner_user_id: str | None = Query(default=None, alias="ownerUserId"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogFilterOptionsResponse:
     _ = status  # Keep input backward compatible but do not self-filter status facet.
@@ -96,6 +106,7 @@ async def list_request_log_filter_options(
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
+        owner_user_id=(owner_user_id if principal.is_admin else principal.user_id),
     )
     return RequestLogFilterOptionsResponse(
         account_ids=options.account_ids,

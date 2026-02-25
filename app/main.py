@@ -15,7 +15,7 @@ from app.core.middleware import (
 )
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
-from app.db.session import close_db, init_db
+from app.db.session import close_db, get_background_session, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.dashboard import api as dashboard_api
@@ -27,6 +27,9 @@ from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.usage import api as usage_api
+from app.modules.users import api as users_api
+from app.modules.users.repository import UsersRepository
+from app.modules.users.service import UsersService
 
 
 @asynccontextmanager
@@ -34,6 +37,8 @@ async def lifespan(_: FastAPI):
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     await init_db()
+    async with get_background_session() as session:
+        await UsersService(UsersRepository(session)).ensure_default_admin()
     await init_http_client()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -74,6 +79,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)
     app.include_router(api_keys_api.router)
+    app.include_router(users_api.router)
     app.include_router(health_api.router)
 
     static_dir = Path(__file__).parent / "static"

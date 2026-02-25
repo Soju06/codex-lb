@@ -9,6 +9,11 @@ describe("AuthSessionSchema", () => {
       passwordRequired: true,
       totpRequiredOnLogin: false,
       totpConfigured: true,
+      user: {
+        id: "dashboard-user-admin-default",
+        username: "admin",
+        role: "admin",
+      },
     });
 
     expect(parsed).toEqual({
@@ -16,6 +21,11 @@ describe("AuthSessionSchema", () => {
       passwordRequired: true,
       totpRequiredOnLogin: false,
       totpConfigured: true,
+      user: {
+        id: "dashboard-user-admin-default",
+        username: "admin",
+        role: "admin",
+      },
     });
   });
 
@@ -31,9 +41,10 @@ describe("AuthSessionSchema", () => {
 });
 
 describe("LoginRequestSchema", () => {
-  it("accepts non-empty password", () => {
+  it("accepts non-empty username and password", () => {
     expect(
       LoginRequestSchema.safeParse({
+        username: "admin",
         password: "strong-password",
       }).success,
     ).toBe(true);
@@ -42,7 +53,17 @@ describe("LoginRequestSchema", () => {
   it("rejects empty password", () => {
     expect(
       LoginRequestSchema.safeParse({
+        username: "admin",
         password: "",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects empty username", () => {
+    expect(
+      LoginRequestSchema.safeParse({
+        username: "",
+        password: "strong-password",
       }).success,
     ).toBe(false);
   });

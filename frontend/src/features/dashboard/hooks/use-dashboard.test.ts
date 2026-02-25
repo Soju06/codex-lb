@@ -36,7 +36,7 @@ describe("useDashboard", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.accounts.length).toBeGreaterThan(0);
 
-    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "overview"] });
+    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "overview", "all"] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
     expect(refetchInterval).toBe(30_000);

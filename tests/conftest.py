@@ -10,6 +10,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
+from tests.support.auth import BOOTSTRAP_ADMIN_PASSWORD
+
 TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
 TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
 
@@ -17,10 +19,13 @@ os.environ["CODEX_LB_DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
 os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
+os.environ["CODEX_LB_BOOTSTRAP_ADMIN_PASSWORD"] = BOOTSTRAP_ADMIN_PASSWORD
 
 from app.db.models import Base  # noqa: E402
-from app.db.session import engine  # noqa: E402
+from app.db.session import SessionLocal, engine  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.modules.api_keys.repository import ApiKeysRepository  # noqa: E402
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -51,11 +56,36 @@ async def db_setup():
 
 
 @pytest_asyncio.fixture
-async def async_client(app_instance):
+async def async_client(app_instance, db_setup):
+    _ = db_setup
     async with app_instance.router.lifespan_context(app_instance):
         transport = ASGITransport(app=app_instance)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            login = await client.post(
+                "/api/dashboard-auth/password/login",
+                json={"username": "admin", "password": BOOTSTRAP_ADMIN_PASSWORD},
+            )
+            assert login.status_code == 200
             yield client
+
+
+@pytest_asyncio.fixture
+async def codex_api_key() -> str:
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name=f"test-codex-{uuid4().hex}",
+                allowed_models=None,
+                expires_at=None,
+            )
+        )
+    return created.key
+
+
+@pytest.fixture
+def codex_auth_headers(codex_api_key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {codex_api_key}"}
 
 
 @pytest.fixture(autouse=True)

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from sqlalchemy import or_, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, DashboardUser
 from app.modules.settings.repository import SettingsRepository
 
 _SETTINGS_ID = 1
@@ -47,6 +47,22 @@ class DashboardAuthRepository:
     async def get_password_hash(self) -> str | None:
         row = await self._settings_repository.get_or_create()
         return row.password_hash
+
+    async def get_user_by_id(self, user_id: str) -> DashboardUser | None:
+        return await self._session.get(DashboardUser, user_id)
+
+    async def get_user_by_username(self, username: str) -> DashboardUser | None:
+        result = await self._session.execute(select(DashboardUser).where(DashboardUser.username == username))
+        return result.scalar_one_or_none()
+
+    async def set_user_password_hash(self, user_id: str, password_hash: str) -> DashboardUser | None:
+        user = await self._session.get(DashboardUser, user_id)
+        if user is None:
+            return None
+        user.password_hash = password_hash
+        await self._session.commit()
+        await self._session.refresh(user)
+        return user
 
     async def clear_password_and_totp(self) -> DashboardSettings:
         row = await self._settings_repository.get_or_create()

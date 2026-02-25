@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
-from app.core.auth.dependencies import set_dashboard_error_format
+from app.core.auth.dependencies import DashboardPrincipal, set_dashboard_error_format
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
     DashboardAuthError,
@@ -26,7 +26,6 @@ from app.modules.dashboard_auth.schemas import (
 from app.modules.dashboard_auth.service import (
     DASHBOARD_SESSION_COOKIE,
     InvalidCredentialsError,
-    PasswordAlreadyConfiguredError,
     PasswordNotConfiguredError,
     PasswordSessionRequiredError,
     TotpAlreadyConfiguredError,
@@ -50,17 +49,25 @@ def _session_client_key(request: Request, *, prefix: str) -> str:
 
 
 async def _has_active_password_session(request: Request, context: DashboardAuthContext) -> bool:
-    settings = await context.repository.get_settings()
-    if settings.password_hash is None:
-        return False
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-    return get_dashboard_session_store().is_password_verified(session_id)
+    session = get_dashboard_session_store().get(session_id)
+    if session is None or not session.password_verified:
+        return False
+    user = await context.repository.get_user_by_id(session.user_id)
+    return bool(user is not None and user.is_active)
 
 
-async def _validate_password_management_session(request: Request) -> None:
+async def _validate_password_management_session(
+    request: Request,
+    context: DashboardAuthContext,
+) -> tuple[DashboardPrincipal, str]:
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     session_state = get_dashboard_session_store().get(session_id)
     if session_state is None or not session_state.password_verified:
+        raise DashboardAuthError("Authentication is required")
+
+    user = await context.repository.get_user_by_id(session_state.user_id)
+    if user is None or not user.is_active:
         raise DashboardAuthError("Authentication is required")
 
     settings = await get_settings_cache().get()
@@ -69,6 +76,8 @@ async def _validate_password_management_session(request: Request) -> None:
             "TOTP verification is required for dashboard access",
             code="totp_required",
         )
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    return DashboardPrincipal(user_id=user.id, username=user.username, role=role), session_id
 
 
 @router.get("/session", response_model=DashboardAuthSessionResponse)
@@ -86,20 +95,10 @@ async def setup_password(
     payload: PasswordSetupRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> DashboardAuthSessionResponse | JSONResponse:
-    password = payload.password.strip()
-    if len(password) < 8:
+    if len(payload.password.strip()) < 8:
         raise DashboardValidationError("Password must be at least 8 characters")
-    try:
-        await context.service.setup_password(password)
-    except PasswordAlreadyConfiguredError as exc:
-        raise DashboardConflictError(str(exc), code="password_already_configured") from exc
-
-    await get_settings_cache().invalidate()
-    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
-    response = await context.service.get_session_state(session_id)
-    json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
-    _set_session_cookie(json_response, session_id, request)
-    return json_response
+    _ = request, payload, context
+    raise DashboardConflictError("Password setup is no longer supported", code="password_already_configured")
 
 
 @router.post("/password/login", response_model=DashboardAuthSessionResponse)
@@ -119,7 +118,7 @@ async def login_password(
         )
 
     try:
-        await context.service.verify_password(payload.password)
+        user = await context.service.verify_password(payload.username, payload.password)
         limiter.reset(rate_key)
     except InvalidCredentialsError as exc:
         limiter.record_failure(rate_key)
@@ -127,7 +126,13 @@ async def login_password(
     except PasswordNotConfiguredError as exc:
         raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
 
-    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
+    session_id = get_dashboard_session_store().create(
+        user_id=user.id,
+        username=user.username,
+        role=user.role.value if hasattr(user.role, "value") else str(user.role),
+        password_verified=True,
+        totp_verified=False,
+    )
     response = await context.service.get_session_state(session_id)
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
     _set_session_cookie(json_response, session_id, request)
@@ -140,14 +145,14 @@ async def change_password(
     payload: PasswordChangeRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
-    await _validate_password_management_session(request)
+    principal, _ = await _validate_password_management_session(request, context)
 
     new_password = payload.new_password.strip()
     if len(new_password) < 8:
         raise DashboardValidationError("Password must be at least 8 characters")
 
     try:
-        await context.service.change_password(payload.current_password, new_password)
+        await context.service.change_password(principal.user_id, payload.current_password, new_password)
     except PasswordNotConfiguredError as exc:
         raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
     except InvalidCredentialsError as exc:
@@ -163,7 +168,7 @@ async def remove_password(
     payload: PasswordRemoveRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
-    await _validate_password_management_session(request)
+    await _validate_password_management_session(request, context)
 
     try:
         await context.service.remove_password(payload.password)

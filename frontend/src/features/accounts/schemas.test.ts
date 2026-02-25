@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AccountSummarySchema,
+  CredentialsImportResponseSchema,
   ImportStateSchema,
   OAuthStateSchema,
 } from "@/features/accounts/schemas";
@@ -96,5 +97,35 @@ describe("ImportStateSchema", () => {
         message: "Imported 1 account",
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("CredentialsImportResponseSchema", () => {
+  it("parses credentials import summary payload", () => {
+    const parsed = CredentialsImportResponseSchema.parse({
+      total: 2,
+      imported: 1,
+      failed: 1,
+      results: [
+        {
+          line: 1,
+          email: "alpha@example.com",
+          status: "imported",
+          accountId: "acc_alpha",
+          error: null,
+        },
+        {
+          line: 2,
+          email: "beta@example.com",
+          status: "failed",
+          accountId: null,
+          error: "invalid otp",
+        },
+      ],
+    });
+
+    expect(parsed.total).toBe(2);
+    expect(parsed.results[0]?.status).toBe("imported");
+    expect(parsed.results[1]?.status).toBe("failed");
   });
 });

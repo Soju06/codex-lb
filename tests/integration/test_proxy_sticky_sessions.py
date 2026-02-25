@@ -66,7 +66,7 @@ async def _set_routing_settings(
 
 
 @pytest.mark.asyncio
-async def test_proxy_sticky_prompt_cache_key_pins_account(async_client, monkeypatch):
+async def test_proxy_sticky_prompt_cache_key_pins_account(async_client, codex_auth_headers, monkeypatch):
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
     acc_a_id = await _import_account(async_client, "acc_a", "a@example.com")
     acc_b_id = await _import_account(async_client, "acc_b", "b@example.com")
@@ -107,7 +107,7 @@ async def test_proxy_sticky_prompt_cache_key_pins_account(async_client, monkeypa
         "prompt_cache_key": "thread_123",
     }
 
-    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    response = await async_client.post("/backend-api/codex/responses", headers=codex_auth_headers, json=payload)
     assert response.status_code == 200
 
     async with SessionLocal() as session:
@@ -127,15 +127,20 @@ async def test_proxy_sticky_prompt_cache_key_pins_account(async_client, monkeypa
             window_minutes=300,
         )
 
-    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    response = await async_client.post("/backend-api/codex/responses", headers=codex_auth_headers, json=payload)
     assert response.status_code == 200
 
     assert seen == ["acc_a", "acc_a"]
 
 
 @pytest.mark.asyncio
-async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monkeypatch):
+async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, codex_auth_headers, monkeypatch):
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    session_response = await async_client.get("/api/dashboard-auth/session")
+    assert session_response.status_code == 200
+    user = session_response.json().get("user")
+    assert isinstance(user, dict)
+
     encryptor = TokenEncryptor()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -151,6 +156,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
         last_refresh=now,
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
+        owner_user_id=user["id"],
     )
     acc_b = Account(
         id="acc_rl_b",
@@ -163,6 +169,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
         last_refresh=now,
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
+        owner_user_id=user["id"],
     )
 
     async with SessionLocal() as session:
@@ -206,7 +213,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
         "stream": True,
         "prompt_cache_key": "thread_rl",
     }
-    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    response = await async_client.post("/backend-api/codex/responses", headers=codex_auth_headers, json=payload)
     assert response.status_code == 200
 
     # First attempt is pinned acc_a, which rate limits; retry should switch to acc_b and update stickiness.
@@ -214,7 +221,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatch):
+async def test_proxy_compact_reallocates_sticky_mapping(async_client, codex_auth_headers, monkeypatch):
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
     acc_c1_id = await _import_account(async_client, "acc_c1", "c1@example.com")
     acc_c2_id = await _import_account(async_client, "acc_c2", "c2@example.com")
@@ -262,7 +269,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
         "stream": True,
         "prompt_cache_key": thread_key,
     }
-    response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
+    response = await async_client.post("/backend-api/codex/responses", headers=codex_auth_headers, json=stream_payload)
     assert response.status_code == 200
     assert stream_seen == ["acc_c1"]
 
@@ -289,10 +296,14 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
         "input": [],
         "prompt_cache_key": thread_key,  # extra field accepted by ResponsesCompactRequest (extra="allow")
     }
-    response = await async_client.post("/backend-api/codex/responses/compact", json=compact_payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers=codex_auth_headers,
+        json=compact_payload,
+    )
     assert response.status_code == 200
     assert compact_seen == ["acc_c2"]
 
-    response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
+    response = await async_client.post("/backend-api/codex/responses", headers=codex_auth_headers, json=stream_payload)
     assert response.status_code == 200
     assert stream_seen == ["acc_c1", "acc_c2"]

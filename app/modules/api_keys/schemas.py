@@ -25,6 +25,7 @@ class LimitRuleResponse(DashboardModel):
 
 
 class ApiKeyCreateRequest(DashboardModel):
+    owner_user_id: str | None = None
     name: str = Field(min_length=1, max_length=128)
     allowed_models: list[str] | None = None
     weekly_token_limit: int | None = Field(default=None, ge=1)
@@ -44,6 +45,7 @@ class ApiKeyUpdateRequest(DashboardModel):
 
 class ApiKeyResponse(DashboardModel):
     id: str
+    owner_user_id: str | None = None
     name: str
     key_prefix: str
     allowed_models: list[str] | None

@@ -25,6 +25,7 @@ export const LimitRuleCreateSchema = z.object({
 
 export const ApiKeySchema = z.object({
   id: z.string(),
+  ownerUserId: z.string().nullable().optional(),
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
@@ -36,6 +37,7 @@ export const ApiKeySchema = z.object({
 });
 
 export const ApiKeyCreateRequestSchema = z.object({
+  ownerUserId: z.string().optional(),
   name: z.string().min(1).max(128),
   allowedModels: z.array(z.string()).optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),

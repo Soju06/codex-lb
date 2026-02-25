@@ -1053,8 +1053,7 @@ async def test_compact_unexpected_exception_releases_reservation(async_client, m
 
 
 @pytest.mark.asyncio
-async def test_stream_without_api_key_auth_skips_settlement(async_client, monkeypatch):
-    """API key auth 비활성 시 정산 로직이 스킵되고 에러 없이 동작한다."""
+async def test_backend_codex_requires_api_key_even_when_api_key_auth_disabled(async_client):
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -1068,18 +1067,9 @@ async def test_stream_without_api_key_auth_skips_settlement(async_client, monkey
 
     await _import_account(async_client, "acc_no_auth", "no-auth@example.com")
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
-        usage = {"input_tokens": 10, "output_tokens": 5}
-        event = {"type": "response.completed", "response": {"id": "resp_no_auth", "usage": usage}}
-        yield f"data: {json.dumps(event)}\n\n"
-
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-
-    async with async_client.stream(
-        "POST",
+    response = await async_client.post(
         "/backend-api/codex/responses",
         json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": True},
-    ) as response:
-        assert response.status_code == 200
-        lines = [line async for line in response.aiter_lines() if line]
-        assert len(lines) >= 1  # stream completed without error
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"

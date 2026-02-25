@@ -17,14 +17,18 @@ class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_since(self, since: datetime) -> list[RequestLog]:
-        result = await self._session.execute(select(RequestLog).where(RequestLog.requested_at >= since))
+    async def list_since(self, since: datetime, *, owner_user_id: str | None = None) -> list[RequestLog]:
+        stmt = select(RequestLog).where(RequestLog.requested_at >= since)
+        if owner_user_id is not None:
+            stmt = stmt.join(Account, Account.id == RequestLog.account_id).where(Account.owner_user_id == owner_user_id)
+        result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
     async def aggregate_by_bucket(
         self,
         since: datetime,
         bucket_seconds: int = 21600,
+        owner_user_id: str | None = None,
     ) -> list[BucketModelAggregate]:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
@@ -51,6 +55,8 @@ class RequestLogsRepository:
             .group_by(bucket_col, RequestLog.model)
             .order_by(bucket_col)
         )
+        if owner_user_id is not None:
+            stmt = stmt.join(Account, Account.id == RequestLog.account_id).where(Account.owner_user_id == owner_user_id)
         result = await self._session.execute(stmt)
         return [
             BucketModelAggregate(
@@ -126,6 +132,7 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
+        owner_user_id: str | None = None,
     ) -> tuple[list[RequestLog], int]:
         conditions = self._build_filters(
             search=search,
@@ -139,6 +146,7 @@ class RequestLogsRepository:
             include_error_other=include_error_other,
             error_codes_in=error_codes_in,
             error_codes_excluding=error_codes_excluding,
+            owner_user_id=owner_user_id,
         )
 
         total_col = func.count().over().label("_total")
@@ -180,6 +188,7 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        owner_user_id: str | None = None,
     ) -> tuple[list[str], list[tuple[str, str | None]], list[tuple[str, str | None]]]:
         conditions = self._build_filters(
             since=since,
@@ -192,6 +201,7 @@ class RequestLogsRepository:
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
+            owner_user_id=owner_user_id,
         )
 
         account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
@@ -205,6 +215,9 @@ class RequestLogsRepository:
             .distinct()
             .order_by(RequestLog.status.asc(), RequestLog.error_code.asc())
         )
+        account_stmt = account_stmt.outerjoin(Account, Account.id == RequestLog.account_id)
+        model_stmt = model_stmt.outerjoin(Account, Account.id == RequestLog.account_id)
+        status_stmt = status_stmt.outerjoin(Account, Account.id == RequestLog.account_id)
         if conditions:
             clause = and_(*conditions)
             account_stmt = account_stmt.where(clause)
@@ -234,8 +247,11 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
+        owner_user_id: str | None = None,
     ) -> list:
         conditions = []
+        if owner_user_id is not None:
+            conditions.append(Account.owner_user_id == owner_user_id)
         if since is not None:
             conditions.append(RequestLog.requested_at >= since)
         if until is not None:

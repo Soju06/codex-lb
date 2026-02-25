@@ -12,8 +12,13 @@ import {
 const API_KEYS_BASE_PATH = "/api/api-keys";
 const MODELS_PATH = "/api/models";
 
-export function listApiKeys() {
-  return get(`${API_KEYS_BASE_PATH}/`, ApiKeyListSchema);
+export function listApiKeys(ownerUserId?: string) {
+  const query = new URLSearchParams();
+  if (ownerUserId) {
+    query.set("ownerUserId", ownerUserId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return get(`${API_KEYS_BASE_PATH}/${suffix}`, ApiKeyListSchema);
 }
 
 export function createApiKey(payload: unknown) {

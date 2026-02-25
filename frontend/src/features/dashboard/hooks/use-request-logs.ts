@@ -13,6 +13,7 @@ import { FilterStateSchema, type FilterState } from "@/features/dashboard/schema
 const DEFAULT_FILTER_STATE: FilterState = {
   search: "",
   timeframe: "all",
+  ownerUserId: undefined,
   accountIds: [],
   modelOptions: [],
   statuses: [],
@@ -32,6 +33,7 @@ function parseFilterState(params: URLSearchParams): FilterState {
   const candidate = {
     search: params.get("search") ?? "",
     timeframe: params.get("timeframe") ?? "all",
+    ownerUserId: params.get("ownerUserId") ?? undefined,
     accountIds: params.getAll("accountId"),
     modelOptions: params.getAll("modelOption"),
     statuses: params.getAll("status"),
@@ -52,6 +54,9 @@ function writeFilterState(state: FilterState): URLSearchParams {
   }
   if (state.timeframe !== "all") {
     params.set("timeframe", state.timeframe);
+  }
+  if (state.ownerUserId) {
+    params.set("ownerUserId", state.ownerUserId);
   }
   for (const value of state.accountIds) {
     params.append("accountId", value);
@@ -90,6 +95,7 @@ export function useRequestLogs() {
       search: filters.search || undefined,
       limit: filters.limit,
       offset: filters.offset,
+      ownerUserId: filters.ownerUserId,
       accountIds: filters.accountIds,
       statuses: filters.statuses,
       modelOptions: filters.modelOptions,
@@ -100,10 +106,11 @@ export function useRequestLogs() {
   const facetFilters = useMemo<RequestLogFacetFilters>(
     () => ({
       since,
+      ownerUserId: filters.ownerUserId,
       accountIds: filters.accountIds,
       modelOptions: filters.modelOptions,
     }),
-    [filters.accountIds, filters.modelOptions, since],
+    [filters.accountIds, filters.modelOptions, filters.ownerUserId, since],
   );
 
   const logsQuery = useQuery({

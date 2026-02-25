@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getDashboardOverview } from "@/features/dashboard/api";
+import { getDashboardOverviewWithParams } from "@/features/dashboard/api";
 
-export function useDashboard() {
+export function useDashboard(ownerUserId?: string) {
   return useQuery({
-    queryKey: ["dashboard", "overview"],
-    queryFn: getDashboardOverview,
+    queryKey: ["dashboard", "overview", ownerUserId ?? "all"],
+    queryFn: () => getDashboardOverviewWithParams({ ownerUserId }),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,

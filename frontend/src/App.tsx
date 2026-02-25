@@ -21,6 +21,10 @@ const SettingsPage = lazy(async () => {
   const module = await import("@/features/settings/components/settings-page");
   return { default: module.SettingsPage };
 });
+const UsersPage = lazy(async () => {
+  const module = await import("@/features/users/components/users-page");
+  return { default: module.UsersPage };
+});
 
 function RouteLoadingFallback() {
   return (
@@ -32,7 +36,20 @@ function RouteLoadingFallback() {
 
 function AppLayout() {
   const logout = useAuthStore((state) => state.logout);
-  const passwordRequired = useAuthStore((state) => state.passwordRequired);
+  const role = useAuthStore((state) => state.user?.role);
+  const isAdmin = role === "admin";
+  const navItems = isAdmin
+    ? [
+        { to: "/dashboard", label: "Dashboard" },
+        { to: "/accounts", label: "Accounts" },
+        { to: "/users", label: "Users" },
+        { to: "/settings", label: "Settings" },
+      ]
+    : [
+        { to: "/dashboard", label: "Dashboard" },
+        { to: "/accounts", label: "Accounts" },
+        { to: "/settings", label: "Settings" },
+      ];
 
   return (
     <div className="flex min-h-screen flex-col bg-background pb-10">
@@ -40,7 +57,8 @@ function AppLayout() {
         onLogout={() => {
           void logout();
         }}
-        showLogout={passwordRequired}
+        navItems={navItems}
+        showLogout
       />
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
         <Outlet />
@@ -51,6 +69,10 @@ function AppLayout() {
 }
 
 export default function App() {
+  const initialized = useAuthStore((state) => state.initialized);
+  const role = useAuthStore((state) => state.user?.role);
+  const isAdmin = role === "admin";
+
   return (
     <TooltipProvider>
       <Toaster richColors />
@@ -72,6 +94,20 @@ export default function App() {
                 <Suspense fallback={<RouteLoadingFallback />}>
                   <AccountsPage />
                 </Suspense>
+              }
+            />
+            <Route
+              path="/users"
+              element={
+                !initialized ? (
+                  <RouteLoadingFallback />
+                ) : isAdmin ? (
+                  <Suspense fallback={<RouteLoadingFallback />}>
+                    <UsersPage />
+                  </Suspense>
+                ) : (
+                  <Navigate to="/dashboard" replace />
+                )
               }
             />
             <Route

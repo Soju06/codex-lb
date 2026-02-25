@@ -57,7 +57,7 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_not_implemented(async_client, monkeypatch):
+async def test_proxy_compact_not_implemented(async_client, codex_auth_headers, monkeypatch):
     await _import_account(async_client, "acc_compact_ni", "ni@example.com")
 
     async def fake_compact(*_args, **_kwargs):
@@ -66,13 +66,17 @@ async def test_proxy_compact_not_implemented(async_client, monkeypatch):
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers=codex_auth_headers,
+        json=payload,
+    )
     assert response.status_code == 501
     assert response.json()["error"]["code"] == "not_implemented"
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_upstream_error_propagates(async_client, monkeypatch):
+async def test_proxy_compact_upstream_error_propagates(async_client, codex_auth_headers, monkeypatch):
     await _import_account(async_client, "acc_compact_err", "err@example.com")
 
     async def fake_compact(*_args, **_kwargs):
@@ -81,13 +85,17 @@ async def test_proxy_compact_upstream_error_propagates(async_client, monkeypatch
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers=codex_auth_headers,
+        json=payload,
+    )
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "upstream_error"
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, monkeypatch):
+async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, codex_auth_headers, monkeypatch):
     expected_account_id = await _import_account(async_client, "acc_usage", "usage@example.com")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
@@ -108,7 +116,7 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers={"x-request-id": request_id},
+        headers={**codex_auth_headers, "x-request-id": request_id},
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -133,7 +141,7 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_retries_rate_limit_then_success(async_client, monkeypatch):
+async def test_proxy_stream_retries_rate_limit_then_success(async_client, codex_auth_headers, monkeypatch):
     expected_account_id_1 = await _import_account(async_client, "acc_1", "one@example.com")
     expected_account_id_2 = await _import_account(async_client, "acc_2", "two@example.com")
 
@@ -158,6 +166,7 @@ async def test_proxy_stream_retries_rate_limit_then_success(async_client, monkey
         "POST",
         "/backend-api/codex/responses",
         json=payload,
+        headers=codex_auth_headers,
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -185,7 +194,7 @@ async def test_proxy_stream_retries_rate_limit_then_success(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_drops_forwarded_headers(async_client, monkeypatch):
+async def test_proxy_stream_drops_forwarded_headers(async_client, codex_auth_headers, monkeypatch):
     await _import_account(async_client, "acc_headers", "headers@example.com")
     captured_headers: dict[str, str] = {}
 
@@ -214,7 +223,7 @@ async def test_proxy_stream_drops_forwarded_headers(async_client, monkeypatch):
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers=request_headers,
+        headers={**request_headers, **codex_auth_headers},
     ) as resp:
         assert resp.status_code == 200
         _ = [line async for line in resp.aiter_lines() if line]
@@ -231,7 +240,7 @@ async def test_proxy_stream_drops_forwarded_headers(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeypatch):
+async def test_proxy_stream_usage_limit_returns_http_error(async_client, codex_auth_headers, monkeypatch):
     expected_account_id = await _import_account(async_client, "acc_limit", "limit@example.com")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
@@ -252,7 +261,11 @@ async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeyp
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
-    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=codex_auth_headers,
+        json=payload,
+    )
     assert response.status_code == 429
     error = response.json()["error"]
     assert error["type"] == "usage_limit_reached"

@@ -84,7 +84,7 @@ async def test_v1_models_includes_supported_in_api_false_models(async_client):
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_models_include_supported_in_api_false_models(async_client):
+async def test_backend_codex_models_include_supported_in_api_false_models(async_client, codex_auth_headers):
     registry = get_model_registry()
     models = [
         _make_upstream_model("gpt-5.2"),
@@ -93,14 +93,14 @@ async def test_backend_codex_models_include_supported_in_api_false_models(async_
     ]
     registry.update({"plus": models, "pro": models})
 
-    resp = await async_client.get("/backend-api/codex/models")
+    resp = await async_client.get("/backend-api/codex/models", headers=codex_auth_headers)
     assert resp.status_code == 200
     ids = {item["id"] for item in resp.json()["data"]}
     assert {"gpt-5.2", "gpt-5.3-codex", "gpt-hidden"}.issubset(ids)
 
 
 @pytest.mark.asyncio
-async def test_model_sets_are_consistent_across_api_endpoints(async_client):
+async def test_model_sets_are_consistent_across_api_endpoints(async_client, codex_auth_headers):
     registry = get_model_registry()
     models = [
         _make_upstream_model("gpt-5.2"),
@@ -111,7 +111,7 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
 
     dashboard = await async_client.get("/api/models")
     v1 = await async_client.get("/v1/models")
-    codex = await async_client.get("/backend-api/codex/models")
+    codex = await async_client.get("/backend-api/codex/models", headers=codex_auth_headers)
 
     assert dashboard.status_code == 200
     assert v1.status_code == 200

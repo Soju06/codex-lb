@@ -3,6 +3,7 @@ import { lazy, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
@@ -10,6 +11,8 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useUsers } from "@/features/users/hooks/use-users";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -18,14 +21,19 @@ const OauthDialog = lazy(() =>
 );
 
 export function AccountsPage() {
+  const role = useAuthStore((state) => state.user?.role);
+  const isAdmin = role === "admin";
+  const [ownerUserId, setOwnerUserId] = useState<string | undefined>(undefined);
   const {
     accountsQuery,
     importMutation,
+    importCredentialsMutation,
     pauseMutation,
     resumeMutation,
     deleteMutation,
-  } = useAccounts();
+  } = useAccounts(ownerUserId);
   const oauth = useOauth();
+  const usersQuery = useUsers({}, isAdmin).usersQuery;
 
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const importDialog = useDialogState();
@@ -55,12 +63,14 @@ export function AccountsPage() {
 
   const mutationBusy =
     importMutation.isPending ||
+    importCredentialsMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     deleteMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
+    getErrorMessageOrNull(importCredentialsMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error);
@@ -74,6 +84,29 @@ export function AccountsPage() {
           Manage imported accounts and authentication flows.
         </p>
       </div>
+      {isAdmin ? (
+        <div className="flex justify-end">
+          <Select
+            value={ownerUserId ?? "all"}
+            onValueChange={(value) => {
+              setOwnerUserId(value === "all" ? undefined : value);
+              setSelectedAccountId(null);
+            }}
+          >
+            <SelectTrigger size="sm" className="w-56">
+              <SelectValue placeholder="All users" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All users</SelectItem>
+              {(usersQuery.data ?? []).map((user) => (
+                <SelectItem key={user.id} value={user.id}>
+                  {user.username}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
 
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
 
@@ -105,11 +138,14 @@ export function AccountsPage() {
 
       <ImportDialog
         open={importDialog.open}
-        busy={importMutation.isPending}
-        error={getErrorMessageOrNull(importMutation.error)}
+        busy={importMutation.isPending || importCredentialsMutation.isPending}
+        error={getErrorMessageOrNull(importMutation.error) || getErrorMessageOrNull(importCredentialsMutation.error)}
         onOpenChange={importDialog.onOpenChange}
-        onImport={async (file) => {
+        onImportAuthJson={async (file) => {
           await importMutation.mutateAsync(file);
+        }}
+        onImportCredentials={async (credentialsText) => {
+          await importCredentialsMutation.mutateAsync(credentialsText);
         }}
       />
 

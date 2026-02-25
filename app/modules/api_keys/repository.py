@@ -63,8 +63,13 @@ class ApiKeysRepository:
         await self._session.refresh(row)
         return row
 
-    async def get_by_id(self, key_id: str) -> ApiKey | None:
-        return await self._session.get(ApiKey, key_id)
+    async def get_by_id(self, key_id: str, *, owner_user_id: str | None = None) -> ApiKey | None:
+        row = await self._session.get(ApiKey, key_id)
+        if row is None:
+            return None
+        if owner_user_id is not None and row.owner_user_id != owner_user_id:
+            return None
+        return row
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         result = await self._session.execute(
@@ -72,24 +77,32 @@ class ApiKeysRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list_all(self) -> list[ApiKey]:
-        result = await self._session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
+    async def list_all(self, *, owner_user_id: str | None = None) -> list[ApiKey]:
+        stmt = select(ApiKey).order_by(ApiKey.created_at.desc())
+        if owner_user_id is not None:
+            stmt = stmt.where(ApiKey.owner_user_id == owner_user_id)
+        result = await self._session.execute(stmt)
         return list(result.scalars().unique().all())
 
     async def update(
         self,
         key_id: str,
         *,
+        owner_user_id: str | _Unset = _UNSET,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
+        owner_scope_user_id: str | None = None,
     ) -> ApiKey | None:
-        row = await self.get_by_id(key_id)
+        row = await self.get_by_id(key_id, owner_user_id=owner_scope_user_id)
         if row is None:
             return None
+        if owner_user_id is not _UNSET:
+            assert owner_user_id is None or isinstance(owner_user_id, str)
+            row.owner_user_id = owner_user_id
         if name is not _UNSET:
             assert isinstance(name, str)
             row.name = name
@@ -112,8 +125,8 @@ class ApiKeysRepository:
         await self._session.refresh(row)
         return row
 
-    async def delete(self, key_id: str) -> bool:
-        row = await self.get_by_id(key_id)
+    async def delete(self, key_id: str, *, owner_scope_user_id: str | None = None) -> bool:
+        row = await self.get_by_id(key_id, owner_user_id=owner_scope_user_id)
         if row is None:
             return False
         await self._session.delete(row)

@@ -7,20 +7,27 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
+export type HeaderNavItem = {
+  to: string;
+  label: string;
+};
+
+const DEFAULT_NAV_ITEMS: ReadonlyArray<HeaderNavItem> = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/accounts", label: "Accounts" },
   { to: "/settings", label: "Settings" },
-] as const;
+];
 
 export type AppHeaderProps = {
   onLogout: () => void;
+  navItems?: ReadonlyArray<HeaderNavItem>;
   showLogout?: boolean;
   className?: string;
 };
 
 export function AppHeader({
   onLogout,
+  navItems = DEFAULT_NAV_ITEMS,
   showLogout = true,
   className,
 }: AppHeaderProps) {
@@ -46,7 +53,7 @@ export function AppHeader({
 
         {/* Desktop nav pills */}
         <nav className="hidden items-center rounded-lg border border-border/50 bg-muted/40 p-0.5 sm:flex">
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <NavLink key={item.to} to={item.to}>
               {({ isActive }) => (
                 <span
@@ -96,7 +103,7 @@ export function AppHeader({
                 </SheetTitle>
               </SheetHeader>
               <nav className="flex flex-col gap-0.5 px-4 pt-2">
-                {NAV_ITEMS.map((item) => (
+                {navItems.map((item) => (
                   <NavLink key={item.to} to={item.to} onClick={() => setMobileOpen(false)}>
                     {({ isActive }) => (
                       <span

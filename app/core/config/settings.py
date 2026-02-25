@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    bootstrap_admin_password: str | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -114,6 +115,16 @@ class Settings(BaseSettings):
                         normalized.append(host)
             return normalized
         raise TypeError("image_inline_allowed_hosts must be a list or comma-separated string")
+
+    @field_validator("bootstrap_admin_password")
+    @classmethod
+    def _validate_bootstrap_admin_password(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if len(normalized) < 8:
+            raise ValueError("bootstrap_admin_password must be at least 8 characters")
+        return normalized
 
 
 @lru_cache(maxsize=1)

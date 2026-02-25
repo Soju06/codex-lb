@@ -18,12 +18,12 @@ export function LoginForm() {
 
   const form = useForm({
     resolver: zodResolver(LoginRequestSchema),
-    defaultValues: { password: "" },
+    defaultValues: { username: "admin", password: "" },
   });
 
-  const handleSubmit = async (values: { password: string }) => {
+  const handleSubmit = async (values: { username: string; password: string }) => {
     clearError();
-    await login(values.password);
+    await login(values.username, values.password);
   };
 
   return (
@@ -31,10 +31,29 @@ export function LoginForm() {
       <form onSubmit={form.handleSubmit(handleSubmit)} className="rounded-2xl border bg-card p-6 shadow-[var(--shadow-md)]">
         <div className="space-y-1.5">
           <h2 className="text-base font-semibold tracking-tight">Sign in</h2>
-          <p className="text-sm text-muted-foreground">Enter your admin password to continue.</p>
+          <p className="text-sm text-muted-foreground">Enter your username and password to continue.</p>
         </div>
 
         <div className="mt-5">
+          <FormField
+            control={form.control}
+            name="username"
+            render={({ field }) => (
+              <FormItem className="mb-4">
+                <FormLabel className="text-xs font-medium">Username</FormLabel>
+                <FormControl>
+                  <Input
+                    {...field}
+                    type="text"
+                    autoComplete="username"
+                    placeholder="Enter username"
+                    disabled={loading}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
           <FormField
             control={form.control}
             name="password"

@@ -103,6 +103,7 @@ export const RequestLogFilterOptionsSchema = z.object({
 export const FilterStateSchema = z.object({
   search: z.string(),
   timeframe: z.enum(["all", "1h", "24h", "7d"]),
+  ownerUserId: z.string().optional(),
   accountIds: z.array(z.string()),
   modelOptions: z.array(z.string()),
   statuses: z.array(z.string()),

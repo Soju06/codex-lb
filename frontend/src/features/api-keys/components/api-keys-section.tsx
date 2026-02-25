@@ -1,9 +1,10 @@
 import { KeySquare } from "lucide-react";
-import { lazy, useMemo } from "react";
+import { lazy, useMemo, useState } from "react";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { ApiKeyAuthToggle } from "@/features/api-keys/components/api-key-auth-toggle";
 import { ApiKeyCreatedDialog } from "@/features/api-keys/components/api-key-created-dialog";
@@ -22,26 +23,40 @@ const ApiKeyEditDialog = lazy(() =>
 export type ApiKeysSectionProps = {
   apiKeyAuthEnabled: boolean;
   disabled?: boolean;
+  ownerOptions?: ReadonlyArray<{
+    id: string;
+    username: string;
+  }>;
+  showApiKeyAuthToggle?: boolean;
   onApiKeyAuthEnabledChange: (enabled: boolean) => void;
 };
 
 export function ApiKeysSection({
   apiKeyAuthEnabled,
   disabled = false,
+  ownerOptions = [],
+  showApiKeyAuthToggle = true,
   onApiKeyAuthEnabledChange,
 }: ApiKeysSectionProps) {
+  const [ownerUserId, setOwnerUserId] = useState<string | undefined>(undefined);
   const {
     apiKeysQuery,
     createMutation,
     updateMutation,
     deleteMutation,
     regenerateMutation,
-  } = useApiKeys();
+  } = useApiKeys(ownerUserId);
 
   const createDialog = useDialogState();
   const editDialog = useDialogState<ApiKey>();
   const deleteDialog = useDialogState<ApiKey>();
   const createdDialog = useDialogState<string>();
+  const showOwnerFilter = ownerOptions.length > 0;
+  const ownerLabels = useMemo(
+    () =>
+      Object.fromEntries(ownerOptions.map((item) => [item.id, item.username])) as Record<string, string>,
+    [ownerOptions],
+  );
 
   const keys = apiKeysQuery.data ?? [];
   const busy =
@@ -62,7 +77,10 @@ export function ApiKeysSection({
   );
 
   const handleCreate = async (payload: ApiKeyCreateRequest) => {
-    const created = await createMutation.mutateAsync(payload);
+    const created = await createMutation.mutateAsync({
+      ...payload,
+      ...(ownerUserId ? { ownerUserId } : {}),
+    });
     createdDialog.show(created.key);
   };
 
@@ -90,17 +108,43 @@ export function ApiKeysSection({
         </Button>
       </div>
 
-      <ApiKeyAuthToggle
-        enabled={apiKeyAuthEnabled}
-        disabled={busy}
-        onChange={onApiKeyAuthEnabledChange}
-      />
+      {showApiKeyAuthToggle ? (
+        <ApiKeyAuthToggle
+          enabled={apiKeyAuthEnabled}
+          disabled={busy}
+          onChange={onApiKeyAuthEnabledChange}
+        />
+      ) : null}
+
+      {showOwnerFilter ? (
+        <div className="flex items-center justify-between rounded-lg border p-3">
+          <div className="space-y-1">
+            <p className="text-sm font-medium">Owner scope</p>
+            <p className="text-xs text-muted-foreground">Filter keys by user and create keys for selected owner.</p>
+          </div>
+          <Select value={ownerUserId ?? "all"} onValueChange={(value) => setOwnerUserId(value === "all" ? undefined : value)}>
+            <SelectTrigger size="sm" className="w-56">
+              <SelectValue placeholder="All users" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All users</SelectItem>
+              {ownerOptions.map((user) => (
+                <SelectItem key={user.id} value={user.id}>
+                  {user.username}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
 
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
 
       <ApiKeyTable
         keys={keys}
         busy={busy}
+        showOwner={showOwnerFilter}
+        ownerLabels={ownerLabels}
         onEdit={(apiKey) => editDialog.show(apiKey)}
         onDelete={(apiKey) => deleteDialog.show(apiKey)}
         onRegenerate={(apiKey) => {

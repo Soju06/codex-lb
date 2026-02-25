@@ -280,6 +280,11 @@ async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous
 async def test_oauth_start_with_existing_account_marks_success(async_client):
     await oauth_module._OAUTH_STORE.reset()
 
+    session_response = await async_client.get("/api/dashboard-auth/session")
+    assert session_response.status_code == 200
+    user = session_response.json().get("user")
+    assert isinstance(user, dict)
+
     encryptor = TokenEncryptor()
     account = Account(
         id="acc_existing",
@@ -291,6 +296,7 @@ async def test_oauth_start_with_existing_account_marks_success(async_client):
         last_refresh=utcnow(),
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
+        owner_user_id=user["id"],
     )
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

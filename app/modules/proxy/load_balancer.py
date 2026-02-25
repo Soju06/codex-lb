@@ -51,11 +51,12 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         prefer_earlier_reset_accounts: bool = False,
         model: str | None = None,
+        owner_user_id: str | None = None,
     ) -> AccountSelection:
         selected_snapshot: Account | None = None
         error_message: str | None = None
         async with self._repo_factory() as repos:
-            accounts = await repos.accounts.list_accounts()
+            accounts = await repos.accounts.list_accounts(owner_user_id=owner_user_id)
             if model:
                 accounts = _filter_accounts_for_model(accounts, model)
                 if not accounts:

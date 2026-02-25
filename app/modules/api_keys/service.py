@@ -27,25 +27,27 @@ from app.modules.api_keys.repository import (
 class ApiKeysRepositoryProtocol(Protocol):
     async def create(self, row: ApiKey) -> ApiKey: ...
 
-    async def get_by_id(self, key_id: str) -> ApiKey | None: ...
+    async def get_by_id(self, key_id: str, *, owner_user_id: str | None = None) -> ApiKey | None: ...
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
 
-    async def list_all(self) -> list[ApiKey]: ...
+    async def list_all(self, *, owner_user_id: str | None = None) -> list[ApiKey]: ...
 
     async def update(
         self,
         key_id: str,
         *,
+        owner_user_id: str | _Unset = ...,
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
         key_prefix: str | _Unset = ...,
+        owner_scope_user_id: str | None = ...,
     ) -> ApiKey | None: ...
 
-    async def delete(self, key_id: str) -> bool: ...
+    async def delete(self, key_id: str, *, owner_scope_user_id: str | None = None) -> bool: ...
 
     async def update_last_used(self, key_id: str) -> None: ...
 
@@ -165,6 +167,7 @@ class ApiKeyCreateData:
     allowed_models: list[str] | None
     expires_at: datetime | None
     limits: list[LimitRuleInput] = field(default_factory=list)
+    owner_user_id: str = "dashboard-user-admin-default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +195,7 @@ class ApiKeyData:
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    owner_user_id: str | None = None
     limits: list[LimitRuleData] = field(default_factory=list)
 
 
@@ -216,6 +220,7 @@ class ApiKeysService:
         plain_key = _generate_plain_key()
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
+            owner_user_id=payload.owner_user_id,
             name=_normalize_name(payload.name),
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
@@ -237,17 +242,24 @@ class ApiKeysService:
 
         return _to_created_data(_to_api_key_data(created), plain_key)
 
-    async def list_keys(self) -> list[ApiKeyData]:
-        rows = await self._repository.list_all()
+    async def list_keys(self, *, owner_user_id: str | None = None) -> list[ApiKeyData]:
+        rows = await self._repository.list_all(owner_user_id=owner_user_id)
         return [_to_api_key_data(row) for row in rows]
 
-    async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
+    async def update_key(
+        self,
+        key_id: str,
+        payload: ApiKeyUpdateData,
+        *,
+        owner_scope_user_id: str | None = None,
+    ) -> ApiKeyData:
         row = await self._repository.update(
             key_id,
             name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
             allowed_models=_serialize_allowed_models(payload.allowed_models) if payload.allowed_models_set else _UNSET,
             expires_at=payload.expires_at if payload.expires_at_set else _UNSET,
             is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
+            owner_scope_user_id=owner_scope_user_id,
         )
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
@@ -271,19 +283,19 @@ class ApiKeysService:
             await self._repository.upsert_limits(key_id, limit_rows)
 
         if payload.limits_set or payload.reset_usage:
-            row = await self._repository.get_by_id(key_id)
+            row = await self._repository.get_by_id(key_id, owner_user_id=owner_scope_user_id)
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
         return _to_api_key_data(row)
 
-    async def delete_key(self, key_id: str) -> None:
-        deleted = await self._repository.delete(key_id)
+    async def delete_key(self, key_id: str, *, owner_scope_user_id: str | None = None) -> None:
+        deleted = await self._repository.delete(key_id, owner_scope_user_id=owner_scope_user_id)
         if not deleted:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-    async def regenerate_key(self, key_id: str) -> ApiKeyCreatedData:
-        row = await self._repository.get_by_id(key_id)
+    async def regenerate_key(self, key_id: str, *, owner_scope_user_id: str | None = None) -> ApiKeyCreatedData:
+        row = await self._repository.get_by_id(key_id, owner_user_id=owner_scope_user_id)
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
         plain_key = _generate_plain_key()
@@ -291,6 +303,7 @@ class ApiKeysService:
             key_id,
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
+            owner_scope_user_id=owner_scope_user_id,
         )
         if updated is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
@@ -626,6 +639,7 @@ def _next_usage_reservation_id() -> str:
 def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
     return ApiKeyCreatedData(
         id=data.id,
+        owner_user_id=data.owner_user_id,
         name=data.name,
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
@@ -642,6 +656,7 @@ def _to_api_key_data(row: ApiKey) -> ApiKeyData:
     limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     return ApiKeyData(
         id=row.id,
+        owner_user_id=row.owner_user_id,
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),

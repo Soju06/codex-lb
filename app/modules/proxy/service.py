@@ -106,6 +106,7 @@ class ProxyService:
             reallocate_sticky=sticky_key is not None,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
             model=payload.model,
+            owner_user_id=api_key.owner_user_id if api_key is not None else None,
         )
         account = selection.account
         if not account:
@@ -332,6 +333,7 @@ class ProxyService:
                     sticky_key=sticky_key,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     model=payload.model,
+                    owner_user_id=api_key.owner_user_id if api_key is not None else None,
                 )
                 account = selection.account
                 if not account:

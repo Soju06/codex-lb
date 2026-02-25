@@ -17,6 +17,7 @@ from app.core.exceptions import (
     DashboardAuthError,
     DashboardBadRequestError,
     DashboardConflictError,
+    DashboardForbiddenError,
     DashboardNotFoundError,
     DashboardRateLimitError,
     DashboardValidationError,
@@ -37,6 +38,7 @@ _OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
 
 _DASHBOARD_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     DashboardAuthError,
+    DashboardForbiddenError,
     DashboardNotFoundError,
     DashboardConflictError,
     DashboardBadRequestError,

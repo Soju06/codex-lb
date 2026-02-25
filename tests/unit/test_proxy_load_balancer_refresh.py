@@ -37,8 +37,10 @@ class StubAccountsRepository:
         self._accounts = accounts
         self.status_updates: list[dict[str, Any]] = []
 
-    async def list_accounts(self) -> list[Account]:
-        return list(self._accounts)
+    async def list_accounts(self, owner_user_id: str | None = None) -> list[Account]:
+        if owner_user_id is None:
+            return list(self._accounts)
+        return [account for account in self._accounts if account.owner_user_id == owner_user_id]
 
     async def update_status(
         self,

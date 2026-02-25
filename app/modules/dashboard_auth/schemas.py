@@ -3,11 +3,18 @@ from __future__ import annotations
 from app.modules.shared.schemas import DashboardModel
 
 
+class DashboardAuthUserResponse(DashboardModel):
+    id: str
+    username: str
+    role: str
+
+
 class DashboardAuthSessionResponse(DashboardModel):
     authenticated: bool
     password_required: bool
     totp_required_on_login: bool
     totp_configured: bool
+    user: DashboardAuthUserResponse | None = None
 
 
 class TotpSetupStartResponse(DashboardModel):
@@ -30,6 +37,7 @@ class PasswordSetupRequest(DashboardModel):
 
 
 class PasswordLoginRequest(DashboardModel):
+    username: str
     password: str
 
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth.dependencies import DashboardPrincipal, get_dashboard_principal
 from app.db.session import get_background_session, get_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
@@ -26,6 +27,8 @@ from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.service import UsageService
+from app.modules.users.repository import UsersRepository
+from app.modules.users.service import UsersService
 
 
 @dataclass(slots=True)
@@ -87,6 +90,13 @@ class DashboardContext:
     service: DashboardService
 
 
+@dataclass(slots=True)
+class UsersContext:
+    session: AsyncSession
+    repository: UsersRepository
+    service: UsersService
+
+
 def get_accounts_context(
     session: AsyncSession = Depends(get_session),
 ) -> AccountsContext:
@@ -138,9 +148,16 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
 
 def get_oauth_context(
     session: AsyncSession = Depends(get_session),
+    principal: DashboardPrincipal = Depends(get_dashboard_principal),
 ) -> OauthContext:
     accounts_repository = AccountsRepository(session)
-    return OauthContext(service=OauthService(accounts_repository, repo_factory=_accounts_repo_context))
+    return OauthContext(
+        service=OauthService(
+            accounts_repository,
+            principal.user_id,
+            repo_factory=_accounts_repo_context,
+        )
+    )
 
 
 def get_dashboard_auth_context(
@@ -186,3 +203,11 @@ def get_dashboard_context(
     repository = DashboardRepository(session)
     service = DashboardService(repository)
     return DashboardContext(session=session, repository=repository, service=service)
+
+
+def get_users_context(
+    session: AsyncSession = Depends(get_session),
+) -> UsersContext:
+    repository = UsersRepository(session)
+    service = UsersService(repository)
+    return UsersContext(session=session, repository=repository, service=service)

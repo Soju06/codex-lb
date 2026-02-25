@@ -28,6 +28,7 @@ export const AccountAuthSchema = z.object({
 
 export const AccountSummarySchema = z.object({
   accountId: z.string(),
+  ownerUserId: z.string().nullable().optional(),
   email: z.string(),
   displayName: z.string(),
   planType: z.string(),
@@ -55,6 +56,21 @@ export const AccountImportResponseSchema = z.object({
   email: z.string(),
   planType: z.string(),
   status: z.string(),
+});
+
+export const CredentialImportResultSchema = z.object({
+  line: z.number(),
+  email: z.string(),
+  status: z.enum(["imported", "failed"]),
+  accountId: z.string().nullable().optional(),
+  error: z.string().nullable().optional(),
+});
+
+export const CredentialsImportResponseSchema = z.object({
+  total: z.number(),
+  imported: z.number(),
+  failed: z.number(),
+  results: z.array(CredentialImportResultSchema),
 });
 
 export const AccountActionResponseSchema = z.object({
@@ -112,6 +128,8 @@ export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
+export type CredentialImportResult = z.infer<typeof CredentialImportResultSchema>;
+export type CredentialsImportResponse = z.infer<typeof CredentialsImportResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type OAuthState = z.infer<typeof OAuthStateSchema>;

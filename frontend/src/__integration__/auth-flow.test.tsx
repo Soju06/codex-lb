@@ -43,6 +43,8 @@ describe("auth flow integration", () => {
 
     expect(await screen.findByText("Sign in")).toBeInTheDocument();
 
+    await user.clear(screen.getByLabelText("Username"));
+    await user.type(screen.getByLabelText("Username"), "admin");
     await user.type(screen.getByLabelText("Password"), "secret-password");
     await user.click(screen.getByRole("button", { name: "Sign In" }));
 

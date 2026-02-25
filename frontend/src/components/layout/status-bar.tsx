@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Activity, ArrowRightLeft } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
-import { getDashboardOverview } from "@/features/dashboard/api";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { getDashboardOverviewWithParams } from "@/features/dashboard/api";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
@@ -14,9 +15,13 @@ function getRoutingLabel(sticky: boolean, preferEarlier: boolean): string {
 }
 
 export function StatusBar() {
+  const role = useAuthStore((state) => state.user?.role);
+  const ownerUserId = useAuthStore((state) => state.user?.id);
+  const isAdmin = role === "admin";
+
   const { data: lastSyncAt = null } = useQuery({
-    queryKey: ["dashboard", "overview"],
-    queryFn: getDashboardOverview,
+    queryKey: ["dashboard", "overview", isAdmin ? "all" : ownerUserId ?? "all"],
+    queryFn: () => getDashboardOverviewWithParams({ ownerUserId: isAdmin ? undefined : ownerUserId }),
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
     select: (data) => data.lastSyncAt,
@@ -25,6 +30,7 @@ export function StatusBar() {
   const { data: settings } = useQuery({
     queryKey: ["settings", "detail"],
     queryFn: getSettings,
+    enabled: isAdmin,
   });
   const lastSync = formatTimeLong(lastSyncAt);
   const [isLive, setIsLive] = useState(false);
@@ -37,9 +43,11 @@ export function StatusBar() {
     return () => clearInterval(id);
   }, [lastSyncAt]);
 
-  const routingLabel = settings
-    ? getRoutingLabel(settings.stickyThreadsEnabled, settings.preferEarlierResetAccounts)
-    : "—";
+  const routingLabel = isAdmin
+    ? settings
+      ? getRoutingLabel(settings.stickyThreadsEnabled, settings.preferEarlierResetAccounts)
+      : "—"
+    : "User scope";
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]">

@@ -24,25 +24,55 @@ class _FakeSettings:
     totp_last_verified_step: int | None = None
 
 
+@dataclass(slots=True)
+class _FakeUser:
+    id: str
+    username: str
+    password_hash: str
+    role: str = "admin"
+    is_active: bool = True
+
+
 class _FakeRepository:
     def __init__(self) -> None:
         self.settings = _FakeSettings()
+        self.user = _FakeUser(
+            id="user-1",
+            username="admin",
+            password_hash=_hash_password("password123"),
+        )
 
     async def get_settings(self) -> _FakeSettings:
         return self.settings
 
+    async def get_user_by_id(self, user_id: str) -> _FakeUser | None:
+        if self.user.id != user_id:
+            return None
+        return self.user
+
+    async def get_user_by_username(self, username: str) -> _FakeUser | None:
+        if self.user.username != username:
+            return None
+        return self.user
+
+    async def set_user_password_hash(self, user_id: str, password_hash: str) -> _FakeUser | None:
+        if self.user.id != user_id:
+            return None
+        self.user.password_hash = password_hash
+        return self.user
+
     async def get_password_hash(self) -> str | None:
         return self.settings.password_hash
-
-    async def set_password_hash(self, password_hash: str) -> _FakeSettings:
-        self.settings.password_hash = password_hash
-        return self.settings
 
     async def try_set_password_hash(self, password_hash: str) -> bool:
         if self.settings.password_hash is not None:
             return False
         self.settings.password_hash = password_hash
         return True
+
+    async def set_password_hash(self, password_hash: str) -> _FakeSettings:
+        self.settings.password_hash = password_hash
+        return self.settings
 
     async def clear_password_and_totp(self) -> _FakeSettings:
         self.settings.password_hash = None
@@ -66,25 +96,13 @@ class _FakeRepository:
         return True
 
 
-@pytest.mark.asyncio
-async def test_setup_password_hashes_and_rejects_duplicate() -> None:
-    repository = _FakeRepository()
-    service = DashboardAuthService(repository, DashboardSessionStore())
-
-    await service.setup_password("password123")
-    stored_hash = repository.settings.password_hash
-    assert stored_hash is not None
-    assert stored_hash != "password123"
-    assert bcrypt.checkpw("password123".encode("utf-8"), stored_hash.encode("utf-8")) is True
-
-    with pytest.raises(PasswordAlreadyConfiguredError):
-        await service.setup_password("another-password")
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 @pytest.mark.asyncio
-async def test_setup_password_raises_when_atomic_set_fails() -> None:
+async def test_setup_password_is_not_supported() -> None:
     repository = _FakeRepository()
-    repository.settings.password_hash = "already-set-by-race"
     service = DashboardAuthService(repository, DashboardSessionStore())
 
     with pytest.raises(PasswordAlreadyConfiguredError):
@@ -92,35 +110,37 @@ async def test_setup_password_raises_when_atomic_set_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_and_change_password() -> None:
+async def test_verify_and_change_password_for_active_user() -> None:
     repository = _FakeRepository()
     service = DashboardAuthService(repository, DashboardSessionStore())
-    await service.setup_password("password123")
 
-    await service.verify_password("password123")
-    with pytest.raises(InvalidCredentialsError):
-        await service.verify_password("wrong-password")
+    user = await service.verify_password("admin", "password123")
+    assert user.id == repository.user.id
 
-    await service.change_password("password123", "new-password-456")
-    await service.verify_password("new-password-456")
     with pytest.raises(InvalidCredentialsError):
-        await service.verify_password("password123")
+        await service.verify_password("admin", "wrong-password")
+
+    await service.change_password(repository.user.id, "password123", "new-password-456")
+    await service.verify_password("admin", "new-password-456")
+
+    with pytest.raises(InvalidCredentialsError):
+        await service.verify_password("admin", "password123")
 
 
 @pytest.mark.asyncio
-async def test_remove_password_clears_password_and_totp() -> None:
+async def test_verify_rejects_inactive_user() -> None:
+    repository = _FakeRepository()
+    repository.user.is_active = False
+    service = DashboardAuthService(repository, DashboardSessionStore())
+
+    with pytest.raises(InvalidCredentialsError):
+        await service.verify_password("admin", "password123")
+
+
+@pytest.mark.asyncio
+async def test_remove_password_is_not_supported() -> None:
     repository = _FakeRepository()
     service = DashboardAuthService(repository, DashboardSessionStore())
-    await service.setup_password("password123")
-    repository.settings.totp_required_on_login = True
-    repository.settings.totp_secret_encrypted = b"secret"
-    repository.settings.totp_last_verified_step = 123
-
-    await service.remove_password("password123")
-    assert repository.settings.password_hash is None
-    assert repository.settings.totp_required_on_login is False
-    assert repository.settings.totp_secret_encrypted is None
-    assert repository.settings.totp_last_verified_step is None
 
     with pytest.raises(PasswordNotConfiguredError):
-        await service.verify_password("password123")
+        await service.remove_password("password123")

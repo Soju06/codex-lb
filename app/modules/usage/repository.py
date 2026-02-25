@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
-from app.db.models import UsageHistory
+from app.db.models import Account, UsageHistory
 
 
 class UsageRepository:
@@ -50,8 +50,11 @@ class UsageRepository:
         self,
         since: datetime,
         window: str | None = None,
+        owner_user_id: str | None = None,
     ) -> list[UsageAggregateRow]:
         conditions = [UsageHistory.recorded_at >= since]
+        if owner_user_id is not None:
+            conditions.append(Account.owner_user_id == owner_user_id)
         if window:
             if window == "primary":
                 conditions.append(or_(UsageHistory.window == "primary", UsageHistory.window.is_(None)))
@@ -71,6 +74,8 @@ class UsageRepository:
             .where(*conditions)
             .group_by(UsageHistory.account_id)
         )
+        if owner_user_id is not None:
+            stmt = stmt.join(Account, Account.id == UsageHistory.account_id)
         result = await self._session.execute(stmt)
         rows = result.all()
         return [
@@ -87,7 +92,11 @@ class UsageRepository:
             for row in rows
         ]
 
-    async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> dict[str, UsageHistory]:
         if window:
             if window == "primary":
                 conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
@@ -95,7 +104,7 @@ class UsageRepository:
                 conditions = UsageHistory.window == window
         else:
             conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
-        subq = (
+        subq_stmt = (
             select(
                 UsageHistory.id.label("usage_id"),
                 func.row_number()
@@ -106,8 +115,12 @@ class UsageRepository:
                 .label("row_number"),
             )
             .where(conditions)
-            .subquery()
         )
+        if owner_user_id is not None:
+            subq_stmt = subq_stmt.join(Account, Account.id == UsageHistory.account_id).where(
+                Account.owner_user_id == owner_user_id
+            )
+        subq = subq_stmt.subquery()
         stmt = select(UsageHistory).join(subq, UsageHistory.id == subq.c.usage_id).where(subq.c.row_number == 1)
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
@@ -118,6 +131,7 @@ class UsageRepository:
         bucket_seconds: int = 21600,
         window: str | None = None,
         account_id: str | None = None,
+        owner_user_id: str | None = None,
     ) -> list[UsageTrendBucket]:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
@@ -136,6 +150,8 @@ class UsageRepository:
                 conditions.append(UsageHistory.window == window)
         if account_id:
             conditions.append(UsageHistory.account_id == account_id)
+        if owner_user_id:
+            conditions.append(Account.owner_user_id == owner_user_id)
 
         stmt = (
             select(
@@ -153,6 +169,8 @@ class UsageRepository:
             )
             .order_by(bucket_col)
         )
+        if owner_user_id:
+            stmt = stmt.join(Account, Account.id == UsageHistory.account_id)
         result = await self._session.execute(stmt)
         return [
             UsageTrendBucket(
@@ -165,11 +183,14 @@ class UsageRepository:
             for row in result.all()
         ]
 
-    async def latest_window_minutes(self, window: str) -> int | None:
+    async def latest_window_minutes(self, window: str, *, owner_user_id: str | None = None) -> int | None:
         if window == "primary":
             conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
         else:
             conditions = UsageHistory.window == window
-        result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
+        stmt = select(func.max(UsageHistory.window_minutes)).where(conditions)
+        if owner_user_id is not None:
+            stmt = stmt.join(Account, Account.id == UsageHistory.account_id).where(Account.owner_user_id == owner_user_id)
+        result = await self._session.execute(stmt)
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None

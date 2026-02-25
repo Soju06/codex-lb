@@ -35,10 +35,42 @@ class AccountStatus(str, Enum):
     DEACTIVATED = "deactivated"
 
 
+class DashboardUserRole(str, Enum):
+    ADMIN = "admin"
+    USER = "user"
+
+
+class DashboardUser(Base):
+    __tablename__ = "dashboard_users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[DashboardUserRole] = mapped_column(
+        SqlEnum(
+            DashboardUserRole,
+            name="dashboard_user_role",
+            validate_strings=True,
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        default=DashboardUserRole.USER,
+        nullable=False,
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
@@ -140,6 +172,7 @@ class ApiKey(Base):
     __tablename__ = "api_keys"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
@@ -263,11 +296,14 @@ class ApiKeyUsageReservationItem(Base):
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index("idx_accounts_email", Account.email)
+Index("idx_accounts_owner_user_id", Account.owner_user_id)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index("idx_api_keys_owner_user_id", ApiKey.owner_user_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
+Index("idx_dashboard_users_username", DashboardUser.username, unique=True)

@@ -4,6 +4,7 @@ import { Settings } from "lucide-react";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
@@ -11,6 +12,7 @@ import { RoutingSettings } from "@/features/settings/components/routing-settings
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { useSettings } from "@/features/settings/hooks/use-settings";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
+import { useUsers } from "@/features/users/hooks/use-users";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const TotpSettings = lazy(() =>
@@ -18,11 +20,16 @@ const TotpSettings = lazy(() =>
 );
 
 export function SettingsPage() {
-  const { settingsQuery, updateSettingsMutation } = useSettings();
+  const role = useAuthStore((state) => state.user?.role);
+  const isAdmin = role === "admin";
+  const { settingsQuery, updateSettingsMutation } = useSettings(isAdmin);
+  const usersQuery = useUsers({}, isAdmin).usersQuery;
 
   const settings = settingsQuery.data;
-  const busy = updateSettingsMutation.isPending;
-  const error = getErrorMessageOrNull(settingsQuery.error) || getErrorMessageOrNull(updateSettingsMutation.error);
+  const busy = isAdmin && updateSettingsMutation.isPending;
+  const error = isAdmin
+    ? getErrorMessageOrNull(settingsQuery.error) || getErrorMessageOrNull(updateSettingsMutation.error)
+    : null;
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
     await updateSettingsMutation.mutateAsync(payload);
@@ -36,10 +43,14 @@ export function SettingsPage() {
           <Settings className="h-5 w-5 text-primary" />
           Settings
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">Configure routing, auth, and API key management.</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {isAdmin
+            ? "Configure routing, auth, and API key management."
+            : "Manage your account security and API keys."}
+        </p>
       </div>
 
-      {!settings ? (
+      {isAdmin && !settings ? (
         <SettingsSkeleton />
       ) : (
         <>
@@ -47,31 +58,49 @@ export function SettingsPage() {
 
           <div className="space-y-4">
             <AppearanceSettings />
-            <RoutingSettings
-              settings={settings}
-              busy={busy}
-              onSave={handleSave}
-            />
-            <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
-            <PasswordSettings disabled={busy} />
-            <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+            {isAdmin && settings ? (
+              <>
+                <RoutingSettings
+                  settings={settings}
+                  busy={busy}
+                  onSave={handleSave}
+                />
+                <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
+                <PasswordSettings disabled={busy} />
+                <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
 
-            <ApiKeysSection
-              apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
-              disabled={busy}
-              onApiKeyAuthEnabledChange={(enabled) =>
-                void handleSave({
-                  stickyThreadsEnabled: settings.stickyThreadsEnabled,
-                  preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-                  importWithoutOverwrite: settings.importWithoutOverwrite,
-                  totpRequiredOnLogin: settings.totpRequiredOnLogin,
-                  apiKeyAuthEnabled: enabled,
-                })
-              }
-            />
+                <ApiKeysSection
+                  apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
+                  disabled={busy}
+                  ownerOptions={(usersQuery.data ?? []).map((user) => ({
+                    id: user.id,
+                    username: user.username,
+                  }))}
+                  onApiKeyAuthEnabledChange={(enabled) =>
+                    void handleSave({
+                      stickyThreadsEnabled: settings.stickyThreadsEnabled,
+                      preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+                      importWithoutOverwrite: settings.importWithoutOverwrite,
+                      totpRequiredOnLogin: settings.totpRequiredOnLogin,
+                      apiKeyAuthEnabled: enabled,
+                    })
+                  }
+                />
+              </>
+            ) : (
+              <>
+                <PasswordSettings disabled={false} />
+                <ApiKeysSection
+                  apiKeyAuthEnabled={false}
+                  disabled={false}
+                  showApiKeyAuthToggle={false}
+                  onApiKeyAuthEnabledChange={() => {}}
+                />
+              </>
+            )}
           </div>
 
-          <LoadingOverlay visible={!!settings && busy} label="Saving settings..." />
+          <LoadingOverlay visible={Boolean(settings) && busy} label="Saving settings..." />
         </>
       )}
     </div>

@@ -13,6 +13,9 @@ import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useUsers } from "@/features/users/hooks/use-users";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import type { AccountSummary } from "@/features/dashboard/schemas";
 import { useThemeStore } from "@/hooks/use-theme";
@@ -25,8 +28,11 @@ export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
-  const dashboardQuery = useDashboard();
+  const role = useAuthStore((state) => state.user?.role);
+  const isAdmin = role === "admin";
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
+  const dashboardQuery = useDashboard(filters.ownerUserId);
+  const usersQuery = useUsers({}, isAdmin).usersQuery;
   const { resumeMutation } = useAccountMutations();
 
   const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
@@ -107,15 +113,43 @@ export function DashboardPage() {
             Overview, account health, and recent request logs.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handleRefresh}
-          disabled={isRefreshing}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-          title="Refresh dashboard"
-        >
-          <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} />
-        </button>
+        <div className="flex items-center gap-2">
+          {isAdmin ? (
+            <Select
+              value={filters.ownerUserId ?? "all"}
+              onValueChange={(value) =>
+                updateFilters({
+                  ownerUserId: value === "all" ? undefined : value,
+                  accountIds: [],
+                  modelOptions: [],
+                  statuses: [],
+                  offset: 0,
+                })
+              }
+            >
+              <SelectTrigger size="sm" className="w-56">
+                <SelectValue placeholder="All users" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All users</SelectItem>
+                {(usersQuery.data ?? []).map((user) => (
+                  <SelectItem key={user.id} value={user.id}>
+                    {user.username}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+          <button
+            type="button"
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            title="Refresh dashboard"
+          >
+            <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}

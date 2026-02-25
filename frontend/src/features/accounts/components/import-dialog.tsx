@@ -18,7 +18,8 @@ export type ImportDialogProps = {
   busy: boolean;
   error: string | null;
   onOpenChange: (open: boolean) => void;
-  onImport: (file: File) => Promise<void>;
+  onImportAuthJson: (file: File) => Promise<void>;
+  onImportCredentials: (credentialsText: string) => Promise<void>;
 };
 
 export function ImportDialog({
@@ -26,38 +27,81 @@ export function ImportDialog({
   busy,
   error,
   onOpenChange,
-  onImport,
+  onImportAuthJson,
+  onImportCredentials,
 }: ImportDialogProps) {
+  const [mode, setMode] = useState<"authJson" | "credentials">("authJson");
   const [file, setFile] = useState<File | null>(null);
+  const [credentialsText, setCredentialsText] = useState("");
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!file) {
-      return;
+    if (mode === "authJson") {
+      if (!file) {
+        return;
+      }
+      await onImportAuthJson(file);
+    } else {
+      const trimmed = credentialsText.trim();
+      if (!trimmed) {
+        return;
+      }
+      await onImportCredentials(trimmed);
     }
-    await onImport(file);
     onOpenChange(false);
+    setMode("authJson");
     setFile(null);
+    setCredentialsText("");
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Import auth.json</DialogTitle>
-          <DialogDescription>Upload an exported account auth.json file.</DialogDescription>
+          <DialogTitle>Import accounts</DialogTitle>
+          <DialogDescription>Upload auth.json or paste credentials in email:password:2fa_secret format.</DialogDescription>
         </DialogHeader>
 
         <form className="space-y-4" onSubmit={handleSubmit}>
-          <div className="space-y-2">
-            <Label htmlFor="auth-json-file">File</Label>
-            <Input
-              id="auth-json-file"
-              type="file"
-              accept="application/json,.json"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-            />
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant={mode === "authJson" ? "default" : "outline"}
+              onClick={() => setMode("authJson")}
+            >
+              auth.json
+            </Button>
+            <Button
+              type="button"
+              variant={mode === "credentials" ? "default" : "outline"}
+              onClick={() => setMode("credentials")}
+            >
+              Credentials
+            </Button>
           </div>
+
+          {mode === "authJson" ? (
+            <div className="space-y-2">
+              <Label htmlFor="auth-json-file">File</Label>
+              <Input
+                id="auth-json-file"
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="credentials-text">Credentials</Label>
+              <textarea
+                id="credentials-text"
+                value={credentialsText}
+                onChange={(event) => setCredentialsText(event.target.value)}
+                placeholder="email:password:2fa_secret"
+                className="border-input bg-background min-h-36 w-full rounded-md border px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              />
+            </div>
+          )}
 
           {error ? (
             <p className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
@@ -66,7 +110,13 @@ export function ImportDialog({
           ) : null}
 
           <DialogFooter>
-            <Button type="submit" disabled={busy || !file}>
+            <Button
+              type="submit"
+              disabled={
+                busy ||
+                (mode === "authJson" ? !file : !credentialsText.trim())
+              }
+            >
               Import
             </Button>
           </DialogFooter>

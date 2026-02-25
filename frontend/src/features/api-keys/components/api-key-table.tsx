@@ -56,12 +56,22 @@ function formatLimitSummary(limits: LimitRule[]): string {
 export type ApiKeyTableProps = {
   keys: ApiKey[];
   busy: boolean;
+  showOwner?: boolean;
+  ownerLabels?: Record<string, string>;
   onEdit: (apiKey: ApiKey) => void;
   onDelete: (apiKey: ApiKey) => void;
   onRegenerate: (apiKey: ApiKey) => void;
 };
 
-export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiKeyTableProps) {
+export function ApiKeyTable({
+  keys,
+  busy,
+  showOwner = false,
+  ownerLabels = {},
+  onEdit,
+  onDelete,
+  onRegenerate,
+}: ApiKeyTableProps) {
   if (keys.length === 0) {
     return <EmptyState icon={KeyRound} title="No API keys created yet" />;
   }
@@ -71,6 +81,9 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
     <Table className="table-fixed">
       <TableHeader>
         <TableRow>
+          {showOwner ? (
+            <TableHead className="w-[10%] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Owner</TableHead>
+          ) : null}
           <TableHead className="w-[12%] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
           <TableHead className="w-[10%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
           <TableHead className="w-[14%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
@@ -84,9 +97,13 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
         {keys.map((apiKey) => {
           const models = apiKey.allowedModels?.join(", ") || "All";
           const usageText = formatLimitSummary(apiKey.limits);
+          const ownerLabel = apiKey.ownerUserId ? ownerLabels[apiKey.ownerUserId] ?? apiKey.ownerUserId : "—";
 
           return (
             <TableRow key={apiKey.id}>
+              {showOwner ? (
+                <TableCell className="pl-4 text-xs text-muted-foreground">{ownerLabel}</TableCell>
+              ) : null}
               <TableCell className="pl-4 font-medium">{apiKey.name}</TableCell>
               <TableCell className="font-mono text-xs">{apiKey.keyPrefix}</TableCell>
               <TableCell className="max-w-[14rem] truncate">{models}</TableCell>

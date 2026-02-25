@@ -30,8 +30,10 @@ class _FakeApiKeysRepository:
         row.limits = []
         return row
 
-    async def get_by_id(self, key_id: str) -> ApiKey | None:
+    async def get_by_id(self, key_id: str, owner_user_id: str | None = None) -> ApiKey | None:
         row = self.rows.get(key_id)
+        if row is not None and owner_user_id is not None and row.owner_user_id != owner_user_id:
+            return None
         if row is not None:
             row.limits = self._limits.get(key_id, [])
         return row
@@ -43,14 +45,19 @@ class _FakeApiKeysRepository:
                 return row
         return None
 
-    async def list_all(self) -> list[ApiKey]:
-        result = sorted(self.rows.values(), key=lambda row: row.created_at, reverse=True)
+    async def list_all(self, owner_user_id: str | None = None) -> list[ApiKey]:
+        rows = list(self.rows.values())
+        if owner_user_id is not None:
+            rows = [row for row in rows if row.owner_user_id == owner_user_id]
+        result = sorted(rows, key=lambda row: row.created_at, reverse=True)
         for row in result:
             row.limits = self._limits.get(row.id, [])
         return result
 
-    async def update(self, key_id: str, **kwargs: object) -> ApiKey | None:
+    async def update(self, key_id: str, owner_user_id: str | None = None, **kwargs: object) -> ApiKey | None:
         row = self.rows.get(key_id)
+        if row is not None and owner_user_id is not None and row.owner_user_id != owner_user_id:
+            return None
         if row is None:
             return None
         for field, value in kwargs.items():
@@ -58,8 +65,11 @@ class _FakeApiKeysRepository:
         row.limits = self._limits.get(key_id, [])
         return row
 
-    async def delete(self, key_id: str) -> bool:
-        if key_id not in self.rows:
+    async def delete(self, key_id: str, owner_user_id: str | None = None) -> bool:
+        row = self.rows.get(key_id)
+        if row is None:
+            return False
+        if owner_user_id is not None and row.owner_user_id != owner_user_id:
             return False
         self.rows.pop(key_id)
         self._limits.pop(key_id, None)

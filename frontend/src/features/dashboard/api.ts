@@ -9,10 +9,15 @@ import {
 const DASHBOARD_PATH = "/api/dashboard";
 const REQUEST_LOGS_PATH = "/api/request-logs";
 
+export type DashboardOverviewParams = {
+  ownerUserId?: string;
+};
+
 export type RequestLogsListFilters = {
   limit?: number;
   offset?: number;
   search?: string;
+  ownerUserId?: string;
   accountIds?: string[];
   statuses?: string[];
   modelOptions?: string[];
@@ -21,6 +26,7 @@ export type RequestLogsListFilters = {
 };
 
 export type RequestLogFacetFilters = {
+  ownerUserId?: string;
   since?: string;
   until?: string;
   accountIds?: string[];
@@ -39,7 +45,16 @@ function appendMany(params: URLSearchParams, key: string, values?: string[]): vo
 }
 
 export function getDashboardOverview() {
-  return get(`${DASHBOARD_PATH}/overview`, DashboardOverviewSchema);
+  return getDashboardOverviewWithParams();
+}
+
+export function getDashboardOverviewWithParams(params: DashboardOverviewParams = {}) {
+  const query = new URLSearchParams();
+  if (params.ownerUserId) {
+    query.set("ownerUserId", params.ownerUserId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return get(`${DASHBOARD_PATH}/overview${suffix}`, DashboardOverviewSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {
@@ -52,6 +67,9 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
   }
   if (params.search) {
     query.set("search", params.search);
+  }
+  if (params.ownerUserId) {
+    query.set("ownerUserId", params.ownerUserId);
   }
   appendMany(query, "accountId", params.accountIds);
   appendMany(query, "status", params.statuses);
@@ -68,6 +86,9 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
 
 export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
   const query = new URLSearchParams();
+  if (params.ownerUserId) {
+    query.set("ownerUserId", params.ownerUserId);
+  }
   if (params.since) {
     query.set("since", params.since);
   }

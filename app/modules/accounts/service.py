@@ -5,24 +5,23 @@ from datetime import timedelta
 
 from pydantic import ValidationError
 
-from app.core.auth import (
-    DEFAULT_EMAIL,
-    DEFAULT_PLAN,
-    claims_from_auth,
-    generate_unique_account_id,
-    parse_auth_json,
-)
+from app.core.auth import claims_from_auth, parse_auth_json
+from app.core.clients.oauth import OAuthTokens
 from app.core.crypto import TokenEncryptor
-from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.credential_automator import CredentialAuthAutomator, CredentialAuthorizationError
+from app.modules.accounts.credential_parser import parse_credential_lines
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountImportResponse,
     AccountSummary,
     AccountTrendsResponse,
+    CredentialImportResult,
+    CredentialsImportResponse,
 )
+from app.modules.accounts.token_factory import PersistableTokenPayload, account_from_token_payload
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
@@ -39,18 +38,28 @@ class AccountsService:
         self,
         repo: AccountsRepository,
         usage_repo: UsageRepository | None = None,
+        credential_automator: CredentialAuthAutomator | None = None,
     ) -> None:
         self._repo = repo
         self._usage_repo = usage_repo
         self._usage_updater = UsageUpdater(usage_repo, repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
+        self._credential_automator = credential_automator or CredentialAuthAutomator()
 
-    async def list_accounts(self) -> list[AccountSummary]:
-        accounts = await self._repo.list_accounts()
+    async def list_accounts(self, *, owner_user_id: str | None = None) -> list[AccountSummary]:
+        accounts = await self._repo.list_accounts(owner_user_id=owner_user_id)
         if not accounts:
             return []
-        primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
-        secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
+        primary_usage = (
+            await self._usage_repo.latest_by_account(window="primary", owner_user_id=owner_user_id)
+            if self._usage_repo
+            else {}
+        )
+        secondary_usage = (
+            await self._usage_repo.latest_by_account(window="secondary", owner_user_id=owner_user_id)
+            if self._usage_repo
+            else {}
+        )
 
         return build_account_summaries(
             accounts=accounts,
@@ -59,8 +68,8 @@ class AccountsService:
             encryptor=self._encryptor,
         )
 
-    async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
-        account = await self._repo.get_by_id(account_id)
+    async def get_account_trends(self, account_id: str, *, owner_user_id: str | None = None) -> AccountTrendsResponse | None:
+        account = await self._repo.get_by_id(account_id, owner_user_id=owner_user_id)
         if not account or not self._usage_repo:
             return None
         now = utcnow()
@@ -71,6 +80,7 @@ class AccountsService:
             since=since,
             bucket_seconds=_DETAIL_BUCKET_SECONDS,
             account_id=account_id,
+            owner_user_id=owner_user_id,
         )
         trends = build_account_usage_trends(buckets, since_epoch, _DETAIL_BUCKET_SECONDS, bucket_count)
         trend = trends.get(account_id)
@@ -80,36 +90,25 @@ class AccountsService:
             secondary=trend.secondary if trend else [],
         )
 
-    async def import_account(self, raw: bytes) -> AccountImportResponse:
+    async def import_account(self, raw: bytes, *, owner_user_id: str) -> AccountImportResponse:
         try:
             auth = parse_auth_json(raw)
         except (json.JSONDecodeError, ValidationError, UnicodeDecodeError, TypeError) as exc:
             raise InvalidAuthJsonError("Invalid auth.json payload") from exc
         claims = claims_from_auth(auth)
-
-        email = claims.email or DEFAULT_EMAIL
-        raw_account_id = claims.account_id
-        account_id = generate_unique_account_id(raw_account_id, email)
-        plan_type = coerce_account_plan_type(claims.plan_type, DEFAULT_PLAN)
         last_refresh = to_utc_naive(auth.last_refresh_at) if auth.last_refresh_at else utcnow()
 
-        account = Account(
-            id=account_id,
-            chatgpt_account_id=raw_account_id,
-            email=email,
-            plan_type=plan_type,
-            access_token_encrypted=self._encryptor.encrypt(auth.tokens.access_token),
-            refresh_token_encrypted=self._encryptor.encrypt(auth.tokens.refresh_token),
-            id_token_encrypted=self._encryptor.encrypt(auth.tokens.id_token),
-            last_refresh=last_refresh,
-            status=AccountStatus.ACTIVE,
-            deactivation_reason=None,
+        account = account_from_token_payload(
+            PersistableTokenPayload(
+                access_token=auth.tokens.access_token,
+                refresh_token=auth.tokens.refresh_token,
+                id_token=auth.tokens.id_token,
+                account_id=claims.account_id,
+                last_refresh=last_refresh,
+            ),
+            encryptor=self._encryptor,
         )
-
-        saved = await self._repo.upsert(account)
-        if self._usage_repo and self._usage_updater:
-            latest_usage = await self._usage_repo.latest_by_account(window="primary")
-            await self._usage_updater.refresh_accounts([saved], latest_usage)
+        saved = await self._save_account(account, owner_user_id=owner_user_id)
         return AccountImportResponse(
             account_id=saved.id,
             email=saved.email,
@@ -117,11 +116,79 @@ class AccountsService:
             status=saved.status,
         )
 
-    async def reactivate_account(self, account_id: str) -> bool:
-        return await self._repo.update_status(account_id, AccountStatus.ACTIVE, None)
+    async def import_credentials(self, credentials_text: str, *, owner_user_id: str) -> CredentialsImportResponse:
+        credential_lines = parse_credential_lines(credentials_text)
+        results: list[CredentialImportResult] = []
+        imported = 0
 
-    async def pause_account(self, account_id: str) -> bool:
-        return await self._repo.update_status(account_id, AccountStatus.PAUSED, None)
+        for line in credential_lines:
+            try:
+                tokens = await self._credential_automator.authorize(
+                    email=line.email,
+                    password=line.account_password,
+                    totp_secret=line.totp_secret,
+                )
+                saved = await self._save_oauth_tokens(tokens, owner_user_id=owner_user_id)
+                imported += 1
+                results.append(
+                    CredentialImportResult(
+                        line=line.line,
+                        email=line.email,
+                        status="imported",
+                        account_id=saved.id,
+                    ),
+                )
+            except CredentialAuthorizationError as exc:
+                results.append(
+                    CredentialImportResult(
+                        line=line.line,
+                        email=line.email,
+                        status="failed",
+                        error=str(exc),
+                    ),
+                )
+            except Exception as exc:
+                results.append(
+                    CredentialImportResult(
+                        line=line.line,
+                        email=line.email,
+                        status="failed",
+                        error=str(exc),
+                    ),
+                )
 
-    async def delete_account(self, account_id: str) -> bool:
-        return await self._repo.delete(account_id)
+        failed = len(results) - imported
+        return CredentialsImportResponse(
+            total=len(results),
+            imported=imported,
+            failed=failed,
+            results=results,
+        )
+
+    async def reactivate_account(self, account_id: str, *, owner_user_id: str | None = None) -> bool:
+        return await self._repo.update_status(account_id, AccountStatus.ACTIVE, None, owner_user_id=owner_user_id)
+
+    async def pause_account(self, account_id: str, *, owner_user_id: str | None = None) -> bool:
+        return await self._repo.update_status(account_id, AccountStatus.PAUSED, None, owner_user_id=owner_user_id)
+
+    async def delete_account(self, account_id: str, *, owner_user_id: str | None = None) -> bool:
+        return await self._repo.delete(account_id, owner_user_id=owner_user_id)
+
+    async def _save_oauth_tokens(self, tokens: OAuthTokens, *, owner_user_id: str) -> Account:
+        account = account_from_token_payload(
+            PersistableTokenPayload(
+                access_token=tokens.access_token,
+                refresh_token=tokens.refresh_token,
+                id_token=tokens.id_token,
+                last_refresh=utcnow(),
+            ),
+            encryptor=self._encryptor,
+        )
+        return await self._save_account(account, owner_user_id=owner_user_id)
+
+    async def _save_account(self, account: Account, *, owner_user_id: str) -> Account:
+        saved = await self._repo.upsert(account, owner_user_id=owner_user_id)
+        if self._usage_repo and self._usage_updater:
+            latest_usage = await self._usage_repo.latest_by_account(window="primary", owner_user_id=owner_user_id)
+            await self._usage_updater.refresh_accounts([saved], latest_usage)
+        return saved

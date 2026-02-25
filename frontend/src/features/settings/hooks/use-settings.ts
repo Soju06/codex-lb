@@ -4,12 +4,13 @@ import { toast } from "sonner";
 import { getSettings, updateSettings } from "@/features/settings/api";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 
-export function useSettings() {
+export function useSettings(enabled = true) {
   const queryClient = useQueryClient();
 
   const settingsQuery = useQuery({
     queryKey: ["settings", "detail"],
     queryFn: getSettings,
+    enabled,
   });
 
   const updateSettingsMutation = useMutation({

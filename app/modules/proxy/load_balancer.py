@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Iterable
@@ -7,6 +8,7 @@ from typing import Iterable
 from app.core import usage as usage_core
 from app.core.balancer import (
     AccountState,
+    RoutingStrategy,
     SelectionResult,
     handle_permanent_failure,
     handle_quota_exceeded,
@@ -22,6 +24,8 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage.updater import UsageUpdater
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,6 +54,7 @@ class LoadBalancer:
         *,
         reallocate_sticky: bool = False,
         prefer_earlier_reset_accounts: bool = False,
+        routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
     ) -> AccountSelection:
         selected_snapshot: Account | None = None
@@ -83,6 +88,7 @@ class LoadBalancer:
                 sticky_key=sticky_key,
                 reallocate_sticky=reallocate_sticky,
                 prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                routing_strategy=routing_strategy,
                 sticky_repo=repos.sticky_sessions,
             )
             for state in states:
@@ -102,10 +108,24 @@ class LoadBalancer:
                     selected_snapshot = _clone_account(selected)
 
         if selected_snapshot is None:
+            logger.warning(
+                "No account selected strategy=%s sticky=%s model=%s error=%s",
+                routing_strategy,
+                bool(sticky_key),
+                model,
+                error_message,
+            )
             return AccountSelection(account=None, error_message=error_message)
 
         runtime = self._runtime.setdefault(selected_snapshot.id, RuntimeState())
         runtime.last_selected_at = time.time()
+        logger.info(
+            "Selected account_id=%s strategy=%s sticky=%s model=%s",
+            selected_snapshot.id,
+            routing_strategy,
+            bool(sticky_key),
+            model,
+        )
         return AccountSelection(account=selected_snapshot, error_message=None)
 
     async def _select_with_stickiness(
@@ -116,13 +136,22 @@ class LoadBalancer:
         sticky_key: str | None,
         reallocate_sticky: bool,
         prefer_earlier_reset_accounts: bool,
+        routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
-            return select_account(states, prefer_earlier_reset=prefer_earlier_reset_accounts)
+            return select_account(
+                states,
+                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                routing_strategy=routing_strategy,
+            )
 
         if reallocate_sticky:
-            chosen = select_account(states, prefer_earlier_reset=prefer_earlier_reset_accounts)
+            chosen = select_account(
+                states,
+                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                routing_strategy=routing_strategy,
+            )
             if chosen.account is not None and chosen.account.account_id in account_map:
                 await sticky_repo.upsert(sticky_key, chosen.account.account_id)
             return chosen
@@ -133,11 +162,19 @@ class LoadBalancer:
             if pinned is None:
                 await sticky_repo.delete(sticky_key)
             else:
-                pinned_result = select_account([pinned], prefer_earlier_reset=prefer_earlier_reset_accounts)
+                pinned_result = select_account(
+                    [pinned],
+                    prefer_earlier_reset=prefer_earlier_reset_accounts,
+                    routing_strategy=routing_strategy,
+                )
                 if pinned_result.account is not None:
                     return pinned_result
 
-        chosen = select_account(states, prefer_earlier_reset=prefer_earlier_reset_accounts)
+        chosen = select_account(
+            states,
+            prefer_earlier_reset=prefer_earlier_reset_accounts,
+            routing_strategy=routing_strategy,
+        )
         if chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id)
         return chosen
@@ -257,7 +294,7 @@ def _state_from_account(
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
 
     # Use account.reset_at from DB as the authoritative source for runtime reset
-    # This survives across requests since LoadBalancer is instantiated per-request
+    # and to survive process restarts.
     db_reset_at = float(account.reset_at) if account.reset_at else None
     effective_runtime_reset = db_reset_at or runtime.reset_at
 

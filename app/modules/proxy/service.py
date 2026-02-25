@@ -100,11 +100,13 @@ class ProxyService:
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
+        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
             reallocate_sticky=sticky_key is not None,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
             model=payload.model,
         )
         account = selection.account
@@ -322,6 +324,7 @@ class ProxyService:
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
+        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
         max_attempts = 3
         settled = False
@@ -331,6 +334,7 @@ class ProxyService:
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
                     model=payload.model,
                 )
                 account = selection.account

@@ -151,9 +151,13 @@ def get_dashboard_auth_context(
     return DashboardAuthContext(session=session, repository=repository, service=service)
 
 
+_proxy_service_singleton: ProxyService | None = None
+
 def get_proxy_context() -> ProxyContext:
-    service = ProxyService(repo_factory=_proxy_repo_context)
-    return ProxyContext(service=service)
+    global _proxy_service_singleton
+    if _proxy_service_singleton is None:
+        _proxy_service_singleton = ProxyService(repo_factory=_proxy_repo_context)
+    return ProxyContext(service=_proxy_service_singleton)
 
 
 def get_api_keys_context(

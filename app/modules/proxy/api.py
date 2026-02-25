@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator
+
+from aiohttp import ClientError, ClientTimeout
 
 from fastapi import APIRouter, Body, Depends, Request, Response, Security
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -12,11 +15,14 @@ from app.core.auth.dependencies import (
     validate_codex_usage_identity,
     validate_proxy_api_key,
 )
+from app.core.clients.http import get_http_client
 from app.core.clients.proxy import ProxyResponseError
+from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyAuthError, ProxyModelNotAllowed, ProxyRateLimitError
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
+from app.core.openai.embeddings import EmbeddingsRequest, EmbeddingsResponse
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
 from app.core.openai.models import (
@@ -131,6 +137,47 @@ async def v1_models(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _build_models_response(api_key)
+
+
+@v1_router.post("/embeddings", response_model=EmbeddingsResponse)
+async def v1_embeddings(
+    payload: EmbeddingsRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    _validate_model_access(api_key, payload.model)
+
+    rate_limit_headers = await context.service.rate_limit_headers()
+    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
+    try:
+        status_code, result = await _proxy_embeddings(payload)
+    except Exception:
+        await _release_reservation(reservation)
+        return JSONResponse(
+            status_code=502,
+            content=openai_error("upstream_error", "Embeddings upstream request failed"),
+            headers=rate_limit_headers,
+        )
+
+    if status_code >= 400:
+        await _release_reservation(reservation)
+        return JSONResponse(status_code=status_code, content=result, headers=rate_limit_headers)
+
+    prompt_tokens = _extract_embeddings_prompt_tokens(result)
+    await _finalize_embeddings_reservation(
+        api_key=api_key,
+        reservation=reservation,
+        model=payload.model,
+        prompt_tokens=prompt_tokens,
+    )
+
+    try:
+        validated = EmbeddingsResponse.model_validate(result)
+        content = validated.model_dump(mode="json", exclude_none=True)
+    except ValidationError:
+        content = result
+
+    return JSONResponse(status_code=200, content=content, headers=rate_limit_headers)
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
@@ -470,6 +517,103 @@ async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         await service.release_usage_reservation(reservation.reservation_id)
+
+
+async def _proxy_embeddings(payload: EmbeddingsRequest) -> tuple[int, OpenAIErrorEnvelope | dict[str, JsonValue]]:
+    settings = get_settings()
+    if not settings.embeddings_enabled or not settings.embeddings_upstream_url:
+        return (
+            405,
+            openai_error(
+                "invalid_request_error",
+                "Method Not Allowed",
+                error_type="invalid_request_error",
+            ),
+        )
+
+    request_payload = payload.to_upstream_payload(model_override=settings.embeddings_model_override)
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if settings.embeddings_upstream_api_key:
+        headers["Authorization"] = f"Bearer {settings.embeddings_upstream_api_key}"
+
+    try:
+        async with get_http_client().session.post(
+            settings.embeddings_upstream_url,
+            headers=headers,
+            json=request_payload,
+            timeout=ClientTimeout(total=settings.embeddings_upstream_timeout_seconds),
+        ) as resp:
+            raw_text = await resp.text()
+    except ClientError:
+        return 502, openai_error("upstream_error", "Embeddings upstream request failed")
+
+    try:
+        parsed: JsonValue = json.loads(raw_text) if raw_text else {}
+    except json.JSONDecodeError:
+        parsed = openai_error(
+            "upstream_error",
+            "Embeddings upstream returned non-JSON response",
+            error_type="server_error",
+        )
+
+    if not isinstance(parsed, dict):
+        parsed = openai_error(
+            "upstream_error",
+            "Embeddings upstream returned invalid response",
+            error_type="server_error",
+        )
+
+    if resp.status >= 400:
+        if "error" not in parsed:
+            parsed = openai_error(
+                "upstream_error",
+                f"Embeddings upstream error (HTTP {resp.status})",
+                error_type="server_error",
+            )
+        return resp.status, parsed
+
+    return 200, parsed
+
+
+def _extract_embeddings_prompt_tokens(payload: dict[str, JsonValue] | OpenAIErrorEnvelope) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    prompt_tokens = usage.get("prompt_tokens")
+    if isinstance(prompt_tokens, int):
+        return max(prompt_tokens, 0)
+    if isinstance(prompt_tokens, float):
+        return max(int(prompt_tokens), 0)
+    return None
+
+
+async def _finalize_embeddings_reservation(
+    *,
+    api_key: ApiKeyData | None,
+    reservation: ApiKeyUsageReservationData | None,
+    model: str,
+    prompt_tokens: int | None,
+) -> None:
+    if reservation is None:
+        return
+
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        if api_key is None or prompt_tokens is None:
+            await service.release_usage_reservation(reservation.reservation_id)
+            return
+        await service.finalize_usage_reservation(
+            reservation.reservation_id,
+            model=model,
+            input_tokens=max(prompt_tokens, 0),
+            output_tokens=0,
+            cached_input_tokens=0,
+        )
 
 
 def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:

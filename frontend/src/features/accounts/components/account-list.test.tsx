@@ -70,7 +70,7 @@ describe("AccountList", () => {
     expect(screen.getByText("No matching accounts")).toBeInTheDocument();
   });
 
-  it("shows account id only for duplicate emails", () => {
+  it("shows provider label for duplicate emails", () => {
     render(
       <AccountList
         accounts={[
@@ -103,9 +103,8 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getByText(/dup@example\.com \| ID d48f0bfc\.\.\.12b5d5/)).toBeInTheDocument();
-    expect(screen.getByText(/dup@example\.com \| ID 7f9de2ad\.\.\.a95cee/)).toBeInTheDocument();
+    expect(screen.getAllByText("dup@example.com | Codex")).toHaveLength(2);
     expect(screen.getByText("unique@example.com")).toBeInTheDocument();
-    expect(screen.queryByText(/unique@example\.com \| ID/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/unique@example\.com \|/)).not.toBeInTheDocument();
   });
 });

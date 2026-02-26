@@ -1,4 +1,4 @@
-import { Inbox } from "lucide-react";
+import { Bot, Inbox, SquareTerminal } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/empty-state";
@@ -101,6 +101,8 @@ export function RecentRequestsTable({
               const time = formatTimeLong(request.requestedAt);
               const accountLabel = accountLabelMap.get(request.accountId) ?? request.accountId;
               const isAnthropic = isAnthropicAccountId(request.accountId);
+              const providerLabel = providerLabelForAccountId(request.accountId);
+              const ProviderIcon = isAnthropic ? Bot : SquareTerminal;
               const errorMessage = request.errorMessage || request.errorCode || "-";
               const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
 
@@ -114,18 +116,18 @@ export function RecentRequestsTable({
                   </TableCell>
                   <TableCell className="truncate align-top text-sm">
                     <div className="flex items-center gap-2">
-                      <span className="truncate">{accountLabel}</span>
-                      <Badge
-                        variant="outline"
+                      <span
                         className={cn(
-                          "h-5 shrink-0 px-1.5 text-[10px] uppercase tracking-wide",
+                          "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
                           isAnthropic
-                            ? "border-amber-500/30 text-amber-700 dark:text-amber-400"
-                            : "border-sky-500/30 text-sky-700 dark:text-sky-400",
+                            ? "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                            : "border-sky-500/35 bg-sky-500/15 text-sky-700 dark:text-sky-400",
                         )}
+                        title={providerLabel}
                       >
-                        {providerLabelForAccountId(request.accountId)}
-                      </Badge>
+                        <ProviderIcon className="h-3 w-3" />
+                      </span>
+                      <span className="truncate">{accountLabel}</span>
                     </div>
                   </TableCell>
                   <TableCell className="truncate align-top">

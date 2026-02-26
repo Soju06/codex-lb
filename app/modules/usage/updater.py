@@ -66,6 +66,8 @@ class UsageUpdater:
         now = utcnow()
         interval = settings.usage_refresh_interval_seconds
         for account in accounts:
+            if _is_anthropic_provider_account(account, settings):
+                continue
             if account.status == AccountStatus.DEACTIVATED:
                 continue
             latest = latest_usage.get(account.id)
@@ -256,3 +258,7 @@ _DEACTIVATING_USAGE_STATUS_CODES = {402, 403, 404}
 
 def _should_deactivate_for_usage_error(status_code: int) -> bool:
     return status_code in _DEACTIVATING_USAGE_STATUS_CODES
+
+
+def _is_anthropic_provider_account(account: Account, settings) -> bool:
+    return account.id == settings.anthropic_default_account_id or account.id.startswith("anthropic_")

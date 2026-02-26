@@ -172,6 +172,9 @@ def to_responses_request_with_cache_resolution(
         translated_payload["top_p"] = payload.top_p
     if payload.top_k is not None:
         translated_payload["top_k"] = payload.top_k
+    reasoning_effort = _extract_reasoning_effort(payload)
+    if reasoning_effort is not None:
+        translated_payload["reasoning"] = {"effort": reasoning_effort}
     if payload.stop_sequences is not None:
         translated_payload["stop"] = _json_array_from_strings(payload.stop_sequences)
     if payload.max_tokens is not None:
@@ -516,6 +519,27 @@ def _extract_prompt_cache_retention(payload: AnthropicMessagesRequest) -> str | 
             param="prompt_cache_retention",
         )
     return normalized
+
+
+def _extract_reasoning_effort(payload: AnthropicMessagesRequest) -> str | None:
+    if not payload.model_extra:
+        return None
+
+    reasoning_payload = payload.model_extra.get("reasoning")
+    if is_json_mapping(reasoning_payload):
+        nested_effort = reasoning_payload.get("effort")
+        if isinstance(nested_effort, str):
+            normalized_nested = nested_effort.strip()
+            if normalized_nested:
+                return normalized_nested
+
+    top_level_effort = payload.model_extra.get("reasoningEffort")
+    if not isinstance(top_level_effort, str):
+        return None
+    normalized_top_level = top_level_effort.strip()
+    if not normalized_top_level:
+        return None
+    return normalized_top_level
 
 
 def _merge_passthrough_cache_extras(

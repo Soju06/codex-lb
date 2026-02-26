@@ -158,6 +158,36 @@ def test_anthropic_request_forwards_prompt_cache_retention():
     assert translated.prompt_cache_retention == "24h"
 
 
+def test_anthropic_request_maps_reasoning_effort_alias():
+    payload = AnthropicMessagesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "reasoningEffort": "xhigh",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+
+    translated = to_responses_request(payload)
+
+    assert translated.reasoning is not None
+    assert translated.reasoning.effort == "xhigh"
+
+
+def test_anthropic_request_maps_nested_reasoning_effort():
+    payload = AnthropicMessagesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "reasoning": {"effort": "medium"},
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+
+    translated = to_responses_request(payload)
+
+    assert translated.reasoning is not None
+    assert translated.reasoning.effort == "medium"
+
+
 def test_anthropic_request_rejects_non_string_prompt_cache_retention():
     payload = AnthropicMessagesRequest.model_validate(
         {

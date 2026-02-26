@@ -22,3 +22,14 @@ The Anthropic-compatible layer SHALL not silently remap requested models (includ
 - **WHEN** a Claude-compatible request specifies model `claude-sonnet-4-6`
 - **THEN** the forwarded upstream request model remains `claude-sonnet-4-6`
 - **AND** sampling fields such as `temperature`, `top_p`, and `top_k` remain unchanged
+
+### Requirement: Anthropic-compatible requests map reasoning effort aliases
+The Anthropic-compatible translation layer SHALL map Claude-facing reasoning effort aliases into `ResponsesRequest.reasoning.effort`.
+
+#### Scenario: Top-level reasoningEffort alias is provided
+- **WHEN** a request includes `reasoningEffort` with a non-empty string value
+- **THEN** the translated upstream payload includes `reasoning.effort` with that value
+
+#### Scenario: Nested reasoning.effort is provided
+- **WHEN** a request includes `reasoning` object with non-empty `effort`
+- **THEN** the translated upstream payload includes `reasoning.effort` with that value

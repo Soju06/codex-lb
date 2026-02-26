@@ -212,6 +212,33 @@ async def test_anthropic_messages_keeps_requested_claude_model(async_client, mon
 
 
 @pytest.mark.asyncio
+async def test_anthropic_messages_maps_reasoning_effort_from_alias(async_client, monkeypatch):
+    await _import_account(async_client, "acc_anthropic_reasoning", "anthropic-reasoning@example.com")
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        reasoning = getattr(payload, "reasoning", None)
+        seen["reasoning_effort"] = getattr(reasoning, "effort", None) if reasoning is not None else None
+        yield 'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_reasoning","usage":{"input_tokens":3,"output_tokens":5}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.1",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoningEffort": "xhigh",
+    }
+    response = await async_client.post("/v1/messages", json=request_payload)
+    assert response.status_code == 200
+    assert seen["reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_messages_claude_preserves_explicit_prompt_cache_key(async_client, monkeypatch):
     await _import_account(async_client, "acc_anthropic_explicit_cache", "anthropic-explicit-cache@example.com")
 

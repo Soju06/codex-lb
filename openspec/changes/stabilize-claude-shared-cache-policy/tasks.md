@@ -19,3 +19,9 @@
 - [x] 4.1 Remove hardcoded Claude model forcing from anthropic-compatible API transport path
 - [x] 4.2 Move API key reservation enforcement/release orchestration from API route layer into anthropic service layer
 - [x] 4.3 Remove out-of-band implementation note file (`info.md`) per review guidance
+
+## 5. Reasoning Effort Mapping
+
+- [x] 5.1 Map `reasoningEffort` alias into `ResponsesRequest.reasoning.effort`
+- [x] 5.2 Map nested `reasoning.effort` into `ResponsesRequest.reasoning.effort`
+- [x] 5.3 Add unit and integration tests for both alias forms

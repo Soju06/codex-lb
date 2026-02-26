@@ -40,6 +40,10 @@ class InvalidAnthropicAuthJsonError(Exception):
     pass
 
 
+class InvalidAnthropicEmailError(Exception):
+    pass
+
+
 class AccountsService:
     def __init__(
         self,
@@ -123,14 +127,17 @@ class AccountsService:
             status=saved.status,
         )
 
-    async def import_anthropic_account(self, raw: bytes) -> AccountImportResponse:
+    async def import_anthropic_account(self, raw: bytes, *, email: str) -> AccountImportResponse:
         try:
             auth = parse_anthropic_auth_json(raw)
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError) as exc:
             raise InvalidAnthropicAuthJsonError("Invalid Anthropic credential payload") from exc
 
+        normalized_email = email.strip().lower()
+        if "@" not in normalized_email:
+            raise InvalidAnthropicEmailError("Invalid Anthropic account email")
+
         settings = get_settings()
-        email = auth.email or settings.anthropic_default_account_email
         account_id = settings.anthropic_default_account_id
         plan_type = coerce_account_plan_type(settings.anthropic_default_plan_type, DEFAULT_PLAN)
 
@@ -144,7 +151,7 @@ class AccountsService:
             account = Account(
                 id=account_id,
                 chatgpt_account_id=None,
-                email=email,
+                email=normalized_email,
                 plan_type=plan_type,
                 access_token_encrypted=encrypted_access,
                 refresh_token_encrypted=encrypted_refresh,
@@ -162,7 +169,7 @@ class AccountsService:
                 id_token_encrypted=encrypted_id,
                 last_refresh=utcnow(),
                 plan_type=plan_type,
-                email=email,
+                email=normalized_email,
             )
             await self._repo.update_status(account_id, AccountStatus.ACTIVE, None)
             saved = await self._repo.get_by_id(account_id)

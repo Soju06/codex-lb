@@ -66,11 +66,13 @@ async def test_import_anthropic_credentials_uses_claude_label(async_client):
             "accessToken": "sk-ant-oat-123",
             "refreshToken": "refresh-123",
             "expiresAt": 1_893_456_789_000,
-        },
-        "user": {"email": "tester@example.com"},
+        }
     }
 
-    files = {"credentials_json": ("claude-credentials.json", json.dumps(credentials), "application/json")}
+    files = {
+        "credentials_json": ("claude-credentials.json", json.dumps(credentials), "application/json"),
+        "email": (None, "tester@example.com"),
+    }
     response = await async_client.post("/api/accounts/import-anthropic", files=files)
     assert response.status_code == 200
     data = response.json()
@@ -87,6 +89,20 @@ async def test_import_anthropic_credentials_uses_claude_label(async_client):
     assert imported is not None
     assert imported["email"] == "tester@example.com"
     assert imported["displayName"] == "claude/tester@example.com"
+
+
+@pytest.mark.asyncio
+async def test_import_anthropic_credentials_requires_email(async_client):
+    credentials = {
+        "claudeAiOauth": {
+            "accessToken": "sk-ant-oat-123",
+            "refreshToken": "refresh-123",
+            "expiresAt": 1_893_456_789_000,
+        }
+    }
+    files = {"credentials_json": ("claude-credentials.json", json.dumps(credentials), "application/json")}
+    response = await async_client.post("/api/accounts/import-anthropic", files=files)
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

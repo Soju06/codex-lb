@@ -111,9 +111,9 @@ export function AccountsPage() {
         busy={importMutation.isPending || importAnthropicMutation.isPending}
         error={getErrorMessageOrNull(importMutation.error) || getErrorMessageOrNull(importAnthropicMutation.error)}
         onOpenChange={importDialog.onOpenChange}
-        onImport={async (provider, file) => {
+        onImport={async (provider, file, email) => {
           if (provider === "anthropic") {
-            await importAnthropicMutation.mutateAsync(file);
+            await importAnthropicMutation.mutateAsync({ file, email: email ?? "" });
             return;
           }
           await importMutation.mutateAsync(file);

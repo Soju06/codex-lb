@@ -27,9 +27,10 @@ export function importAccount(file: File) {
   });
 }
 
-export function importAnthropicAccount(file: File) {
+export function importAnthropicAccount({ file, email }: { file: File; email: string }) {
   const formData = new FormData();
   formData.append("credentials_json", file);
+  formData.append("email", email);
   return post(`${ACCOUNTS_BASE_PATH}/import-anthropic`, AccountImportResponseSchema, {
     body: formData,
   });

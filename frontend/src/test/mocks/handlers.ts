@@ -254,11 +254,14 @@ export const handlers = [
     });
   }),
 
-  http.post("/api/accounts/import-anthropic", async () => {
+  http.post("/api/accounts/import-anthropic", async ({ request }) => {
+    const formData = await request.formData();
+    const emailValue = formData.get("email");
+    const email = typeof emailValue === "string" && emailValue.trim() ? emailValue.trim() : "claude-user@example.com";
     const created = createAccountSummary({
       accountId: "anthropic_default",
-      email: "claude-user@example.com",
-      displayName: "claude/claude-user@example.com",
+      email,
+      displayName: `claude/${email}`,
       status: "active",
     });
     state.accounts = [...state.accounts.filter((account) => account.accountId !== created.accountId), created];

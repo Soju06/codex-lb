@@ -47,13 +47,18 @@ If no argument is given, auto-detect the user's most recent open PR and confirm.
 
 Launch the adversarial review as a background process.
 
-1. Read `references/prompts/adversarial-review.md` from this skill directory.
-2. Pipe the prompt into the review script and run with `run_in_background=true`:
+1. Run the review script with `run_in_background=true`:
    ```
-   cat <prompt-file> | bash <skill-dir>/scripts/codex-subagent.sh --base <branch>
+   bash <skill-dir>/scripts/codex-subagent.sh --base <branch>
    ```
-3. Inform the user the review is running (~20-50 min).
-4. The script parses Codex output and returns the final review text.
+   Note: Codex CLI v0.105.0+ does not support combining `--base`/`--commit`
+   with a custom prompt. The built-in review logic is used automatically.
+   For `--uncommitted` mode (no diff target), pipe stdin for custom instructions:
+   ```
+   cat <prompt-file> | bash <skill-dir>/scripts/codex-subagent.sh --uncommitted
+   ```
+2. Inform the user the review is running (~20-50 min).
+3. The script parses Codex output and returns the final review text.
 
 ### Error handling
 

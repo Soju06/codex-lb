@@ -20,12 +20,13 @@ set -euo pipefail
 # Supported: --base <branch>, --uncommitted, --commit <sha>
 
 CODEX_ARGS=()
+HAS_DIFF_TARGET=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base|--commit)
-      CODEX_ARGS+=("$1" "$2"); shift 2 ;;
+      CODEX_ARGS+=("$1" "$2"); HAS_DIFF_TARGET=true; shift 2 ;;
     --uncommitted)
-      CODEX_ARGS+=("$1"); shift ;;
+      CODEX_ARGS+=("$1"); HAS_DIFF_TARGET=true; shift ;;
     *)
       echo "Warning: Unknown argument '$1' (passed through)" >&2
       CODEX_ARGS+=("$1"); shift ;;
@@ -43,13 +44,19 @@ if [[ -n "${CODEX_REVIEW_REASONING:-}" ]]; then
 fi
 
 # --- Execute ---
-# Read prompt from stdin if available; otherwise run without custom prompt.
+# Codex CLI v0.105.0: --base/--commit/--uncommitted and [PROMPT] are mutually
+# exclusive. When a diff target is specified, stdin prompt is ignored (Codex
+# uses its built-in review logic). When no diff target, stdin prompt is passed.
 if [ -p /dev/stdin ]; then
-  CODEX_ARGS+=("-")
-  OUTPUT=$(codex exec review "${CODEX_ARGS[@]}" 2>&1)
-else
-  OUTPUT=$(codex exec review "${CODEX_ARGS[@]}" 2>&1)
+  if $HAS_DIFF_TARGET; then
+    # Drain stdin and discard — cannot combine with --base/--commit/--uncommitted
+    cat > /dev/null
+    echo "Note: stdin prompt ignored (incompatible with --base/--commit/--uncommitted in Codex CLI)" >&2
+  else
+    CODEX_ARGS+=("-")
+  fi
 fi
+OUTPUT=$(codex exec review "${CODEX_ARGS[@]}" 2>&1)
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then

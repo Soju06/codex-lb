@@ -503,6 +503,8 @@ def _extract_prompt_cache_retention(payload: AnthropicMessagesRequest) -> str | 
 
     value = payload.model_extra.get("prompt_cache_retention")
     if value is None:
+        value = payload.model_extra.get("promptCacheRetention")
+    if value is None:
         return None
     if not isinstance(value, str):
         raise AnthropicTranslationError("prompt_cache_retention must be a string", param="prompt_cache_retention")

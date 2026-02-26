@@ -137,11 +137,12 @@ class UsageRepository:
         if account_id:
             conditions.append(UsageHistory.account_id == account_id)
 
+        window_expr = func.coalesce(UsageHistory.window, "primary")
         stmt = (
             select(
                 bucket_col,
                 UsageHistory.account_id,
-                func.coalesce(UsageHistory.window, "primary").label("window"),
+                window_expr.label("window"),
                 func.avg(UsageHistory.used_percent).label("avg_used_percent"),
                 func.count(UsageHistory.id).label("samples"),
             )
@@ -149,7 +150,7 @@ class UsageRepository:
             .group_by(
                 bucket_col,
                 UsageHistory.account_id,
-                func.coalesce(UsageHistory.window, "primary"),
+                window_expr,
             )
             .order_by(bucket_col)
         )

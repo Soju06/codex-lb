@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     anthropic_oauth_client_id: str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     anthropic_sdk_cli_path: str | None = None
     anthropic_sdk_default_session_id: str | None = None
-    anthropic_sdk_pool_enabled: bool = True
+    anthropic_sdk_pool_enabled: bool = False
     anthropic_sdk_pool_size: int = Field(default=4, ge=1)
     anthropic_sdk_pool_acquire_timeout_seconds: float = 30.0
     anthropic_usage_base_url: str = "https://api.anthropic.com"

@@ -22,6 +22,7 @@ from app.modules.api_keys.service import (
 )
 
 router = APIRouter(prefix="/claude/v1", tags=["anthropic"], dependencies=[Depends(set_anthropic_error_format)])
+api_router = APIRouter(prefix="/claude-api/v1", tags=["anthropic"], dependencies=[Depends(set_anthropic_error_format)])
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-...)", auto_error=False)
 
@@ -57,6 +58,25 @@ async def messages(
     context: AnthropicContext = Depends(get_anthropic_context),
     api_key: ApiKeyData | None = Security(validate_anthropic_api_key),
 ):
+    return await _messages_impl(request, context, api_key, transport="sdk")
+
+
+@api_router.post("/messages")
+async def messages_api(
+    request: Request,
+    context: AnthropicContext = Depends(get_anthropic_context),
+    api_key: ApiKeyData | None = Security(validate_anthropic_api_key),
+):
+    return await _messages_impl(request, context, api_key, transport="api")
+
+
+async def _messages_impl(
+    request: Request,
+    context: AnthropicContext,
+    api_key: ApiKeyData | None,
+    *,
+    transport: str,
+):
     payload = await _require_json_object(request)
     model = _extract_model(payload)
     _validate_model_access(api_key, model)
@@ -69,6 +89,7 @@ async def messages(
             request.headers,
             api_key=api_key,
             api_key_reservation=reservation,
+            transport=transport,
         )
         try:
             first = await upstream_stream.__anext__()
@@ -93,6 +114,7 @@ async def messages(
             request.headers,
             api_key=api_key,
             api_key_reservation=reservation,
+            transport=transport,
         )
         return JSONResponse(content=response_payload)
     except AnthropicProxyError as exc:

@@ -4,10 +4,17 @@ import logging
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 import anyio
 
 from app.core.auth.anthropic_credentials import resolve_anthropic_credentials
+from app.core.clients.anthropic_api_proxy import (
+    create_message as core_create_message_api,
+)
+from app.core.clients.anthropic_api_proxy import (
+    stream_messages as core_stream_messages_api,
+)
 from app.core.clients.anthropic_proxy import (
     AnthropicProxyError,
     parse_sse_data_payload,
@@ -53,6 +60,7 @@ class AnthropicService:
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        transport: Literal["sdk", "api"] = "sdk",
     ) -> dict[str, JsonValue]:
         settings = get_settings()
         request_id = ensure_request_id(headers.get("x-request-id") or headers.get("request-id"))
@@ -68,7 +76,8 @@ class AnthropicService:
         error = AnthropicRequestError(code=None, message=None)
 
         try:
-            response_payload = await core_create_message(
+            response_payload = await _create_message_with_transport(
+                transport,
                 payload,
                 headers,
             )
@@ -106,12 +115,14 @@ class AnthropicService:
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        transport: Literal["sdk", "api"] = "sdk",
     ) -> AsyncIterator[str]:
         return self._stream_messages(
             payload,
             headers,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
+            transport=transport,
         )
 
     async def refresh_usage_windows(self) -> bool:
@@ -172,6 +183,7 @@ class AnthropicService:
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        transport: Literal["sdk", "api"],
     ) -> AsyncIterator[str]:
         settings = get_settings()
         request_id = ensure_request_id(headers.get("x-request-id") or headers.get("request-id"))
@@ -185,7 +197,8 @@ class AnthropicService:
         accumulator = _StreamAccumulator(model=model)
 
         try:
-            async for line in core_stream_messages(
+            async for line in _stream_messages_with_transport(
+                transport,
                 payload,
                 headers,
             ):
@@ -449,3 +462,26 @@ def _normalize_input_tokens_for_log(input_tokens: int | None, cached_input_token
     if cached_input_tokens > input_tokens:
         return input_tokens + cached_input_tokens
     return input_tokens
+
+
+async def _create_message_with_transport(
+    transport: Literal["sdk", "api"],
+    payload: dict[str, JsonValue],
+    headers: Mapping[str, str],
+) -> dict[str, JsonValue]:
+    if transport == "api":
+        return await core_create_message_api(payload, headers)
+    return await core_create_message(payload, headers)
+
+
+async def _stream_messages_with_transport(
+    transport: Literal["sdk", "api"],
+    payload: dict[str, JsonValue],
+    headers: Mapping[str, str],
+) -> AsyncIterator[str]:
+    if transport == "api":
+        async for line in core_stream_messages_api(payload, headers):
+            yield line
+        return
+    async for line in core_stream_messages(payload, headers):
+        yield line

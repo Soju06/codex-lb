@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     upstream_connect_timeout_seconds: float = 30.0
     stream_idle_timeout_seconds: float = 300.0
     max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    anthropic_api_base_url: str = "https://api.anthropic.com"
+    anthropic_api_version: str = "2023-06-01"
+    anthropic_api_beta: str | None = None
+    anthropic_api_timeout_seconds: float = 300.0
+    anthropic_api_detect_cli_headers: bool = True
+    anthropic_api_system_prompt_injection_mode: Literal["none", "minimal", "full"] = "minimal"
+    anthropic_oauth_token_url: str = "https://console.anthropic.com/v1/oauth/token"
+    anthropic_oauth_client_id: str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     anthropic_sdk_cli_path: str | None = None
     anthropic_sdk_default_session_id: str | None = None
     anthropic_sdk_pool_enabled: bool = True

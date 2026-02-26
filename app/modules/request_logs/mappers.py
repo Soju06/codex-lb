@@ -27,6 +27,8 @@ def to_request_log_entry(log: RequestLog) -> RequestLogEntry:
         requested_at=log.requested_at,
         account_id=log.account_id,
         request_id=log.request_id,
+        codex_session_hash=log.codex_session_hash,
+        codex_conversation_hash=log.codex_conversation_hash,
         model=log.model,
         reasoning_effort=log.reasoning_effort,
         status=log_status(log),

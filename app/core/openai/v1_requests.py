@@ -32,6 +32,7 @@ class V1ResponsesRequest(BaseModel):
     previous_response_id: str | None = None
     truncation: str | None = None
     prompt_cache_key: str | None = None
+    prompt_cache_retention: str | None = None
     text: ResponsesTextControls | None = None
 
     @field_validator("input")

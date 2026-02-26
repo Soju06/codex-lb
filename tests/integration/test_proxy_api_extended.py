@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from hashlib import sha256
 
 import pytest
 from sqlalchemy import select
@@ -104,11 +105,17 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     request_id = "req_usage_123"
+    codex_session_id = "session_abc_123"
+    codex_conversation_id = "conversation_xyz_789"
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers={"x-request-id": request_id},
+        headers={
+            "x-request-id": request_id,
+            "x-codex-session-id": codex_session_id,
+            "x-codex-conversation-id": codex_conversation_id,
+        },
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -129,6 +136,8 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
         assert log.output_tokens == 5
         assert log.cached_input_tokens == 3
         assert log.reasoning_tokens == 2
+        assert log.codex_session_hash == f"sha256:{sha256(codex_session_id.encode('utf-8')).hexdigest()[:12]}"
+        assert log.codex_conversation_hash == f"sha256:{sha256(codex_conversation_id.encode('utf-8')).hexdigest()[:12]}"
         assert log.status == "success"
 
 

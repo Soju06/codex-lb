@@ -17,6 +17,7 @@ from app.core.openai.model_refresh_scheduler import build_model_refresh_schedule
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.anthropic_compat import api as anthropic_compat_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
@@ -66,6 +67,8 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.v1_router)
     app.include_router(proxy_api.usage_router)
+    app.include_router(anthropic_compat_api.router)
+    app.include_router(anthropic_compat_api.anthropic_router)
     app.include_router(accounts_api.router)
     app.include_router(dashboard_api.router)
     app.include_router(usage_api.router)
@@ -80,7 +83,7 @@ def create_app() -> FastAPI:
     index_html = static_dir / "index.html"
     static_root = static_dir.resolve()
     frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
-    excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
+    excluded_prefixes = ("api/", "v1/", "backend-api/", "anthropic/", "health")
 
     def _is_static_asset_path(path: str) -> bool:
         if path.startswith("assets/"):

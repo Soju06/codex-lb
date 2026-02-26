@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import Request, Security
+from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.clients.usage import UsageFetchError, fetch_usage
@@ -24,6 +24,10 @@ _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
 
 def set_openai_error_format(request: Request) -> None:
     request.state.error_format = "openai"
+
+
+def set_anthropic_error_format(request: Request) -> None:
+    request.state.error_format = "anthropic"
 
 
 def set_dashboard_error_format(request: Request) -> None:
@@ -50,6 +54,26 @@ async def validate_proxy_api_key(
             return await service.validate_key(token)
         except ApiKeyInvalidError as exc:
             raise ProxyAuthError(str(exc)) from exc
+
+
+async def validate_anthropic_api_key(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
+) -> ApiKeyData | None:
+    settings = await get_settings_cache().get()
+    if not settings.api_key_auth_enabled:
+        return None
+
+    token = _extract_anthropic_api_key(request, credentials)
+    if token is None:
+        raise HTTPException(status_code=401, detail="Missing API key")
+
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        try:
+            return await service.validate_key(token)
+        except ApiKeyInvalidError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
 # --- Dashboard session auth ---
@@ -116,6 +140,23 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     if not value.lower().startswith(prefix):
         return None
     token = value[len(prefix) :].strip()
+    if not token:
+        return None
+    return token
+
+
+def _extract_anthropic_api_key(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str | None:
+    x_api_key = request.headers.get("x-api-key")
+    if x_api_key is not None:
+        token = x_api_key.strip()
+        if token:
+            return token
+    if credentials is None:
+        return None
+    token = credentials.credentials.strip()
     if not token:
         return None
     return token

@@ -22,7 +22,7 @@ from app.modules.api_keys.service import (
 )
 
 router = APIRouter(prefix="/claude/v1", tags=["anthropic"], dependencies=[Depends(set_anthropic_error_format)])
-api_router = APIRouter(prefix="/claude-api/v1", tags=["anthropic"], dependencies=[Depends(set_anthropic_error_format)])
+api_router = APIRouter(prefix="/claude-sdk/v1", tags=["anthropic"], dependencies=[Depends(set_anthropic_error_format)])
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-...)", auto_error=False)
 
@@ -58,7 +58,7 @@ async def messages(
     context: AnthropicContext = Depends(get_anthropic_context),
     api_key: ApiKeyData | None = Security(validate_anthropic_api_key),
 ):
-    return await _messages_impl(request, context, api_key, transport="sdk")
+    return await _messages_impl(request, context, api_key, transport="api")
 
 
 @api_router.post("/messages")
@@ -67,7 +67,7 @@ async def messages_api(
     context: AnthropicContext = Depends(get_anthropic_context),
     api_key: ApiKeyData | None = Security(validate_anthropic_api_key),
 ):
-    return await _messages_impl(request, context, api_key, transport="api")
+    return await _messages_impl(request, context, api_key, transport="sdk")
 
 
 async def _messages_impl(

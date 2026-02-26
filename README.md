@@ -226,8 +226,8 @@ print(response.choices[0].message.content)
 
 `codex-lb` serves two Anthropic-compatible routes:
 
-- `POST /claude/v1/messages` (local Claude SDK runtime via `claude-agent-sdk`)
-- `POST /claude-api/v1/messages` (direct OAuth-backed API proxy to `api.anthropic.com/v1/messages`)
+- `POST /claude/v1/messages` (direct OAuth-backed API proxy to `api.anthropic.com/v1/messages`)
+- `POST /claude-sdk/v1/messages` (local Claude SDK runtime via `claude-agent-sdk`)
 
 Start the server (OpenAI routes and both Anthropic routes are enabled):
 
@@ -253,7 +253,7 @@ Usage windows source (Linux-only auto-discovery + optional overrides):
 export CODEX_LB_ANTHROPIC_USAGE_BEARER_TOKEN="sk-ant-oat01-..."
 ```
 
-Example request (SDK route):
+Example request (API route):
 
 ```bash
 curl -sS http://127.0.0.1:2455/claude/v1/messages \
@@ -268,9 +268,9 @@ curl -sS http://127.0.0.1:2455/claude/v1/messages \
 
 Notes:
 
-- `/claude/v1/messages` runs generation through the local Claude SDK runtime.
-- `/claude-api/v1/messages` sends requests directly to `api.anthropic.com/v1/messages` using discovered or configured OAuth credentials.
-- API compatibility for `/claude-api/v1/messages` includes request normalization and optional CLI header/system-prompt parity helpers.
+- `/claude/v1/messages` sends requests directly to `api.anthropic.com/v1/messages` using discovered or configured OAuth credentials.
+- `/claude-sdk/v1/messages` runs generation through the local Claude SDK runtime.
+- API compatibility for `/claude/v1/messages` includes request normalization and optional CLI header/system-prompt parity helpers.
 - OpenAI compatibility routes (`/v1/responses`, `/v1/chat/completions`) stay available in the same server instance.
 
 ## API Key Authentication

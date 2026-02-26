@@ -78,6 +78,9 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+[tool.ty.src]
+exclude = [".agents/hooks/"]
+
 [tool.ty.environment]
 python-version = "3.13"
 

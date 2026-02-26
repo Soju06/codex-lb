@@ -126,7 +126,7 @@ codex
         "baseURL": "http://127.0.0.1:2455/v1"
       },
       "models": {
-        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" } }
+        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" },"options": { "reasoningEffort": "medium"} }
       }
     }
   },
@@ -152,7 +152,7 @@ If you use `enabled_providers`, include every provider you want to keep plus `co
         "apiKey": "{env:CODEX_LB_API_KEY}"   // reads from env var
       },
       "models": {
-        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" } }
+        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" },"options": { "reasoningEffort": "medium"} }
       }
     }
   },

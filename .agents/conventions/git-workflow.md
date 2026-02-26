@@ -16,4 +16,23 @@
    gh pr create --title "feat(api): add auth" --body "..."
    ```
 
-5. **Best Practices**: Commit often in small units. Do not commit directly to `main`. Always check `git diff` before pushing.
+5. **Pushing to Fork PRs**: When a PR comes from a fork (cross-repository), push
+   commits directly to the fork's head branch instead of creating a separate PR.
+
+   ```bash
+   # 1. Check PR head info
+   gh pr view <N> --json headRefName,headRepositoryOwner,isCrossRepository
+
+   # 2. Add fork remote (if not already added)
+   git remote add <fork-owner> https://github.com/<fork-owner>/<repo>.git
+   git fetch <fork-owner> <head-branch>
+
+   # 3. Checkout fork branch, apply changes, push
+   git checkout -b <fork-owner>-<head-branch> <fork-owner>/<head-branch>
+   # ... make changes and commit ...
+   git push <fork-owner> HEAD:<head-branch>
+   ```
+
+   Note: This requires "Allow edits from maintainers" to be enabled on the PR.
+
+6. **Best Practices**: Commit often in small units. Do not commit directly to `main`. Always check `git diff` before pushing.

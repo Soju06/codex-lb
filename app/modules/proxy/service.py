@@ -50,6 +50,7 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.response_context_cache import get_response_context_cache
 from app.modules.proxy.types import RateLimitStatusPayloadData
 from app.modules.usage.updater import UsageUpdater
 
@@ -345,6 +346,7 @@ class ProxyService:
         sticky_threads_enabled = settings.sticky_threads_enabled
         routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
+        await _resolve_item_references(payload, actor_log=actor_log)
         max_attempts = 3
         settled = False
         settlement = _StreamSettlement()
@@ -511,6 +513,9 @@ class ProxyService:
         error_message = None
         usage = None
         saw_text_delta = False
+        completion_response_id: str | None = None
+        completion_assistant_text: str | None = None
+        context_scope = _response_context_scope(actor_log)
 
         try:
             stream = core_stream_responses(
@@ -549,6 +554,8 @@ class ProxyService:
                 usage = event.response.usage if event.response else None
                 if event.type == "response.incomplete":
                     status = "error"
+            if event_type in ("response.completed", "response.incomplete"):
+                completion_response_id, completion_assistant_text = _extract_completion_context(first_payload)
 
             if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
                 saw_text_delta = True
@@ -590,6 +597,7 @@ class ProxyService:
                         usage = event.response.usage if event.response else None
                         if event_type == "response.incomplete":
                             status = "error"
+                        completion_response_id, completion_assistant_text = _extract_completion_context(event_payload)
                 yield line
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -615,6 +623,25 @@ class ProxyService:
             settlement.input_tokens = input_tokens
             settlement.output_tokens = output_tokens
             settlement.cached_input_tokens = cached_input_tokens
+            with anyio.CancelScope(shield=True):
+                try:
+                    if status == "success" and context_scope and completion_response_id:
+                        cache = get_response_context_cache()
+                        await cache.put_context(
+                            context_scope,
+                            completion_response_id,
+                            payload.input if isinstance(payload.input, list) else [],
+                            completion_assistant_text,
+                        )
+                except Exception:
+                    logger.warning(
+                        "Failed to persist response context scope=%s response_id=%s request_id=%s",
+                        context_scope,
+                        completion_response_id,
+                        request_id,
+                        exc_info=True,
+                    )
+
             with anyio.CancelScope(shield=True):
                 try:
                     async with self._repo_factory() as repos:
@@ -883,6 +910,123 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
         "x-codex-conversation-id",
     }
     return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})
+
+
+async def _resolve_item_references(
+    payload: ResponsesRequest,
+    *,
+    actor_log: RequestActorLogData | None,
+) -> None:
+    scope = _response_context_scope(actor_log)
+    if scope is None or not isinstance(payload.input, list):
+        return
+
+    cache = get_response_context_cache()
+    expanded_input: list[JsonValue] = []
+    replaced_count = 0
+    unresolved_ids: list[str] = []
+
+    for item in payload.input:
+        reference_id = _item_reference_id(item)
+        if reference_id is None:
+            expanded_input.append(item)
+            continue
+
+        cached = await cache.get_context(scope, reference_id)
+        if cached is None:
+            unresolved_ids.append(reference_id)
+            continue
+        replaced_count += 1
+        expanded_input.extend(cached)
+
+    if replaced_count == 0 and not unresolved_ids:
+        return
+
+    payload.input = expanded_input
+    if unresolved_ids:
+        logger.info(
+            "Dropped unresolved item references scope=%s missing=%s request_id=%s",
+            scope,
+            len(unresolved_ids),
+            get_request_id(),
+        )
+
+
+def _response_context_scope(actor_log: RequestActorLogData | None) -> str | None:
+    if actor_log is None:
+        return None
+    if actor_log.api_key:
+        return f"api_key:{actor_log.api_key}"
+
+    parts = [actor_log.client_app, actor_log.client_ip]
+    normalized = [part.strip().lower() for part in parts if isinstance(part, str) and part.strip()]
+    if not normalized:
+        return None
+    return f"actor:{'|'.join(normalized)}"
+
+
+def _item_reference_id(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type != "item_reference":
+        return None
+    value = item.get("id")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _extract_completion_context(payload: dict[str, JsonValue] | None) -> tuple[str | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None, None
+
+    response_id = response.get("id")
+    normalized_id = response_id.strip() if isinstance(response_id, str) else None
+    assistant_text = _extract_assistant_output_text(response.get("output"))
+    return normalized_id or None, assistant_text
+
+
+def _extract_assistant_output_text(value: JsonValue) -> str | None:
+    if not isinstance(value, list):
+        return None
+
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in {"assistant", None}:
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                parts.append(text)
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            text = part.get("text")
+            refusal = part.get("refusal")
+            if isinstance(text, str) and part_type in {"output_text", "text", "input_text"}:
+                cleaned = text.strip()
+                if cleaned:
+                    parts.append(cleaned)
+            elif isinstance(refusal, str) and part_type == "refusal":
+                cleaned = refusal.strip()
+                if cleaned:
+                    parts.append(cleaned)
+    if not parts:
+        return None
+    return "\n".join(parts)
 
 
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:

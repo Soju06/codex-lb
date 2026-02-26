@@ -120,6 +120,11 @@ _PASSTHROUGH_CACHE_EXTRA_KEYS = frozenset(
     }
 )
 
+_CAMEL_TO_SNAKE_CACHE_KEY: dict[str, str] = {
+    "promptCacheKey": "prompt_cache_key",
+    "promptCacheRetention": "prompt_cache_retention",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PromptCacheKeyResolution:
@@ -515,6 +520,9 @@ def _merge_passthrough_cache_extras(
         return
     for key in _PASSTHROUGH_CACHE_EXTRA_KEYS:
         if key in translated_payload:
+            continue
+        canonical = _CAMEL_TO_SNAKE_CACHE_KEY.get(key, key)
+        if canonical != key and canonical in translated_payload:
             continue
         value = payload.model_extra.get(key)
         if value is None:
@@ -1222,6 +1230,9 @@ def _extract_stop_reason(
                 return "max_tokens", stop_sequence
             if reason == "stop_sequence":
                 return "stop_sequence", stop_sequence
+
+    if stop_sequence is not None:
+        return "stop_sequence", stop_sequence
 
     return "end_turn", stop_sequence
 

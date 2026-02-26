@@ -331,8 +331,17 @@ class ResponsesRequest(BaseModel):
 
     @field_validator("store")
     @classmethod
-    def _normalize_store(cls, value: bool | None) -> bool:
+    def _ensure_store_false(cls, value: bool | None) -> bool:
+        if value is True:
+            raise ValueError("store must be false")
         return False if value is None else value
+
+    @field_validator("previous_response_id")
+    @classmethod
+    def _reject_previous_response_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        raise ValueError("previous_response_id is not supported")
 
     @field_validator("tools")
     @classmethod

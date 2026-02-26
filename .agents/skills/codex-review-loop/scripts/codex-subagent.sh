@@ -70,15 +70,17 @@ if [ $EXIT_CODE -ne 0 ]; then
 fi
 
 # --- Parse output ---
-# codex exec review output format:
-#   ... (header, thinking, exec, collab blocks) ...
-#   codex              <- last model response marker
+# codex exec review output format (v0.105.0):
+#   ... (header, thinking, exec blocks) ...
+#   codex              <- model response marker (may appear multiple times)
+#   <response text>
+#   codex              <- next model response marker (resets capture)
 #   <final review>     <- the actual review text
-#   tokens used        <- footer
-#   104,825            <- token count
+#   <EOF>              <- no footer in current CLI version
 #
-# Strategy: reset buffer on each "^codex$", stop on "^tokens used$".
-# Final buffer = last model response block.
+# Strategy: reset buffer on each "^codex$" so only the last model
+# response block survives. "^tokens used$" is kept as a guard for
+# older/future CLI versions that may append a footer.
 PARSED=$(echo "$OUTPUT" | awk '
 /^codex$/ { buf=""; capturing=1; next }
 /^tokens used$/ { capturing=0; next }

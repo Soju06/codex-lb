@@ -10,6 +10,7 @@ This causes unstable sticky routing and lower cache reuse.
 - Force all non-explicit sources (`metadata`, `cache_control`, `anchor`, `none`) into a deterministic `claude-shared:*` key lane.
 - Keep the existing dedicated `:count_tokens` lane behavior unchanged.
 - Map Anthropic reasoning aliases (`reasoningEffort`, `reasoning.effort`) into `ResponsesRequest.reasoning.effort`.
+- Add optional server default reasoning effort via `CODEX_LB_ANTHROPIC_DEFAULT_REASONING_EFFORT`.
 - Update Anthropic compatibility tests to assert the new stable-key contract.
 
 ## Capabilities
@@ -20,5 +21,5 @@ This causes unstable sticky routing and lower cache reuse.
 
 ## Impact
 
-- **Code**: `app/modules/anthropic_compat/api.py`, `app/modules/anthropic_compat/service.py`, `app/modules/anthropic_compat/translator.py`
+- **Code**: `app/modules/anthropic_compat/api.py`, `app/modules/anthropic_compat/service.py`, `app/modules/anthropic_compat/translator.py`, `app/core/config/settings.py`
 - **Tests**: `tests/integration/test_anthropic_compat.py`, `tests/unit/test_anthropic_translator.py`

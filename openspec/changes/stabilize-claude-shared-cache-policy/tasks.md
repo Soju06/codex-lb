@@ -25,3 +25,9 @@
 - [x] 5.1 Map `reasoningEffort` alias into `ResponsesRequest.reasoning.effort`
 - [x] 5.2 Map nested `reasoning.effort` into `ResponsesRequest.reasoning.effort`
 - [x] 5.3 Add unit and integration tests for both alias forms
+
+## 6. Server Default Reasoning Effort
+
+- [x] 6.1 Add `CODEX_LB_ANTHROPIC_DEFAULT_REASONING_EFFORT` setting
+- [x] 6.2 Apply configured default only when request has no explicit reasoning effort
+- [x] 6.3 Add integration coverage for default application and explicit override precedence

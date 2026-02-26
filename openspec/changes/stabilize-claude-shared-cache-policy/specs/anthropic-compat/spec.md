@@ -33,3 +33,16 @@ The Anthropic-compatible translation layer SHALL map Claude-facing reasoning eff
 #### Scenario: Nested reasoning.effort is provided
 - **WHEN** a request includes `reasoning` object with non-empty `effort`
 - **THEN** the translated upstream payload includes `reasoning.effort` with that value
+
+### Requirement: Anthropic-compatible routes support server default reasoning effort
+The Anthropic-compatible API layer SHALL apply a configured server default reasoning effort when the request does not provide one.
+
+#### Scenario: Default reasoning effort is configured and request has no explicit effort
+- **WHEN** `CODEX_LB_ANTHROPIC_DEFAULT_REASONING_EFFORT` is set to `xhigh`
+- **AND** a request omits both `reasoningEffort` and `reasoning.effort`
+- **THEN** forwarded request payload includes `reasoning.effort` equal to `xhigh`
+
+#### Scenario: Explicit request effort takes precedence over configured default
+- **WHEN** `CODEX_LB_ANTHROPIC_DEFAULT_REASONING_EFFORT` is set
+- **AND** a request includes `reasoningEffort` or `reasoning.effort`
+- **THEN** forwarded request payload uses the request-provided effort value

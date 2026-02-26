@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -236,6 +237,73 @@ async def test_anthropic_messages_maps_reasoning_effort_from_alias(async_client,
     response = await async_client.post("/v1/messages", json=request_payload)
     assert response.status_code == 200
     assert seen["reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_applies_default_reasoning_effort_from_settings(async_client, monkeypatch):
+    await _import_account(async_client, "acc_anthropic_default_reasoning", "anthropic-default-reasoning@example.com")
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        reasoning = getattr(payload, "reasoning", None)
+        seen["reasoning_effort"] = getattr(reasoning, "effort", None) if reasoning is not None else None
+        yield 'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_default_reasoning","usage":{"input_tokens":3,"output_tokens":5}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(
+        "app.modules.anthropic_compat.api.get_settings",
+        lambda: SimpleNamespace(
+            anthropic_default_reasoning_effort="xhigh",
+            log_proxy_request_shape_raw_cache_key=False,
+        ),
+    )
+
+    request_payload = {
+        "model": "gpt-5.1",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    response = await async_client.post("/v1/messages", json=request_payload)
+    assert response.status_code == 200
+    assert seen["reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_keeps_explicit_reasoning_over_default(async_client, monkeypatch):
+    await _import_account(async_client, "acc_anthropic_explicit_reasoning", "anthropic-explicit-reasoning@example.com")
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        reasoning = getattr(payload, "reasoning", None)
+        seen["reasoning_effort"] = getattr(reasoning, "effort", None) if reasoning is not None else None
+        yield 'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_explicit_reasoning","usage":{"input_tokens":3,"output_tokens":5}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(
+        "app.modules.anthropic_compat.api.get_settings",
+        lambda: SimpleNamespace(
+            anthropic_default_reasoning_effort="xhigh",
+            log_proxy_request_shape_raw_cache_key=False,
+        ),
+    )
+
+    request_payload = {
+        "model": "gpt-5.1",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoningEffort": "medium",
+    }
+    response = await async_client.post("/v1/messages", json=request_payload)
+    assert response.status_code == 200
+    assert seen["reasoning_effort"] == "medium"
 
 
 @pytest.mark.asyncio

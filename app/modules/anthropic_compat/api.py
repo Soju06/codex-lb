@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.core.auth.dependencies import set_anthropic_error_format, validate_anthropic_api_key
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
-from app.core.openai.requests import ResponsesRequest
+from app.core.openai.requests import ResponsesReasoning, ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
 from app.dependencies import AnthropicCompatContext, get_anthropic_compat_context
@@ -142,6 +142,7 @@ async def _messages_impl(
         cache_resolution,
         api_key,
     )
+    responses_payload = _apply_default_reasoning_effort(responses_payload)
     _log_prompt_cache_resolution(
         request=request,
         operation="messages",
@@ -286,6 +287,23 @@ def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> Non
         return
 
     raise HTTPException(status_code=403, detail=f"This API key does not have access to model '{model}'")
+
+
+def _apply_default_reasoning_effort(responses_payload: ResponsesRequest) -> ResponsesRequest:
+    settings = get_settings()
+    default_effort = settings.anthropic_default_reasoning_effort
+    if default_effort is None:
+        return responses_payload
+
+    reasoning = responses_payload.reasoning
+    if reasoning is not None and reasoning.effort:
+        return responses_payload
+
+    if reasoning is None:
+        default_reasoning = ResponsesReasoning(effort=default_effort)
+    else:
+        default_reasoning = reasoning.model_copy(update={"effort": default_effort})
+    return responses_payload.model_copy(update={"reasoning": default_reasoning})
 
 
 def _apply_claude_prompt_cache_policy(

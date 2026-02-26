@@ -43,3 +43,5 @@ certs/
 .codex-lb/
 
 .specstory/
+
+.agents/hooks/state

@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
+import anyio
+
 from app.core import usage as usage_core
 from app.core.balancer import (
     AccountState,
@@ -47,6 +49,7 @@ class LoadBalancer:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
         self._runtime: dict[str, RuntimeState] = {}
+        self._selection_lock = anyio.Lock()
 
     async def select_account(
         self,
@@ -83,15 +86,31 @@ class LoadBalancer:
                 runtime=self._runtime,
             )
 
-            result = await self._select_with_stickiness(
-                states=states,
-                account_map=account_map,
-                sticky_key=sticky_key,
-                reallocate_sticky=reallocate_sticky,
-                prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-                routing_strategy=routing_strategy,
-                sticky_repo=repos.sticky_sessions,
-            )
+            if routing_strategy == "round_robin":
+                async with self._selection_lock:
+                    self._refresh_last_selected(states)
+                    result = await self._select_with_stickiness(
+                        states=states,
+                        account_map=account_map,
+                        sticky_key=sticky_key,
+                        reallocate_sticky=reallocate_sticky,
+                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        sticky_repo=repos.sticky_sessions,
+                    )
+                    if result.account is not None:
+                        runtime = self._runtime.setdefault(result.account.account_id, RuntimeState())
+                        runtime.last_selected_at = time.time()
+            else:
+                result = await self._select_with_stickiness(
+                    states=states,
+                    account_map=account_map,
+                    sticky_key=sticky_key,
+                    reallocate_sticky=reallocate_sticky,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                    routing_strategy=routing_strategy,
+                    sticky_repo=repos.sticky_sessions,
+                )
             for state in states:
                 account = account_map.get(state.account_id)
                 if account:
@@ -134,6 +153,11 @@ class LoadBalancer:
         stale_ids = [account_id for account_id in self._runtime if account_id not in account_ids]
         for account_id in stale_ids:
             self._runtime.pop(account_id, None)
+
+    def _refresh_last_selected(self, states: Iterable[AccountState]) -> None:
+        for state in states:
+            runtime = self._runtime.setdefault(state.account_id, RuntimeState())
+            state.last_selected_at = runtime.last_selected_at
 
     async def _select_with_stickiness(
         self,

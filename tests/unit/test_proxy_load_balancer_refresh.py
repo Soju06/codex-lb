@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState
 from app.modules.proxy.repo_bundle import ProxyRepositories
 
@@ -201,3 +203,106 @@ async def test_select_account_prunes_stale_runtime_for_removed_accounts() -> Non
     selection = await balancer.select_account()
     assert selection.account is not None
     assert selection.account.id == account_id
+
+
+@pytest.mark.asyncio
+async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
+    async def stub_refresh_accounts(
+        self,
+        accounts: list[Account],
+        latest_usage: dict[str, UsageHistory],
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.UsageUpdater.refresh_accounts",
+        stub_refresh_accounts,
+    )
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account_a = _make_account("acc-round-robin-a", "a@example.com")
+    account_b = _make_account("acc-round-robin-b", "b@example.com")
+    primary_entries = {
+        account_a.id: UsageHistory(
+            id=1,
+            account_id=account_a.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        account_b.id: UsageHistory(
+            id=2,
+            account_id=account_b.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary_entries = {
+        account_a.id: UsageHistory(
+            id=3,
+            account_id=account_a.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        account_b.id: UsageHistory(
+            id=4,
+            account_id=account_b.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([account_a, account_b])
+    usage_repo = StubUsageRepository(primary=primary_entries, secondary=secondary_entries)
+    sticky_repo = StubStickySessionsRepository()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        yield ProxyRepositories(
+            accounts=accounts_repo,  # type: ignore[arg-type]
+            usage=usage_repo,  # type: ignore[arg-type]
+            request_logs=object(),  # type: ignore[arg-type]
+            sticky_sessions=sticky_repo,  # type: ignore[arg-type]
+            api_keys=object(),  # type: ignore[arg-type]
+        )
+
+    original_sync = LoadBalancer._sync_state
+
+    async def slow_sync(
+        self: LoadBalancer,
+        accounts_repo: AccountsRepository,
+        account: Account,
+        state,
+    ) -> None:
+        await asyncio.sleep(0.05)
+        await original_sync(self, accounts_repo, account, state)
+
+    monkeypatch.setattr(LoadBalancer, "_sync_state", slow_sync)
+
+    balancer = LoadBalancer(repo_factory)
+    start = asyncio.Event()
+
+    async def pick_account() -> str:
+        await start.wait()
+        selection = await balancer.select_account(routing_strategy="round_robin")
+        assert selection.account is not None
+        return selection.account.id
+
+    first = asyncio.create_task(pick_account())
+    second = asyncio.create_task(pick_account())
+    start.set()
+    selected_ids = await asyncio.gather(first, second)
+
+    assert len(set(selected_ids)) == 2

@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from app.modules.proxy.response_context_cache import ResponseContextCache
-from app.modules.proxy.service import _extract_completion_context, _item_reference_id
+from app.modules.proxy.service import (
+    _extract_completion_context,
+    _extract_completion_reference_ids,
+    _item_reference_id,
+)
 
 
 def test_item_reference_id_detects_reference() -> None:
@@ -33,6 +37,21 @@ def test_extract_completion_context_reads_response_id_and_output_text() -> None:
     response_id, assistant_text = _extract_completion_context(payload)
     assert response_id == "resp_abc"
     assert assistant_text == "Hello world"
+
+
+def test_extract_completion_reference_ids_includes_response_and_output_items() -> None:
+    payload = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_abc",
+            "output": [
+                {"id": "rs_1", "type": "message", "role": "assistant", "content": []},
+                {"id": "rs_2", "type": "reasoning", "summary": []},
+            ],
+        },
+    }
+    ids = _extract_completion_reference_ids(payload)
+    assert ids == {"resp_abc", "rs_1", "rs_2"}
 
 
 @pytest.mark.asyncio

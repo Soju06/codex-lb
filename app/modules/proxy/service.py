@@ -346,7 +346,7 @@ class ProxyService:
         sticky_threads_enabled = settings.sticky_threads_enabled
         routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
-        await _resolve_item_references(payload, actor_log=actor_log)
+        await _resolve_item_references(payload, actor_log=actor_log, headers=headers)
         max_attempts = 3
         settled = False
         settlement = _StreamSettlement()
@@ -515,7 +515,8 @@ class ProxyService:
         saw_text_delta = False
         completion_response_id: str | None = None
         completion_assistant_text: str | None = None
-        context_scope = _response_context_scope(actor_log)
+        completion_reference_ids: set[str] = set()
+        context_scope = _response_context_scope(actor_log, headers=headers)
 
         try:
             stream = core_stream_responses(
@@ -556,6 +557,7 @@ class ProxyService:
                     status = "error"
             if event_type in ("response.completed", "response.incomplete"):
                 completion_response_id, completion_assistant_text = _extract_completion_context(first_payload)
+                completion_reference_ids.update(_extract_completion_reference_ids(first_payload))
 
             if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
                 saw_text_delta = True
@@ -598,6 +600,7 @@ class ProxyService:
                         if event_type == "response.incomplete":
                             status = "error"
                         completion_response_id, completion_assistant_text = _extract_completion_context(event_payload)
+                        completion_reference_ids.update(_extract_completion_reference_ids(event_payload))
                 yield line
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -625,14 +628,25 @@ class ProxyService:
             settlement.cached_input_tokens = cached_input_tokens
             with anyio.CancelScope(shield=True):
                 try:
-                    if status == "success" and context_scope and completion_response_id:
+                    if status == "success" and context_scope:
                         cache = get_response_context_cache()
-                        await cache.put_context(
-                            context_scope,
-                            completion_response_id,
-                            payload.input if isinstance(payload.input, list) else [],
-                            completion_assistant_text,
-                        )
+                        input_items = payload.input if isinstance(payload.input, list) else []
+                        if completion_response_id:
+                            await cache.put_context(
+                                context_scope,
+                                completion_response_id,
+                                input_items,
+                                completion_assistant_text,
+                            )
+                        for reference_id in completion_reference_ids:
+                            if not reference_id or reference_id == completion_response_id:
+                                continue
+                            await cache.put_context(
+                                context_scope,
+                                reference_id,
+                                input_items,
+                                completion_assistant_text,
+                            )
                 except Exception:
                     logger.warning(
                         "Failed to persist response context scope=%s response_id=%s request_id=%s",
@@ -916,8 +930,9 @@ async def _resolve_item_references(
     payload: ResponsesRequest,
     *,
     actor_log: RequestActorLogData | None,
+    headers: Mapping[str, str],
 ) -> None:
-    scope = _response_context_scope(actor_log)
+    scope = _response_context_scope(actor_log, headers=headers)
     if scope is None or not isinstance(payload.input, list):
         return
 
@@ -925,11 +940,19 @@ async def _resolve_item_references(
     expanded_input: list[JsonValue] = []
     replaced_count = 0
     unresolved_ids: list[str] = []
+    nested_dropped = 0
+    nested_replaced = 0
 
     for item in payload.input:
         reference_id = _item_reference_id(item)
         if reference_id is None:
-            expanded_input.append(item)
+            normalized = await _strip_nested_item_references(item, scope=scope, cache=cache)
+            if normalized is _DROP_ITEM_REFERENCE:
+                nested_dropped += 1
+                continue
+            if normalized != item:
+                nested_replaced += 1
+            expanded_input.append(normalized)
             continue
 
         cached = await cache.get_context(scope, reference_id)
@@ -939,30 +962,62 @@ async def _resolve_item_references(
         replaced_count += 1
         expanded_input.extend(cached)
 
-    if replaced_count == 0 and not unresolved_ids:
+    if replaced_count == 0 and not unresolved_ids and nested_dropped == 0 and nested_replaced == 0:
         return
 
     payload.input = expanded_input
-    if unresolved_ids:
+    if unresolved_ids or nested_dropped or nested_replaced:
         logger.info(
-            "Dropped unresolved item references scope=%s missing=%s request_id=%s",
+            "Normalized item references scope=%s top_missing=%s nested_dropped=%s nested_replaced=%s request_id=%s",
             scope,
             len(unresolved_ids),
+            nested_dropped,
+            nested_replaced,
             get_request_id(),
         )
 
 
-def _response_context_scope(actor_log: RequestActorLogData | None) -> str | None:
+def _response_context_scope(
+    actor_log: RequestActorLogData | None,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> str | None:
     if actor_log is None:
-        return None
-    if actor_log.api_key:
-        return f"api_key:{actor_log.api_key}"
+        actor_log_api_key = None
+        actor_log_client_app = None
+        actor_log_client_ip = None
+    else:
+        actor_log_api_key = actor_log.api_key
+        actor_log_client_app = actor_log.client_app
+        actor_log_client_ip = actor_log.client_ip
+    if actor_log_api_key:
+        return f"api_key:{actor_log_api_key}"
 
-    parts = [actor_log.client_app, actor_log.client_ip]
+    parts = [actor_log_client_app, actor_log_client_ip]
     normalized = [part.strip().lower() for part in parts if isinstance(part, str) and part.strip()]
-    if not normalized:
+    if normalized:
+        return f"actor:{'|'.join(normalized)}"
+    if not headers:
         return None
-    return f"actor:{'|'.join(normalized)}"
+
+    client_app = _header_lookup(headers, "x-openai-client-id") or _header_lookup(headers, "x-app-id")
+    user_agent = _header_lookup(headers, "user-agent")
+    header_parts = [client_app, user_agent]
+    normalized_headers = [part.strip().lower() for part in header_parts if isinstance(part, str) and part.strip()]
+    if not normalized_headers:
+        return None
+    return f"header:{'|'.join(normalized_headers)}"
+
+
+def _header_lookup(headers: Mapping[str, str], key: str) -> str | None:
+    direct = headers.get(key)
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    target = key.lower()
+    for existing_key, value in headers.items():
+        if existing_key.lower() == target and isinstance(value, str) and value.strip():
+            return value
+    return None
 
 
 def _item_reference_id(item: JsonValue) -> str | None:
@@ -989,6 +1044,35 @@ def _extract_completion_context(payload: dict[str, JsonValue] | None) -> tuple[s
     normalized_id = response_id.strip() if isinstance(response_id, str) else None
     assistant_text = _extract_assistant_output_text(response.get("output"))
     return normalized_id or None, assistant_text
+
+
+def _extract_completion_reference_ids(payload: dict[str, JsonValue] | None) -> set[str]:
+    if not isinstance(payload, dict):
+        return set()
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return set()
+
+    reference_ids: set[str] = set()
+    response_id = response.get("id")
+    if isinstance(response_id, str):
+        normalized = response_id.strip()
+        if normalized:
+            reference_ids.add(normalized)
+
+    output = response.get("output")
+    if not isinstance(output, list):
+        return reference_ids
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not isinstance(item_id, str):
+            continue
+        normalized = item_id.strip()
+        if normalized:
+            reference_ids.add(normalized)
+    return reference_ids
 
 
 def _extract_assistant_output_text(value: JsonValue) -> str | None:
@@ -1027,6 +1111,66 @@ def _extract_assistant_output_text(value: JsonValue) -> str | None:
     if not parts:
         return None
     return "\n".join(parts)
+
+
+_DROP_ITEM_REFERENCE = object()
+
+
+async def _strip_nested_item_references(
+    value: JsonValue,
+    *,
+    scope: str,
+    cache: "ResponseContextCache",
+) -> JsonValue | object:
+    reference_id = _item_reference_id(value)
+    if reference_id is not None:
+        cached = await cache.get_context(scope, reference_id)
+        if cached is None:
+            return _DROP_ITEM_REFERENCE
+        replacement = _assistant_text_from_context(cached)
+        if not replacement:
+            return _DROP_ITEM_REFERENCE
+        return {"type": "input_text", "text": replacement}
+
+    if isinstance(value, list):
+        normalized_list: list[JsonValue] = []
+        for item in value:
+            normalized = await _strip_nested_item_references(item, scope=scope, cache=cache)
+            if normalized is _DROP_ITEM_REFERENCE:
+                continue
+            normalized_list.append(normalized)
+        return normalized_list
+
+    if not isinstance(value, dict):
+        return value
+
+    normalized_dict: dict[str, JsonValue] = {}
+    for key, nested in value.items():
+        normalized = await _strip_nested_item_references(nested, scope=scope, cache=cache)
+        if normalized is _DROP_ITEM_REFERENCE:
+            continue
+        normalized_dict[key] = normalized
+
+    if normalized_dict.get("type") == "message":
+        content = normalized_dict.get("content")
+        if isinstance(content, list) and not content:
+            return _DROP_ITEM_REFERENCE
+
+    return normalized_dict
+
+
+def _assistant_text_from_context(cached: list[JsonValue]) -> str | None:
+    for item in reversed(cached):
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") != "assistant":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            normalized = content.strip()
+            if normalized:
+                return normalized
+    return None
 
 
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:

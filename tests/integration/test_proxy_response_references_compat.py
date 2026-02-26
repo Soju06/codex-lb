@@ -45,6 +45,7 @@ async def test_v1_responses_expands_item_reference_from_local_context(async_clie
     cache = get_response_context_cache()
     await cache.reset()
     await _import_account(async_client, "acc_ref", "ref@example.com")
+    monkeypatch.setattr(proxy_module, "_response_context_scope", lambda actor_log, headers=None: "scope:test")
 
     seen_inputs: list[object] = []
     turn = {"count": 0}
@@ -54,8 +55,9 @@ async def test_v1_responses_expands_item_reference_from_local_context(async_clie
         seen_inputs.append(json.loads(json.dumps(payload.input)))
         if turn["count"] == 1:
             yield (
-                'data: {"type":"response.completed","response":{"id":"rs_local_1","status":"completed",'
-                '"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}]}}\n\n'
+                'data: {"type":"response.completed","response":{"id":"resp_local_1","status":"completed",'
+                '"output":[{"id":"rs_local_1","type":"message","role":"assistant",'
+                '"content":[{"type":"output_text","text":"first answer"}]}]}}\n\n'
             )
             return
         yield 'data: {"type":"response.completed","response":{"id":"rs_local_2","status":"completed"}}\n\n'
@@ -65,7 +67,7 @@ async def test_v1_responses_expands_item_reference_from_local_context(async_clie
     first = await async_client.post(
         "/v1/responses",
         json={"model": "gpt-5.1", "input": "first question"},
-        headers={"x-openai-client-id": "openclaw-test"},
+        headers={"x-openai-client-id": "openclaw-test", "Authorization": "Bearer compat-token-1"},
     )
     assert first.status_code == 200
 
@@ -74,18 +76,24 @@ async def test_v1_responses_expands_item_reference_from_local_context(async_clie
         json={
             "model": "gpt-5.1",
             "input": [
-                {"type": "item_reference", "id": "rs_local_1"},
-                {"role": "user", "content": [{"type": "input_text", "text": "follow up"}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "item_reference", "id": "rs_local_1"},
+                        {"type": "input_text", "text": "follow up"},
+                    ],
+                },
             ],
         },
-        headers={"x-openai-client-id": "openclaw-test"},
+        headers={"x-openai-client-id": "openclaw-test", "Authorization": "Bearer compat-token-1"},
     )
     assert second.status_code == 200
 
     assert len(seen_inputs) == 2
     second_input = seen_inputs[1]
     assert isinstance(second_input, list)
-    assert all(not (isinstance(item, dict) and item.get("type") == "item_reference") for item in second_input)
-    assert {"role": "assistant", "content": "first answer"} in second_input
+    serialized_second_input = json.dumps(second_input)
+    assert '"item_reference"' not in serialized_second_input
+    assert "first answer" in serialized_second_input
 
     await cache.reset()

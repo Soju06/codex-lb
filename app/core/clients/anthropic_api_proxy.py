@@ -191,7 +191,7 @@ async def _request_json(
     creds: AnthropicCredentials,
 ) -> tuple[dict[str, JsonValue], int]:
     response, status = await _request_json_once(payload, headers, base_url=base_url, session=session)
-    if status == 401 and creds.refresh_token:
+    if creds.refresh_token and _should_attempt_oauth_refresh(status, response):
         refreshed = await refresh_anthropic_access_token(creds)
         if refreshed is not None:
             headers = dict(headers)
@@ -235,7 +235,7 @@ async def _stream_request(
             yield block
         return
     except AnthropicProxyError as exc:
-        if exc.status_code != 401 or not creds.refresh_token:
+        if not creds.refresh_token or not _should_attempt_oauth_refresh(exc.status_code, exc.payload):
             raise
 
     refreshed = await refresh_anthropic_access_token(creds)
@@ -301,6 +301,25 @@ def _ensure_error_payload(payload: dict[str, JsonValue], status_code: int) -> di
     if isinstance(payload_message, str) and payload_message:
         message = payload_message
     return anthropic_error_payload("api_error", message)
+
+
+def _should_attempt_oauth_refresh(status_code: int, payload: dict[str, JsonValue]) -> bool:
+    if status_code == 401:
+        return True
+    if status_code != 403:
+        return False
+
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    error_type = error.get("type")
+    if error_type not in {"permission_error", "authentication_error"}:
+        return False
+    message = error.get("message")
+    if not isinstance(message, str):
+        return False
+    lowered = message.casefold()
+    return "oauth" in lowered and "revoked" in lowered
 
 
 async def _iter_sse_event_blocks(response: aiohttp.ClientResponse) -> AsyncIterator[str]:

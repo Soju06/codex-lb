@@ -125,6 +125,10 @@ _CAMEL_TO_SNAKE_CACHE_KEY: dict[str, str] = {
     "promptCacheRetention": "prompt_cache_retention",
 }
 
+# Canonical keys already handled by resolve_prompt_cache_key /
+# _extract_prompt_cache_retention — passthrough must not override.
+_NORMALIZED_CACHE_KEYS = frozenset({"prompt_cache_key", "prompt_cache_retention"})
+
 
 @dataclass(frozen=True, slots=True)
 class PromptCacheKeyResolution:
@@ -522,6 +526,8 @@ def _merge_passthrough_cache_extras(
         if key in translated_payload:
             continue
         canonical = _CAMEL_TO_SNAKE_CACHE_KEY.get(key, key)
+        if canonical in _NORMALIZED_CACHE_KEYS:
+            continue
         if canonical != key and canonical in translated_payload:
             continue
         value = payload.model_extra.get(key)

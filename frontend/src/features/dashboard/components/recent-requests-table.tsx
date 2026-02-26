@@ -82,12 +82,13 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="min-w-[800px] table-fixed">
+        <Table className="min-w-[1080px] table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
+              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Actor</TableHead>
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
@@ -116,6 +117,27 @@ export function RecentRequestsTable({
                     <span className="font-mono text-xs">
                       {formatModelLabel(request.model, request.reasoningEffort)}
                     </span>
+                    {request.requestedModel && request.requestedModel !== request.model ? (
+                      <div className="text-[11px] text-muted-foreground">
+                        from {formatModelLabel(request.requestedModel, null)}
+                      </div>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="align-top">
+                    <div className="space-y-0.5 text-[11px] leading-tight text-muted-foreground">
+                      <div className="truncate">
+                        <span className="font-medium text-foreground/90">App:</span>{" "}
+                        {request.clientApp || "-"}
+                      </div>
+                      <div className="truncate">
+                        <span className="font-medium text-foreground/90">IP:</span>{" "}
+                        {request.clientIp || "-"}
+                      </div>
+                      <div className="truncate">
+                        <span className="font-medium text-foreground/90">Key:</span>{" "}
+                        {request.apiKey || "-"}
+                      </div>
+                    </div>
                   </TableCell>
                   <TableCell className="align-top">
                     <Badge

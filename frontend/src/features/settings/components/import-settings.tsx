@@ -14,6 +14,7 @@ export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) 
     void onSave({
       stickyThreadsEnabled: settings.stickyThreadsEnabled,
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+      routingStrategy: settings.routingStrategy,
       importWithoutOverwrite: settings.importWithoutOverwrite,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,

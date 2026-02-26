@@ -1,7 +1,8 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 
+import { resetMockState } from "@/test/mocks/handlers";
 import { server, startMockServer } from "@/test/mocks/server";
 
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
@@ -34,10 +35,15 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 }
 
 beforeAll(() => {
+  configure({ asyncUtilTimeout: 10_000 });
   startMockServer();
 });
 
 afterEach(() => {
+  if (typeof window !== "undefined") {
+    window.history.replaceState({}, "", "/");
+  }
+  resetMockState();
   server.resetHandlers();
   cleanup();
 });

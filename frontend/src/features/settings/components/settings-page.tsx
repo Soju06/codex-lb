@@ -1,4 +1,4 @@
-import { lazy } from "react";
+import { Suspense, lazy } from "react";
 import { Settings } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -54,7 +54,9 @@ export function SettingsPage() {
             />
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
-            <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+            <Suspense fallback={null}>
+              <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+            </Suspense>
 
             <ApiKeysSection
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}

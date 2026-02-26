@@ -78,21 +78,31 @@ async function parseJsonBody<T>(request: Request, schema: z.ZodType<T>): Promise
   }
 }
 
-const state: {
+type MockState = {
   accounts: AccountSummary[];
   requestLogs: RequestLogEntry[];
   authSession: DashboardAuthSession;
   settings: DashboardSettings;
   apiKeys: ApiKey[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
-} = {
-  accounts: createDefaultAccounts(),
-  requestLogs: createDefaultRequestLogs(),
-  authSession: createDashboardAuthSession(),
-  settings: createDashboardSettings(),
-  apiKeys: createDefaultApiKeys(),
-  firewallEntries: [],
 };
+
+function createInitialState(): MockState {
+  return {
+    accounts: createDefaultAccounts(),
+    requestLogs: createDefaultRequestLogs(),
+    authSession: createDashboardAuthSession(),
+    settings: createDashboardSettings(),
+    apiKeys: createDefaultApiKeys(),
+    firewallEntries: [],
+  };
+}
+
+let state: MockState = createInitialState();
+
+export function resetMockState(): void {
+  state = createInitialState();
+}
 
 function parseDateValue(value: string | null): number | null {
   if (!value) {

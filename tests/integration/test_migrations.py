@@ -322,7 +322,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.commit()
 
         result = await run_startup_migrations(db_url)
-        assert result.current_revision == "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+        assert result.current_revision == inspect_migration_state(db_url).head_revision
 
         async with session_factory() as session:
             await session.execute(text("PRAGMA foreign_keys=ON"))

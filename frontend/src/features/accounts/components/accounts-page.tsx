@@ -1,4 +1,4 @@
-import { lazy, useMemo, useState } from "react";
+import { Suspense, lazy, useMemo, useState } from "react";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
@@ -113,19 +113,21 @@ export function AccountsPage() {
         }}
       />
 
-      <OauthDialog
-        open={oauthDialog.open}
-        state={oauth.state}
-        onOpenChange={oauthDialog.onOpenChange}
-        onStart={async (method) => {
-          await oauth.start(method);
-        }}
-        onComplete={async () => {
-          await oauth.complete();
-          await accountsQuery.refetch();
-        }}
-        onReset={oauth.reset}
-      />
+      <Suspense fallback={null}>
+        <OauthDialog
+          open={oauthDialog.open}
+          state={oauth.state}
+          onOpenChange={oauthDialog.onOpenChange}
+          onStart={async (method) => {
+            await oauth.start(method);
+          }}
+          onComplete={async () => {
+            await oauth.complete();
+            await accountsQuery.refetch();
+          }}
+          onReset={oauth.reset}
+        />
+      </Suspense>
 
       <ConfirmDialog
         open={deleteDialog.open}

@@ -264,7 +264,7 @@ async def _request_json(
     creds: AnthropicCredentials,
 ) -> tuple[dict[str, JsonValue], int]:
     response, status = await _request_json_once(payload, headers, base_url=base_url, session=session)
-    if status == 401 and creds.refresh_token:
+    if creds.refresh_token and _should_attempt_oauth_refresh(status, response):
         refreshed = await refresh_anthropic_access_token(creds)
         if refreshed is not None:
             headers = dict(headers)
@@ -308,7 +308,7 @@ async def _stream_request(
             yield block
         return
     except AnthropicProxyError as exc:
-        if exc.status_code != 401 or not creds.refresh_token:
+        if not creds.refresh_token or not _should_attempt_oauth_refresh(exc.status_code, exc.payload):
             raise
 
     refreshed = await refresh_anthropic_access_token(creds)
@@ -374,6 +374,25 @@ def _ensure_error_payload(payload: dict[str, JsonValue], status_code: int) -> di
     if isinstance(payload_message, str) and payload_message:
         message = payload_message
     return anthropic_error_payload("api_error", message)
+
+
+def _should_attempt_oauth_refresh(status_code: int, payload: dict[str, JsonValue]) -> bool:
+    if status_code == 401:
+        return True
+    if status_code != 403:
+        return False
+
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    error_type = error.get("type")
+    if error_type not in {"permission_error", "authentication_error"}:
+        return False
+    message = error.get("message")
+    if not isinstance(message, str):
+        return False
+    lowered = message.casefold()
+    return "oauth" in lowered and "revoked" in lowered
 
 
 async def _iter_sse_event_blocks(response: aiohttp.ClientResponse) -> AsyncIterator[str]:
@@ -587,16 +606,21 @@ def _system_text_chars_from_detected(cli_data: _DetectedCliData | None) -> int:
 
 
 def _build_payload_diagnostics(payload: dict[str, JsonValue]) -> dict[str, int | str | bool | None]:
-    messages = payload.get("messages")
+    messages: Any = payload.get("messages")
+    tools: Any = payload.get("tools")
+    system: Any = payload.get("system")
+    max_tokens: Any = payload.get("max_tokens")
+    stream: Any = payload.get("stream")
     message_count = len(messages) if isinstance(messages, list) else 0
+    tools_count = len(tools) if isinstance(tools, list) else 0
     return {
         "json_bytes": _json_size_bytes(payload),
         "message_count": message_count,
         "messages_text_chars": _messages_text_chars(messages),
-        "system_text_chars": _system_text_chars(payload.get("system")),
-        "tools_count": len(payload.get("tools")) if isinstance(payload.get("tools"), list) else 0,
-        "max_tokens": _as_int(payload.get("max_tokens")),
-        "stream": bool(payload.get("stream")),
+        "system_text_chars": _system_text_chars(system),
+        "tools_count": tools_count,
+        "max_tokens": _as_int(max_tokens),
+        "stream": bool(stream),
     }
 
 

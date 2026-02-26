@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import tempfile
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +39,9 @@ _IGNORE_INBOUND_HEADERS = {
 
 _CACHE_TTL_SECONDS = 900
 _MAX_EVENT_BYTES = 2 * 1024 * 1024
+_DIAGNOSTICS_MAX_ITEMS = 500
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -47,6 +53,14 @@ class _DetectedCliData:
 
 _detected_cli_cache: _DetectedCliData | None = None
 _detect_lock = asyncio.Lock()
+_recent_diagnostics: deque[dict[str, Any]] = deque(maxlen=_DIAGNOSTICS_MAX_ITEMS)
+
+
+def get_recent_diagnostics(limit: int = 100) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    capped = min(limit, _DIAGNOSTICS_MAX_ITEMS)
+    return list(_recent_diagnostics)[-capped:]
 
 
 async def create_message(
@@ -58,12 +72,34 @@ async def create_message(
     credentials: AnthropicCredentials | None = None,
 ) -> dict[str, JsonValue]:
     request_payload = _prepare_payload(payload)
+    request_id = _extract_request_id(headers)
     creds = await _resolve_valid_credentials(credentials)
     inbound_headers = _filter_inbound_headers(headers)
+    preflight = _build_payload_diagnostics(request_payload)
+
     cli_data = await _get_detected_cli_data()
+    merged_headers = 0
+    system_injected = False
+    detected_system_chars = _system_text_chars_from_detected(cli_data)
     if cli_data is not None:
-        _merge_cli_headers(inbound_headers, cli_data.headers)
-        _inject_system_prompt(request_payload, cli_data.body_json)
+        merged_headers = _merge_cli_headers(inbound_headers, cli_data.headers)
+        system_injected = _inject_system_prompt(request_payload, cli_data.body_json)
+
+    post_mutation = _build_payload_diagnostics(request_payload)
+    _record_diagnostic(
+        {
+            "kind": "anthropic_api_preflight",
+            "request_id": request_id,
+            "stream": False,
+            "model": request_payload.get("model"),
+            "cli_detected": cli_data is not None,
+            "cli_merged_headers": merged_headers,
+            "system_injected": system_injected,
+            "detected_system_chars": detected_system_chars,
+            "pre": preflight,
+            "post": post_mutation,
+        }
+    )
 
     request_headers = _build_request_headers(
         inbound_headers,
@@ -76,6 +112,17 @@ async def create_message(
         base_url=base_url,
         session=session,
         creds=creds,
+    )
+    usage = _extract_usage_payload(response_payload)
+    _record_diagnostic(
+        {
+            "kind": "anthropic_api_response",
+            "request_id": request_id,
+            "stream": False,
+            "status_code": status_code,
+            "usage": usage,
+            "error_type": _extract_error_type(response_payload),
+        }
     )
     if status_code >= 400:
         raise AnthropicProxyError(status_code, _ensure_error_payload(response_payload, status_code))
@@ -92,13 +139,35 @@ async def stream_messages(
 ) -> AsyncIterator[str]:
     request_payload = _prepare_payload(payload)
     request_payload["stream"] = True
+    request_id = _extract_request_id(headers)
 
     creds = await _resolve_valid_credentials(credentials)
     inbound_headers = _filter_inbound_headers(headers)
+    preflight = _build_payload_diagnostics(request_payload)
+
     cli_data = await _get_detected_cli_data()
+    merged_headers = 0
+    system_injected = False
+    detected_system_chars = _system_text_chars_from_detected(cli_data)
     if cli_data is not None:
-        _merge_cli_headers(inbound_headers, cli_data.headers)
-        _inject_system_prompt(request_payload, cli_data.body_json)
+        merged_headers = _merge_cli_headers(inbound_headers, cli_data.headers)
+        system_injected = _inject_system_prompt(request_payload, cli_data.body_json)
+
+    post_mutation = _build_payload_diagnostics(request_payload)
+    _record_diagnostic(
+        {
+            "kind": "anthropic_api_preflight",
+            "request_id": request_id,
+            "stream": True,
+            "model": request_payload.get("model"),
+            "cli_detected": cli_data is not None,
+            "cli_merged_headers": merged_headers,
+            "system_injected": system_injected,
+            "detected_system_chars": detected_system_chars,
+            "pre": preflight,
+            "post": post_mutation,
+        }
+    )
 
     request_headers = _build_request_headers(
         inbound_headers,
@@ -464,30 +533,161 @@ async def _run_claude_detection_command(cli_binary: str, port: int) -> None:
             await process.wait()
 
 
-def _merge_cli_headers(target: dict[str, str], cli_headers: dict[str, str]) -> None:
+def _merge_cli_headers(target: dict[str, str], cli_headers: dict[str, str]) -> int:
     blocked = {"authorization", "x-api-key", "host", "content-length"}
+    merged = 0
     for key, value in cli_headers.items():
         lower = key.lower()
         if lower in blocked:
             continue
+        previous = target.get(key)
+        if previous != value:
+            merged += 1
         target[key] = value
+    return merged
 
 
-def _inject_system_prompt(payload: dict[str, JsonValue], body_json: dict[str, Any] | None) -> None:
+def _inject_system_prompt(payload: dict[str, JsonValue], body_json: dict[str, Any] | None) -> bool:
     if body_json is None:
-        return
+        return False
     settings = get_settings()
     mode = settings.anthropic_api_system_prompt_injection_mode
     if mode == "none":
-        return
+        return False
 
     detected_system = body_json.get("system")
     if not isinstance(detected_system, (str, list, dict)):
-        return
+        return False
 
     if mode == "minimal":
         if payload.get("system") is None:
             payload["system"] = detected_system
-        return
+            return True
+        return False
 
+    previous = payload.get("system")
     payload["system"] = detected_system
+    return previous != detected_system
+
+
+def _extract_request_id(headers: Mapping[str, str]) -> str | None:
+    for key, value in headers.items():
+        lower = key.lower()
+        if lower in {"x-request-id", "request-id"}:
+            request_id = value.strip()
+            if request_id:
+                return request_id
+    return None
+
+
+def _system_text_chars_from_detected(cli_data: _DetectedCliData | None) -> int:
+    if cli_data is None or not isinstance(cli_data.body_json, dict):
+        return 0
+    return _system_text_chars(cli_data.body_json.get("system"))
+
+
+def _build_payload_diagnostics(payload: dict[str, JsonValue]) -> dict[str, int | str | bool | None]:
+    messages = payload.get("messages")
+    message_count = len(messages) if isinstance(messages, list) else 0
+    return {
+        "json_bytes": _json_size_bytes(payload),
+        "message_count": message_count,
+        "messages_text_chars": _messages_text_chars(messages),
+        "system_text_chars": _system_text_chars(payload.get("system")),
+        "tools_count": len(payload.get("tools")) if isinstance(payload.get("tools"), list) else 0,
+        "max_tokens": _as_int(payload.get("max_tokens")),
+        "stream": bool(payload.get("stream")),
+    }
+
+
+def _json_size_bytes(payload: dict[str, JsonValue]) -> int:
+    try:
+        return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return -1
+
+
+def _messages_text_chars(messages: Any) -> int:
+    if not isinstance(messages, list):
+        return 0
+    total = 0
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        total += _content_text_chars(item.get("content"))
+    return total
+
+
+def _content_text_chars(content: Any) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if isinstance(block, str):
+                total += len(block)
+                continue
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    total += len(text)
+        return total
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return len(text)
+    return 0
+
+
+def _system_text_chars(system: Any) -> int:
+    if isinstance(system, str):
+        return len(system)
+    if isinstance(system, list):
+        return sum(_system_text_chars(item) for item in system)
+    if isinstance(system, dict):
+        text = system.get("text")
+        if isinstance(text, str):
+            return len(text)
+    return 0
+
+
+def _as_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _extract_usage_payload(payload: dict[str, JsonValue]) -> dict[str, int] | None:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    out: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = usage.get(key)
+        parsed = _as_int(value)
+        if parsed is not None:
+            out[key] = parsed
+    return out or None
+
+
+def _extract_error_type(payload: dict[str, JsonValue]) -> str | None:
+    error = payload.get("error")
+    if isinstance(error, dict):
+        error_type = error.get("type")
+        if isinstance(error_type, str):
+            return error_type
+    return None
+
+
+def _record_diagnostic(entry: dict[str, Any]) -> None:
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **entry,
+    }
+    _recent_diagnostics.append(record)
+    logger.warning("anthropic_api_diag %s", json.dumps(record, default=str))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -11,6 +12,8 @@ from typing import Any
 
 from app.core.config.settings import get_settings
 from app.core.types import JsonValue
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -25,6 +28,7 @@ class AnthropicProxyError(Exception):
 @dataclass(frozen=True, slots=True)
 class _PoolKey:
     model: str
+    session_id: str
     max_tokens: int | None
     temperature: float | None
     system_prompt: str | None
@@ -166,13 +170,29 @@ async def create_message(
     base_url: str | None = None,
     session: object | None = None,
 ) -> dict[str, JsonValue]:
-    del headers, base_url, session
+    del base_url, session
 
     message_payload = _build_sdk_query_message(payload)
-    session_id = _resolve_session_id(payload) or _ephemeral_session_id()
+    session_id, session_source = _resolve_session_id_with_source(payload)
+    if session_id is None:
+        session_id = _ephemeral_session_id()
+        session_source = "ephemeral"
+
+    _log_sdk_preflight(
+        payload,
+        message_payload,
+        headers,
+        stream=False,
+        session_id=session_id,
+        session_source=session_source,
+    )
 
     try:
-        async with _acquire_client(payload) as client:
+        async with _acquire_client(
+            payload,
+            session_id=session_id,
+            poolable=session_source != "ephemeral",
+        ) as client:
             await _send_query(client, message_payload, session_id=session_id)
             collected = [message async for message in client.receive_response()]
     except AnthropicProxyError:
@@ -180,7 +200,9 @@ async def create_message(
     except Exception as exc:
         raise _map_sdk_error(exc) from exc
 
-    return _build_non_stream_response(collected, requested_model=_extract_request_model(payload))
+    response_payload = _build_non_stream_response(collected, requested_model=_extract_request_model(payload))
+    _log_sdk_result(response_payload, headers, stream=False)
+    return response_payload
 
 
 async def stream_messages(
@@ -190,18 +212,34 @@ async def stream_messages(
     base_url: str | None = None,
     session: object | None = None,
 ) -> AsyncIterator[str]:
-    del headers, base_url, session
+    del base_url, session
 
     message_payload = _build_sdk_query_message(payload)
-    session_id = _resolve_session_id(payload) or _ephemeral_session_id()
+    session_id, session_source = _resolve_session_id_with_source(payload)
+    if session_id is None:
+        session_id = _ephemeral_session_id()
+        session_source = "ephemeral"
     model = _extract_request_model(payload)
     message_id = f"msg_{uuid.uuid4().hex}"
     yielded_start = False
     content_block_index = 0
     emitted_content = False
 
+    _log_sdk_preflight(
+        payload,
+        message_payload,
+        headers,
+        stream=True,
+        session_id=session_id,
+        session_source=session_source,
+    )
+
     try:
-        async with _acquire_client(payload) as client:
+        async with _acquire_client(
+            payload,
+            session_id=session_id,
+            poolable=session_source != "ephemeral",
+        ) as client:
             await _send_query(client, message_payload, session_id=session_id)
 
             async for sdk_message in client.receive_response():
@@ -306,6 +344,7 @@ async def stream_messages(
                         }
                     )
                     yield _to_sse({"type": "message_stop"})
+                    _log_sdk_stream_result(usage, headers)
                     return
 
         if yielded_start:
@@ -629,20 +668,131 @@ def _extract_request_model(payload: dict[str, JsonValue]) -> str:
 
 
 def _resolve_session_id(payload: dict[str, JsonValue]) -> str | None:
+    session_id, _ = _resolve_session_id_with_source(payload)
+    return session_id
+
+
+def _resolve_session_id_with_source(payload: dict[str, JsonValue]) -> tuple[str | None, str]:
     direct_session_id = payload.get("session_id")
     if isinstance(direct_session_id, str) and direct_session_id.strip():
-        return direct_session_id.strip()
+        return direct_session_id.strip(), "session_id"
 
     metadata = payload.get("metadata")
     if isinstance(metadata, Mapping):
         metadata_session_id = metadata.get("session_id")
         if isinstance(metadata_session_id, str) and metadata_session_id.strip():
-            return metadata_session_id.strip()
+            return metadata_session_id.strip(), "metadata"
 
     default_session_id = get_settings().anthropic_sdk_default_session_id
     if default_session_id and default_session_id.strip():
-        return default_session_id.strip()
-    return None
+        return default_session_id.strip(), "default"
+    return None, "none"
+
+
+def _extract_request_id(headers: Mapping[str, str]) -> str:
+    for key, value in headers.items():
+        if key.lower() in {"x-request-id", "request-id"} and value.strip():
+            return value.strip()
+    return "-"
+
+
+def _json_size_bytes(payload: dict[str, JsonValue]) -> int:
+    try:
+        return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return -1
+
+
+def _payload_message_count(payload: dict[str, JsonValue]) -> int:
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        return len(messages)
+    return 0
+
+
+def _system_text_chars_for_payload(payload: dict[str, JsonValue]) -> int:
+    system = payload.get("system")
+    if isinstance(system, str):
+        return len(system)
+    if isinstance(system, list):
+        total = 0
+        for item in system:
+            if isinstance(item, str):
+                total += len(item)
+            elif isinstance(item, Mapping):
+                text = item.get("text")
+                if isinstance(text, str):
+                    total += len(text)
+        return total
+    return 0
+
+
+def _prompt_chars_from_message_payload(message_payload: dict[str, JsonValue]) -> int:
+    message = message_payload.get("message")
+    if not isinstance(message, Mapping):
+        return 0
+    content = message.get("content")
+    if isinstance(content, str):
+        return len(content)
+    return 0
+
+
+def _session_tail(session_id: str) -> str:
+    if len(session_id) <= 8:
+        return session_id
+    return session_id[-8:]
+
+
+def _log_sdk_preflight(
+    payload: dict[str, JsonValue],
+    message_payload: dict[str, JsonValue],
+    headers: Mapping[str, str],
+    *,
+    stream: bool,
+    session_id: str,
+    session_source: str,
+) -> None:
+    logger.warning(
+        "anthropic_sdk_diag stage=preflight "
+        "request_id=%s stream=%s model=%s session_source=%s session_tail=%s "
+        "payload_bytes=%s message_count=%s prompt_chars=%s system_chars=%s",
+        _extract_request_id(headers),
+        stream,
+        _extract_request_model(payload),
+        session_source,
+        _session_tail(session_id),
+        _json_size_bytes(payload),
+        _payload_message_count(payload),
+        _prompt_chars_from_message_payload(message_payload),
+        _system_text_chars_for_payload(payload),
+    )
+
+
+def _log_sdk_result(response_payload: dict[str, JsonValue], headers: Mapping[str, str], *, stream: bool) -> None:
+    usage = response_payload.get("usage")
+    if not isinstance(usage, Mapping):
+        usage = {}
+    logger.warning(
+        "anthropic_sdk_diag stage=result "
+        "request_id=%s stream=%s input_tokens=%s cached_input_tokens=%s output_tokens=%s",
+        _extract_request_id(headers),
+        stream,
+        usage.get("input_tokens"),
+        usage.get("cache_read_input_tokens"),
+        usage.get("output_tokens"),
+    )
+
+
+def _log_sdk_stream_result(usage: dict[str, JsonValue], headers: Mapping[str, str]) -> None:
+    logger.warning(
+        "anthropic_sdk_diag stage=result "
+        "request_id=%s stream=%s input_tokens=%s cached_input_tokens=%s output_tokens=%s",
+        _extract_request_id(headers),
+        True,
+        usage.get("input_tokens"),
+        usage.get("cache_read_input_tokens"),
+        usage.get("output_tokens"),
+    )
 
 
 async def _send_query(client: Any, message_payload: dict[str, JsonValue], *, session_id: str | None) -> None:

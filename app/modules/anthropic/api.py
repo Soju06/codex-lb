@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Security
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.auth.dependencies import set_anthropic_error_format
+from app.core.auth.dependencies import (
+    set_anthropic_error_format,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
+from app.core.clients.anthropic_api_proxy import get_recent_diagnostics
 from app.core.clients.anthropic_proxy import AnthropicProxyError, anthropic_error_payload
 from app.core.config.settings_cache import get_settings_cache
 from app.core.types import JsonValue
@@ -23,6 +29,11 @@ from app.modules.api_keys.service import (
 
 router = APIRouter(prefix="/claude/v1", tags=["anthropic"], dependencies=[Depends(set_anthropic_error_format)])
 api_router = APIRouter(prefix="/claude-api/v1", tags=["anthropic"], dependencies=[Depends(set_anthropic_error_format)])
+diagnostics_router = APIRouter(
+    prefix="/api/anthropic",
+    tags=["dashboard"],
+    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+)
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-...)", auto_error=False)
 
@@ -75,7 +86,7 @@ async def _messages_impl(
     context: AnthropicContext,
     api_key: ApiKeyData | None,
     *,
-    transport: str,
+    transport: Literal["sdk", "api"],
 ):
     payload = await _require_json_object(request)
     model = _extract_model(payload)
@@ -189,3 +200,10 @@ def _extract_model(payload: dict[str, JsonValue]) -> str | None:
     if isinstance(model, str) and model.strip():
         return model.strip()
     return None
+
+
+@diagnostics_router.get("/diagnostics")
+async def list_anthropic_diagnostics(
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, list[dict[str, object]]]:
+    return {"entries": get_recent_diagnostics(limit)}

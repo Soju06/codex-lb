@@ -61,6 +61,7 @@ class LoadBalancer:
         error_message: str | None = None
         async with self._repo_factory() as repos:
             accounts = await repos.accounts.list_accounts()
+            self._prune_runtime(accounts)
             if model:
                 accounts = _filter_accounts_for_model(accounts, model)
                 if not accounts:
@@ -127,6 +128,12 @@ class LoadBalancer:
             model,
         )
         return AccountSelection(account=selected_snapshot, error_message=None)
+
+    def _prune_runtime(self, accounts: Iterable[Account]) -> None:
+        account_ids = {account.id for account in accounts}
+        stale_ids = [account_id for account_id in self._runtime if account_id not in account_ids]
+        for account_id in stale_ids:
+            self._runtime.pop(account_id, None)
 
     async def _select_with_stickiness(
         self,

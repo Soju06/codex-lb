@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState
 from app.modules.proxy.repo_bundle import ProxyRepositories
 
 pytestmark = pytest.mark.unit
@@ -146,3 +147,57 @@ async def test_select_account_skips_latest_primary_requery_when_not_refreshed(mo
     assert selection.account.id == account.id
     assert usage_repo.primary_calls == 1
     assert usage_repo.secondary_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_select_account_prunes_stale_runtime_for_removed_accounts() -> None:
+    account_id = "acc-reused"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account(account_id)
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=10.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([])
+    usage_repo = StubUsageRepository(primary={}, secondary={account_id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        yield ProxyRepositories(
+            accounts=accounts_repo,  # type: ignore[arg-type]
+            usage=usage_repo,  # type: ignore[arg-type]
+            request_logs=object(),  # type: ignore[arg-type]
+            sticky_sessions=sticky_repo,  # type: ignore[arg-type]
+            api_keys=object(),  # type: ignore[arg-type]
+        )
+
+    balancer = LoadBalancer(repo_factory)
+    balancer._runtime[account_id] = RuntimeState(cooldown_until=time.time() + 300.0)
+
+    empty_selection = await balancer.select_account()
+    assert empty_selection.account is None
+    assert account_id not in balancer._runtime
+
+    accounts_repo._accounts = [account]
+    usage_repo._primary = {account_id: primary_entry}
+
+    selection = await balancer.select_account()
+    assert selection.account is not None
+    assert selection.account.id == account_id

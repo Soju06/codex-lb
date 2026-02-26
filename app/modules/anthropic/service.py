@@ -372,7 +372,7 @@ class _StreamAccumulator:
     def to_error(self) -> AnthropicRequestError:
         return AnthropicRequestError(code=self.error_code, message=self.error_message)
 
-    def _apply_usage(self, usage: dict[str, JsonValue] | None) -> None:
+    def _apply_usage(self, usage: Mapping[str, object] | None) -> None:
         if usage is None:
             return
         input_tokens = _as_int(usage.get("input_tokens"))
@@ -448,7 +448,7 @@ def _normalize_error_code(raw_code: JsonValue, raw_type: JsonValue) -> str | Non
     return None
 
 
-def _as_int(value: JsonValue) -> int | None:
+def _as_int(value: object) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):

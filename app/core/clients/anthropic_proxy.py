@@ -395,10 +395,15 @@ def _ephemeral_session_id() -> str:
 
 
 @asynccontextmanager
-async def _acquire_client(payload: dict[str, JsonValue]) -> AsyncIterator[Any]:
+async def _acquire_client(
+    payload: dict[str, JsonValue],
+    *,
+    session_id: str,
+    poolable: bool,
+) -> AsyncIterator[Any]:
     sdk = _require_sdk()
     settings = get_settings()
-    if not settings.anthropic_sdk_pool_enabled:
+    if not settings.anthropic_sdk_pool_enabled or not poolable:
         options = _build_sdk_options(payload)
         client = sdk.ClaudeSDKClient(options)
         await client.connect()
@@ -408,7 +413,7 @@ async def _acquire_client(payload: dict[str, JsonValue]) -> AsyncIterator[Any]:
             await _safe_disconnect(client)
         return
 
-    key = _pool_key_from_payload(payload)
+    key = _pool_key_from_payload(payload, session_id=session_id)
 
     async def _create_client() -> Any:
         options = _build_sdk_options(payload)
@@ -435,7 +440,7 @@ async def _acquire_client(payload: dict[str, JsonValue]) -> AsyncIterator[Any]:
         await _POOL_MANAGER.release(key, pooled)
 
 
-def _pool_key_from_payload(payload: dict[str, JsonValue]) -> _PoolKey:
+def _pool_key_from_payload(payload: dict[str, JsonValue], *, session_id: str) -> _PoolKey:
     settings = get_settings()
     model = _extract_request_model(payload)
     max_tokens = _as_int(payload.get("max_tokens"))
@@ -450,6 +455,7 @@ def _pool_key_from_payload(payload: dict[str, JsonValue]) -> _PoolKey:
 
     return _PoolKey(
         model=model,
+        session_id=session_id,
         max_tokens=max_tokens,
         temperature=temperature,
         system_prompt=system_prompt,
@@ -616,7 +622,7 @@ def _content_to_text(value: JsonValue) -> str:
             if isinstance(item, str):
                 chunks.append(item)
                 continue
-            if not isinstance(item, Mapping):
+            if not isinstance(item, dict):
                 continue
             block_type = item.get("type")
             if block_type == "text":
@@ -628,7 +634,7 @@ def _content_to_text(value: JsonValue) -> str:
                 if isinstance(result_content, str) and result_content:
                     chunks.append(result_content)
         return "\n".join(chunks)
-    if isinstance(value, Mapping):
+    if isinstance(value, dict):
         text_value = value.get("text")
         if isinstance(text_value, str):
             return text_value
@@ -648,7 +654,7 @@ def _extract_system_prompt(payload: dict[str, JsonValue]) -> str | None:
             if isinstance(block, str) and block.strip():
                 parts.append(block.strip())
                 continue
-            if isinstance(block, Mapping) and block.get("type") == "text":
+            if isinstance(block, dict) and block.get("type") == "text":
                 text_value = block.get("text")
                 if isinstance(text_value, str) and text_value.strip():
                     parts.append(text_value.strip())
@@ -678,7 +684,7 @@ def _resolve_session_id_with_source(payload: dict[str, JsonValue]) -> tuple[str 
         return direct_session_id.strip(), "session_id"
 
     metadata = payload.get("metadata")
-    if isinstance(metadata, Mapping):
+    if isinstance(metadata, dict):
         metadata_session_id = metadata.get("session_id")
         if isinstance(metadata_session_id, str) and metadata_session_id.strip():
             return metadata_session_id.strip(), "metadata"
@@ -719,7 +725,7 @@ def _system_text_chars_for_payload(payload: dict[str, JsonValue]) -> int:
         for item in system:
             if isinstance(item, str):
                 total += len(item)
-            elif isinstance(item, Mapping):
+            elif isinstance(item, dict):
                 text = item.get("text")
                 if isinstance(text, str):
                     total += len(text)
@@ -729,7 +735,7 @@ def _system_text_chars_for_payload(payload: dict[str, JsonValue]) -> int:
 
 def _prompt_chars_from_message_payload(message_payload: dict[str, JsonValue]) -> int:
     message = message_payload.get("message")
-    if not isinstance(message, Mapping):
+    if not isinstance(message, dict):
         return 0
     content = message.get("content")
     if isinstance(content, str):
@@ -770,7 +776,7 @@ def _log_sdk_preflight(
 
 def _log_sdk_result(response_payload: dict[str, JsonValue], headers: Mapping[str, str], *, stream: bool) -> None:
     usage = response_payload.get("usage")
-    if not isinstance(usage, Mapping):
+    if not isinstance(usage, dict):
         usage = {}
     logger.warning(
         "anthropic_sdk_diag stage=result "

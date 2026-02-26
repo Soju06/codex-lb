@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import cast
 
 import aiohttp
 
@@ -62,7 +63,7 @@ async def fetch_usage_snapshot(
     return _parse_usage_payload(payload)
 
 
-async def _safe_json(resp: aiohttp.ClientResponse) -> dict:
+async def _safe_json(resp: aiohttp.ClientResponse) -> dict[str, object]:
     try:
         data = await resp.json(content_type=None)
     except Exception:
@@ -71,10 +72,11 @@ async def _safe_json(resp: aiohttp.ClientResponse) -> dict:
     return data if isinstance(data, dict) else {"error": {"message": str(data)}}
 
 
-def _error_message(payload: dict) -> str | None:
+def _error_message(payload: dict[str, object]) -> str | None:
     error = payload.get("error")
     if isinstance(error, dict):
-        message = error.get("message")
+        error_payload = cast(dict[str, object], error)
+        message = error_payload.get("message")
         if isinstance(message, str) and message.strip():
             return message.strip()
     message = payload.get("message")
@@ -83,7 +85,7 @@ def _error_message(payload: dict) -> str | None:
     return None
 
 
-def _parse_usage_payload(payload: dict) -> AnthropicUsageSnapshot:
+def _parse_usage_payload(payload: dict[str, object]) -> AnthropicUsageSnapshot:
     five_hour = _parse_usage_window(payload.get("five_hour"), window_minutes=300)
     seven_day = _parse_usage_window(payload.get("seven_day"), window_minutes=10080)
     return AnthropicUsageSnapshot(five_hour=five_hour, seven_day=seven_day)
@@ -92,10 +94,11 @@ def _parse_usage_payload(payload: dict) -> AnthropicUsageSnapshot:
 def _parse_usage_window(raw: object, *, window_minutes: int) -> AnthropicUsageWindow | None:
     if not isinstance(raw, dict):
         return None
-    used = _normalize_utilization_percent(raw.get("utilization"))
+    raw_payload = cast(dict[str, object], raw)
+    used = _normalize_utilization_percent(raw_payload.get("utilization"))
     if used is None:
         return None
-    reset_at_epoch = _parse_reset_at(raw.get("resets_at"))
+    reset_at_epoch = _parse_reset_at(raw_payload.get("resets_at"))
     return AnthropicUsageWindow(
         used_percent=used,
         reset_at_epoch=reset_at_epoch,

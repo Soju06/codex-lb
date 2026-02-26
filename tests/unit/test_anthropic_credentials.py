@@ -20,7 +20,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.mark.asyncio
 async def test_resolve_anthropic_credentials_prefers_env(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_ANTHROPIC_USAGE_BEARER_TOKEN", "sk-ant-oat-example-env-token")
+    monkeypatch.setenv("CODEX_LB_ANTHROPIC_USAGE_BEARER_TOKEN", "sk-ant-oat-test-env-token")
     monkeypatch.setenv("CODEX_LB_ANTHROPIC_ORG_ID", "org_env")
     monkeypatch.setenv("CODEX_LB_ANTHROPIC_CREDENTIALS_DISCOVERY_ENABLED", "false")
     get_settings.cache_clear()
@@ -30,7 +30,7 @@ async def test_resolve_anthropic_credentials_prefers_env(monkeypatch) -> None:
 
     assert credentials is not None
     assert credentials.source == "env"
-    assert credentials.bearer_token == "sk-ant-oat-example-env-token"
+    assert credentials.bearer_token == "sk-ant-oat-test-env-token"
     assert credentials.org_id == "org_env"
 
 
@@ -42,7 +42,7 @@ async def test_resolve_anthropic_credentials_reads_config_file(tmp_path, monkeyp
             {
                 "session": {
                     "oauth": {
-                        "token": "sk-ant-oat-example-file-token",
+                        "token": "sk-ant-oat-test-file-token",
                         "organization_id": "org_file",
                     }
                 }
@@ -63,7 +63,7 @@ async def test_resolve_anthropic_credentials_reads_config_file(tmp_path, monkeyp
 
     assert credentials is not None
     assert credentials.source.startswith("file:")
-    assert credentials.bearer_token == "sk-ant-oat-example-file-token"
+    assert credentials.bearer_token == "sk-ant-oat-test-file-token"
     assert credentials.org_id == "org_file"
 
 

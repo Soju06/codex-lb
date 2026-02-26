@@ -13,7 +13,9 @@ from sqlalchemy import text
 TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
 TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
 
-os.environ["CODEX_LB_DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
+os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
+    "CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}"
+)
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
 os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
@@ -27,10 +29,14 @@ from app.main import create_app  # noqa: E402
 async def app_instance():
     app = create_app()
     async with engine.begin() as conn:
-        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-        await conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+
+        def _reset(sync_conn):
+            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+            Base.metadata.drop_all(sync_conn)
+            Base.metadata.create_all(sync_conn)
+
+        await conn.run_sync(_reset)
     return app
 
 
@@ -43,10 +49,14 @@ async def dispose_engine():
 @pytest_asyncio.fixture
 async def db_setup():
     async with engine.begin() as conn:
-        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-        await conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+
+        def _reset(sync_conn):
+            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+            Base.metadata.drop_all(sync_conn)
+            Base.metadata.create_all(sync_conn)
+
+        await conn.run_sync(_reset)
     return True
 
 

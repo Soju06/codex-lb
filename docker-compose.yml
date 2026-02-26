@@ -58,6 +58,26 @@ services:
         - action: rebuild
           path: ./frontend/bun.lock
 
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: codex_lb
+      POSTGRES_PASSWORD: codex_lb
+      POSTGRES_DB: codex_lb
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codex_lb -d codex_lb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - codex-lb-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
 volumes:
   codex-lb-data:
     name: codex-lb-data
+  codex-lb-postgres-data:
+    name: codex-lb-postgres-data

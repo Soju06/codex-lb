@@ -238,6 +238,7 @@ Authorization: Bearer sk-clb-...
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
 Dashboard auth is configured in Settings.
+SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
 
 ## Data
 

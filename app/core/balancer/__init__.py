@@ -1,6 +1,7 @@
 from app.core.balancer.logic import (
     PERMANENT_FAILURE_CODES,
     AccountState,
+    RoutingStrategy,
     SelectionResult,
     handle_permanent_failure,
     handle_quota_exceeded,
@@ -11,6 +12,7 @@ from app.core.balancer.logic import (
 __all__ = [
     "PERMANENT_FAILURE_CODES",
     "AccountState",
+    "RoutingStrategy",
     "SelectionResult",
     "handle_permanent_failure",
     "handle_quota_exceeded",

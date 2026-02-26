@@ -17,6 +17,8 @@ from app.modules.dashboard.service import DashboardService
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_auth.service import DashboardAuthService, get_dashboard_session_store
 from app.modules.oauth.service import OauthService
+from app.modules.model_overrides.repository import ModelOverridesRepository
+from app.modules.model_overrides.service import ModelOverridesService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -87,6 +89,13 @@ class DashboardContext:
     service: DashboardService
 
 
+@dataclass(slots=True)
+class ModelOverridesContext:
+    session: AsyncSession
+    repository: ModelOverridesRepository
+    service: ModelOverridesService
+
+
 def get_accounts_context(
     session: AsyncSession = Depends(get_session),
 ) -> AccountsContext:
@@ -133,6 +142,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
+            model_overrides=ModelOverridesRepository(session),
         )
 
 
@@ -151,9 +161,13 @@ def get_dashboard_auth_context(
     return DashboardAuthContext(session=session, repository=repository, service=service)
 
 
+_proxy_service_singleton: ProxyService | None = None
+
 def get_proxy_context() -> ProxyContext:
-    service = ProxyService(repo_factory=_proxy_repo_context)
-    return ProxyContext(service=service)
+    global _proxy_service_singleton
+    if _proxy_service_singleton is None:
+        _proxy_service_singleton = ProxyService(repo_factory=_proxy_repo_context)
+    return ProxyContext(service=_proxy_service_singleton)
 
 
 def get_api_keys_context(
@@ -186,3 +200,11 @@ def get_dashboard_context(
     repository = DashboardRepository(session)
     service = DashboardService(repository)
     return DashboardContext(session=session, repository=repository, service=service)
+
+
+def get_model_overrides_context(
+    session: AsyncSession = Depends(get_session),
+) -> ModelOverridesContext:
+    repository = ModelOverridesRepository(session)
+    service = ModelOverridesService(repository)
+    return ModelOverridesContext(session=session, repository=repository, service=service)

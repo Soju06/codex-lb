@@ -46,6 +46,9 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    client_ip: list[str] | None = Query(default=None, alias="clientIp"),
+    client_app: list[str] | None = Query(default=None, alias="clientApp"),
+    api_key: list[str] | None = Query(default=None, alias="apiKey"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     context: RequestLogsContext = Depends(get_request_logs_context),
@@ -64,6 +67,9 @@ async def list_request_logs(
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
+        client_ips=client_ip,
+        client_apps=client_app,
+        api_keys=api_key,
         status=status,
     )
     return RequestLogsResponse(
@@ -80,6 +86,9 @@ async def list_request_log_filter_options(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    client_ip: list[str] | None = Query(default=None, alias="clientIp"),
+    client_app: list[str] | None = Query(default=None, alias="clientApp"),
+    api_key: list[str] | None = Query(default=None, alias="apiKey"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     context: RequestLogsContext = Depends(get_request_logs_context),
@@ -96,6 +105,9 @@ async def list_request_log_filter_options(
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
+        client_ips=client_ip,
+        client_apps=client_app,
+        api_keys=api_key,
     )
     return RequestLogFilterOptionsResponse(
         account_ids=options.account_ids,
@@ -103,5 +115,8 @@ async def list_request_log_filter_options(
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options
         ],
+        client_ips=options.client_ips,
+        client_apps=options.client_apps,
+        api_keys=options.api_keys,
         statuses=options.statuses,
     )

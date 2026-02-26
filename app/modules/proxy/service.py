@@ -31,6 +31,7 @@ from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
+from app.modules.model_overrides.service import ModelOverrideMatch, ModelOverridesService, RequestActorContext
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
@@ -73,6 +74,7 @@ class ProxyService:
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
+        actor_log: RequestActorLogData | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         _maybe_log_proxy_request_shape("stream", payload, headers)
@@ -84,7 +86,23 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
+            actor_log=actor_log,
         )
+
+    async def resolve_model_override(self, actor: RequestActorContext) -> ModelOverrideMatch | None:
+        try:
+            async with self._repo_factory() as repos:
+                service = ModelOverridesService(repos.model_overrides)
+                return await service.resolve(actor)
+        except Exception:
+            logger.warning(
+                "Failed to resolve model override request_id=%s client_ip=%s client_app=%s",
+                get_request_id(),
+                actor.client_ip,
+                actor.client_app,
+                exc_info=True,
+            )
+            return None
 
     async def compact_responses(
         self,
@@ -100,11 +118,13 @@ class ProxyService:
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
+        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
             reallocate_sticky=sticky_key is not None,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
             model=payload.model,
         )
         account = selection.account
@@ -317,11 +337,13 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
+        actor_log: RequestActorLogData | None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
+        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
         max_attempts = 3
         settled = False
@@ -331,6 +353,7 @@ class ProxyService:
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
                     model=payload.model,
                 )
                 account = selection.account
@@ -356,6 +379,7 @@ class ProxyService:
                         api_key=api_key,
                         settlement=settlement,
                         suppress_text_done_events=suppress_text_done_events,
+                        actor_log=actor_log,
                     ):
                         yield line
                     settled = await self._settle_stream_api_key_usage(
@@ -386,6 +410,7 @@ class ProxyService:
                             api_key=api_key,
                             settlement=settlement,
                             suppress_text_done_events=suppress_text_done_events,
+                            actor_log=actor_log,
                         ):
                             yield line
                         settled = await self._settle_stream_api_key_usage(
@@ -473,6 +498,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
+        actor_log: RequestActorLogData | None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -597,11 +623,16 @@ class ProxyService:
                             api_key_id=api_key.id if api_key else None,
                             request_id=request_id,
                             model=model,
+                            requested_model=(actor_log.requested_model if actor_log else model),
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=cached_input_tokens,
                             reasoning_tokens=reasoning_tokens,
                             reasoning_effort=reasoning_effort,
+                            client_ip=actor_log.client_ip if actor_log else None,
+                            client_app=actor_log.client_app if actor_log else None,
+                            auth_key_fingerprint=actor_log.api_key if actor_log else None,
+                            override_id=actor_log.override_id if actor_log else None,
                             latency_ms=latency_ms,
                             status=status,
                             error_code=error_code,
@@ -693,6 +724,15 @@ class _StreamSettlement:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class RequestActorLogData:
+    client_ip: str | None
+    client_app: str | None
+    api_key: str | None
+    requested_model: str | None
+    override_id: int | None = None
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

@@ -137,6 +137,7 @@ async def test_select_account_skips_latest_primary_requery_when_not_refreshed(mo
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
+            model_overrides=object(),  # type: ignore[arg-type]
         )
 
     balancer = LoadBalancer(repo_factory)

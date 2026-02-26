@@ -343,6 +343,9 @@ def _state_from_account(
 
 
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
+    accounts = [account for account in accounts if account.chatgpt_account_id]
+    if not accounts:
+        return []
     allowed_plans = get_model_registry().plan_types_for_model(model)
     if allowed_plans is None:
         return accounts

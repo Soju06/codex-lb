@@ -74,6 +74,10 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
     ),
     "gpt-5.1-codex": ModelPrice(input_per_1m=1.25, cached_input_per_1m=0.125, output_per_1m=10.0),
     "gpt-5-codex": ModelPrice(input_per_1m=1.25, cached_input_per_1m=0.125, output_per_1m=10.0),
+    "claude-opus-4": ModelPrice(input_per_1m=15.0, cached_input_per_1m=1.5, output_per_1m=75.0),
+    "claude-sonnet-4": ModelPrice(input_per_1m=3.0, cached_input_per_1m=0.3, output_per_1m=15.0),
+    "claude-3-7-sonnet": ModelPrice(input_per_1m=3.0, cached_input_per_1m=0.3, output_per_1m=15.0),
+    "claude-3-5-haiku": ModelPrice(input_per_1m=0.8, cached_input_per_1m=0.08, output_per_1m=4.0),
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
@@ -85,6 +89,14 @@ DEFAULT_MODEL_ALIASES: dict[str, str] = {
     "gpt-5.1-codex-mini*": "gpt-5.1-codex-mini",
     "gpt-5.1-codex*": "gpt-5.1-codex",
     "gpt-5-codex*": "gpt-5-codex",
+    "claude-opus-4*": "claude-opus-4",
+    "claude-sonnet-4*": "claude-sonnet-4",
+    "claude-3-7-sonnet*": "claude-3-7-sonnet",
+    "claude-3-5-haiku*": "claude-3-5-haiku",
+    "anthropic/claude-opus-4*": "claude-opus-4",
+    "anthropic/claude-sonnet-4*": "claude-sonnet-4",
+    "anthropic/claude-3-7-sonnet*": "claude-3-7-sonnet",
+    "anthropic/claude-3-5-haiku*": "claude-3-5-haiku",
 }
 
 

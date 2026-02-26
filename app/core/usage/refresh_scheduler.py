@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from app.core.config.settings import get_settings
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.anthropic.repository import AnthropicRepository
+from app.modules.anthropic.service import AnthropicService
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -52,12 +54,19 @@ class UsageRefreshScheduler:
         async with self._lock:
             try:
                 async with get_background_session() as session:
-                    usage_repo = UsageRepository(session)
-                    accounts_repo = AccountsRepository(session)
-                    latest_usage = await usage_repo.latest_by_account(window="primary")
-                    accounts = await accounts_repo.list_accounts()
-                    updater = UsageUpdater(usage_repo, accounts_repo)
-                    await updater.refresh_accounts(accounts, latest_usage)
+                    settings = get_settings()
+                    if settings.usage_refresh_enabled:
+                        usage_repo = UsageRepository(session)
+                        accounts_repo = AccountsRepository(session)
+                        latest_usage = await usage_repo.latest_by_account(window="primary")
+                        accounts = await accounts_repo.list_accounts()
+                        updater = UsageUpdater(usage_repo, accounts_repo)
+                        await updater.refresh_accounts(accounts, latest_usage)
+
+                    if settings.anthropic_usage_refresh_enabled:
+                        service = AnthropicService(AnthropicRepository(session))
+                        await service.refresh_usage_windows()
+
                     await get_rate_limit_headers_cache().invalidate()
             except Exception:
                 logger.exception("Usage refresh loop failed")
@@ -65,7 +74,8 @@ class UsageRefreshScheduler:
 
 def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
     settings = get_settings()
+    enabled = settings.usage_refresh_enabled or settings.anthropic_usage_refresh_enabled
     return UsageRefreshScheduler(
         interval_seconds=settings.usage_refresh_interval_seconds,
-        enabled=settings.usage_refresh_enabled,
+        enabled=enabled,
     )

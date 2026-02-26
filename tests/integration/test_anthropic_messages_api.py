@@ -6,8 +6,12 @@ import pytest
 from sqlalchemy import select
 
 from app.core.clients.anthropic_proxy import AnthropicProxyError, anthropic_error_payload
-from app.db.models import RequestLog
+from app.core.config.settings import get_settings
+from app.core.crypto import TokenEncryptor
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
+from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -131,7 +135,7 @@ async def test_anthropic_messages_non_stream_upstream_error(async_client, monkey
 
 @pytest.mark.asyncio
 async def test_anthropic_api_messages_non_stream_success(async_client, monkeypatch):
-    async def _stub_create_message_api(payload, headers, *, base_url=None, session=None):
+    async def _stub_create_message_api(payload, headers, *, base_url=None, session=None, credentials=None):
         return {
             "id": "msg_api_1",
             "type": "message",
@@ -170,7 +174,7 @@ async def test_anthropic_api_messages_non_stream_success(async_client, monkeypat
 
 @pytest.mark.asyncio
 async def test_anthropic_api_messages_stream_success(async_client, monkeypatch):
-    async def _stub_stream_messages_api(payload, headers, *, base_url=None, session=None):
+    async def _stub_stream_messages_api(payload, headers, *, base_url=None, session=None, credentials=None):
         yield (
             "event: message_start\n"
             "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\","
@@ -208,3 +212,63 @@ async def test_anthropic_api_messages_stream_success(async_client, monkeypatch):
     assert log.status == "success"
     assert log.input_tokens == 3
     assert log.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_anthropic_api_uses_imported_db_credentials(async_client, monkeypatch):
+    settings = get_settings()
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account_id = settings.anthropic_default_account_id
+        existing = await repo.get_by_id(account_id)
+        if existing is None:
+            account = Account(
+                id=account_id,
+                chatgpt_account_id=None,
+                email="claude@example.com",
+                plan_type="pro",
+                access_token_encrypted=encryptor.encrypt("sk-ant-oat-db-access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh-db"),
+                id_token_encrypted=encryptor.encrypt(""),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+            await repo.upsert(account, merge_by_email=False)
+        else:
+            await repo.update_tokens(
+                account_id=account_id,
+                access_token_encrypted=encryptor.encrypt("sk-ant-oat-db-access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh-db"),
+                id_token_encrypted=encryptor.encrypt(""),
+                last_refresh=utcnow(),
+                email="claude@example.com",
+                plan_type="pro",
+            )
+
+    async def _stub_create_message_api(payload, headers, *, base_url=None, session=None, credentials=None):
+        assert credentials is not None
+        assert credentials.bearer_token == "sk-ant-oat-db-access"
+        return {
+            "id": "msg_api_db_creds",
+            "type": "message",
+            "model": "claude-sonnet-4-20250514",
+            "usage": {"input_tokens": 5, "output_tokens": 1, "cache_read_input_tokens": 0},
+            "content": [{"type": "text", "text": "ok api db"}],
+        }
+
+    monkeypatch.setattr("app.modules.anthropic.service.core_create_message_api", _stub_create_message_api)
+
+    response = await async_client.post(
+        "/claude-api/v1/messages",
+        json={
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        headers={"x-request-id": "req_anthropic_api_db_credentials"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "msg_api_db_creds"

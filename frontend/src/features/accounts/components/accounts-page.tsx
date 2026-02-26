@@ -21,6 +21,7 @@ export function AccountsPage() {
   const {
     accountsQuery,
     importMutation,
+    importAnthropicMutation,
     pauseMutation,
     resumeMutation,
     deleteMutation,
@@ -55,12 +56,14 @@ export function AccountsPage() {
 
   const mutationBusy =
     importMutation.isPending ||
+    importAnthropicMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     deleteMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
+    getErrorMessageOrNull(importAnthropicMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error);
@@ -105,10 +108,14 @@ export function AccountsPage() {
 
       <ImportDialog
         open={importDialog.open}
-        busy={importMutation.isPending}
-        error={getErrorMessageOrNull(importMutation.error)}
+        busy={importMutation.isPending || importAnthropicMutation.isPending}
+        error={getErrorMessageOrNull(importMutation.error) || getErrorMessageOrNull(importAnthropicMutation.error)}
         onOpenChange={importDialog.onOpenChange}
-        onImport={async (file) => {
+        onImport={async (provider, file) => {
+          if (provider === "anthropic") {
+            await importAnthropicMutation.mutateAsync(file);
+            return;
+          }
           await importMutation.mutateAsync(file);
         }}
       />

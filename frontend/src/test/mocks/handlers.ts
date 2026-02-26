@@ -254,6 +254,22 @@ export const handlers = [
     });
   }),
 
+  http.post("/api/accounts/import-anthropic", async () => {
+    const created = createAccountSummary({
+      accountId: "anthropic_default",
+      email: "claude-user@example.com",
+      displayName: "claude/claude-user@example.com",
+      status: "active",
+    });
+    state.accounts = [...state.accounts.filter((account) => account.accountId !== created.accountId), created];
+    return HttpResponse.json({
+      accountId: created.accountId,
+      email: created.email,
+      planType: created.planType,
+      status: created.status,
+    });
+  }),
+
   http.post("/api/accounts/:accountId/pause", ({ params }) => {
     const accountId = String(params.accountId);
     const account = findAccount(accountId);

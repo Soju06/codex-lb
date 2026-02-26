@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
@@ -89,7 +90,7 @@ def _account_to_summary(
     return AccountSummary(
         account_id=account.id,
         email=account.email,
-        display_name=account.email,
+        display_name=_display_name_for_account(account),
         plan_type=plan_type,
         status=account.status.value,
         usage=AccountUsage(
@@ -180,6 +181,13 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
+def _display_name_for_account(account: Account) -> str:
+    settings = get_settings()
+    if account.id == settings.anthropic_default_account_id or account.id.startswith("anthropic_"):
+        return f"claude/{account.email}"
+    return account.email
 
 
 def build_account_usage_trends(

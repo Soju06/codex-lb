@@ -6,6 +6,7 @@ import json
 import pytest
 
 from app.core.auth import generate_unique_account_id
+from app.core.config.settings import get_settings
 
 pytestmark = pytest.mark.integration
 
@@ -55,6 +56,37 @@ async def test_reactivate_missing_account_returns_404(async_client):
     assert response.status_code == 404
     payload = response.json()
     assert payload["error"]["code"] == "account_not_found"
+
+
+@pytest.mark.asyncio
+async def test_import_anthropic_credentials_uses_claude_label(async_client):
+    settings = get_settings()
+    credentials = {
+        "claudeAiOauth": {
+            "accessToken": "sk-ant-oat-123",
+            "refreshToken": "refresh-123",
+            "expiresAt": 1_893_456_789_000,
+        },
+        "user": {"email": "tester@example.com"},
+    }
+
+    files = {"credentials_json": ("claude-credentials.json", json.dumps(credentials), "application/json")}
+    response = await async_client.post("/api/accounts/import-anthropic", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["accountId"] == settings.anthropic_default_account_id
+    assert data["email"] == "tester@example.com"
+
+    list_response = await async_client.get("/api/accounts")
+    assert list_response.status_code == 200
+    accounts = list_response.json()["accounts"]
+    imported = next(
+        (account for account in accounts if account["accountId"] == settings.anthropic_default_account_id),
+        None,
+    )
+    assert imported is not None
+    assert imported["email"] == "tester@example.com"
+    assert imported["displayName"] == "claude/tester@example.com"
 
 
 @pytest.mark.asyncio

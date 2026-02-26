@@ -14,6 +14,7 @@ import aiohttp
 
 from app.core.clients.http import get_http_client
 from app.core.config.settings import Settings, get_settings
+from app.db.models import Account
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,15 @@ class AnthropicCredentials:
     refresh_token: str | None = None
     expires_at_ms: int | None = None
     source_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AnthropicAuthFile:
+    access_token: str
+    refresh_token: str | None
+    org_id: str | None
+    expires_at_ms: int | None
+    email: str | None
 
 
 async def resolve_anthropic_credentials(*, force_refresh: bool = False) -> AnthropicCredentials | None:
@@ -84,6 +94,44 @@ def clear_anthropic_credentials_cache() -> None:
     global _cached_credentials, _cached_at_monotonic
     _cached_credentials = None
     _cached_at_monotonic = 0.0
+
+
+def credentials_from_account(account: Account) -> AnthropicCredentials | None:
+    try:
+        from app.core.crypto import TokenEncryptor
+
+        encryptor = TokenEncryptor()
+        encrypted_access = bytes(account.access_token_encrypted)
+        encrypted_refresh = bytes(account.refresh_token_encrypted)
+        access_token = _normalize_secret(encryptor.decrypt(encrypted_access))
+        if access_token is None or not access_token.startswith(_TOKEN_PREFIX):
+            return None
+        refresh_token = _normalize_secret(encryptor.decrypt(encrypted_refresh))
+    except Exception:
+        return None
+
+    return AnthropicCredentials(
+        bearer_token=access_token,
+        org_id=None,
+        source=f"db-account:{account.id}",
+        refresh_token=refresh_token,
+    )
+
+
+def parse_anthropic_auth_json(raw: bytes) -> AnthropicAuthFile:
+    data = json.loads(raw)
+    structured = _extract_structured_credentials(data)
+    if structured is None:
+        raise ValueError("Unable to extract Anthropic OAuth credentials")
+
+    email = _extract_email(data)
+    return AnthropicAuthFile(
+        access_token=structured.bearer_token,
+        refresh_token=structured.refresh_token,
+        org_id=structured.org_id,
+        expires_at_ms=structured.expires_at_ms,
+        email=email,
+    )
 
 
 def _set_cache(value: AnthropicCredentials | None) -> None:
@@ -426,6 +474,26 @@ def _extract_structured_credentials(payload: Any) -> _StructuredCredentials | No
                     expires_at_ms=expires_at_ms,
                 )
 
+    return None
+
+
+def _extract_email(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized_key = key.strip().lower().replace("-", "_")
+            if normalized_key == "email" and isinstance(value, str):
+                email = value.strip()
+                if "@" in email:
+                    return email
+            nested = _extract_email(value)
+            if nested is not None:
+                return nested
+        return None
+    if isinstance(payload, list):
+        for item in payload:
+            nested = _extract_email(item)
+            if nested is not None:
+                return nested
     return None
 
 

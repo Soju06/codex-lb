@@ -12,13 +12,16 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+export type ImportProvider = "openai" | "anthropic";
 
 export type ImportDialogProps = {
   open: boolean;
   busy: boolean;
   error: string | null;
   onOpenChange: (open: boolean) => void;
-  onImport: (file: File) => Promise<void>;
+  onImport: (provider: ImportProvider, file: File) => Promise<void>;
 };
 
 export function ImportDialog({
@@ -29,15 +32,17 @@ export function ImportDialog({
   onImport,
 }: ImportDialogProps) {
   const [file, setFile] = useState<File | null>(null);
+  const [provider, setProvider] = useState<ImportProvider>("openai");
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!file) {
       return;
     }
-    await onImport(file);
+    await onImport(provider, file);
     onOpenChange(false);
     setFile(null);
+    setProvider("openai");
   };
 
   return (
@@ -49,6 +54,19 @@ export function ImportDialog({
         </DialogHeader>
 
         <form className="space-y-4" onSubmit={handleSubmit}>
+          <div className="space-y-2">
+            <Label htmlFor="import-provider">Provider</Label>
+            <Select value={provider} onValueChange={(value) => setProvider(value as ImportProvider)}>
+              <SelectTrigger id="import-provider">
+                <SelectValue placeholder="Select provider" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="openai">OpenAI (auth.json)</SelectItem>
+                <SelectItem value="anthropic">Claude (credentials JSON)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
           <div className="space-y-2">
             <Label htmlFor="auth-json-file">File</Label>
             <Input

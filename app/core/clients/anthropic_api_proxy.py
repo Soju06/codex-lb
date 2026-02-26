@@ -55,9 +55,10 @@ async def create_message(
     *,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    credentials: AnthropicCredentials | None = None,
 ) -> dict[str, JsonValue]:
     request_payload = _prepare_payload(payload)
-    creds = await _resolve_valid_credentials()
+    creds = await _resolve_valid_credentials(credentials)
     inbound_headers = _filter_inbound_headers(headers)
     cli_data = await _get_detected_cli_data()
     if cli_data is not None:
@@ -87,11 +88,12 @@ async def stream_messages(
     *,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    credentials: AnthropicCredentials | None = None,
 ) -> AsyncIterator[str]:
     request_payload = _prepare_payload(payload)
     request_payload["stream"] = True
 
-    creds = await _resolve_valid_credentials()
+    creds = await _resolve_valid_credentials(credentials)
     inbound_headers = _filter_inbound_headers(headers)
     cli_data = await _get_detected_cli_data()
     if cli_data is not None:
@@ -155,9 +157,11 @@ def _build_request_headers(
     return request_headers
 
 
-async def _resolve_valid_credentials() -> AnthropicCredentials:
-    credentials = await resolve_anthropic_credentials()
-    if credentials is None:
+async def _resolve_valid_credentials(credentials: AnthropicCredentials | None = None) -> AnthropicCredentials:
+    resolved = credentials
+    if resolved is None:
+        resolved = await resolve_anthropic_credentials()
+    if resolved is None:
         raise AnthropicProxyError(
             503,
             anthropic_error_payload(
@@ -167,11 +171,11 @@ async def _resolve_valid_credentials() -> AnthropicCredentials:
             ),
         )
 
-    if _is_token_expiring_soon(credentials):
-        refreshed = await refresh_anthropic_access_token(credentials)
+    if _is_token_expiring_soon(resolved):
+        refreshed = await refresh_anthropic_access_token(resolved)
         if refreshed is not None:
             return refreshed
-    return credentials
+    return resolved
 
 
 def _is_token_expiring_soon(credentials: AnthropicCredentials) -> bool:

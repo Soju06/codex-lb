@@ -8,6 +8,7 @@ from typing import Literal
 
 import anyio
 
+from app.core.auth.anthropic_credentials import credentials_from_account as anthropic_credentials_from_account
 from app.core.auth.anthropic_credentials import resolve_anthropic_credentials
 from app.core.clients.anthropic_api_proxy import (
     create_message as core_create_message_api,
@@ -29,6 +30,7 @@ from app.core.clients.anthropic_usage import AnthropicUsageFetchError, fetch_usa
 from app.core.config.settings import get_settings
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id, get_request_id
+from app.db.models import Account
 from app.modules.anthropic.repository import AnthropicRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
@@ -80,6 +82,7 @@ class AnthropicService:
                 transport,
                 payload,
                 headers,
+                account=account,
             )
             model = _extract_response_model(response_payload) or model
             usage = _usage_from_message_payload(response_payload)
@@ -201,6 +204,7 @@ class AnthropicService:
                 transport,
                 payload,
                 headers,
+                account=account,
             ):
                 event_payload = parse_sse_data_payload(line)
                 accumulator.observe(event_payload)
@@ -468,9 +472,12 @@ async def _create_message_with_transport(
     transport: Literal["sdk", "api"],
     payload: dict[str, JsonValue],
     headers: Mapping[str, str],
+    *,
+    account: Account,
 ) -> dict[str, JsonValue]:
     if transport == "api":
-        return await core_create_message_api(payload, headers)
+        credentials = anthropic_credentials_from_account(account)
+        return await core_create_message_api(payload, headers, credentials=credentials)
     return await core_create_message(payload, headers)
 
 
@@ -478,9 +485,12 @@ async def _stream_messages_with_transport(
     transport: Literal["sdk", "api"],
     payload: dict[str, JsonValue],
     headers: Mapping[str, str],
+    *,
+    account: Account,
 ) -> AsyncIterator[str]:
     if transport == "api":
-        async for line in core_stream_messages_api(payload, headers):
+        credentials = anthropic_credentials_from_account(account)
+        async for line in core_stream_messages_api(payload, headers, credentials=credentials):
             yield line
         return
     async for line in core_stream_messages(payload, headers):

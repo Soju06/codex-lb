@@ -95,7 +95,17 @@ async def test_v1_responses_rejects_input_file_id(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_previous_response_id(async_client):
+async def test_v1_responses_allows_previous_response_id(async_client, monkeypatch):
+    await _import_account(async_client, "acc_prev_id", "prev-id@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_prev_id")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     payload = {
         "model": "gpt-5.2",
         "previous_response_id": "resp_abc123",
@@ -107,8 +117,8 @@ async def test_v1_responses_rejects_previous_response_id(async_client):
         ],
     }
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "invalid_request_error"
+    assert resp.status_code == 200
+    assert seen["payload"].previous_response_id == "resp_abc123"
 
 
 @pytest.mark.asyncio
@@ -193,10 +203,21 @@ async def test_v1_responses_rejects_invalid_include(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_store_true(async_client):
+async def test_v1_responses_allows_store_true(async_client, monkeypatch):
+    await _import_account(async_client, "acc_store_true", "store-true@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_store_true")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     payload = {"model": "gpt-5.2", "input": "hi", "store": True}
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    assert seen["payload"].store is True
 
 
 @pytest.mark.asyncio

@@ -18,10 +18,11 @@ def test_responses_requires_input():
         ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi"})
 
 
-def test_store_true_is_rejected():
+def test_store_true_is_allowed():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "store": True}
-    with pytest.raises(ValueError, match="store must be false"):
-        ResponsesRequest.model_validate(payload)
+    request = ResponsesRequest.model_validate(payload)
+    assert request.store is True
+    assert request.to_payload()["store"] is True
 
 
 def test_store_omitted_defaults_to_false():
@@ -235,8 +236,25 @@ def test_responses_rejects_conversation_previous_response_id():
         "conversation": "conv_1",
         "previous_response_id": "resp_1",
     }
-    with pytest.raises(ValueError, match="previous_response_id is not supported"):
+    with pytest.raises(ValueError, match="Provide either 'conversation' or 'previous_response_id'"):
         ResponsesRequest.model_validate(payload)
+
+
+def test_responses_accepts_previous_response_id():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "previous_response_id": "resp_1",
+    }
+    request = ResponsesRequest.model_validate(payload)
+    assert request.previous_response_id == "resp_1"
+
+
+def test_v1_store_omitted_defaults_to_true():
+    payload = {"model": "gpt-5.1", "input": "hello"}
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+    assert request.store is True
 
 
 def test_v1_messages_convert_to_responses_input():

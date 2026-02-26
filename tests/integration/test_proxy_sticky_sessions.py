@@ -134,6 +134,69 @@ async def test_proxy_sticky_prompt_cache_key_pins_account(async_client, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_v1_store_true_uses_client_identity_sticky_key(async_client, monkeypatch):
+    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    acc_a_id = await _import_account(async_client, "acc_store_a", "store-a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_store_b", "store-b@example.com")
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_store_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    headers = {"x-openai-client-id": "openclaw-session-1"}
+    payload = {"model": "gpt-5.1", "input": "hi", "store": True}
+
+    response = await async_client.post("/v1/responses", json=payload, headers=headers)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=95.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    response = await async_client.post("/v1/responses", json=payload, headers=headers)
+    assert response.status_code == 200
+
+    assert seen == ["acc_store_a", "acc_store_a"]
+
+
+@pytest.mark.asyncio
 async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monkeypatch):
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
     encryptor = TokenEncryptor()

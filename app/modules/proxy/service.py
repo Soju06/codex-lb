@@ -344,7 +344,11 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
-        sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
+        sticky_key = (
+            _sticky_key_from_payload(payload, headers=headers, actor_log=actor_log)
+            if sticky_threads_enabled
+            else None
+        )
         max_attempts = 3
         settled = False
         settlement = _StreamSettlement()
@@ -885,12 +889,98 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
     return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})
 
 
-def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
+def _sticky_key_from_payload(
+    payload: ResponsesRequest,
+    *,
+    headers: Mapping[str, str],
+    actor_log: RequestActorLogData | None,
+) -> str | None:
     value = payload.prompt_cache_key
-    if not value:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+
+    if isinstance(payload.conversation, str):
+        stripped = payload.conversation.strip()
+        if stripped:
+            return _stable_sticky_key("conv", stripped)
+
+    if isinstance(payload.previous_response_id, str):
+        stripped = payload.previous_response_id.strip()
+        if stripped:
+            return _stable_sticky_key("prev", stripped)
+
+    referenced_response_id = _first_referenced_response_id(payload.input)
+    if referenced_response_id:
+        return _stable_sticky_key("item", referenced_response_id)
+
+    if payload.store:
+        return _sticky_key_from_store_context(headers, actor_log)
+    return None
+
+
+def _sticky_key_from_store_context(
+    headers: Mapping[str, str],
+    actor_log: RequestActorLogData | None,
+) -> str | None:
+    for key in ("x-openai-client-id", "x-codex-session-id", "x-codex-conversation-id", "x-request-id"):
+        value = _coerce_header(headers, key)
+        if value:
+            return _stable_sticky_key("client", value)
+
+    if actor_log and actor_log.api_key:
+        identity = "|".join(
+            (
+                actor_log.api_key,
+                actor_log.client_app or "",
+                actor_log.client_ip or "",
+            )
+        )
+        return _stable_sticky_key("actor", identity)
+    return None
+
+
+def _coerce_header(headers: Mapping[str, str], name: str) -> str | None:
+    for key, value in headers.items():
+        if key.lower() != name:
+            continue
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _first_referenced_response_id(value: JsonValue) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            found = _first_referenced_response_id(item)
+            if found:
+                return found
         return None
-    stripped = value.strip()
-    return stripped or None
+
+    if not isinstance(value, dict):
+        return None
+
+    response_id = value.get("id")
+    response_type = value.get("type")
+    if isinstance(response_id, str):
+        stripped = response_id.strip()
+        if stripped and (
+            stripped.startswith(("rs_", "resp_"))
+            or response_type in {"item_reference", "response_reference"}
+        ):
+            return stripped
+
+    for nested in value.values():
+        found = _first_referenced_response_id(nested)
+        if found:
+            return found
+    return None
+
+
+def _stable_sticky_key(prefix: str, value: str) -> str:
+    return f"{prefix}:{_hash_identifier(value)}"
 
 
 def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:

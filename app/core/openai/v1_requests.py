@@ -25,7 +25,7 @@ class V1ResponsesRequest(BaseModel):
     tool_choice: str | dict[str, JsonValue] | None = None
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
-    store: bool | None = None
+    store: bool | None = True
     stream: bool | None = None
     include: list[str] = Field(default_factory=list)
     conversation: str | None = None
@@ -45,10 +45,8 @@ class V1ResponsesRequest(BaseModel):
 
     @field_validator("store")
     @classmethod
-    def _ensure_store_false(cls, value: bool | None) -> bool | None:
-        if value is True:
-            raise ValueError("store must be false")
-        return value
+    def _default_store_true(cls, value: bool | None) -> bool:
+        return True if value is None else value
 
     @field_validator("tools")
     @classmethod

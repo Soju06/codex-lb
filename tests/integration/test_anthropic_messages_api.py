@@ -30,7 +30,7 @@ async def test_anthropic_messages_non_stream_success(async_client, monkeypatch):
     monkeypatch.setattr("app.modules.anthropic.service.core_create_message", _stub_create_message)
 
     response = await async_client.post(
-        "/claude/v1/messages",
+        "/claude-sdk/v1/messages",
         json={
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 128,
@@ -71,7 +71,7 @@ async def test_anthropic_messages_stream_success(async_client, monkeypatch):
 
     async with async_client.stream(
         "POST",
-        "/claude/v1/messages",
+        "/claude-sdk/v1/messages",
         json={
             "model": "claude-sonnet-4-20250514",
             "stream": True,
@@ -110,7 +110,7 @@ async def test_anthropic_messages_non_stream_upstream_error(async_client, monkey
     monkeypatch.setattr("app.modules.anthropic.service.core_create_message", _stub_create_message)
 
     response = await async_client.post(
-        "/claude/v1/messages",
+        "/claude-sdk/v1/messages",
         json={
             "model": "claude-sonnet-4-20250514",
             "messages": [{"role": "user", "content": "hello"}],
@@ -147,7 +147,7 @@ async def test_anthropic_api_messages_non_stream_success(async_client, monkeypat
     monkeypatch.setattr("app.modules.anthropic.service.core_create_message_api", _stub_create_message_api)
 
     response = await async_client.post(
-        "/claude-api/v1/messages",
+        "/claude/v1/messages",
         json={
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 128,
@@ -187,7 +187,7 @@ async def test_anthropic_api_messages_stream_success(async_client, monkeypatch):
 
     async with async_client.stream(
         "POST",
-        "/claude-api/v1/messages",
+        "/claude/v1/messages",
         json={
             "model": "claude-sonnet-4-20250514",
             "stream": True,
@@ -261,7 +261,7 @@ async def test_anthropic_api_uses_imported_db_credentials(async_client, monkeypa
     monkeypatch.setattr("app.modules.anthropic.service.core_create_message_api", _stub_create_message_api)
 
     response = await async_client.post(
-        "/claude-api/v1/messages",
+        "/claude/v1/messages",
         json={
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 128,

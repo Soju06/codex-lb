@@ -30,6 +30,10 @@ def set_dashboard_error_format(request: Request) -> None:
     request.state.error_format = "dashboard"
 
 
+def set_anthropic_error_format(request: Request) -> None:
+    request.state.error_format = "anthropic"
+
+
 # --- Proxy API key auth ---
 
 

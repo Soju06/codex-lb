@@ -53,6 +53,21 @@ class Settings(BaseSettings):
     upstream_connect_timeout_seconds: float = 30.0
     stream_idle_timeout_seconds: float = 300.0
     max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    anthropic_sdk_cli_path: str | None = None
+    anthropic_sdk_default_session_id: str | None = None
+    anthropic_usage_base_url: str = "https://api.anthropic.com"
+    anthropic_usage_beta: str = "oauth-2025-04-20"
+    anthropic_usage_refresh_enabled: bool = True
+    anthropic_usage_bearer_token: str | None = None
+    anthropic_org_id: str | None = None
+    anthropic_auto_discover_org: bool = False
+    anthropic_credentials_discovery_enabled: bool = True
+    anthropic_credentials_file: Path | None = None
+    anthropic_credentials_helper_command: str | None = None
+    anthropic_credentials_cache_seconds: int = Field(default=60, ge=0)
+    anthropic_default_account_id: str = "anthropic_default"
+    anthropic_default_account_email: str = "anthropic@local"
+    anthropic_default_plan_type: str = "pro"
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_scope: str = "openid profile email"
@@ -96,6 +111,20 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
+
+    @field_validator("anthropic_credentials_file", mode="before")
+    @classmethod
+    def _expand_anthropic_credentials_file(cls, value: str | Path | None) -> Path | None:
+        if value is None:
+            return None
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            return Path(stripped).expanduser()
+        raise TypeError("anthropic_credentials_file must be a path")
 
     @field_validator("image_inline_allowed_hosts", mode="before")
     @classmethod

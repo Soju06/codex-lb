@@ -93,6 +93,8 @@ def _group_by_plan(accounts: list[Account]) -> dict[str, list[Account]]:
     for account in accounts:
         if account.status != AccountStatus.ACTIVE:
             continue
+        if not account.chatgpt_account_id:
+            continue
         plan_type = account.plan_type
         if not plan_type:
             continue
@@ -115,7 +117,7 @@ async def _fetch_with_failover(
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
-                    account = await auth_manager.ensure_fresh(account, force=True)
+                    account = await AuthManager(accounts_repo).ensure_fresh(account, force=True)
                     access_token = encryptor.decrypt(account.access_token_encrypted)
                     return await fetch_models_for_plan(access_token, account.chatgpt_account_id)
                 except (ModelFetchError, RefreshError):

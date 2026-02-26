@@ -27,6 +27,7 @@ IGNORE_INBOUND_HEADERS = {
     "content-length",
     "host",
     "forwarded",
+    "x-api-key",
     "x-real-ip",
     "true-client-ip",
 }

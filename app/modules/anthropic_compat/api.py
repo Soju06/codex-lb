@@ -166,8 +166,8 @@ async def _messages_impl(
         cache_resolution=cache_resolution,
     )
 
-    _validate_model_access(api_key, responses_payload.model)
-    reservation = await _enforce_request_limits(api_key, request_model=responses_payload.model)
+    _validate_model_access(api_key, payload.model)
+    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
     rate_limit_headers = await context.service.rate_limit_headers()
 
     if payload.stream:
@@ -268,7 +268,7 @@ async def _count_tokens_impl(
         cache_resolution=cache_resolution,
     )
 
-    _validate_model_access(api_key, responses_payload.model)
+    _validate_model_access(api_key, payload.model)
     rate_limit_headers = await context.service.rate_limit_headers()
     input_tokens = _estimate_input_tokens(responses_payload)
     response = AnthropicCountTokensResponse(input_tokens=input_tokens)

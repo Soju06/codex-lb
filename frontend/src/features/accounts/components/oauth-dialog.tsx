@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { OAuthState } from "@/features/accounts/schemas";
 import { formatCountdown } from "@/utils/formatters";
@@ -61,7 +62,7 @@ export type OauthDialogProps = {
   state: OAuthState;
   onOpenChange: (open: boolean) => void;
   onStart: (method?: "browser" | "device") => Promise<void>;
-  onComplete: () => Promise<void>;
+  onComplete: (callbackUrl?: string) => Promise<void>;
   onReset: () => void;
 };
 
@@ -74,6 +75,8 @@ export function OauthDialog({
   onReset,
 }: OauthDialogProps) {
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
+  const [callbackUrlInput, setCallbackUrlInput] = useState("");
+  const [submittingCallback, setSubmittingCallback] = useState(false);
   const stage = getStage(state);
   const completedRef = useRef(false);
 
@@ -92,6 +95,8 @@ export function OauthDialog({
     if (!next) {
       onReset();
       setSelectedMethod("browser");
+      setCallbackUrlInput("");
+      setSubmittingCallback(false);
     }
   };
 
@@ -101,6 +106,19 @@ export function OauthDialog({
 
   const handleChangeMethod = () => {
     onReset();
+    setCallbackUrlInput("");
+    setSubmittingCallback(false);
+  };
+
+  const handleCallbackSubmit = () => {
+    const value = callbackUrlInput.trim();
+    if (!value) {
+      return;
+    }
+    setSubmittingCallback(true);
+    void onComplete(value).finally(() => {
+      setSubmittingCallback(false);
+    });
   };
 
   return (
@@ -166,6 +184,18 @@ export function OauthDialog({
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>Waiting for authorization to complete...</span>
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Paste callback URL (fallback)</p>
+              <Input
+                value={callbackUrlInput}
+                onChange={(event) => setCallbackUrlInput(event.target.value)}
+                placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                If the browser shows a localhost error after agreeing, paste the full URL from the address bar.
+              </p>
             </div>
           </div>
         ) : null}
@@ -252,6 +282,21 @@ export function OauthDialog({
                   </a>
                 </Button>
               ) : null}
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleCallbackSubmit}
+                disabled={!callbackUrlInput.trim() || submittingCallback}
+              >
+                {submittingCallback ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    Submitting...
+                  </>
+                ) : (
+                  "Submit callback URL"
+                )}
+              </Button>
             </>
           ) : null}
 

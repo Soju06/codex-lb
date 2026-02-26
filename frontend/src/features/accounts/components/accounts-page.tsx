@@ -120,9 +120,11 @@ export function AccountsPage() {
         onStart={async (method) => {
           await oauth.start(method);
         }}
-        onComplete={async () => {
-          await oauth.complete();
-          await accountsQuery.refetch();
+        onComplete={async (callbackUrl) => {
+          const status = await oauth.complete(callbackUrl);
+          if (status === "success") {
+            await accountsQuery.refetch();
+          }
         }}
         onReset={oauth.reset}
       />

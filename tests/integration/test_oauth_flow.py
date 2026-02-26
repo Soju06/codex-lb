@@ -329,3 +329,55 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+
+
+@pytest.mark.asyncio
+async def test_browser_oauth_can_complete_from_pasted_callback_url(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    email = "browser@example.com"
+    raw_account_id = "acc_browser"
+    expected_state = "state_123"
+    expected_verifier = "verifier_123"
+
+    async def fake_exchange_authorization_code(*, code, code_verifier, **_):
+        assert code == "auth_code_123"
+        assert code_verifier == expected_verifier
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="browser-access",
+            refresh_token="browser-refresh",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    async with oauth_module._OAUTH_STORE.lock:
+        oauth_module._OAUTH_STORE._state = oauth_module.OAuthState(
+            status="pending",
+            method="browser",
+            state_token=expected_state,
+            code_verifier=expected_verifier,
+        )
+
+    complete = await async_client.post(
+        "/api/oauth/complete",
+        json={
+            "callbackUrl": (
+                "http://localhost:1455/auth/callback"
+                "?code=auth_code_123&scope=openid+profile&state=state_123"
+            )
+        },
+    )
+    assert complete.status_code == 200
+    assert complete.json()["status"] == "success"
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    data = accounts.json()["accounts"]
+    assert any(account["accountId"] == expected_account_id for account in data)

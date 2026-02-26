@@ -261,7 +261,7 @@ export const handlers = [
     const created = createAccountSummary({
       accountId: "anthropic_default",
       email,
-      displayName: `claude/${email}`,
+      displayName: email,
       status: "active",
     });
     state.accounts = [...state.accounts.filter((account) => account.accountId !== created.accountId), created];

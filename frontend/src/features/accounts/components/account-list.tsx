@@ -13,6 +13,7 @@ import {
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
+import { isAnthropicAccountId } from "@/utils/account-provider";
 import { formatSlug } from "@/utils/formatters";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "deactivated"];
@@ -37,19 +38,28 @@ export function AccountList({
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return accounts.filter((account) => {
-      if (statusFilter !== "all" && account.status !== statusFilter) {
-        return false;
-      }
-      if (!needle) {
-        return true;
-      }
-      return (
-        account.email.toLowerCase().includes(needle) ||
-        account.accountId.toLowerCase().includes(needle) ||
-        account.planType.toLowerCase().includes(needle)
-      );
-    });
+    return accounts
+      .filter((account) => {
+        if (statusFilter !== "all" && account.status !== statusFilter) {
+          return false;
+        }
+        if (!needle) {
+          return true;
+        }
+        return (
+          account.email.toLowerCase().includes(needle) ||
+          account.accountId.toLowerCase().includes(needle) ||
+          account.planType.toLowerCase().includes(needle)
+        );
+      })
+      .sort((a, b) => {
+        const aIsAnthropic = isAnthropicAccountId(a.accountId) ? 1 : 0;
+        const bIsAnthropic = isAnthropicAccountId(b.accountId) ? 1 : 0;
+        if (aIsAnthropic !== bIsAnthropic) {
+          return aIsAnthropic - bIsAnthropic;
+        }
+        return (a.displayName || a.email).localeCompare(b.displayName || b.email);
+      });
   }, [accounts, search, statusFilter]);
 
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);

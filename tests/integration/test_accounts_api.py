@@ -59,7 +59,7 @@ async def test_reactivate_missing_account_returns_404(async_client):
 
 
 @pytest.mark.asyncio
-async def test_import_anthropic_credentials_uses_claude_label(async_client):
+async def test_import_anthropic_credentials_uses_email_display_name(async_client):
     settings = get_settings()
     credentials = {
         "claudeAiOauth": {
@@ -88,7 +88,7 @@ async def test_import_anthropic_credentials_uses_claude_label(async_client):
     )
     assert imported is not None
     assert imported["email"] == "tester@example.com"
-    assert imported["displayName"] == "claude/tester@example.com"
+    assert imported["displayName"] == "tester@example.com"
 
 
 @pytest.mark.asyncio

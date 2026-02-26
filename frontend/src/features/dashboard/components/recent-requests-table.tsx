@@ -22,6 +22,8 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
+import { cn } from "@/lib/utils";
+import { isAnthropicAccountId, providerLabelForAccountId } from "@/utils/account-provider";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatCompactNumber,
@@ -98,11 +100,12 @@ export function RecentRequestsTable({
             {requests.map((request) => {
               const time = formatTimeLong(request.requestedAt);
               const accountLabel = accountLabelMap.get(request.accountId) ?? request.accountId;
+              const isAnthropic = isAnthropicAccountId(request.accountId);
               const errorMessage = request.errorMessage || request.errorCode || "-";
               const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
 
               return (
-                <TableRow key={request.requestId}>
+                <TableRow key={request.requestId} className={cn(isAnthropic && "bg-amber-500/5 hover:bg-amber-500/10")}>
                   <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
                       <div className="text-sm font-medium">{time.time}</div>
@@ -110,7 +113,20 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell>
                   <TableCell className="truncate align-top text-sm">
-                    {accountLabel}
+                    <div className="flex items-center gap-2">
+                      <span className="truncate">{accountLabel}</span>
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "h-5 shrink-0 px-1.5 text-[10px] uppercase tracking-wide",
+                          isAnthropic
+                            ? "border-amber-500/30 text-amber-700 dark:text-amber-400"
+                            : "border-sky-500/30 text-sky-700 dark:text-sky-400",
+                        )}
+                      >
+                        {providerLabelForAccountId(request.accountId)}
+                      </Badge>
+                    </div>
                   </TableCell>
                   <TableCell className="truncate align-top">
                     <span className="font-mono text-xs">

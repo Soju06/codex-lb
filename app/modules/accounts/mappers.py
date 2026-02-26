@@ -180,6 +180,8 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
 def build_account_usage_trends(
     buckets: list[UsageTrendBucket],
     since_epoch: int,

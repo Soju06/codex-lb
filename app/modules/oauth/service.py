@@ -26,7 +26,7 @@ from app.core.clients.oauth import (
     generate_pkce_pair,
     request_device_code,
 )
-from app.core.config.settings import get_settings
+from app.core.config.settings import Settings, get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import utcnow
@@ -42,6 +42,7 @@ from app.modules.oauth.schemas import (
 
 _async_sleep = asyncio.sleep
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
+_ANTHROPIC_PROVIDER_PLACEHOLDER_TOKEN = "anthropic-provider"
 
 
 @dataclass
@@ -132,7 +133,12 @@ class OauthService:
         force_method = (request.force_method or "").lower()
         if not force_method:
             accounts = await self._accounts_repo.list_accounts()
-            if accounts:
+            settings = get_settings()
+            has_existing_oauth_account = any(
+                not self._is_provider_seed_account(account, settings)
+                for account in accounts
+            )
+            if has_existing_oauth_account:
                 async with self._store.lock:
                     await self._store._cleanup_locked()
                     self._store._state = OAuthState(status="success")
@@ -342,6 +348,24 @@ class OauthService:
         if server:
             await server.stop()
 
+    def _is_provider_seed_account(self, account: Account, settings: Settings) -> bool:
+        if account.id != settings.anthropic_default_account_id:
+            return False
+        if account.email != settings.anthropic_default_account_email:
+            return False
+        if account.chatgpt_account_id is not None:
+            return False
+        if not (
+            account.access_token_encrypted == account.refresh_token_encrypted
+            and account.refresh_token_encrypted == account.id_token_encrypted
+        ):
+            return False
+        try:
+            decrypted = self._encryptor.decrypt(account.access_token_encrypted)
+        except Exception:
+            return False
+        return decrypted == _ANTHROPIC_PROVIDER_PLACEHOLDER_TOKEN
+
     @staticmethod
     def _html_response(html: str) -> web.Response:
         return web.Response(text=html, content_type="text/html")
@@ -364,3 +388,4 @@ def _success_html() -> str:
 
 def _error_html(message: str) -> str:
     return f"<html><body><h1>Login failed</h1><p>{message}</p></body></html>"
+

@@ -135,8 +135,7 @@ class OauthService:
             accounts = await self._accounts_repo.list_accounts()
             settings = get_settings()
             has_existing_oauth_account = any(
-                not self._is_provider_seed_account(account, settings)
-                for account in accounts
+                not self._is_provider_seed_account(account, settings) for account in accounts
             )
             if has_existing_oauth_account:
                 async with self._store.lock:
@@ -388,4 +387,3 @@ def _success_html() -> str:
 
 def _error_html(message: str) -> str:
     return f"<html><body><h1>Login failed</h1><p>{message}</p></body></html>"
-

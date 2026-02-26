@@ -44,9 +44,7 @@ async def test_anthropic_messages_non_stream_success(async_client, monkeypatch):
     assert payload["id"] == "msg_1"
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(RequestLog).where(RequestLog.request_id == "req_anthropic_non_stream")
-        )
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_anthropic_non_stream"))
         log = result.scalar_one()
 
     assert log.status == "success"
@@ -61,11 +59,11 @@ async def test_anthropic_messages_stream_success(async_client, monkeypatch):
     async def _stub_stream_messages(payload, headers, *, base_url=None, session=None):
         yield (
             "event: message_start\n"
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\","
-            "\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":1}}}\n\n"
+            'data: {"type":"message_start","message":{"model":"claude-sonnet-4-20250514",'
+            '"usage":{"input_tokens":10,"cache_read_input_tokens":1}}}\n\n'
         )
-        yield "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n"
-        yield "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        yield 'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n'
+        yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
     monkeypatch.setattr("app.modules.anthropic.service.core_stream_messages", _stub_stream_messages)
 
@@ -88,9 +86,7 @@ async def test_anthropic_messages_stream_success(async_client, monkeypatch):
     assert first_payload["type"] == "message_start"
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(RequestLog).where(RequestLog.request_id == "req_anthropic_stream")
-        )
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_anthropic_stream"))
         log = result.scalar_one()
 
     assert log.status == "success"
@@ -124,9 +120,7 @@ async def test_anthropic_messages_non_stream_upstream_error(async_client, monkey
     assert payload["error"]["type"] == "invalid_request_error"
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(RequestLog).where(RequestLog.request_id == "req_anthropic_error")
-        )
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_anthropic_error"))
         log = result.scalar_one()
 
     assert log.status == "error"
@@ -177,11 +171,11 @@ async def test_anthropic_api_messages_stream_success(async_client, monkeypatch):
     async def _stub_stream_messages_api(payload, headers, *, base_url=None, session=None, credentials=None):
         yield (
             "event: message_start\n"
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\","
-            "\"usage\":{\"input_tokens\":3,\"cache_read_input_tokens\":0}}}\n\n"
+            'data: {"type":"message_start","message":{"model":"claude-sonnet-4-20250514",'
+            '"usage":{"input_tokens":3,"cache_read_input_tokens":0}}}\n\n'
         )
-        yield "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n"
-        yield "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        yield 'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":2}}\n\n'
+        yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
     monkeypatch.setattr("app.modules.anthropic.service.core_stream_messages_api", _stub_stream_messages_api)
 
@@ -204,9 +198,7 @@ async def test_anthropic_api_messages_stream_success(async_client, monkeypatch):
     assert first_payload["type"] == "message_start"
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(RequestLog).where(RequestLog.request_id == "req_anthropic_api_stream")
-        )
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_anthropic_api_stream"))
         log = result.scalar_one()
 
     assert log.status == "success"

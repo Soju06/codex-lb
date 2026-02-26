@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +20,132 @@ class AnthropicProxyError(Exception):
 
     def __str__(self) -> str:
         return f"Anthropic proxy response error ({self.status_code})"
+
+
+@dataclass(frozen=True, slots=True)
+class _PoolKey:
+    model: str
+    max_tokens: int | None
+    temperature: float | None
+    system_prompt: str | None
+    cli_path: str | None
+    allowed_tools_signature: str | None
+    permission_mode: str | None
+    cwd: str | None
+    max_thinking_tokens: int | None
+    mcp_servers_signature: str | None
+
+
+@dataclass(slots=True)
+class _PooledClient:
+    client: Any
+    broken: bool = False
+
+
+class _ClientPool:
+    def __init__(self, max_size: int) -> None:
+        self._max_size = max_size
+        self._queue: asyncio.LifoQueue[_PooledClient] = asyncio.LifoQueue(maxsize=max_size)
+        self._created = 0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, create_client: Any, *, acquire_timeout_seconds: float) -> _PooledClient:
+        try:
+            return self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+
+        should_create = False
+        async with self._lock:
+            if self._created < self._max_size:
+                self._created += 1
+                should_create = True
+
+        if should_create:
+            try:
+                client = await create_client()
+                return _PooledClient(client=client)
+            except Exception:
+                async with self._lock:
+                    self._created = max(0, self._created - 1)
+                raise
+
+        try:
+            return await asyncio.wait_for(self._queue.get(), timeout=acquire_timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise AnthropicProxyError(
+                503,
+                anthropic_error_payload(
+                    "api_error",
+                    "Timed out waiting for an available Claude SDK session",
+                ),
+            ) from exc
+
+    async def release(self, pooled: _PooledClient) -> None:
+        if pooled.broken:
+            await _safe_disconnect(pooled.client)
+            async with self._lock:
+                self._created = max(0, self._created - 1)
+            return
+
+        try:
+            self._queue.put_nowait(pooled)
+        except asyncio.QueueFull:
+            await _safe_disconnect(pooled.client)
+            async with self._lock:
+                self._created = max(0, self._created - 1)
+
+    async def close(self) -> None:
+        drained = 0
+        while True:
+            try:
+                pooled = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            drained += 1
+            await _safe_disconnect(pooled.client)
+        if drained:
+            async with self._lock:
+                self._created = max(0, self._created - drained)
+
+
+class _PoolManager:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._pools: dict[_PoolKey, _ClientPool] = {}
+
+    async def acquire(
+        self,
+        key: _PoolKey,
+        create_client: Any,
+        *,
+        max_size: int,
+        acquire_timeout_seconds: float,
+    ) -> _PooledClient:
+        async with self._lock:
+            pool = self._pools.get(key)
+            if pool is None:
+                pool = _ClientPool(max_size=max_size)
+                self._pools[key] = pool
+        return await pool.acquire(create_client, acquire_timeout_seconds=acquire_timeout_seconds)
+
+    async def release(self, key: _PoolKey, pooled: _PooledClient) -> None:
+        async with self._lock:
+            pool = self._pools.get(key)
+        if pool is None:
+            await _safe_disconnect(pooled.client)
+            return
+        await pool.release(pooled)
+
+    async def close_all(self) -> None:
+        async with self._lock:
+            pools = list(self._pools.values())
+            self._pools.clear()
+        for pool in pools:
+            await pool.close()
+
+
+_POOL_MANAGER = _PoolManager()
 
 
 def anthropic_error_payload(error_type: str, message: str) -> dict[str, JsonValue]:
@@ -40,25 +168,17 @@ async def create_message(
 ) -> dict[str, JsonValue]:
     del headers, base_url, session
 
-    sdk = _require_sdk()
-    options = _build_sdk_options(payload)
     message_payload = _build_sdk_query_message(payload)
-    session_id = _resolve_session_id(payload)
+    session_id = _resolve_session_id(payload) or _ephemeral_session_id()
 
-    client = sdk.ClaudeSDKClient(options)
     try:
-        await client.connect()
-        await _send_query(client, message_payload, session_id=session_id)
-        collected = [message async for message in client.receive_response()]
+        async with _acquire_client(payload) as client:
+            await _send_query(client, message_payload, session_id=session_id)
+            collected = [message async for message in client.receive_response()]
     except AnthropicProxyError:
         raise
     except Exception as exc:
         raise _map_sdk_error(exc) from exc
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
 
     return _build_non_stream_response(collected, requested_model=_extract_request_model(payload))
 
@@ -72,124 +192,121 @@ async def stream_messages(
 ) -> AsyncIterator[str]:
     del headers, base_url, session
 
-    sdk = _require_sdk()
-    options = _build_sdk_options(payload)
     message_payload = _build_sdk_query_message(payload)
-    session_id = _resolve_session_id(payload)
+    session_id = _resolve_session_id(payload) or _ephemeral_session_id()
     model = _extract_request_model(payload)
     message_id = f"msg_{uuid.uuid4().hex}"
     yielded_start = False
     content_block_index = 0
     emitted_content = False
 
-    client = sdk.ClaudeSDKClient(options)
     try:
-        await client.connect()
-        await _send_query(client, message_payload, session_id=session_id)
+        async with _acquire_client(payload) as client:
+            await _send_query(client, message_payload, session_id=session_id)
 
-        async for sdk_message in client.receive_response():
-            message_type = type(sdk_message).__name__
+            async for sdk_message in client.receive_response():
+                message_type = type(sdk_message).__name__
 
-            if not yielded_start:
-                yielded_start = True
-                yield _to_sse(
-                    {
-                        "type": "message_start",
-                        "message": {
-                            "id": message_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "model": model,
-                            "content": [],
-                            "stop_reason": None,
-                            "stop_sequence": None,
-                            "usage": _stream_usage_defaults({}),
-                        },
-                    }
-                )
-
-            if message_type == "AssistantMessage":
-                for block in _extract_content_blocks(sdk_message):
-                    block_type = block.get("type")
-                    if block_type == "text":
-                        text_value = block.get("text")
-                        if not isinstance(text_value, str) or not text_value:
-                            continue
-                        yield _to_sse(
-                            {
-                                "type": "content_block_start",
-                                "index": content_block_index,
-                                "content_block": {"type": "text", "text": ""},
-                            }
-                        )
-                        yield _to_sse(
-                            {
-                                "type": "content_block_delta",
-                                "index": content_block_index,
-                                "delta": {"type": "text_delta", "text": text_value},
-                            }
-                        )
-                        yield _to_sse({"type": "content_block_stop", "index": content_block_index})
-                        content_block_index += 1
-                        emitted_content = True
-                    elif block_type in {"tool_use", "tool_result"}:
-                        yield _to_sse(
-                            {
-                                "type": "content_block_start",
-                                "index": content_block_index,
-                                "content_block": block,
-                            }
-                        )
-                        yield _to_sse({"type": "content_block_stop", "index": content_block_index})
-                        content_block_index += 1
-                        emitted_content = True
-
-            if message_type == "ResultMessage":
-                if getattr(sdk_message, "is_error", False):
-                    error_message = _extract_result_error_message(sdk_message)
+                if not yielded_start:
+                    yielded_start = True
                     yield _to_sse(
-                        anthropic_error_payload(
-                            "api_error",
-                            error_message,
-                        )
+                        {
+                            "type": "message_start",
+                            "message": {
+                                "id": message_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "model": model,
+                                "content": [],
+                                "stop_reason": None,
+                                "stop_sequence": None,
+                                "usage": _stream_usage_defaults({}),
+                            },
+                        }
                     )
+
+                if message_type == "AssistantMessage":
+                    for block in _extract_content_blocks(sdk_message):
+                        block_type = block.get("type")
+                        if block_type == "text":
+                            text_value = block.get("text")
+                            if not isinstance(text_value, str) or not text_value:
+                                continue
+                            yield _to_sse(
+                                {
+                                    "type": "content_block_start",
+                                    "index": content_block_index,
+                                    "content_block": {"type": "text", "text": ""},
+                                }
+                            )
+                            yield _to_sse(
+                                {
+                                    "type": "content_block_delta",
+                                    "index": content_block_index,
+                                    "delta": {"type": "text_delta", "text": text_value},
+                                }
+                            )
+                            yield _to_sse({"type": "content_block_stop", "index": content_block_index})
+                            content_block_index += 1
+                            emitted_content = True
+                        elif block_type in {"tool_use", "tool_result"}:
+                            yield _to_sse(
+                                {
+                                    "type": "content_block_start",
+                                    "index": content_block_index,
+                                    "content_block": block,
+                                }
+                            )
+                            yield _to_sse({"type": "content_block_stop", "index": content_block_index})
+                            content_block_index += 1
+                            emitted_content = True
+
+                if message_type == "ResultMessage":
+                    if getattr(sdk_message, "is_error", False):
+                        error_message = _extract_result_error_message(sdk_message)
+                        yield _to_sse(
+                            anthropic_error_payload(
+                                "api_error",
+                                error_message,
+                            )
+                        )
+                        return
+
+                    if not emitted_content:
+                        fallback_text = _extract_result_text(sdk_message)
+                        if fallback_text:
+                            yield _to_sse(
+                                {
+                                    "type": "content_block_start",
+                                    "index": content_block_index,
+                                    "content_block": {"type": "text", "text": ""},
+                                }
+                            )
+                            yield _to_sse(
+                                {
+                                    "type": "content_block_delta",
+                                    "index": content_block_index,
+                                    "delta": {"type": "text_delta", "text": fallback_text},
+                                }
+                            )
+                            yield _to_sse({"type": "content_block_stop", "index": content_block_index})
+                            content_block_index += 1
+                            emitted_content = True
+
+                    stop_reason = _extract_stop_reason(sdk_message)
+                    usage = _stream_usage_defaults(_extract_usage_fields(sdk_message))
+                    yield _to_sse(
+                        {
+                            "type": "message_delta",
+                            "delta": {
+                                "stop_reason": stop_reason,
+                                "stop_sequence": None,
+                            },
+                            "usage": usage,
+                        }
+                    )
+                    yield _to_sse({"type": "message_stop"})
                     return
-
-                if not emitted_content:
-                    fallback_text = _extract_result_text(sdk_message)
-                    if fallback_text:
-                        yield _to_sse(
-                            {
-                                "type": "content_block_start",
-                                "index": content_block_index,
-                                "content_block": {"type": "text", "text": ""},
-                            }
-                        )
-                        yield _to_sse(
-                            {
-                                "type": "content_block_delta",
-                                "index": content_block_index,
-                                "delta": {"type": "text_delta", "text": fallback_text},
-                            }
-                        )
-                        yield _to_sse({"type": "content_block_stop", "index": content_block_index})
-                        content_block_index += 1
-                        emitted_content = True
-
-                stop_reason = _extract_stop_reason(sdk_message)
-                usage = _stream_usage_defaults(_extract_usage_fields(sdk_message))
-                yield _to_sse(
-                    {
-                        "type": "message_delta",
-                        "delta": {
-                            "stop_reason": stop_reason,
-                            "stop_sequence": None,
-                        },
-                        "usage": usage,
-                    }
-                )
-                yield _to_sse({"type": "message_stop"})
-                return
 
         if yielded_start:
             yield _to_sse(
@@ -202,11 +319,6 @@ async def stream_messages(
         raise
     except Exception as exc:
         raise _map_sdk_error(exc) from exc
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
 
 
 def parse_sse_data_payload(event_block: str) -> dict[str, JsonValue] | None:
@@ -233,6 +345,115 @@ def parse_sse_data_payload(event_block: str) -> dict[str, JsonValue] | None:
     if isinstance(payload, dict):
         return payload
     return None
+
+
+async def close_anthropic_client_pools() -> None:
+    await _POOL_MANAGER.close_all()
+
+
+def _ephemeral_session_id() -> str:
+    return f"codexlb_{uuid.uuid4().hex}"
+
+
+@asynccontextmanager
+async def _acquire_client(payload: dict[str, JsonValue]) -> AsyncIterator[Any]:
+    sdk = _require_sdk()
+    settings = get_settings()
+    if not settings.anthropic_sdk_pool_enabled:
+        options = _build_sdk_options(payload)
+        client = sdk.ClaudeSDKClient(options)
+        await client.connect()
+        try:
+            yield client
+        finally:
+            await _safe_disconnect(client)
+        return
+
+    key = _pool_key_from_payload(payload)
+
+    async def _create_client() -> Any:
+        options = _build_sdk_options(payload)
+        client = sdk.ClaudeSDKClient(options)
+        await client.connect()
+        return client
+
+    pooled = await _POOL_MANAGER.acquire(
+        key,
+        _create_client,
+        max_size=settings.anthropic_sdk_pool_size,
+        acquire_timeout_seconds=settings.anthropic_sdk_pool_acquire_timeout_seconds,
+    )
+
+    broken = False
+    try:
+        yield pooled.client
+    except Exception:
+        broken = True
+        raise
+    finally:
+        if broken:
+            pooled.broken = True
+        await _POOL_MANAGER.release(key, pooled)
+
+
+def _pool_key_from_payload(payload: dict[str, JsonValue]) -> _PoolKey:
+    settings = get_settings()
+    model = _extract_request_model(payload)
+    max_tokens = _as_int(payload.get("max_tokens"))
+    temperature_raw = payload.get("temperature")
+    temperature = float(temperature_raw) if isinstance(temperature_raw, (int, float)) else None
+    system_prompt = _extract_system_prompt(payload)
+    allowed_tools_signature = _signature_for_json(payload.get("allowed_tools"))
+    permission_mode = _normalize_str(payload.get("permission_mode"))
+    cwd = _normalize_str(payload.get("cwd"))
+    max_thinking_tokens = _as_int(payload.get("max_thinking_tokens"))
+    mcp_servers_signature = _signature_for_json(payload.get("mcp_servers"))
+
+    return _PoolKey(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system_prompt=system_prompt,
+        cli_path=_normalize_str(settings.anthropic_sdk_cli_path),
+        allowed_tools_signature=allowed_tools_signature,
+        permission_mode=permission_mode,
+        cwd=cwd,
+        max_thinking_tokens=max_thinking_tokens,
+        mcp_servers_signature=mcp_servers_signature,
+    )
+
+
+def _signature_for_json(value: JsonValue | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    except Exception:
+        return None
+
+
+def _normalize_str(value: object) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+async def _safe_disconnect(client: Any) -> None:
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
 
 
 def _require_sdk() -> Any:

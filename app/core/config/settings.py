@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     anthropic_sdk_cli_path: str | None = None
     anthropic_sdk_default_session_id: str | None = None
+    anthropic_sdk_pool_enabled: bool = True
+    anthropic_sdk_pool_size: int = Field(default=4, ge=1)
+    anthropic_sdk_pool_acquire_timeout_seconds: float = 30.0
     anthropic_usage_base_url: str = "https://api.anthropic.com"
     anthropic_usage_beta: str = "oauth-2025-04-20"
     anthropic_usage_refresh_enabled: bool = True

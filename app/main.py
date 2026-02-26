@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from app.core.clients.anthropic_proxy import close_anthropic_client_pools
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
@@ -47,6 +48,7 @@ async def lifespan(_: FastAPI):
         await model_scheduler.stop()
         await usage_scheduler.stop()
         try:
+            await close_anthropic_client_pools()
             await close_http_client()
         finally:
             await close_db()

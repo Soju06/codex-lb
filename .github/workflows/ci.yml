@@ -175,7 +175,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      CODEX_LB_DATABASE_URL: postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
+      CODEX_LB_TEST_DATABASE_URL: postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 
     steps:
       - name: Checkout repository

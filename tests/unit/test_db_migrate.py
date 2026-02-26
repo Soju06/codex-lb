@@ -135,7 +135,7 @@ def test_ensure_alembic_version_table_capacity_creates_table_when_missing(monkey
     inspector = _FakeInspector(has_table=False)
     monkeypatch.setattr("app.db.migrate.inspect", lambda _: inspector)
 
-    _ensure_alembic_version_table_capacity_for_connection(connection, required_length=64)
+    _ensure_alembic_version_table_capacity_for_connection(connection, required_length=64)  # type: ignore[arg-type]
 
     assert connection.executed_sql == [
         "CREATE TABLE alembic_version ( version_num VARCHAR(64) NOT NULL, PRIMARY KEY (version_num) )"
@@ -147,11 +147,9 @@ def test_ensure_alembic_version_table_capacity_alters_short_column(monkeypatch) 
     inspector = _FakeInspector(has_table=True, version_num_length=32)
     monkeypatch.setattr("app.db.migrate.inspect", lambda _: inspector)
 
-    _ensure_alembic_version_table_capacity_for_connection(connection, required_length=64)
+    _ensure_alembic_version_table_capacity_for_connection(connection, required_length=64)  # type: ignore[arg-type]
 
-    assert connection.executed_sql == [
-        "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)"
-    ]
+    assert connection.executed_sql == ["ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)"]
 
 
 def test_max_revision_id_length_exceeds_alembic_default(tmp_path: Path) -> None:

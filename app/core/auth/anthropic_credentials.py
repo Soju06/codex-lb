@@ -39,6 +39,9 @@ class AnthropicCredentials:
     bearer_token: str
     org_id: str | None
     source: str
+    refresh_token: str | None = None
+    expires_at_ms: int | None = None
+    source_path: Path | None = None
 
 
 async def resolve_anthropic_credentials(*, force_refresh: bool = False) -> AnthropicCredentials | None:
@@ -89,6 +92,46 @@ def _set_cache(value: AnthropicCredentials | None) -> None:
     _cached_at_monotonic = time.monotonic()
 
 
+def _parse_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_expires_at_ms(payload: dict[str, Any]) -> int | None:
+    expires_at = _parse_int(payload.get("expires_at") or payload.get("expiresAt"))
+    if expires_at is not None:
+        if expires_at < 10_000_000_000:
+            return expires_at * 1000
+        return expires_at
+
+    expires_in = _parse_int(payload.get("expires_in") or payload.get("expiresIn"))
+    if expires_in is None:
+        return None
+    now_seconds = int(time.time())
+    return (now_seconds + expires_in) * 1000
+
+
+async def _safe_json_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
+    try:
+        data = await resp.json(content_type=None)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 async def _resolve_uncached(settings: Settings, *, org_override: str | None) -> AnthropicCredentials | None:
     discovered = _discover_from_files(settings)
     if discovered is None:
@@ -104,7 +147,60 @@ async def _resolve_uncached(settings: Settings, *, org_override: str | None) -> 
         bearer_token=token,
         org_id=org_id,
         source=discovered.source,
+        refresh_token=discovered.refresh_token,
+        expires_at_ms=discovered.expires_at_ms,
+        source_path=discovered.source_path,
     )
+
+
+async def refresh_anthropic_access_token(
+    credentials: AnthropicCredentials,
+) -> AnthropicCredentials | None:
+    refresh_token = _normalize_secret(credentials.refresh_token)
+    if not refresh_token:
+        return None
+
+    settings = get_settings()
+    timeout = aiohttp.ClientTimeout(total=settings.oauth_timeout_seconds)
+    payload = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": settings.anthropic_oauth_client_id,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    try:
+        async with get_http_client().session.post(
+            settings.anthropic_oauth_token_url,
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        ) as response:
+            data = await _safe_json_response(response)
+            if response.status >= 400:
+                return None
+    except Exception:
+        return None
+
+    access_token = _normalize_secret(_read_string(data, "access_token"))
+    if access_token is None:
+        return None
+
+    new_refresh_token = _normalize_secret(_read_string(data, "refresh_token")) or refresh_token
+    expires_at_ms = _parse_expires_at_ms(data)
+    refreshed = AnthropicCredentials(
+        bearer_token=access_token,
+        org_id=credentials.org_id,
+        source=f"{credentials.source}:refreshed",
+        refresh_token=new_refresh_token,
+        expires_at_ms=expires_at_ms,
+        source_path=credentials.source_path,
+    )
+    _set_cache(refreshed)
+    return refreshed
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +208,9 @@ class _RawDiscoveredCredentials:
     bearer_token: str
     org_id: str | None
     source: str
+    refresh_token: str | None = None
+    expires_at_ms: int | None = None
+    source_path: Path | None = None
 
 
 def _discover_from_files(settings: Settings) -> _RawDiscoveredCredentials | None:
@@ -122,14 +221,18 @@ def _discover_from_files(settings: Settings) -> _RawDiscoveredCredentials | None
         payload = _load_json_file(path)
         if payload is None:
             continue
-        token = _extract_token(payload)
+        structured = _extract_structured_credentials(payload)
+        token = structured.bearer_token if structured is not None else _extract_token(payload)
         if token is None:
             continue
-        org_id = _extract_org_id(payload)
+        org_id = structured.org_id if structured is not None else _extract_org_id(payload)
         return _RawDiscoveredCredentials(
             bearer_token=token,
             org_id=org_id,
             source=f"file:{path}",
+            refresh_token=structured.refresh_token if structured is not None else None,
+            expires_at_ms=structured.expires_at_ms if structured is not None else None,
+            source_path=path,
         )
     return None
 
@@ -167,6 +270,8 @@ def _discover_from_helper_command(settings: Settings) -> _RawDiscoveredCredentia
         bearer_token=parsed.bearer_token,
         org_id=parsed.org_id,
         source="helper-command",
+        refresh_token=parsed.refresh_token,
+        expires_at_ms=parsed.expires_at_ms,
     )
 
 
@@ -174,6 +279,16 @@ def _discover_from_helper_command(settings: Settings) -> _RawDiscoveredCredentia
 class _HelperCredentials:
     bearer_token: str
     org_id: str | None
+    refresh_token: str | None = None
+    expires_at_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _StructuredCredentials:
+    bearer_token: str
+    org_id: str | None
+    refresh_token: str | None
+    expires_at_ms: int | None
 
 
 def _parse_helper_output(stdout: str) -> _HelperCredentials | None:
@@ -189,6 +304,15 @@ def _parse_helper_output(stdout: str) -> _HelperCredentials | None:
         return _HelperCredentials(bearer_token=token, org_id=None)
 
     if isinstance(payload, dict):
+        structured = _extract_structured_credentials(payload)
+        if structured is not None:
+            return _HelperCredentials(
+                bearer_token=structured.bearer_token,
+                org_id=structured.org_id,
+                refresh_token=structured.refresh_token,
+                expires_at_ms=structured.expires_at_ms,
+            )
+
         token = _normalize_secret(_read_string(payload, "token") or _read_string(payload, "bearer_token"))
         if token is None:
             token = _extract_token(payload)
@@ -259,6 +383,49 @@ def _extract_org_id(payload: Any) -> str | None:
             nested = _extract_org_id(item)
             if nested:
                 return nested
+    return None
+
+
+def _extract_structured_credentials(payload: Any) -> _StructuredCredentials | None:
+    if not isinstance(payload, dict):
+        return None
+
+    claude_oauth = payload.get("claudeAiOauth")
+    if isinstance(claude_oauth, dict):
+        access_token = _normalize_secret(_read_string(claude_oauth, "accessToken"))
+        if access_token is not None:
+            refresh_token = _normalize_secret(_read_string(claude_oauth, "refreshToken"))
+            expires_at_ms = _parse_int(claude_oauth.get("expiresAt"))
+            org_id = _extract_org_id(payload)
+            return _StructuredCredentials(
+                bearer_token=access_token,
+                org_id=org_id,
+                refresh_token=refresh_token,
+                expires_at_ms=expires_at_ms,
+            )
+
+    session = payload.get("session")
+    if isinstance(session, dict):
+        oauth = session.get("oauth")
+        if isinstance(oauth, dict):
+            access_token = _normalize_secret(
+                _read_string(oauth, "token")
+                or _read_string(oauth, "access_token")
+                or _read_string(oauth, "accessToken")
+            )
+            if access_token is not None:
+                refresh_token = _normalize_secret(
+                    _read_string(oauth, "refresh_token") or _read_string(oauth, "refreshToken")
+                )
+                expires_at_ms = _parse_expires_at_ms(oauth)
+                org_id = _extract_org_id(payload)
+                return _StructuredCredentials(
+                    bearer_token=access_token,
+                    org_id=org_id,
+                    refresh_token=refresh_token,
+                    expires_at_ms=expires_at_ms,
+                )
+
     return None
 
 

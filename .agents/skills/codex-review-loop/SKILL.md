@@ -26,7 +26,8 @@ HITL-gated fix loop, optional re-verification.
 2. **Codex Review** — launch adversarial review via Codex CLI (~20-50 min)
 3. **Finding Analysis** — parse raw output into structured findings
 4. **Atomic Fix Loop** — fix, verify, commit each approved finding
-5. **Final Report** — summary of all findings, fixes, and verification status
+5. **Re-review Loop** — re-run review until 0 findings (max 3 iterations)
+6. **Final Report** — summary of all findings, fixes, and verification status
 
 ---
 
@@ -148,14 +149,32 @@ For each approved finding, execute an atomic fix-verify-commit cycle.
 
 ---
 
-## HITL Gate 3: Re-verification
+## Phase 5: Re-review Loop
 
-After all fixes, present the commit stack and skipped items.
+After all fixes are committed, automatically re-run the Codex review
+to check for regressions or new issues introduced by the fixes.
 
-Options:
-- Re-verify via Codex (`--uncommitted` mode, max 2 iterations)
-- Review commits
-- Done — output final report
+### Loop behaviour
+
+1. Re-run Codex review (`--base <branch>`) against the same base.
+2. Parse findings (Phase 3) and present to user (HITL Gate 1).
+3. If **0 findings** → loop terminates, proceed to Final Report.
+4. If findings exist → execute Phase 4 (fix-verify-commit), then repeat
+   from step 1.
+
+### Safety limits
+
+- **Max iterations**: 3 (initial review + 2 re-reviews).
+  After 3 iterations, terminate the loop regardless of remaining findings
+  and output the Final Report with unresolved items noted.
+- **Escalation**: If the same finding recurs across 2 consecutive iterations,
+  mark it as `wont_fix` and skip in subsequent iterations.
+
+### HITL override
+
+At each re-review result, the user may choose:
+- **Continue** — proceed with fixes (default when findings > 0)
+- **Stop** — terminate the loop early and output Final Report
 
 ---
 
@@ -163,7 +182,7 @@ Options:
 
 Output a summary including:
 - PR metadata (number, title, base/head)
-- Loop iteration count
+- Loop iteration count and termination reason (clean / max iterations / user stop)
 - Findings table (ID, severity, category, title, status, commit hash)
 - Commit stack
 - Verification status (ruff, ty, pytest)

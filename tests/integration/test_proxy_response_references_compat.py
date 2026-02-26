@@ -44,6 +44,46 @@ async def _import_account(async_client, account_id: str, email: str) -> None:
 async def test_v1_responses_expands_item_reference_from_local_context(async_client, monkeypatch):
     cache = get_response_context_cache()
     await cache.reset()
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_strips_rs_ids_from_input_items(async_client, monkeypatch):
+    cache = get_response_context_cache()
+    await cache.reset()
+    await _import_account(async_client, "acc_ref_strip", "ref-strip@example.com")
+    monkeypatch.setattr(proxy_module, "_response_context_scope", lambda actor_log, headers=None: "scope:test")
+
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_inputs.append(json.loads(json.dumps(payload.input)))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_strip_1","status":"completed"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "conversation": "rs_conversation_should_be_removed",
+            "input": [
+                {
+                    "id": "rs_item_should_be_removed",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+        },
+        headers={"x-openai-client-id": "openclaw-test", "Authorization": "Bearer compat-token-2"},
+    )
+    assert response.status_code == 200
+    assert len(seen_inputs) == 1
+
+    serialized = json.dumps(seen_inputs[0])
+    assert "rs_item_should_be_removed" not in serialized
+
+    await cache.reset()
     await _import_account(async_client, "acc_ref", "ref@example.com")
     monkeypatch.setattr(proxy_module, "_response_context_scope", lambda actor_log, headers=None: "scope:test")
 

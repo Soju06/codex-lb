@@ -933,6 +933,8 @@ async def _resolve_item_references(
     headers: Mapping[str, str],
 ) -> None:
     scope = _response_context_scope(actor_log, headers=headers)
+    if isinstance(payload.conversation, str) and _looks_like_response_item_id(payload.conversation):
+        payload.conversation = None
     if scope is None or not isinstance(payload.input, list):
         return
 
@@ -1146,6 +1148,8 @@ async def _strip_nested_item_references(
 
     normalized_dict: dict[str, JsonValue] = {}
     for key, nested in value.items():
+        if key in {"id", "item_id"} and isinstance(nested, str) and _looks_like_response_item_id(nested):
+            continue
         normalized = await _strip_nested_item_references(nested, scope=scope, cache=cache)
         if normalized is _DROP_ITEM_REFERENCE:
             continue
@@ -1171,6 +1175,11 @@ def _assistant_text_from_context(cached: list[JsonValue]) -> str | None:
             if normalized:
                 return normalized
     return None
+
+
+def _looks_like_response_item_id(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized.startswith("rs_") or normalized.startswith("resp_")
 
 
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:

@@ -4,8 +4,10 @@ import pytest
 
 from app.modules.proxy.response_context_cache import ResponseContextCache
 from app.modules.proxy.service import (
+    _assistant_text_from_context,
     _extract_completion_context,
     _extract_completion_reference_ids,
+    _looks_like_response_item_id,
     _item_reference_id,
 )
 
@@ -68,3 +70,18 @@ async def test_response_context_cache_roundtrip() -> None:
     assert cached is not None
     assert cached[0] == {"role": "user", "content": "hello"}
     assert cached[1] == {"role": "assistant", "content": "assistant-reply"}
+
+
+def test_looks_like_response_item_id_detects_supported_prefixes() -> None:
+    assert _looks_like_response_item_id("rs_abc")
+    assert _looks_like_response_item_id("resp_abc")
+    assert not _looks_like_response_item_id("conv_abc")
+
+
+def test_assistant_text_from_context_reads_last_assistant_string() -> None:
+    cached = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "first"},
+        {"role": "assistant", "content": "second"},
+    ]
+    assert _assistant_text_from_context(cached) == "second"

@@ -527,7 +527,7 @@ def _merge_passthrough_cache_extras(
         value = payload.model_extra.get(key)
         if value is None:
             continue
-        translated_payload[key] = value
+        translated_payload[canonical] = value
 
 
 def _derive_prompt_cache_key_from_cache_control(payload: AnthropicMessagesRequest) -> str | None:

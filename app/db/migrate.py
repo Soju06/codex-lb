@@ -193,6 +193,7 @@ def _bootstrap_legacy_history(config: Config) -> LegacyBootstrapResult:
 
     target_legacy_name = LEGACY_MIGRATION_ORDER[contiguous_count - 1]
     target_revision = LEGACY_TO_REVISION[target_legacy_name]
+    _ensure_alembic_version_table_capacity(config)
     command.stamp(config, target_revision)
 
     return LegacyBootstrapResult(

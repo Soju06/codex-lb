@@ -12,9 +12,14 @@ class RequestLogEntry(DashboardModel):
     account_id: str
     request_id: str
     model: str
+    requested_model: str | None = None
+    override_id: int | None = None
     status: str
     error_code: str | None = None
     error_message: str | None = None
+    client_ip: str | None = None
+    client_app: str | None = None
+    api_key: str | None = None
     tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_effort: str | None = None
@@ -36,4 +41,7 @@ class RequestLogModelOption(DashboardModel):
 class RequestLogFilterOptionsResponse(DashboardModel):
     account_ids: list[str] = Field(default_factory=list)
     model_options: list[RequestLogModelOption] = Field(default_factory=list)
+    client_ips: list[str] = Field(default_factory=list)
+    client_apps: list[str] = Field(default_factory=list)
+    api_keys: list[str] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)

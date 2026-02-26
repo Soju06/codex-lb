@@ -2,6 +2,7 @@ import { http, HttpResponse } from "msw";
 import { z } from "zod";
 
 import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
+import type { ModelOverride } from "@/features/model-overrides/schemas";
 import {
   createAccountSummary,
   createAccountTrends,
@@ -56,6 +57,10 @@ const ApiKeyUpdatePayloadSchema = z.object({
 const SettingsPayloadSchema = z.object({
   stickyThreadsEnabled: z.boolean().optional(),
   preferEarlierResetAccounts: z.boolean().optional(),
+  routingStrategy: z.enum(["usage_weighted", "round_robin"]).optional(),
+  globalModelForceEnabled: z.boolean().optional(),
+  globalModelForceModel: z.string().nullable().optional(),
+  globalModelForceReasoningEffort: z.enum(["low", "normal", "medium", "high", "xhigh"]).nullable().optional(),
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
@@ -80,12 +85,14 @@ const state: {
   authSession: DashboardAuthSession;
   settings: DashboardSettings;
   apiKeys: ApiKey[];
+  modelOverrides: ModelOverride[];
 } = {
   accounts: createDefaultAccounts(),
   requestLogs: createDefaultRequestLogs(),
   authSession: createDashboardAuthSession(),
   settings: createDashboardSettings(),
   apiKeys: createDefaultApiKeys(),
+  modelOverrides: [],
 };
 
 function parseDateValue(value: string | null): number | null {
@@ -103,6 +110,9 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
   const models = new Set(url.searchParams.getAll("model"));
   const reasoningEfforts = new Set(url.searchParams.getAll("reasoningEffort"));
   const modelOptions = new Set(url.searchParams.getAll("modelOption"));
+  const clientIps = new Set(url.searchParams.getAll("clientIp"));
+  const clientApps = new Set(url.searchParams.getAll("clientApp"));
+  const apiKeys = new Set(url.searchParams.getAll("apiKey"));
   const search = (url.searchParams.get("search") || "").trim().toLowerCase();
   const since = parseDateValue(url.searchParams.get("since"));
   const until = parseDateValue(url.searchParams.get("until"));
@@ -134,6 +144,15 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
         return false;
       }
     }
+    if (clientIps.size > 0 && !clientIps.has(entry.clientIp ?? "")) {
+      return false;
+    }
+    if (clientApps.size > 0 && !clientApps.has(entry.clientApp ?? "")) {
+      return false;
+    }
+    if (apiKeys.size > 0 && !apiKeys.has(entry.apiKey ?? "")) {
+      return false;
+    }
 
     const timestamp = new Date(entry.requestedAt).getTime();
     if (since !== null && timestamp < since) {
@@ -152,6 +171,9 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
         entry.errorCode,
         entry.errorMessage,
         entry.status,
+        entry.clientIp,
+        entry.clientApp,
+        entry.apiKey,
       ]
         .filter(Boolean)
         .join(" ")
@@ -187,10 +209,16 @@ function requestLogOptionsFromEntries(entries: RequestLogEntry[]) {
 
   const presentStatuses = new Set(entries.map((entry) => entry.status));
   const statuses = STATUS_ORDER.filter((status) => presentStatuses.has(status));
+  const clientIps = [...new Set(entries.map((entry) => entry.clientIp).filter(Boolean) as string[])].sort();
+  const clientApps = [...new Set(entries.map((entry) => entry.clientApp).filter(Boolean) as string[])].sort();
+  const apiKeys = [...new Set(entries.map((entry) => entry.apiKey).filter(Boolean) as string[])].sort();
 
   return createRequestLogFilterOptions({
     accountIds,
     modelOptions: modelOptionsList,
+    clientIps,
+    clientApps,
+    apiKeys,
     statuses: [...statuses],
   });
 }
@@ -346,6 +374,64 @@ export const handlers = [
       ...payload,
     });
     return HttpResponse.json(state.settings);
+  }),
+
+  http.get("/api/model-overrides", () => {
+    return HttpResponse.json({ items: state.modelOverrides });
+  }),
+
+  http.post("/api/model-overrides", async ({ request }) => {
+    const body = (await request.json()) as Record<string, unknown>;
+    const nextId = state.modelOverrides.length === 0 ? 1 : Math.max(...state.modelOverrides.map((item) => item.id)) + 1;
+    const now = new Date().toISOString();
+    const created: ModelOverride = {
+      id: nextId,
+      matchType: String(body.matchType ?? "app") as ModelOverride["matchType"],
+      matchValue: String(body.matchValue ?? ""),
+      forcedModel: String(body.forcedModel ?? ""),
+      forcedReasoningEffort: body.forcedReasoningEffort == null ? null : String(body.forcedReasoningEffort),
+      enabled: Boolean(body.enabled ?? true),
+      note: body.note == null ? null : String(body.note),
+      createdAt: now,
+      updatedAt: now,
+    };
+    state.modelOverrides = [...state.modelOverrides, created];
+    return HttpResponse.json(created);
+  }),
+
+  http.put("/api/model-overrides/:overrideId", async ({ params, request }) => {
+    const overrideId = Number(params.overrideId);
+    const body = (await request.json()) as Record<string, unknown>;
+    const existing = state.modelOverrides.find((item) => item.id === overrideId);
+    if (!existing) {
+      return HttpResponse.json(
+        { error: { code: "model_override_not_found", message: "Override not found" } },
+        { status: 404 },
+      );
+    }
+    const updated: ModelOverride = {
+      ...existing,
+      matchValue: body.matchValue == null ? existing.matchValue : String(body.matchValue),
+      forcedModel: body.forcedModel == null ? existing.forcedModel : String(body.forcedModel),
+      forcedReasoningEffort:
+        body.forcedReasoningEffort === undefined
+          ? existing.forcedReasoningEffort
+          : body.forcedReasoningEffort == null
+            ? null
+            : String(body.forcedReasoningEffort),
+      enabled: body.enabled == null ? existing.enabled : Boolean(body.enabled),
+      note:
+        body.note === undefined ? existing.note : body.note == null ? null : String(body.note),
+      updatedAt: new Date().toISOString(),
+    };
+    state.modelOverrides = state.modelOverrides.map((item) => (item.id === overrideId ? updated : item));
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/model-overrides/:overrideId", ({ params }) => {
+    const overrideId = Number(params.overrideId);
+    state.modelOverrides = state.modelOverrides.filter((item) => item.id !== overrideId);
+    return new HttpResponse(null, { status: 204 });
   }),
 
   http.get("/api/dashboard-auth/session", () => {

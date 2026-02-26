@@ -31,6 +31,7 @@ from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
+from app.modules.model_overrides.service import ModelOverrideMatch, ModelOverridesService, RequestActorContext
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
@@ -49,6 +50,7 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.response_context_cache import get_response_context_cache
 from app.modules.proxy.types import RateLimitStatusPayloadData
 from app.modules.usage.updater import UsageUpdater
 
@@ -73,6 +75,7 @@ class ProxyService:
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
+        actor_log: RequestActorLogData | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         _maybe_log_proxy_request_shape("stream", payload, headers)
@@ -84,7 +87,23 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
+            actor_log=actor_log,
         )
+
+    async def resolve_model_override(self, actor: RequestActorContext) -> ModelOverrideMatch | None:
+        try:
+            async with self._repo_factory() as repos:
+                service = ModelOverridesService(repos.model_overrides)
+                return await service.resolve(actor)
+        except Exception:
+            logger.warning(
+                "Failed to resolve model override request_id=%s client_ip=%s client_app=%s",
+                get_request_id(),
+                actor.client_ip,
+                actor.client_app,
+                exc_info=True,
+            )
+            return None
 
     async def compact_responses(
         self,
@@ -100,11 +119,13 @@ class ProxyService:
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
+        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
             reallocate_sticky=sticky_key is not None,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
             model=payload.model,
         )
         account = selection.account
@@ -317,12 +338,15 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
+        actor_log: RequestActorLogData | None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
+        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
+        await _resolve_item_references(payload, actor_log=actor_log, headers=headers)
         max_attempts = 3
         settled = False
         settlement = _StreamSettlement()
@@ -331,6 +355,7 @@ class ProxyService:
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
                     model=payload.model,
                 )
                 account = selection.account
@@ -356,6 +381,7 @@ class ProxyService:
                         api_key=api_key,
                         settlement=settlement,
                         suppress_text_done_events=suppress_text_done_events,
+                        actor_log=actor_log,
                     ):
                         yield line
                     settled = await self._settle_stream_api_key_usage(
@@ -386,6 +412,7 @@ class ProxyService:
                             api_key=api_key,
                             settlement=settlement,
                             suppress_text_done_events=suppress_text_done_events,
+                            actor_log=actor_log,
                         ):
                             yield line
                         settled = await self._settle_stream_api_key_usage(
@@ -473,6 +500,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
+        actor_log: RequestActorLogData | None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -485,6 +513,10 @@ class ProxyService:
         error_message = None
         usage = None
         saw_text_delta = False
+        completion_response_id: str | None = None
+        completion_assistant_text: str | None = None
+        completion_reference_ids: set[str] = set()
+        context_scope = _response_context_scope(actor_log, headers=headers)
 
         try:
             stream = core_stream_responses(
@@ -523,6 +555,9 @@ class ProxyService:
                 usage = event.response.usage if event.response else None
                 if event.type == "response.incomplete":
                     status = "error"
+            if event_type in ("response.completed", "response.incomplete"):
+                completion_response_id, completion_assistant_text = _extract_completion_context(first_payload)
+                completion_reference_ids.update(_extract_completion_reference_ids(first_payload))
 
             if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
                 saw_text_delta = True
@@ -564,6 +599,8 @@ class ProxyService:
                         usage = event.response.usage if event.response else None
                         if event_type == "response.incomplete":
                             status = "error"
+                        completion_response_id, completion_assistant_text = _extract_completion_context(event_payload)
+                        completion_reference_ids.update(_extract_completion_reference_ids(event_payload))
                 yield line
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -591,17 +628,52 @@ class ProxyService:
             settlement.cached_input_tokens = cached_input_tokens
             with anyio.CancelScope(shield=True):
                 try:
+                    if status == "success" and context_scope:
+                        cache = get_response_context_cache()
+                        input_items = payload.input if isinstance(payload.input, list) else []
+                        if completion_response_id:
+                            await cache.put_context(
+                                context_scope,
+                                completion_response_id,
+                                input_items,
+                                completion_assistant_text,
+                            )
+                        for reference_id in completion_reference_ids:
+                            if not reference_id or reference_id == completion_response_id:
+                                continue
+                            await cache.put_context(
+                                context_scope,
+                                reference_id,
+                                input_items,
+                                completion_assistant_text,
+                            )
+                except Exception:
+                    logger.warning(
+                        "Failed to persist response context scope=%s response_id=%s request_id=%s",
+                        context_scope,
+                        completion_response_id,
+                        request_id,
+                        exc_info=True,
+                    )
+
+            with anyio.CancelScope(shield=True):
+                try:
                     async with self._repo_factory() as repos:
                         await repos.request_logs.add_log(
                             account_id=account_id_value,
                             api_key_id=api_key.id if api_key else None,
                             request_id=request_id,
                             model=model,
+                            requested_model=(actor_log.requested_model if actor_log else model),
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=cached_input_tokens,
                             reasoning_tokens=reasoning_tokens,
                             reasoning_effort=reasoning_effort,
+                            client_ip=actor_log.client_ip if actor_log else None,
+                            client_app=actor_log.client_app if actor_log else None,
+                            auth_key_fingerprint=actor_log.api_key if actor_log else None,
+                            override_id=actor_log.override_id if actor_log else None,
                             latency_ms=latency_ms,
                             status=status,
                             error_code=error_code,
@@ -693,6 +765,15 @@ class _StreamSettlement:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class RequestActorLogData:
+    client_ip: str | None
+    client_app: str | None
+    api_key: str | None
+    requested_model: str | None
+    override_id: int | None = None
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -843,6 +924,262 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
         "x-codex-conversation-id",
     }
     return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})
+
+
+async def _resolve_item_references(
+    payload: ResponsesRequest,
+    *,
+    actor_log: RequestActorLogData | None,
+    headers: Mapping[str, str],
+) -> None:
+    scope = _response_context_scope(actor_log, headers=headers)
+    if isinstance(payload.conversation, str) and _looks_like_response_item_id(payload.conversation):
+        payload.conversation = None
+    if scope is None or not isinstance(payload.input, list):
+        return
+
+    cache = get_response_context_cache()
+    expanded_input: list[JsonValue] = []
+    replaced_count = 0
+    unresolved_ids: list[str] = []
+    nested_dropped = 0
+    nested_replaced = 0
+
+    for item in payload.input:
+        reference_id = _item_reference_id(item)
+        if reference_id is None:
+            normalized = await _strip_nested_item_references(item, scope=scope, cache=cache)
+            if normalized is _DROP_ITEM_REFERENCE:
+                nested_dropped += 1
+                continue
+            if normalized != item:
+                nested_replaced += 1
+            expanded_input.append(normalized)
+            continue
+
+        cached = await cache.get_context(scope, reference_id)
+        if cached is None:
+            unresolved_ids.append(reference_id)
+            continue
+        replaced_count += 1
+        expanded_input.extend(cached)
+
+    if replaced_count == 0 and not unresolved_ids and nested_dropped == 0 and nested_replaced == 0:
+        return
+
+    payload.input = expanded_input
+    if unresolved_ids or nested_dropped or nested_replaced:
+        logger.info(
+            "Normalized item references scope=%s top_missing=%s nested_dropped=%s nested_replaced=%s request_id=%s",
+            scope,
+            len(unresolved_ids),
+            nested_dropped,
+            nested_replaced,
+            get_request_id(),
+        )
+
+
+def _response_context_scope(
+    actor_log: RequestActorLogData | None,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> str | None:
+    if actor_log is None:
+        actor_log_api_key = None
+        actor_log_client_app = None
+        actor_log_client_ip = None
+    else:
+        actor_log_api_key = actor_log.api_key
+        actor_log_client_app = actor_log.client_app
+        actor_log_client_ip = actor_log.client_ip
+    if actor_log_api_key:
+        return f"api_key:{actor_log_api_key}"
+
+    parts = [actor_log_client_app, actor_log_client_ip]
+    normalized = [part.strip().lower() for part in parts if isinstance(part, str) and part.strip()]
+    if normalized:
+        return f"actor:{'|'.join(normalized)}"
+    if not headers:
+        return None
+
+    client_app = _header_lookup(headers, "x-openai-client-id") or _header_lookup(headers, "x-app-id")
+    user_agent = _header_lookup(headers, "user-agent")
+    header_parts = [client_app, user_agent]
+    normalized_headers = [part.strip().lower() for part in header_parts if isinstance(part, str) and part.strip()]
+    if not normalized_headers:
+        return None
+    return f"header:{'|'.join(normalized_headers)}"
+
+
+def _header_lookup(headers: Mapping[str, str], key: str) -> str | None:
+    direct = headers.get(key)
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    target = key.lower()
+    for existing_key, value in headers.items():
+        if existing_key.lower() == target and isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _item_reference_id(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type != "item_reference":
+        return None
+    value = item.get("id")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _extract_completion_context(payload: dict[str, JsonValue] | None) -> tuple[str | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None, None
+
+    response_id = response.get("id")
+    normalized_id = response_id.strip() if isinstance(response_id, str) else None
+    assistant_text = _extract_assistant_output_text(response.get("output"))
+    return normalized_id or None, assistant_text
+
+
+def _extract_completion_reference_ids(payload: dict[str, JsonValue] | None) -> set[str]:
+    if not isinstance(payload, dict):
+        return set()
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return set()
+
+    reference_ids: set[str] = set()
+    response_id = response.get("id")
+    if isinstance(response_id, str):
+        normalized = response_id.strip()
+        if normalized:
+            reference_ids.add(normalized)
+
+    output = response.get("output")
+    if not isinstance(output, list):
+        return reference_ids
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not isinstance(item_id, str):
+            continue
+        normalized = item_id.strip()
+        if normalized:
+            reference_ids.add(normalized)
+    return reference_ids
+
+
+def _extract_assistant_output_text(value: JsonValue) -> str | None:
+    if not isinstance(value, list):
+        return None
+
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in {"assistant", None}:
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                parts.append(text)
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            text = part.get("text")
+            refusal = part.get("refusal")
+            if isinstance(text, str) and part_type in {"output_text", "text", "input_text"}:
+                cleaned = text.strip()
+                if cleaned:
+                    parts.append(cleaned)
+            elif isinstance(refusal, str) and part_type == "refusal":
+                cleaned = refusal.strip()
+                if cleaned:
+                    parts.append(cleaned)
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
+_DROP_ITEM_REFERENCE = object()
+
+
+async def _strip_nested_item_references(
+    value: JsonValue,
+    *,
+    scope: str,
+    cache: "ResponseContextCache",
+) -> JsonValue | object:
+    reference_id = _item_reference_id(value)
+    if reference_id is not None:
+        cached = await cache.get_context(scope, reference_id)
+        if cached is None:
+            return _DROP_ITEM_REFERENCE
+        replacement = _assistant_text_from_context(cached)
+        if not replacement:
+            return _DROP_ITEM_REFERENCE
+        return {"type": "input_text", "text": replacement}
+
+    if isinstance(value, list):
+        normalized_list: list[JsonValue] = []
+        for item in value:
+            normalized = await _strip_nested_item_references(item, scope=scope, cache=cache)
+            if normalized is _DROP_ITEM_REFERENCE:
+                continue
+            normalized_list.append(normalized)
+        return normalized_list
+
+    if not isinstance(value, dict):
+        return value
+
+    normalized_dict: dict[str, JsonValue] = {}
+    for key, nested in value.items():
+        if key in {"id", "item_id"} and isinstance(nested, str) and _looks_like_response_item_id(nested):
+            continue
+        normalized = await _strip_nested_item_references(nested, scope=scope, cache=cache)
+        if normalized is _DROP_ITEM_REFERENCE:
+            continue
+        normalized_dict[key] = normalized
+
+    if normalized_dict.get("type") == "message":
+        content = normalized_dict.get("content")
+        if isinstance(content, list) and not content:
+            return _DROP_ITEM_REFERENCE
+
+    return normalized_dict
+
+
+def _assistant_text_from_context(cached: list[JsonValue]) -> str | None:
+    for item in reversed(cached):
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") != "assistant":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            normalized = content.strip()
+            if normalized:
+                return normalized
+    return None
+
+
+def _looks_like_response_item_id(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized.startswith("rs_") or normalized.startswith("resp_")
 
 
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:

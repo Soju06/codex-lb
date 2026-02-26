@@ -30,6 +30,19 @@ const devicePendingState = {
   errorMessage: null,
 };
 
+const browserPendingState = {
+  status: "pending" as const,
+  method: "browser" as const,
+  authorizationUrl: "https://auth.openai.com/oauth/authorize?foo=bar",
+  callbackUrl: "http://localhost:1455/auth/callback",
+  verificationUrl: null,
+  userCode: null,
+  deviceAuthId: null,
+  intervalSeconds: null,
+  expiresInSeconds: null,
+  errorMessage: null,
+};
+
 const successState = {
   ...idleState,
   status: "success" as const,
@@ -98,6 +111,33 @@ describe("OauthDialog", () => {
 
     expect(screen.getByText("Account has been added successfully.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+  });
+
+  it("submits pasted callback URL during browser flow", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByPlaceholderText("http://localhost:1455/auth/callback?code=...&state=...");
+    await user.type(
+      input,
+      "http://localhost:1455/auth/callback?code=test-code&state=test-state",
+    );
+    await user.click(screen.getByRole("button", { name: "Submit callback URL" }));
+
+    expect(onComplete).toHaveBeenCalledWith(
+      "http://localhost:1455/auth/callback?code=test-code&state=test-state",
+    );
   });
 
   it("renders error stage with message and retry option", () => {

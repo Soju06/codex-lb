@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    embeddings_enabled: bool = False
+    embeddings_upstream_url: str = ""
+    embeddings_upstream_api_key: str | None = None
+    embeddings_upstream_timeout_seconds: float = 30.0
+    embeddings_model_override: str | None = None
 
     @field_validator("database_url")
     @classmethod

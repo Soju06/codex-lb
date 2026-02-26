@@ -77,11 +77,16 @@ class RequestLogsRepository:
         status: str,
         error_code: str | None,
         error_message: str | None = None,
+        requested_model: str | None = None,
         requested_at: datetime | None = None,
         cached_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
         api_key_id: str | None = None,
+        client_ip: str | None = None,
+        client_app: str | None = None,
+        auth_key_fingerprint: str | None = None,
+        override_id: int | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         log = RequestLog(
@@ -89,11 +94,16 @@ class RequestLogsRepository:
             api_key_id=api_key_id,
             request_id=resolved_request_id,
             model=model,
+            requested_model=requested_model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
             reasoning_tokens=reasoning_tokens,
             reasoning_effort=reasoning_effort,
+            client_ip=client_ip,
+            client_app=client_app,
+            auth_key_fingerprint=auth_key_fingerprint,
+            override_id=override_id,
             latency_ms=latency_ms,
             status=status,
             error_code=error_code,
@@ -122,6 +132,9 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        client_ips: list[str] | None = None,
+        client_apps: list[str] | None = None,
+        api_keys: list[str] | None = None,
         include_success: bool = True,
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
@@ -135,6 +148,9 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            client_ips=client_ips,
+            client_apps=client_apps,
+            api_keys=api_keys,
             include_success=include_success,
             include_error_other=include_error_other,
             error_codes_in=error_codes_in,
@@ -180,7 +196,17 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
-    ) -> tuple[list[str], list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+        client_ips: list[str] | None = None,
+        client_apps: list[str] | None = None,
+        api_keys: list[str] | None = None,
+    ) -> tuple[
+        list[str],
+        list[tuple[str, str | None]],
+        list[tuple[str, str | None]],
+        list[str],
+        list[str],
+        list[str],
+    ]:
         conditions = self._build_filters(
             since=since,
             until=until,
@@ -188,6 +214,9 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            client_ips=client_ips,
+            client_apps=client_apps,
+            api_keys=api_keys,
             include_success=True,
             include_error_other=True,
             error_codes_in=None,
@@ -200,6 +229,14 @@ class RequestLogsRepository:
             .distinct()
             .order_by(RequestLog.model.asc(), RequestLog.reasoning_effort.asc())
         )
+        client_ip_stmt = select(RequestLog.client_ip).distinct().order_by(RequestLog.client_ip.asc())
+        client_app_stmt = select(RequestLog.client_app).distinct().order_by(RequestLog.client_app.asc())
+        api_key_stmt = (
+            select(RequestLog.auth_key_fingerprint)
+            .where(RequestLog.auth_key_fingerprint.is_not(None))
+            .distinct()
+            .order_by(RequestLog.auth_key_fingerprint.asc())
+        )
         status_stmt = (
             select(RequestLog.status, RequestLog.error_code)
             .distinct()
@@ -209,16 +246,25 @@ class RequestLogsRepository:
             clause = and_(*conditions)
             account_stmt = account_stmt.where(clause)
             model_stmt = model_stmt.where(clause)
+            client_ip_stmt = client_ip_stmt.where(clause)
+            client_app_stmt = client_app_stmt.where(clause)
+            api_key_stmt = api_key_stmt.where(clause)
             status_stmt = status_stmt.where(clause)
 
         account_rows = await self._session.execute(account_stmt)
         model_rows = await self._session.execute(model_stmt)
+        client_ip_rows = await self._session.execute(client_ip_stmt)
+        client_app_rows = await self._session.execute(client_app_stmt)
+        api_key_rows = await self._session.execute(api_key_stmt)
         status_rows = await self._session.execute(status_stmt)
 
         account_ids = [row[0] for row in account_rows.all() if row[0]]
         model_options = [(row[0], row[1]) for row in model_rows.all() if row[0]]
+        client_ips = [row[0] for row in client_ip_rows.all() if row[0]]
+        client_apps = [row[0] for row in client_app_rows.all() if row[0]]
+        api_keys = [row[0] for row in api_key_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
-        return account_ids, model_options, status_values
+        return account_ids, model_options, status_values, client_ips, client_apps, api_keys
 
     def _build_filters(
         self,
@@ -230,6 +276,9 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        client_ips: list[str] | None = None,
+        client_apps: list[str] | None = None,
+        api_keys: list[str] | None = None,
         include_success: bool = True,
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
@@ -260,6 +309,12 @@ class RequestLogsRepository:
                 conditions.append(RequestLog.model.in_(models))
             if reasoning_efforts:
                 conditions.append(RequestLog.reasoning_effort.in_(reasoning_efforts))
+        if client_ips:
+            conditions.append(RequestLog.client_ip.in_(client_ips))
+        if client_apps:
+            conditions.append(RequestLog.client_app.in_(client_apps))
+        if api_keys:
+            conditions.append(RequestLog.auth_key_fingerprint.in_(api_keys))
 
         status_conditions = []
         if include_success:
@@ -286,7 +341,11 @@ class RequestLogsRepository:
                     Account.email.ilike(search_pattern),
                     RequestLog.request_id.ilike(search_pattern),
                     RequestLog.model.ilike(search_pattern),
+                    RequestLog.requested_model.ilike(search_pattern),
                     RequestLog.reasoning_effort.ilike(search_pattern),
+                    RequestLog.client_ip.ilike(search_pattern),
+                    RequestLog.client_app.ilike(search_pattern),
+                    RequestLog.auth_key_fingerprint.ilike(search_pattern),
                     RequestLog.status.ilike(search_pattern),
                     RequestLog.error_code.ilike(search_pattern),
                     RequestLog.error_message.ilike(search_pattern),

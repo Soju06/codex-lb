@@ -7,6 +7,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import parse_qs, urlparse
 
 from aiohttp import web
 
@@ -154,6 +155,8 @@ class OauthService:
 
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
+        if payload.callback_url:
+            return await self._complete_browser_callback_from_url(payload.callback_url)
         async with self._store.lock:
             state = self._store.state
             if payload.device_auth_id:
@@ -242,36 +245,66 @@ class OauthService:
 
     async def _handle_callback(self, request: web.Request) -> web.Response:
         params = request.rel_url.query
-        error = params.get("error")
-        code = params.get("code")
-        state = params.get("state")
+        result = await self._complete_browser_callback(
+            code=params.get("code"),
+            state_token=params.get("state"),
+            error=params.get("error"),
+        )
+        if result.status == "success":
+            return self._html_response(_success_html())
+        async with self._store.lock:
+            message = self._store.state.error_message or "Authorization failed."
+        return self._html_response(_error_html(message))
 
+    async def _complete_browser_callback_from_url(self, callback_url: str) -> OauthCompleteResponse:
+        parsed = urlparse(callback_url)
+        query = parse_qs(parsed.query)
+        code = query.get("code", [None])[0]
+        state_token = query.get("state", [None])[0]
+        error = query.get("error", [None])[0]
+        return await self._complete_browser_callback(code=code, state_token=state_token, error=error)
+
+    async def _complete_browser_callback(
+        self,
+        *,
+        code: str | None,
+        state_token: str | None,
+        error: str | None,
+    ) -> OauthCompleteResponse:
         if error:
             await self._set_error(f"OAuth error: {error}")
-            return self._html_response(_error_html("Authorization failed."))
+            asyncio.create_task(self._stop_callback_server())
+            return OauthCompleteResponse(status="error")
 
         async with self._store.lock:
-            expected_state = self._store.state.state_token
-            verifier = self._store.state.code_verifier
+            current_state = self._store.state
+            expected_state = current_state.state_token
+            verifier = current_state.code_verifier
+            method = current_state.method
 
-        if not code or not state or state != expected_state or not verifier:
+        if method != "browser":
+            await self._set_error("Browser OAuth flow is not initialized.")
+            return OauthCompleteResponse(status="error")
+
+        if not code or not state_token or state_token != expected_state or not verifier:
             await self._set_error("Invalid OAuth callback state.")
-            return self._html_response(_error_html("Invalid OAuth callback."))
+            asyncio.create_task(self._stop_callback_server())
+            return OauthCompleteResponse(status="error")
 
         try:
             tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
             await self._persist_tokens(tokens)
             await self._set_success()
-            html = _success_html()
+            status = "success"
         except OAuthError as exc:
             await self._set_error(exc.message)
-            html = _error_html(exc.message)
+            status = "error"
         except AccountIdentityConflictError as exc:
             await self._set_error(str(exc))
-            html = _error_html(str(exc))
+            status = "error"
 
         asyncio.create_task(self._stop_callback_server())
-        return self._html_response(html)
+        return OauthCompleteResponse(status=status)
 
     async def _poll_device_tokens(self, context: "DevicePollContext") -> None:
         try:

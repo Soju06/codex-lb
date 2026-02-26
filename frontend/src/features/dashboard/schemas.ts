@@ -73,9 +73,14 @@ export const RequestLogSchema = z.object({
   accountId: z.string(),
   requestId: z.string(),
   model: z.string(),
+  requestedModel: z.string().nullable(),
+  overrideId: z.number().int().nullable(),
   status: z.string(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
+  clientIp: z.string().nullable(),
+  clientApp: z.string().nullable(),
+  apiKey: z.string().nullable(),
   tokens: z.number().nullable(),
   cachedInputTokens: z.number().nullable(),
   reasoningEffort: z.string().nullable(),
@@ -97,6 +102,9 @@ export const RequestLogModelOptionSchema = z.object({
 export const RequestLogFilterOptionsSchema = z.object({
   accountIds: z.array(z.string()),
   modelOptions: z.array(RequestLogModelOptionSchema),
+  clientIps: z.array(z.string()),
+  clientApps: z.array(z.string()),
+  apiKeys: z.array(z.string()),
   statuses: z.array(z.string()),
 });
 

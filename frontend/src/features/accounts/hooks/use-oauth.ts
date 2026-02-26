@@ -101,18 +101,43 @@ export function useOauth() {
     }
   }, [clearCountdownTimer, clearPollTimer]);
 
-  const complete = useCallback(async () => {
+  const complete = useCallback(async (callbackUrl?: string) => {
     try {
-      await completeOauth({
-        deviceAuthId: state.deviceAuthId ?? undefined,
-        userCode: state.userCode ?? undefined,
-      });
-      setState((prev) =>
-        OAuthStateSchema.parse({
-          ...prev,
-          status: "success",
-        }),
+      const response = await completeOauth(
+        callbackUrl
+          ? {
+              callbackUrl,
+            }
+          : {
+              deviceAuthId: state.deviceAuthId ?? undefined,
+              userCode: state.userCode ?? undefined,
+            },
       );
+
+      if (response.status === "success") {
+        setState((prev) =>
+          OAuthStateSchema.parse({
+            ...prev,
+            status: "success",
+          }),
+        );
+        return "success";
+      }
+
+      if (response.status === "error") {
+        const status = await getOauthStatus().catch(() => null);
+        setState((prev) =>
+          OAuthStateSchema.parse({
+            ...prev,
+            status: "error",
+            errorMessage: status?.errorMessage ?? "Failed to complete OAuth",
+          }),
+        );
+        return "error";
+      }
+
+      await poll();
+      return "pending";
     } catch (error) {
       setState((prev) =>
         OAuthStateSchema.parse({
@@ -123,7 +148,7 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.deviceAuthId, state.userCode]);
+  }, [poll, state.deviceAuthId, state.userCode]);
 
   useEffect(() => {
     if (state.status !== "pending" || !state.intervalSeconds || state.intervalSeconds <= 0) {

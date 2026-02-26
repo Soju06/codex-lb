@@ -51,6 +51,11 @@ const EXPECTED_ENDPOINTS = [
   // settings
   "GET /api/settings",
   "PUT /api/settings",
+  // model overrides
+  "GET /api/model-overrides",
+  "POST /api/model-overrides",
+  "PUT /api/model-overrides/:overrideId",
+  "DELETE /api/model-overrides/:overrideId",
   // models
   "GET /api/models",
   // api-keys

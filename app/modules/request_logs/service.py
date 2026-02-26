@@ -31,6 +31,9 @@ class RequestLogStatusFilter:
 class RequestLogFilterOptions:
     account_ids: list[str]
     model_options: list[RequestLogModelOption]
+    client_ips: list[str]
+    client_apps: list[str]
+    api_keys: list[str]
     statuses: list[str]
 
 
@@ -56,6 +59,9 @@ class RequestLogsService:
         model_options: list[RequestLogModelOption] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        client_ips: list[str] | None = None,
+        client_apps: list[str] | None = None,
+        api_keys: list[str] | None = None,
         status: list[str] | None = None,
     ) -> RequestLogsPage:
         status_filter = _map_status_filter(status)
@@ -72,6 +78,9 @@ class RequestLogsService:
             model_options=normalized_model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            client_ips=client_ips,
+            client_apps=client_apps,
+            api_keys=api_keys,
             include_success=status_filter.include_success,
             include_error_other=status_filter.include_error_other,
             error_codes_in=status_filter.error_codes_in,
@@ -92,17 +101,30 @@ class RequestLogsService:
         model_options: list[RequestLogModelOption] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        client_ips: list[str] | None = None,
+        client_apps: list[str] | None = None,
+        api_keys: list[str] | None = None,
     ) -> RequestLogFilterOptions:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
         )
-        option_account_ids, option_model_options, status_values = await self._repo.list_filter_options(
+        (
+            option_account_ids,
+            option_model_options,
+            status_values,
+            option_client_ips,
+            option_client_apps,
+            option_api_keys,
+        ) = await self._repo.list_filter_options(
             since=since,
             until=until,
             account_ids=account_ids,
             model_options=normalized_model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            client_ips=client_ips,
+            client_apps=client_apps,
+            api_keys=api_keys,
         )
         return RequestLogFilterOptions(
             account_ids=option_account_ids,
@@ -110,6 +132,9 @@ class RequestLogsService:
                 RequestLogModelOption(model=model, reasoning_effort=reasoning_effort)
                 for model, reasoning_effort in option_model_options
             ],
+            client_ips=option_client_ips,
+            client_apps=option_client_apps,
+            api_keys=option_api_keys,
             statuses=_normalize_status_values(status_values),
         )
 

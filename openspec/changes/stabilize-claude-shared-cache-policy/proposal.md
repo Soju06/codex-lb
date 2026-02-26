@@ -19,5 +19,5 @@ This causes unstable sticky routing and lower cache reuse.
 
 ## Impact
 
-- **Code**: `app/modules/anthropic_compat/api.py`
+- **Code**: `app/modules/anthropic_compat/api.py`, `app/modules/anthropic_compat/service.py`
 - **Tests**: `tests/integration/test_anthropic_compat.py`

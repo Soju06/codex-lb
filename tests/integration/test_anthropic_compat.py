@@ -158,7 +158,7 @@ async def test_anthropic_messages_accept_system_role_and_cache_control(async_cli
 
 
 @pytest.mark.asyncio
-async def test_anthropic_messages_forces_claude_model_and_reasoning_effort(async_client, monkeypatch):
+async def test_anthropic_messages_keeps_requested_claude_model(async_client, monkeypatch):
     await _import_account(async_client, "acc_anthropic_model_map", "anthropic-model-map@example.com")
 
     seen: dict[str, object] = {}
@@ -197,19 +197,15 @@ async def test_anthropic_messages_forces_claude_model_and_reasoning_effort(async
     }
     response = await async_client.post("/anthropic/v1/messages?beta=true", json=request_payload)
     assert response.status_code == 200
-    assert seen["model"] == "gpt-5.3-codex"
-    assert seen["reasoning_effort"] == "xhigh"
+    assert seen["model"] == "claude-sonnet-4-6"
+    assert seen["reasoning_effort"] is None
     assert isinstance(seen["prompt_cache_key"], str)
     assert seen["prompt_cache_key"].startswith("claude-shared:")
-    assert seen["temperature"] is None
-    assert seen["top_p"] is None
-    assert seen["top_k"] is None
-    assert seen["instructions"] == ""
+    assert seen["temperature"] == 0.2
+    assert seen["top_p"] == 0.9
+    assert seen["top_k"] == 32
+    assert seen["instructions"] == "Cached context"
     assert seen["input"] == [
-        {
-            "role": "developer",
-            "content": [{"type": "input_text", "text": "Cached context"}],
-        },
         {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     ]
     assert response.json()["model"] == "claude-sonnet-4-6"

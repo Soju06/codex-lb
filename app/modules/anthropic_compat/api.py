@@ -11,11 +11,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.core.auth.dependencies import set_anthropic_error_format, validate_anthropic_api_key
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
-from app.core.openai.model_registry import get_model_registry
-from app.core.openai.requests import ResponsesReasoning, ResponsesRequest
+from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
-from app.db.session import get_background_session
 from app.dependencies import AnthropicCompatContext, get_anthropic_compat_context
 from app.modules.anthropic_compat.schemas import (
     AnthropicCountTokensRequest,
@@ -33,29 +31,16 @@ from app.modules.anthropic_compat.translator import (
     stream_anthropic_events_from_openai_stream,
     to_responses_request_with_cache_resolution,
 )
-from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
-    ApiKeysService,
-    ApiKeyUsageReservationData,
 )
 
 logger = logging.getLogger(__name__)
 
-_CLAUDE_CODE_FORCED_MODEL = "gpt-5.3-codex"
-_CLAUDE_CODE_FORCED_REASONING_EFFORT = "xhigh"
-_CLAUDE_CODE_STRIPPED_SAMPLING_FIELDS: tuple[str, ...] = ("temperature", "top_p", "top_k")
 _CLAUDE_SHARED_PROMPT_CACHE_KEY_PREFIX = "claude-shared"
 _CLAUDE_SHARED_PROMPT_CACHE_KEY_VERSION = 1
-_CLAUDE_FALLBACK_MODEL_PREFERENCES: tuple[str, ...] = (
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.1",
-    "gpt-5",
-    "gpt-4.1",
-)
 
 router = APIRouter(tags=["anthropic_compat"], dependencies=[Depends(set_anthropic_error_format)])
 anthropic_router = APIRouter(
@@ -150,7 +135,6 @@ async def _messages_impl(
     except AnthropicTranslationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    responses_payload = _apply_claude_code_overrides(payload.model, responses_payload, api_key)
     responses_payload, cache_resolution = _apply_claude_prompt_cache_policy(
         payload.model,
         payload,
@@ -167,7 +151,16 @@ async def _messages_impl(
     )
 
     _validate_model_access(api_key, payload.model)
-    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
+    try:
+        reservation = await context.service.enforce_request_limits(
+            api_key,
+            request_model=payload.model,
+        )
+    except ApiKeyRateLimitExceededError as exc:
+        message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
+        raise HTTPException(status_code=429, detail=message) from exc
+    except ApiKeyInvalidError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     rate_limit_headers = await context.service.rate_limit_headers()
 
     if payload.stream:
@@ -182,7 +175,7 @@ async def _messages_impl(
         except StopAsyncIteration:
             first = None
         except ProxyResponseError as exc:
-            await _release_reservation(reservation)
+            await context.service.release_usage_reservation(reservation)
             error = anthropic_error_from_openai_payload(
                 exc.payload,
                 fallback_message="Upstream error",
@@ -210,7 +203,7 @@ async def _messages_impl(
     try:
         response = await collect_anthropic_response_from_openai_stream(stream, model=payload.model)
     except ProxyResponseError as exc:
-        await _release_reservation(reservation)
+        await context.service.release_usage_reservation(reservation)
         error = anthropic_error_from_openai_payload(
             exc.payload,
             fallback_message="Upstream error",
@@ -247,7 +240,6 @@ async def _count_tokens_impl(
     except AnthropicTranslationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    responses_payload = _apply_claude_code_overrides(payload.model, responses_payload, api_key)
     responses_payload, cache_resolution = _apply_claude_prompt_cache_policy(
         payload.model,
         payload,
@@ -282,37 +274,6 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
         yield line
 
 
-async def _enforce_request_limits(
-    api_key: ApiKeyData | None,
-    *,
-    request_model: str | None,
-) -> ApiKeyUsageReservationData | None:
-    if api_key is None:
-        return None
-
-    async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
-        try:
-            return await service.enforce_limits_for_request(
-                api_key.id,
-                request_model=request_model,
-            )
-        except ApiKeyRateLimitExceededError as exc:
-            message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
-            raise HTTPException(status_code=429, detail=message) from exc
-        except ApiKeyInvalidError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-
-
-async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -> None:
-    if reservation is None:
-        return
-
-    async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
-        await service.release_usage_reservation(reservation.reservation_id)
-
-
 def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
     if api_key is None:
         return
@@ -325,57 +286,6 @@ def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> Non
         return
 
     raise HTTPException(status_code=403, detail=f"This API key does not have access to model '{model}'")
-
-
-def _resolve_upstream_model(requested_model: str, api_key: ApiKeyData | None) -> str:
-    normalized_model = requested_model.strip()
-    if not normalized_model:
-        return requested_model
-    if not normalized_model.lower().startswith("claude-"):
-        return normalized_model
-
-    candidates = _candidate_models_for_api_key(api_key)
-    if not candidates:
-        return normalized_model
-    if normalized_model in candidates:
-        return normalized_model
-
-    for preferred in _CLAUDE_FALLBACK_MODEL_PREFERENCES:
-        if preferred in candidates:
-            logger.info("Anthropic model remapped from '%s' to '%s'", normalized_model, preferred)
-            return preferred
-
-    fallback = candidates[0]
-    logger.info("Anthropic model remapped from '%s' to '%s'", normalized_model, fallback)
-    return fallback
-
-
-def _apply_claude_code_overrides(
-    requested_model: str,
-    responses_payload: ResponsesRequest,
-    api_key: ApiKeyData | None,
-) -> ResponsesRequest:
-    normalized_model = requested_model.strip().lower()
-    if not normalized_model.startswith("claude-"):
-        resolved_model = _resolve_upstream_model(requested_model, api_key)
-        if resolved_model == responses_payload.model:
-            return responses_payload
-        return responses_payload.model_copy(update={"model": resolved_model})
-
-    forced = responses_payload.model_copy(
-        update={
-            "model": _CLAUDE_CODE_FORCED_MODEL,
-            "reasoning": ResponsesReasoning(effort=_CLAUDE_CODE_FORCED_REASONING_EFFORT),
-        }
-    )
-    forced = _strip_sampling_fields(forced, _CLAUDE_CODE_STRIPPED_SAMPLING_FIELDS)
-    forced = _promote_instructions_to_input_prefix(forced)
-    logger.info(
-        "Anthropic Claude request forced to model '%s' with reasoning effort '%s'",
-        _CLAUDE_CODE_FORCED_MODEL,
-        _CLAUDE_CODE_FORCED_REASONING_EFFORT,
-    )
-    return forced
 
 
 def _apply_claude_prompt_cache_policy(
@@ -471,55 +381,6 @@ def _normalize_tool_signature(payload: AnthropicMessagesRequest) -> list[dict[st
             }
         )
     return sorted(tools, key=lambda tool: str(tool["name"]))
-
-
-def _candidate_models_for_api_key(api_key: ApiKeyData | None) -> list[str]:
-    if api_key and api_key.allowed_models:
-        return _dedupe_preserve_order(api_key.allowed_models)
-
-    snapshot = get_model_registry().get_snapshot()
-    if snapshot is None:
-        return []
-    return sorted(snapshot.models.keys())
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for value in values:
-        normalized = value.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    return deduped
-
-
-def _strip_sampling_fields(payload: ResponsesRequest, fields: tuple[str, ...]) -> ResponsesRequest:
-    raw = payload.model_dump(mode="python", exclude_none=False)
-    for field in fields:
-        raw.pop(field, None)
-    return ResponsesRequest.model_validate(raw)
-
-
-def _promote_instructions_to_input_prefix(payload: ResponsesRequest) -> ResponsesRequest:
-    instructions = payload.instructions.strip()
-    if not instructions:
-        return payload
-
-    existing_input = payload.input
-    input_items: list[JsonValue]
-    if isinstance(existing_input, list):
-        input_items = list(existing_input)
-    else:
-        input_items = [existing_input]
-
-    prefix_message: dict[str, JsonValue] = {
-        "role": "developer",
-        "content": [{"type": "input_text", "text": instructions}],
-    }
-    updated_input: list[JsonValue] = [prefix_message, *input_items]
-    return payload.model_copy(update={"instructions": "", "input": updated_input})
 
 
 def _status_for_anthropic_error_type(error_type: str) -> int:

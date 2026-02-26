@@ -13,3 +13,9 @@
 
 - [x] 3.1 Add anthropic-compat requirement delta for stable non-explicit Claude cache keys
 - [ ] 3.2 Validate specs locally with `openspec validate --specs` (CLI `openspec` unavailable in this environment)
+
+## 4. PR Review Alignment
+
+- [x] 4.1 Remove hardcoded Claude model forcing from anthropic-compatible API transport path
+- [x] 4.2 Move API key reservation enforcement/release orchestration from API route layer into anthropic service layer
+- [x] 4.3 Remove out-of-band implementation note file (`info.md`) per review guidance

@@ -56,8 +56,12 @@ if [ -p /dev/stdin ]; then
     CODEX_ARGS+=("-")
   fi
 fi
+# Temporarily disable errexit so we can capture the exit code and surface
+# the diagnostic output instead of silently terminating.
+set +e
 OUTPUT=$(codex exec review "${CODEX_ARGS[@]}" 2>&1)
 EXIT_CODE=$?
+set -e
 
 if [ $EXIT_CODE -ne 0 ]; then
   echo "Codex review failed (exit $EXIT_CODE):"

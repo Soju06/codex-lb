@@ -29,8 +29,11 @@ def load_session_state(session_id: str) -> dict:
     hook_dir = Path(__file__).resolve().parent
     state_path = hook_dir / "state" / f"skills-used-{session_id}.json"
     if state_path.exists():
-        with open(state_path) as f:
-            return json.load(f)
+        try:
+            with open(state_path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            pass
     return {"suggestedSkills": [], "usedSkills": []}
 
 

@@ -1,0 +1,72 @@
+{
+  "version": "1.0",
+  "skills": {
+    "codex-review-loop": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Automated adversarial PR code review loop powered by Codex CLI",
+      "promptTriggers": {
+        "keywords": [
+          "codex review",
+          "codex-review-loop",
+          "adversarial review",
+          "code review loop",
+          "review PR",
+          "pr review",
+          "코드 리뷰",
+          "리뷰 루프",
+          "적대적 리뷰",
+          "deep review"
+        ],
+        "intentPatterns": [
+          "(review|check|audit).*(PR|pull request|branch|changes|code)",
+          "(codex|adversarial).*(review|check|audit)",
+          "(리뷰|검토|감사).*(PR|브랜치|변경|코드)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [],
+        "pathExclusions": [],
+        "contentPatterns": []
+      }
+    },
+    "project-conventions": {
+      "type": "domain",
+      "enforcement": "remind",
+      "priority": "high",
+      "description": "Project code conventions (typing, structure, DI, testing, anti-patterns)",
+      "promptTriggers": {
+        "keywords": [
+          "convention",
+          "컨벤션",
+          "code architecture",
+          "코드 아키텍처",
+          "coding standard"
+        ],
+        "intentPatterns": [
+          "(implement|build|create|구현|생성).*(module|feature|모듈|기능)",
+          "(convention|컨벤션|architecture|아키텍처).*(guide|reference|참조)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "**/app/modules/**/*.py",
+          "**/app/core/**/*.py",
+          "**/app/db/**/*.py",
+          "**/app/dependencies.py",
+          "**/app/main.py",
+          "**/tests/**/*.py"
+        ],
+        "pathExclusions": [
+          "**/__pycache__/**"
+        ]
+      },
+      "skipConditions": {
+        "sessionSkillUsed": true,
+        "envOverride": "SKIP_CONVENTION_GUARD"
+      },
+      "blockMessage": "BLOCKED: Run /project-conventions first.\nYou must review project conventions before editing code.\n\n→ Skill tool: 'project-conventions'\n→ Bypass: SKIP_CONVENTION_GUARD=1"
+    }
+  }
+}

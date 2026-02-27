@@ -21,6 +21,7 @@ from app.db.models import Base
 logger = logging.getLogger(__name__)
 
 _ALEMBIC_VERSION_TABLE = "alembic_version"
+_ALEMBIC_VERSION_COLUMN = "version_num"
 _LEGACY_MIGRATIONS_TABLE = "schema_migrations"
 _REQUIRED_TABLES_FOR_LEGACY_STAMP = frozenset(
     {
@@ -106,7 +107,7 @@ def _read_legacy_migration_names(connection: Connection) -> set[str]:
 
 
 def _read_current_revision_from_connection(connection: Connection) -> str | None:
-    rows = connection.execute(text(f"SELECT version_num FROM {_ALEMBIC_VERSION_TABLE}")).fetchall()
+    rows = connection.execute(text(f"SELECT {_ALEMBIC_VERSION_COLUMN} FROM {_ALEMBIC_VERSION_TABLE}")).fetchall()
     revisions = [str(row[0]) for row in rows if row and row[0]]
     if not revisions:
         return None
@@ -192,6 +193,7 @@ def _bootstrap_legacy_history(config: Config) -> LegacyBootstrapResult:
 
     target_legacy_name = LEGACY_MIGRATION_ORDER[contiguous_count - 1]
     target_revision = LEGACY_TO_REVISION[target_legacy_name]
+    _ensure_alembic_version_table_capacity(config)
     command.stamp(config, target_revision)
 
     return LegacyBootstrapResult(
@@ -218,6 +220,60 @@ def _head_revision(config: Config) -> str:
     if len(heads) == 1:
         return heads[0]
     return ",".join(heads)
+
+
+def _max_revision_id_length(config: Config) -> int:
+    script_directory = ScriptDirectory.from_config(config)
+    lengths = [len(revision.revision) for revision in script_directory.walk_revisions() if revision.revision]
+    if not lengths:
+        raise MigrationBootstrapError("No Alembic revisions found")
+    return max(lengths)
+
+
+def _ensure_alembic_version_table_capacity_for_connection(connection: Connection, *, required_length: int) -> None:
+    if connection.dialect.name != "postgresql":
+        return
+
+    inspector = inspect(connection)
+    if not inspector.has_table(_ALEMBIC_VERSION_TABLE):
+        connection.execute(
+            text(
+                " ".join(
+                    (
+                        f"CREATE TABLE {_ALEMBIC_VERSION_TABLE} (",
+                        f"{_ALEMBIC_VERSION_COLUMN} VARCHAR({required_length}) NOT NULL,",
+                        f"PRIMARY KEY ({_ALEMBIC_VERSION_COLUMN})",
+                        ")",
+                    )
+                )
+            )
+        )
+        return
+
+    columns = inspector.get_columns(_ALEMBIC_VERSION_TABLE)
+    version_num_column = next((column for column in columns if column.get("name") == _ALEMBIC_VERSION_COLUMN), None)
+    if version_num_column is None:
+        raise MigrationBootstrapError(
+            f"{_ALEMBIC_VERSION_TABLE}.{_ALEMBIC_VERSION_COLUMN} is missing from migration metadata table"
+        )
+    version_num_type = version_num_column.get("type")
+    version_num_length = getattr(version_num_type, "length", None)
+    if version_num_length is None or version_num_length >= required_length:
+        return
+
+    connection.execute(
+        text(
+            f"ALTER TABLE {_ALEMBIC_VERSION_TABLE} "
+            f"ALTER COLUMN {_ALEMBIC_VERSION_COLUMN} TYPE VARCHAR({required_length})"
+        )
+    )
+
+
+def _ensure_alembic_version_table_capacity(config: Config) -> None:
+    sync_database_url = _required_sqlalchemy_url(config)
+    required_length = _max_revision_id_length(config)
+    with create_engine(sync_database_url, future=True).begin() as connection:
+        _ensure_alembic_version_table_capacity_for_connection(connection, required_length=required_length)
 
 
 def inspect_migration_state(database_url: str) -> MigrationState:
@@ -282,6 +338,7 @@ def run_upgrade(
     if bootstrap_legacy:
         bootstrap_result = _bootstrap_legacy_history(config)
 
+    _ensure_alembic_version_table_capacity(config)
     command.upgrade(config, revision)
 
     sync_database_url = _required_sqlalchemy_url(config)
@@ -311,6 +368,7 @@ def current_revision(database_url: str) -> str | None:
 
 def stamp_revision(database_url: str, revision: str) -> None:
     config = _build_alembic_config(database_url)
+    _ensure_alembic_version_table_capacity(config)
     command.stamp(config, revision)
 
 

@@ -157,6 +157,53 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+  test-postgres:
+    name: Tests (pytest, PostgreSQL)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: codex_lb
+          POSTGRES_PASSWORD: codex_lb
+          POSTGRES_DB: codex_lb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codex_lb -d codex_lb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CODEX_LB_TEST_DATABASE_URL: postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.7"
+
+      - name: Install frontend dependencies
+        run: cd frontend && bun install --frozen-lockfile
+
+      - name: Build frontend assets
+        run: cd frontend && bun run build
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev --frozen
+
+      - name: Run tests
+        run: uv run pytest
+
   migration-check:
     name: Migration check (alembic)
     runs-on: ubuntu-24.04

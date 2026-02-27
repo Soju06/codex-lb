@@ -24,6 +24,7 @@ async def get_settings(
     return DashboardSettingsResponse(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+        routing_strategy=settings.routing_strategy,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
@@ -42,6 +43,7 @@ async def update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=payload.sticky_threads_enabled,
                 prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
+                routing_strategy=payload.routing_strategy or current.routing_strategy,
                 import_without_overwrite=(
                     payload.import_without_overwrite
                     if payload.import_without_overwrite is not None
@@ -66,6 +68,7 @@ async def update_settings(
     return DashboardSettingsResponse(
         sticky_threads_enabled=updated.sticky_threads_enabled,
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
+        routing_strategy=updated.routing_strategy,
         import_without_overwrite=updated.import_without_overwrite,
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,

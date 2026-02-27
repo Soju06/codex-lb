@@ -63,6 +63,7 @@ export function SettingsPage() {
                 void handleSave({
                   stickyThreadsEnabled: settings.stickyThreadsEnabled,
                   preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+                  routingStrategy: settings.routingStrategy,
                   importWithoutOverwrite: settings.importWithoutOverwrite,
                   totpRequiredOnLogin: settings.totpRequiredOnLogin,
                   apiKeyAuthEnabled: enabled,

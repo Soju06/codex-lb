@@ -126,7 +126,7 @@ codex
         "baseURL": "http://127.0.0.1:2455/v1"
       },
       "models": {
-        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" } }
+        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" },"options": { "reasoningEffort": "medium"} }
       }
     }
   },
@@ -152,7 +152,7 @@ If you use `enabled_providers`, include every provider you want to keep plus `co
         "apiKey": "{env:CODEX_LB_API_KEY}"   // reads from env var
       },
       "models": {
-        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" } }
+        "gpt-5.3-codex": { "name": "GPT-5.3 Codex", "reasoning": true, "interleaved": { "field": "reasoning_details" },"options": { "reasoningEffort": "medium"} }
       }
     }
   },
@@ -289,6 +289,7 @@ Authorization: Bearer sk-clb-...
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
 Dashboard auth is configured in Settings.
+SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
 
 ## Data
 
@@ -331,6 +332,8 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/azkore"><img src="https://avatars.githubusercontent.com/u/7746783?v=4?s=100" width="100px;" alt="Eugene Korekin"/><br /><sub><b>Eugene Korekin</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=azkore" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Aazkore" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=azkore" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/JordxnBN"><img src="https://avatars.githubusercontent.com/u/259802500?v=4?s=100" width="100px;" alt="jordan"/><br /><sub><b>jordan</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=JordxnBN" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AJordxnBN" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=JordxnBN" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/DOCaCola"><img src="https://avatars.githubusercontent.com/u/2077396?v=4?s=100" width="100px;" alt="DOCaCola"/><br /><sub><b>DOCaCola</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/issues?q=author%3ADOCaCola" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=DOCaCola" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=DOCaCola" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/joeblack2k"><img src="https://avatars.githubusercontent.com/u/3456102?v=4?s=100" width="100px;" alt="JoeBlack2k"/><br /><sub><b>JoeBlack2k</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=joeblack2k" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Ajoeblack2k" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=joeblack2k" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

@@ -108,6 +108,28 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "DOCaCola",
+      "name": "DOCaCola",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2077396?v=4",
+      "profile": "https://github.com/DOCaCola",
+      "contributions": [
+        "bug",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "joeblack2k",
+      "name": "JoeBlack2k",
+      "avatar_url": "https://avatars.githubusercontent.com/u/3456102?v=4",
+      "profile": "https://github.com/joeblack2k",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

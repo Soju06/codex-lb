@@ -82,21 +82,17 @@ model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
 [model_providers.codex-lb]
-name = "OpenAI"  # MUST be "OpenAI" - enables /compact endpoint
+name = "OpenAI"                                      # required — enables remote /responses/compact
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
-requires_openai_auth = true
+# requires_openai_auth — do NOT set; triggers OpenAI OAuth, wrong for a load balancer
 ```
 
-**With API key auth:**
+**With [API key auth](#api-key-authentication):**
 
 ```toml
-model = "gpt-5.3-codex"
-model_reasoning_effort = "xhigh"
-model_provider = "codex-lb"
-
 [model_providers.codex-lb]
-name = "OpenAI"  # MUST be "OpenAI" - enables /compact endpoint
+name = "OpenAI"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
@@ -105,6 +101,19 @@ env_key = "CODEX_LB_API_KEY"
 ```bash
 export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
 codex
+```
+
+**Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
+old sessions won't appear until you re-tag them:
+
+```bash
+# JSONL session files (all versions)
+find ~/.codex/sessions -name '*.jsonl' \
+  -exec sed -i '' 's/"model_provider":"openai"/"model_provider":"codex-lb"/g' {} +
+
+# SQLite state DB (>= v0.105.0, creates ~/.codex/state_*.sqlite)
+sqlite3 ~/.codex/state_5.sqlite \
+  "UPDATE threads SET model_provider = 'codex-lb' WHERE model_provider = 'openai';"
 ```
 
 </details>

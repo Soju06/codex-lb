@@ -48,6 +48,7 @@ async def test_resolve_anthropic_credentials_reads_config_file(tmp_path, monkeyp
 
     monkeypatch.delenv("CODEX_LB_ANTHROPIC_USAGE_BEARER_TOKEN", raising=False)
     monkeypatch.delenv("CODEX_LB_ANTHROPIC_ORG_ID", raising=False)
+    monkeypatch.setattr("app.core.auth.anthropic_credentials._is_linux", lambda: True)
     monkeypatch.setenv("CODEX_LB_ANTHROPIC_CREDENTIALS_DISCOVERY_ENABLED", "true")
     monkeypatch.setenv("CODEX_LB_ANTHROPIC_AUTO_DISCOVER_ORG", "false")
     monkeypatch.setenv("CODEX_LB_ANTHROPIC_CREDENTIALS_FILE", str(credentials_file))

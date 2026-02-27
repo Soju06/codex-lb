@@ -222,6 +222,57 @@ print(response.choices[0].message.content)
 
 </details>
 
+## Anthropic Messages Mode (POC)
+
+`codex-lb` serves two Anthropic-compatible routes:
+
+- `POST /claude/v1/messages` (direct OAuth-backed API proxy to `api.anthropic.com/v1/messages`)
+- `POST /claude-sdk/v1/messages` (local Claude SDK runtime via `claude-agent-sdk`)
+
+Start the server (OpenAI routes and both Anthropic routes are enabled):
+
+```bash
+uv run fastapi run app/main.py --host 0.0.0.0 --port 2455
+```
+
+Prerequisites:
+
+```bash
+claude /login
+uv sync
+```
+
+Usage windows source (Linux-only auto-discovery + optional overrides):
+
+- Set `CODEX_LB_ANTHROPIC_USAGE_REFRESH_ENABLED=true` to enable 5h/7d usage ingestion.
+- Auto-discovery from local Claude credentials (`claude login`) is enabled by default for 5h/7d usage ingestion.
+- Usage polling calls Anthropic OAuth usage API (`/api/oauth/usage`) with the configured OAuth beta header.
+- You can override usage auth explicitly with:
+
+```bash
+export CODEX_LB_ANTHROPIC_USAGE_BEARER_TOKEN="sk-ant-oat01-..."
+```
+
+Example request (API route):
+
+```bash
+curl -sS http://127.0.0.1:2455/claude/v1/messages \
+  -H 'content-type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [{"role":"user","content":"Hello"}]
+  }'
+```
+
+Notes:
+
+- `/claude/v1/messages` sends requests directly to `api.anthropic.com/v1/messages` using discovered or configured OAuth credentials.
+- `/claude-sdk/v1/messages` runs generation through the local Claude SDK runtime.
+- API compatibility for `/claude/v1/messages` includes request normalization and optional CLI header/system-prompt parity helpers.
+- OpenAI compatibility routes (`/v1/responses`, `/v1/chat/completions`) stay available in the same server instance.
+
 ## API Key Authentication
 
 API key auth is **disabled by default** — the proxy is open to any client. Enable it in **Settings → API Key Auth** on the dashboard.

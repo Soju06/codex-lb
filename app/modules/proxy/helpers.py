@@ -43,7 +43,11 @@ def _header_account_id(account_id: str | None) -> str | None:
 
 
 def _select_accounts_for_limits(accounts: Iterable[Account]) -> list[Account]:
-    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
+    return [
+        account
+        for account in accounts
+        if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED) and account.chatgpt_account_id
+    ]
 
 
 def _summarize_window(

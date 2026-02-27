@@ -18,6 +18,16 @@ class OpenAIErrorEnvelope(TypedDict):
     error: OpenAIErrorDetail
 
 
+class AnthropicErrorDetail(TypedDict):
+    type: str
+    message: str
+
+
+class AnthropicErrorEnvelope(TypedDict):
+    type: str
+    error: AnthropicErrorDetail
+
+
 class DashboardErrorDetail(TypedDict):
     code: str
     message: str
@@ -43,6 +53,10 @@ class ResponseFailedEvent(TypedDict):
 
 def openai_error(code: str, message: str, error_type: str = "server_error") -> OpenAIErrorEnvelope:
     return {"error": {"message": message, "type": error_type, "code": code}}
+
+
+def anthropic_error(error_type: str, message: str) -> AnthropicErrorEnvelope:
+    return {"type": "error", "error": {"type": error_type, "message": message}}
 
 
 def dashboard_error(code: str, message: str) -> DashboardErrorEnvelope:

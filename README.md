@@ -234,6 +234,41 @@ Authorization: Bearer sk-clb-...
 
 **Creating keys**: Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
 
+## Embeddings Upstream (OpenClaw memory / vector search)
+
+`/v1/embeddings` can be proxied to a dedicated OpenAI-compatible embeddings backend.
+
+Minimal `.env.local` example:
+
+```bash
+CODEX_LB_EMBEDDINGS_ENABLED=true
+CODEX_LB_EMBEDDINGS_UPSTREAM_URL=http://ollama-embeddings:11434/v1/embeddings
+# optional:
+# CODEX_LB_EMBEDDINGS_UPSTREAM_API_KEY=
+# CODEX_LB_EMBEDDINGS_MODEL_OVERRIDE=text-embedding-3-small
+```
+
+Docker sidecar example:
+
+```yaml
+services:
+  ollama-embeddings:
+    image: ollama/ollama:latest
+    container_name: ollama-embeddings
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    volumes:
+      - ./ollama:/root/.ollama
+```
+
+Then pull an embedding model inside that container, for example:
+
+```bash
+docker exec ollama-embeddings ollama pull nomic-embed-text
+```
+
+Important: `ollama-embeddings` must be an actual embeddings server image (`ollama/ollama` in this example). Using `ghcr.io/soju06/codex-lb` as the embeddings upstream service will not expose Ollama on `:11434`.
+
 ## Configuration
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).

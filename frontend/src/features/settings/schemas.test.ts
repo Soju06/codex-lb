@@ -10,6 +10,7 @@ describe("DashboardSettingsSchema", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
       preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
@@ -17,6 +18,7 @@ describe("DashboardSettingsSchema", () => {
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
+    expect(parsed.routingStrategy).toBe("round_robin");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
   });
@@ -27,12 +29,14 @@ describe("SettingsUpdateRequestSchema", () => {
     const parsed = SettingsUpdateRequestSchema.parse({
       stickyThreadsEnabled: false,
       preferEarlierResetAccounts: true,
+      routingStrategy: "usage_weighted",
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
     });
 
     expect(parsed.importWithoutOverwrite).toBe(true);
+    expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
   });

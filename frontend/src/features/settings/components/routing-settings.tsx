@@ -1,5 +1,12 @@
 import { Route } from "lucide-react";
 
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
@@ -14,6 +21,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
     void onSave({
       stickyThreadsEnabled: settings.stickyThreadsEnabled,
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+      routingStrategy: settings.routingStrategy,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
       ...patch,
@@ -35,6 +43,25 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
         </div>
 
         <div className="divide-y rounded-lg border">
+          <div className="flex items-center justify-between gap-4 p-3">
+            <div>
+              <p className="text-sm font-medium">Routing strategy</p>
+              <p className="text-xs text-muted-foreground">Choose usage-based balancing or strict round robin.</p>
+            </div>
+            <Select
+              value={settings.routingStrategy}
+              onValueChange={(value) => save({ routingStrategy: value as "usage_weighted" | "round_robin" })}
+            >
+              <SelectTrigger className="h-8 w-44 text-xs" disabled={busy}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="usage_weighted">Usage weighted</SelectItem>
+                <SelectItem value="round_robin">Round robin</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
           <div className="flex items-center justify-between p-3">
             <div>
               <p className="text-sm font-medium">Sticky threads</p>

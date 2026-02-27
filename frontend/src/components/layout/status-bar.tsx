@@ -6,7 +6,10 @@ import { getDashboardOverview } from "@/features/dashboard/api";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
-function getRoutingLabel(sticky: boolean, preferEarlier: boolean): string {
+function getRoutingLabel(strategy: "usage_weighted" | "round_robin", sticky: boolean, preferEarlier: boolean): string {
+  if (strategy === "round_robin") {
+    return sticky ? "Round robin + Sticky threads" : "Round robin";
+  }
   if (sticky && preferEarlier) return "Sticky + Early reset";
   if (sticky) return "Sticky threads";
   if (preferEarlier) return "Early reset preferred";
@@ -38,7 +41,7 @@ export function StatusBar() {
   }, [lastSyncAt]);
 
   const routingLabel = settings
-    ? getRoutingLabel(settings.stickyThreadsEnabled, settings.preferEarlierResetAccounts)
+    ? getRoutingLabel(settings.routingStrategy, settings.stickyThreadsEnabled, settings.preferEarlierResetAccounts)
     : "—";
 
   return (

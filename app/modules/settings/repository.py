@@ -21,6 +21,7 @@ class SettingsRepository:
             id=_SETTINGS_ID,
             sticky_threads_enabled=False,
             prefer_earlier_reset_accounts=False,
+            routing_strategy="usage_weighted",
             import_without_overwrite=False,
             totp_required_on_login=False,
             password_hash=None,
@@ -45,6 +46,7 @@ class SettingsRepository:
         *,
         sticky_threads_enabled: bool | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
+        routing_strategy: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
@@ -54,6 +56,8 @@ class SettingsRepository:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if prefer_earlier_reset_accounts is not None:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
+        if routing_strategy is not None:
+            settings.routing_strategy = routing_strategy
         if import_without_overwrite is not None:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:

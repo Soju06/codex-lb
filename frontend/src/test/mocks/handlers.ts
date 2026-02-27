@@ -56,6 +56,7 @@ const ApiKeyUpdatePayloadSchema = z.object({
 const SettingsPayloadSchema = z.object({
   stickyThreadsEnabled: z.boolean().optional(),
   preferEarlierResetAccounts: z.boolean().optional(),
+  routingStrategy: z.enum(["usage_weighted", "round_robin"]).optional(),
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),

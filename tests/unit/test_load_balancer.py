@@ -153,6 +153,29 @@ def test_select_account_skips_rate_limited_until_reset():
     assert result.account.account_id == "b"
 
 
+def test_select_account_round_robin_prefers_least_recently_selected():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.ACTIVE, used_percent=90.0, last_selected_at=now - 2),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=10.0, last_selected_at=now - 30),
+        AccountState("c", AccountStatus.ACTIVE, used_percent=5.0, last_selected_at=now - 5),
+    ]
+    result = select_account(states, now=now, routing_strategy="round_robin")
+    assert result.account is not None
+    assert result.account.account_id == "b"
+
+
+def test_select_account_round_robin_prefers_never_selected():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.ACTIVE, used_percent=1.0, last_selected_at=now - 1),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=99.0, last_selected_at=None),
+    ]
+    result = select_account(states, now=now, routing_strategy="round_robin")
+    assert result.account is not None
+    assert result.account.account_id == "b"
+
+
 def test_handle_rate_limit_sets_reset_at_from_message(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)

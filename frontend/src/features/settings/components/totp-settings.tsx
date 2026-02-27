@@ -170,6 +170,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
               void onSave({
                 stickyThreadsEnabled: settings.stickyThreadsEnabled,
                 preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+                routingStrategy: settings.routingStrategy,
                 importWithoutOverwrite: settings.importWithoutOverwrite,
                 totpRequiredOnLogin: checked,
                 apiKeyAuthEnabled: settings.apiKeyAuthEnabled,

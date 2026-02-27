@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Body, Depends, Request, Response, Security
+from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
@@ -64,6 +64,13 @@ usage_router = APIRouter(
     tags=["proxy"],
     dependencies=[Depends(validate_codex_usage_identity), Depends(set_openai_error_format)],
 )
+transcribe_router = APIRouter(
+    prefix="/backend-api",
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
+
+_TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 
 
 @router.post(
@@ -131,6 +138,46 @@ async def v1_models(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _build_models_response(api_key)
+
+
+@transcribe_router.post("/transcribe")
+async def backend_transcribe(
+    request: Request,
+    file: UploadFile = File(...),
+    prompt: str | None = Form(None),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> JSONResponse:
+    return await _transcribe_request(
+        request=request,
+        file=file,
+        prompt=prompt,
+        context=context,
+        api_key=api_key,
+    )
+
+
+@v1_router.post("/audio/transcriptions")
+async def v1_audio_transcriptions(
+    request: Request,
+    model: str = Form(...),
+    file: UploadFile = File(...),
+    prompt: str | None = Form(None),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> JSONResponse:
+    if model != _TRANSCRIPTION_MODEL:
+        return JSONResponse(
+            status_code=400,
+            content=_openai_invalid_transcription_model_error(model),
+        )
+    return await _transcribe_request(
+        request=request,
+        file=file,
+        prompt=prompt,
+        context=context,
+        api_key=api_key,
+    )
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
@@ -422,6 +469,38 @@ async def _compact_responses(
     )
 
 
+async def _transcribe_request(
+    *,
+    request: Request,
+    file: UploadFile,
+    prompt: str | None,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> JSONResponse:
+    _validate_model_access(api_key, _TRANSCRIPTION_MODEL)
+    reservation = await _enforce_request_limits(api_key, request_model=_TRANSCRIPTION_MODEL)
+    rate_limit_headers = await context.service.rate_limit_headers()
+    try:
+        audio_bytes = await file.read()
+        result = await context.service.transcribe(
+            audio_bytes=audio_bytes,
+            filename=file.filename or "audio.wav",
+            content_type=file.content_type,
+            prompt=prompt,
+            headers=request.headers,
+        )
+    except ProxyResponseError as exc:
+        error = _parse_error_envelope(exc.payload)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error.model_dump(mode="json", exclude_none=True),
+            headers=rate_limit_headers,
+        )
+    finally:
+        await _release_reservation(reservation)
+    return JSONResponse(content=result, headers=rate_limit_headers)
+
+
 @usage_router.get("/api/codex/usage", response_model=RateLimitStatusPayload)
 @usage_router.get("/api/codex/usage/", response_model=RateLimitStatusPayload, include_in_schema=False)
 async def codex_usage(
@@ -559,6 +638,16 @@ def _openai_invalid_payload_error(param: str | None = None) -> OpenAIErrorEnvelo
     error = openai_error("invalid_request_error", "Invalid request payload", error_type="invalid_request_error")
     if param:
         error["error"]["param"] = param
+    return error
+
+
+def _openai_invalid_transcription_model_error(model: str) -> OpenAIErrorEnvelope:
+    error = openai_error(
+        "invalid_request_error",
+        f"Unsupported transcription model '{model}'. Only '{_TRANSCRIPTION_MODEL}' is supported.",
+        error_type="invalid_request_error",
+    )
+    error["error"]["param"] = "model"
     return error
 
 

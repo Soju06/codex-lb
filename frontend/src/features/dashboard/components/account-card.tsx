@@ -1,15 +1,15 @@
-import { Clock, ExternalLink, Play, RotateCcw } from "lucide-react";
+import { Bot, Clock, ExternalLink, Play, RotateCcw, SquareTerminal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { cn } from "@/lib/utils";
 import type { AccountSummary } from "@/features/dashboard/schemas";
-import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   normalizeStatus,
   quotaBarColor,
   quotaBarTrack,
 } from "@/utils/account-status";
+import { isAnthropicAccountId, providerLabelForAccountId } from "@/utils/account-provider";
 import { formatPercentNullable, formatQuotaResetLabel } from "@/utils/formatters";
 
 type AccountAction = "details" | "resume" | "reauth";
@@ -65,7 +65,11 @@ function QuotaBar({
 }
 
 export function AccountCard({ account, showAccountId = false, onAction }: AccountCardProps) {
+  void showAccountId;
   const status = normalizeStatus(account.status);
+  const isAnthropic = isAnthropicAccountId(account.accountId);
+  const ProviderIcon = isAnthropic ? Bot : SquareTerminal;
+  const providerLabel = providerLabelForAccountId(account.accountId);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
   const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
@@ -74,22 +78,38 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
 
   const title = account.displayName || account.email;
-  const compactId = formatCompactAccountId(account.accountId);
   const emailSubtitle =
     account.displayName && account.displayName !== account.email
       ? account.email
       : null;
-  const heading = showAccountId && !emailSubtitle ? `${title} (${compactId})` : title;
-  const subtitle = showAccountId && emailSubtitle ? `${emailSubtitle} | ID ${compactId}` : emailSubtitle;
+  const subtitle = emailSubtitle ? `${emailSubtitle} | ${providerLabel}` : providerLabel;
 
   return (
-    <div className="card-hover rounded-xl border bg-card p-4">
+    <div
+      className={cn(
+        "card-hover rounded-xl border bg-card p-4",
+        isAnthropic && "border-amber-500/20 bg-amber-500/5",
+      )}
+    >
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold leading-tight">{heading}</p>
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
+                isAnthropic
+                  ? "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                  : "border-sky-500/35 bg-sky-500/15 text-sky-700 dark:text-sky-400",
+              )}
+              title={providerLabel}
+            >
+              <ProviderIcon className="h-3 w-3" />
+            </span>
+            <p className="truncate text-sm font-semibold leading-tight">{title}</p>
+          </div>
           {subtitle ? (
-            <p className="mt-0.5 truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">
               {subtitle}
             </p>
           ) : null}

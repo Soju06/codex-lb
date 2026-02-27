@@ -9,6 +9,7 @@ import pytest
 import app.modules.oauth.service as oauth_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.oauth import DeviceCode, OAuthTokens
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -309,6 +310,25 @@ async def test_oauth_start_with_existing_account_marks_success(async_client):
 async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 
+    settings = get_settings()
+    encryptor = TokenEncryptor()
+    placeholder = encryptor.encrypt("anthropic-provider")
+    provider_seed = Account(
+        id=settings.anthropic_default_account_id,
+        chatgpt_account_id=None,
+        email=settings.anthropic_default_account_email,
+        plan_type=settings.anthropic_default_plan_type,
+        access_token_encrypted=placeholder,
+        refresh_token_encrypted=placeholder,
+        id_token_encrypted=placeholder,
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(provider_seed)
+
     async def fake_browser_flow(self):
         raise OSError("no port")
 
@@ -329,3 +349,34 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+
+
+@pytest.mark.asyncio
+async def test_oauth_start_keeps_non_placeholder_anthropic_default_account(async_client):
+    await oauth_module._OAUTH_STORE.reset()
+
+    settings = get_settings()
+    encryptor = TokenEncryptor()
+    account = Account(
+        id=settings.anthropic_default_account_id,
+        chatgpt_account_id=None,
+        email=settings.anthropic_default_account_email,
+        plan_type=settings.anthropic_default_plan_type,
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(account)
+
+    start = await async_client.post("/api/oauth/start", json={})
+    assert start.status_code == 200
+    assert start.json()["method"] == "browser"
+
+    status = await async_client.get("/api/oauth/status")
+    assert status.status_code == 200
+    assert status.json()["status"] == "success"

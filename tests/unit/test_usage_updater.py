@@ -144,6 +144,42 @@ async def test_usage_updater_includes_chatgpt_account_id_even_when_shared(monkey
     assert [call["account_id"] for call in calls] == [shared, shared, "workspace_unique"]
 
 
+@pytest.mark.asyncio
+async def test_usage_updater_skips_anthropic_provider_accounts(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    calls: list[dict[str, Any]] = []
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        calls.append({"access_token": access_token, "account_id": account_id})
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+
+    anthropic = _make_account("anthropic_default", "anthropic_workspace", email="claude@example.com")
+    openai = _make_account("acc_openai", "workspace_openai", email="openai@example.com")
+
+    await updater.refresh_accounts([anthropic, openai], latest_usage={})
+
+    assert [call["account_id"] for call in calls] == ["workspace_openai"]
+
+
 class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []

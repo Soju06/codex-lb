@@ -1,4 +1,4 @@
-import { Inbox } from "lucide-react";
+import { Bot, Inbox, SquareTerminal } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/empty-state";
@@ -22,6 +22,8 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
+import { cn } from "@/lib/utils";
+import { isAnthropicAccountId, providerLabelForAccountId } from "@/utils/account-provider";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatCompactNumber,
@@ -98,11 +100,14 @@ export function RecentRequestsTable({
             {requests.map((request) => {
               const time = formatTimeLong(request.requestedAt);
               const accountLabel = accountLabelMap.get(request.accountId) ?? request.accountId;
+              const isAnthropic = isAnthropicAccountId(request.accountId);
+              const providerLabel = providerLabelForAccountId(request.accountId);
+              const ProviderIcon = isAnthropic ? Bot : SquareTerminal;
               const errorMessage = request.errorMessage || request.errorCode || "-";
               const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
 
               return (
-                <TableRow key={request.requestId}>
+                <TableRow key={request.requestId} className={cn(isAnthropic && "bg-amber-500/5 hover:bg-amber-500/10")}>
                   <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
                       <div className="text-sm font-medium">{time.time}</div>
@@ -110,7 +115,20 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell>
                   <TableCell className="truncate align-top text-sm">
-                    {accountLabel}
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
+                          isAnthropic
+                            ? "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                            : "border-sky-500/35 bg-sky-500/15 text-sky-700 dark:text-sky-400",
+                        )}
+                        title={providerLabel}
+                      >
+                        <ProviderIcon className="h-3 w-3" />
+                      </span>
+                      <span className="truncate">{accountLabel}</span>
+                    </div>
                   </TableCell>
                   <TableCell className="truncate align-top">
                     <span className="font-mono text-xs">

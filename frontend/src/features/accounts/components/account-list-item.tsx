@@ -1,8 +1,10 @@
+import { Bot, SquareTerminal } from "lucide-react";
+
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
-import { formatCompactAccountId } from "@/utils/account-identifiers";
+import { isAnthropicAccountId, providerLabelForAccountId } from "@/utils/account-provider";
 import { formatSlug } from "@/utils/formatters";
 
 export type AccountListItemProps = {
@@ -30,12 +32,15 @@ function MiniQuotaBar({ percent }: { percent: number | null }) {
 
 export function AccountListItem({ account, selected, showAccountId = false, onSelect }: AccountListItemProps) {
   const status = normalizeStatus(account.status);
+  const isAnthropic = isAnthropicAccountId(account.accountId);
+  const ProviderIcon = isAnthropic ? Bot : SquareTerminal;
+  const providerLabel = providerLabelForAccountId(account.accountId);
   const title = account.displayName || account.email;
   const baseSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : formatSlug(account.planType);
   const subtitle = showAccountId
-    ? `${baseSubtitle} | ID ${formatCompactAccountId(account.accountId)}`
+    ? `${baseSubtitle} | ${providerLabel}`
     : baseSubtitle;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
 
@@ -44,16 +49,30 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
       type="button"
       onClick={() => onSelect(account.accountId)}
       className={cn(
-        "w-full rounded-lg px-3 py-2.5 text-left transition-colors",
-        selected
-          ? "bg-primary/8 ring-1 ring-primary/25"
-          : "hover:bg-muted/50",
+        "w-full rounded-lg border px-3 py-2.5 text-left transition-colors",
+        isAnthropic && !selected && "border-amber-500/20 bg-amber-500/8 hover:bg-amber-500/14",
+        selected && isAnthropic && "border-amber-500/35 bg-amber-500/18 ring-1 ring-amber-500/25",
+        selected && !isAnthropic && "border-primary/20 bg-primary/8 ring-1 ring-primary/25",
+        !isAnthropic && !selected && "border-transparent hover:bg-muted/50",
       )}
     >
       <div className="flex items-center gap-2.5">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{title}</p>
-          <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
+                isAnthropic
+                  ? "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                  : "border-sky-500/35 bg-sky-500/15 text-sky-700 dark:text-sky-400",
+              )}
+              title={providerLabel}
+            >
+              <ProviderIcon className="h-3 w-3" />
+            </span>
+            <p className="min-w-0 truncate text-sm font-medium">{title}</p>
+          </div>
+          <p className="truncate text-xs text-muted-foreground">
             {subtitle}
           </p>
         </div>

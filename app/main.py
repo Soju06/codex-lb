@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from app.core.clients.anthropic_proxy import close_anthropic_client_pools
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
@@ -17,6 +18,7 @@ from app.core.openai.model_refresh_scheduler import build_model_refresh_schedule
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.anthropic import api as anthropic_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
@@ -46,6 +48,7 @@ async def lifespan(_: FastAPI):
         await model_scheduler.stop()
         await usage_scheduler.stop()
         try:
+            await close_anthropic_client_pools()
             await close_http_client()
         finally:
             await close_db()
@@ -65,6 +68,9 @@ def create_app() -> FastAPI:
 
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.v1_router)
+    app.include_router(anthropic_api.router)
+    app.include_router(anthropic_api.api_router)
+    app.include_router(anthropic_api.diagnostics_router)
     app.include_router(proxy_api.usage_router)
     app.include_router(accounts_api.router)
     app.include_router(dashboard_api.router)

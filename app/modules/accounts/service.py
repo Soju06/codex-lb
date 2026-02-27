@@ -12,6 +12,8 @@ from app.core.auth import (
     generate_unique_account_id,
     parse_auth_json,
 )
+from app.core.auth.anthropic_credentials import parse_anthropic_auth_json
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -31,6 +33,14 @@ _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
 
 class InvalidAuthJsonError(Exception):
+    pass
+
+
+class InvalidAnthropicAuthJsonError(Exception):
+    pass
+
+
+class InvalidAnthropicEmailError(Exception):
     pass
 
 
@@ -110,6 +120,61 @@ class AccountsService:
         if self._usage_repo and self._usage_updater:
             latest_usage = await self._usage_repo.latest_by_account(window="primary")
             await self._usage_updater.refresh_accounts([saved], latest_usage)
+        return AccountImportResponse(
+            account_id=saved.id,
+            email=saved.email,
+            plan_type=saved.plan_type,
+            status=saved.status,
+        )
+
+    async def import_anthropic_account(self, raw: bytes, *, email: str) -> AccountImportResponse:
+        try:
+            auth = parse_anthropic_auth_json(raw)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError) as exc:
+            raise InvalidAnthropicAuthJsonError("Invalid Anthropic credential payload") from exc
+
+        normalized_email = email.strip().lower()
+        if "@" not in normalized_email:
+            raise InvalidAnthropicEmailError("Invalid Anthropic account email")
+
+        settings = get_settings()
+        account_id = settings.anthropic_default_account_id
+        plan_type = coerce_account_plan_type(settings.anthropic_default_plan_type, DEFAULT_PLAN)
+
+        refresh_token = auth.refresh_token or ""
+        encrypted_access = self._encryptor.encrypt(auth.access_token)
+        encrypted_refresh = self._encryptor.encrypt(refresh_token)
+        encrypted_id = self._encryptor.encrypt("")
+
+        existing = await self._repo.get_by_id(account_id)
+        if existing is None:
+            account = Account(
+                id=account_id,
+                chatgpt_account_id=None,
+                email=normalized_email,
+                plan_type=plan_type,
+                access_token_encrypted=encrypted_access,
+                refresh_token_encrypted=encrypted_refresh,
+                id_token_encrypted=encrypted_id,
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+            saved = await self._repo.upsert(account, merge_by_email=False)
+        else:
+            await self._repo.update_tokens(
+                account_id=account_id,
+                access_token_encrypted=encrypted_access,
+                refresh_token_encrypted=encrypted_refresh,
+                id_token_encrypted=encrypted_id,
+                last_refresh=utcnow(),
+                plan_type=plan_type,
+                email=normalized_email,
+            )
+            await self._repo.update_status(account_id, AccountStatus.ACTIVE, None)
+            saved = await self._repo.get_by_id(account_id)
+            if saved is None:
+                raise RuntimeError("Failed to load saved Anthropic account")
         return AccountImportResponse(
             account_id=saved.id,
             email=saved.email,

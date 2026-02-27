@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Literal
-from typing import Iterable
+from typing import Iterable, Literal
 
 from app.core.balancer.types import UpstreamError
 from app.core.utils.retry import backoff_seconds, parse_retry_after

@@ -49,7 +49,7 @@ class LoadBalancer:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
         self._runtime: dict[str, RuntimeState] = {}
-        self._selection_lock = anyio.Lock()
+        self._runtime_lock = anyio.Lock()
 
     async def select_account(
         self,
@@ -64,44 +64,29 @@ class LoadBalancer:
         error_message: str | None = None
         async with self._repo_factory() as repos:
             accounts = await repos.accounts.list_accounts()
-            self._prune_runtime(accounts)
-            if model:
-                accounts = _filter_accounts_for_model(accounts, model)
-                if not accounts:
-                    return AccountSelection(
-                        account=None,
-                        error_message=f"No accounts with a plan supporting model '{model}'",
-                    )
-            latest_primary = await repos.usage.latest_by_account()
-            updater = UsageUpdater(repos.usage, repos.accounts)
-            refreshed = await updater.refresh_accounts(accounts, latest_primary)
-            if refreshed:
+            async with self._runtime_lock:
+                self._prune_runtime(accounts)
+                if model:
+                    accounts = _filter_accounts_for_model(accounts, model)
+                    if not accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=f"No accounts with a plan supporting model '{model}'",
+                        )
                 latest_primary = await repos.usage.latest_by_account()
-            latest_secondary = await repos.usage.latest_by_account(window="secondary")
+                updater = UsageUpdater(repos.usage, repos.accounts)
+                refreshed = await updater.refresh_accounts(accounts, latest_primary)
+                if refreshed:
+                    latest_primary = await repos.usage.latest_by_account()
+                latest_secondary = await repos.usage.latest_by_account(window="secondary")
 
-            states, account_map = _build_states(
-                accounts=accounts,
-                latest_primary=latest_primary,
-                latest_secondary=latest_secondary,
-                runtime=self._runtime,
-            )
+                states, account_map = _build_states(
+                    accounts=accounts,
+                    latest_primary=latest_primary,
+                    latest_secondary=latest_secondary,
+                    runtime=self._runtime,
+                )
 
-            if routing_strategy == "round_robin":
-                async with self._selection_lock:
-                    self._refresh_last_selected(states)
-                    result = await self._select_with_stickiness(
-                        states=states,
-                        account_map=account_map,
-                        sticky_key=sticky_key,
-                        reallocate_sticky=reallocate_sticky,
-                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-                        routing_strategy=routing_strategy,
-                        sticky_repo=repos.sticky_sessions,
-                    )
-                    if result.account is not None:
-                        runtime = self._runtime.setdefault(result.account.account_id, RuntimeState())
-                        runtime.last_selected_at = time.time()
-            else:
                 result = await self._select_with_stickiness(
                     states=states,
                     account_map=account_map,
@@ -111,21 +96,25 @@ class LoadBalancer:
                     routing_strategy=routing_strategy,
                     sticky_repo=repos.sticky_sessions,
                 )
-            for state in states:
-                account = account_map.get(state.account_id)
-                if account:
-                    await self._sync_state(repos.accounts, account, state)
+                if result.account is not None:
+                    runtime = self._runtime.setdefault(result.account.account_id, RuntimeState())
+                    runtime.last_selected_at = time.time()
 
-            if result.account is None:
-                error_message = result.error_message
-            else:
-                selected = account_map.get(result.account.account_id)
-                if selected is None:
+                for state in states:
+                    account = account_map.get(state.account_id)
+                    if account:
+                        await self._sync_state(repos.accounts, account, state)
+
+                if result.account is None:
                     error_message = result.error_message
                 else:
-                    selected.status = result.account.status
-                    selected.deactivation_reason = result.account.deactivation_reason
-                    selected_snapshot = _clone_account(selected)
+                    selected = account_map.get(result.account.account_id)
+                    if selected is None:
+                        error_message = result.error_message
+                    else:
+                        selected.status = result.account.status
+                        selected.deactivation_reason = result.account.deactivation_reason
+                        selected_snapshot = _clone_account(selected)
 
         if selected_snapshot is None:
             logger.warning(
@@ -153,11 +142,6 @@ class LoadBalancer:
         stale_ids = [account_id for account_id in self._runtime if account_id not in account_ids]
         for account_id in stale_ids:
             self._runtime.pop(account_id, None)
-
-    def _refresh_last_selected(self, states: Iterable[AccountState]) -> None:
-        for state in states:
-            runtime = self._runtime.setdefault(state.account_id, RuntimeState())
-            state.last_selected_at = runtime.last_selected_at
 
     async def _select_with_stickiness(
         self,
@@ -211,29 +195,33 @@ class LoadBalancer:
         return chosen
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
-        state = self._state_for(account)
-        handle_rate_limit(state, error)
-        async with self._repo_factory() as repos:
-            await self._sync_state(repos.accounts, account, state)
+        async with self._runtime_lock:
+            state = self._state_for(account)
+            handle_rate_limit(state, error)
+            async with self._repo_factory() as repos:
+                await self._sync_state(repos.accounts, account, state)
 
     async def mark_quota_exceeded(self, account: Account, error: UpstreamError) -> None:
-        state = self._state_for(account)
-        handle_quota_exceeded(state, error)
-        async with self._repo_factory() as repos:
-            await self._sync_state(repos.accounts, account, state)
+        async with self._runtime_lock:
+            state = self._state_for(account)
+            handle_quota_exceeded(state, error)
+            async with self._repo_factory() as repos:
+                await self._sync_state(repos.accounts, account, state)
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
-        state = self._state_for(account)
-        handle_permanent_failure(state, error_code)
-        async with self._repo_factory() as repos:
-            await self._sync_state(repos.accounts, account, state)
+        async with self._runtime_lock:
+            state = self._state_for(account)
+            handle_permanent_failure(state, error_code)
+            async with self._repo_factory() as repos:
+                await self._sync_state(repos.accounts, account, state)
 
     async def record_error(self, account: Account) -> None:
-        state = self._state_for(account)
-        state.error_count += 1
-        state.last_error_at = time.time()
-        async with self._repo_factory() as repos:
-            await self._sync_state(repos.accounts, account, state)
+        async with self._runtime_lock:
+            state = self._state_for(account)
+            state.error_count += 1
+            state.last_error_at = time.time()
+            async with self._repo_factory() as repos:
+                await self._sync_state(repos.accounts, account, state)
 
     def _state_for(self, account: Account) -> AccountState:
         runtime = self._runtime.setdefault(account.id, RuntimeState())

@@ -62,9 +62,9 @@ class LoadBalancer:
     ) -> AccountSelection:
         selected_snapshot: Account | None = None
         error_message: str | None = None
-        async with self._repo_factory() as repos:
-            accounts = await repos.accounts.list_accounts()
-            async with self._runtime_lock:
+        async with self._runtime_lock:
+            async with self._repo_factory() as repos:
+                accounts = await repos.accounts.list_accounts()
                 self._prune_runtime(accounts)
                 if model:
                     accounts = _filter_accounts_for_model(accounts, model)

@@ -56,7 +56,7 @@ def test_stream_accumulator_collects_usage_and_terminal() -> None:
 
     usage = accumulator.to_usage()
     assert accumulator.status == "success"
-    assert usage.input_tokens == 12
+    assert usage.input_tokens == 15
     assert usage.output_tokens == 8
     assert usage.cached_input_tokens == 3
 
@@ -84,6 +84,23 @@ def test_usage_from_message_payload_normalizes_cached_over_input() -> None:
     assert usage.input_tokens == 16028
     assert usage.output_tokens == 51
     assert usage.cached_input_tokens == 16018
+
+
+def test_usage_from_message_payload_includes_cache_creation_tokens() -> None:
+    usage = _usage_from_message_payload(
+        {
+            "usage": {
+                "input_tokens": 11,
+                "cache_creation_input_tokens": 7,
+                "cache_read_input_tokens": 3,
+                "output_tokens": 2,
+            }
+        }
+    )
+
+    assert usage.input_tokens == 21
+    assert usage.output_tokens == 2
+    assert usage.cached_input_tokens == 3
 
 
 @pytest.mark.asyncio

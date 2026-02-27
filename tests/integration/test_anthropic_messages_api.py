@@ -23,7 +23,12 @@ async def test_anthropic_messages_non_stream_success(async_client, monkeypatch):
             "id": "msg_1",
             "type": "message",
             "model": "claude-sonnet-4-20250514",
-            "usage": {"input_tokens": 12, "output_tokens": 5, "cache_read_input_tokens": 2},
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 4,
+                "cache_read_input_tokens": 2,
+            },
             "content": [{"type": "text", "text": "ok"}],
         }
 
@@ -49,7 +54,7 @@ async def test_anthropic_messages_non_stream_success(async_client, monkeypatch):
 
     assert log.status == "success"
     assert log.model == "claude-sonnet-4-20250514"
-    assert log.input_tokens == 12
+    assert log.input_tokens == 18
     assert log.output_tokens == 5
     assert log.cached_input_tokens == 2
 
@@ -60,7 +65,7 @@ async def test_anthropic_messages_stream_success(async_client, monkeypatch):
         yield (
             "event: message_start\n"
             'data: {"type":"message_start","message":{"model":"claude-sonnet-4-20250514",'
-            '"usage":{"input_tokens":10,"cache_read_input_tokens":1}}}\n\n'
+            '"usage":{"input_tokens":10,"cache_creation_input_tokens":2,"cache_read_input_tokens":1}}}\n\n'
         )
         yield 'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n'
         yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
@@ -90,7 +95,7 @@ async def test_anthropic_messages_stream_success(async_client, monkeypatch):
         log = result.scalar_one()
 
     assert log.status == "success"
-    assert log.input_tokens == 10
+    assert log.input_tokens == 13
     assert log.output_tokens == 7
     assert log.cached_input_tokens == 1
 
@@ -134,7 +139,12 @@ async def test_anthropic_api_messages_non_stream_success(async_client, monkeypat
             "id": "msg_api_1",
             "type": "message",
             "model": "claude-sonnet-4-20250514",
-            "usage": {"input_tokens": 8, "output_tokens": 3, "cache_read_input_tokens": 0},
+            "usage": {
+                "input_tokens": 8,
+                "output_tokens": 3,
+                "cache_creation_input_tokens": 6,
+                "cache_read_input_tokens": 0,
+            },
             "content": [{"type": "text", "text": "ok api"}],
         }
 
@@ -162,7 +172,7 @@ async def test_anthropic_api_messages_non_stream_success(async_client, monkeypat
 
     assert log.status == "success"
     assert log.model == "claude-sonnet-4-20250514"
-    assert log.input_tokens == 8
+    assert log.input_tokens == 14
     assert log.output_tokens == 3
 
 
@@ -172,7 +182,7 @@ async def test_anthropic_api_messages_stream_success(async_client, monkeypatch):
         yield (
             "event: message_start\n"
             'data: {"type":"message_start","message":{"model":"claude-sonnet-4-20250514",'
-            '"usage":{"input_tokens":3,"cache_read_input_tokens":0}}}\n\n'
+            '"usage":{"input_tokens":3,"cache_creation_input_tokens":1,"cache_read_input_tokens":0}}}\n\n'
         )
         yield 'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":2}}\n\n'
         yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
@@ -202,7 +212,7 @@ async def test_anthropic_api_messages_stream_success(async_client, monkeypatch):
         log = result.scalar_one()
 
     assert log.status == "success"
-    assert log.input_tokens == 3
+    assert log.input_tokens == 4
     assert log.output_tokens == 2
 
 

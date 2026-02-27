@@ -376,12 +376,17 @@ class _StreamAccumulator:
         if usage is None:
             return
         input_tokens = _as_int(usage.get("input_tokens"))
+        cache_creation_input_tokens = _as_int(usage.get("cache_creation_input_tokens"))
         output_tokens = _as_int(usage.get("output_tokens"))
         cached_input_tokens = _as_int(usage.get("cache_read_input_tokens"))
-        normalized_input_tokens = _normalize_input_tokens_for_log(input_tokens, cached_input_tokens)
+        total_input_tokens = _total_input_tokens_for_log(
+            input_tokens,
+            cache_creation_input_tokens,
+            cached_input_tokens,
+        )
 
-        if normalized_input_tokens is not None:
-            self.input_tokens = normalized_input_tokens
+        if total_input_tokens is not None:
+            self.input_tokens = total_input_tokens
         if output_tokens is not None:
             self.output_tokens = output_tokens
         if cached_input_tokens is not None:
@@ -407,9 +412,14 @@ def _usage_from_message_payload(payload: dict[str, JsonValue]) -> AnthropicReque
     if not isinstance(usage, dict):
         return AnthropicRequestUsage(input_tokens=None, output_tokens=None, cached_input_tokens=None)
     input_tokens = _as_int(usage.get("input_tokens"))
+    cache_creation_input_tokens = _as_int(usage.get("cache_creation_input_tokens"))
     cached_input_tokens = _as_int(usage.get("cache_read_input_tokens"))
     return AnthropicRequestUsage(
-        input_tokens=_normalize_input_tokens_for_log(input_tokens, cached_input_tokens),
+        input_tokens=_total_input_tokens_for_log(
+            input_tokens,
+            cache_creation_input_tokens,
+            cached_input_tokens,
+        ),
         output_tokens=_as_int(usage.get("output_tokens")),
         cached_input_tokens=cached_input_tokens,
     )
@@ -458,14 +468,14 @@ def _as_int(value: object) -> int | None:
     return None
 
 
-def _normalize_input_tokens_for_log(input_tokens: int | None, cached_input_tokens: int | None) -> int | None:
-    if input_tokens is None:
+def _total_input_tokens_for_log(
+    input_tokens: int | None,
+    cache_creation_input_tokens: int | None,
+    cache_read_input_tokens: int | None,
+) -> int | None:
+    if input_tokens is None and cache_creation_input_tokens is None and cache_read_input_tokens is None:
         return None
-    if cached_input_tokens is None:
-        return input_tokens
-    if cached_input_tokens > input_tokens:
-        return input_tokens + cached_input_tokens
-    return input_tokens
+    return (input_tokens or 0) + (cache_creation_input_tokens or 0) + (cache_read_input_tokens or 0)
 
 
 async def _create_message_with_transport(

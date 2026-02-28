@@ -1,7 +1,7 @@
 """add api_key_limits table and migrate legacy weekly limits
 
-Revision ID: 009_add_api_key_limits
-Revises: 008_add_api_keys
+Revision ID: 20260214_000000_add_api_key_limits
+Revises: 20260213_000800_add_api_keys
 Create Date: 2026-02-14
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "009_add_api_key_limits"
-down_revision = "008_add_api_keys"
+revision = "20260214_000000_add_api_key_limits"
+down_revision = "20260213_000800_add_api_keys"
 branch_labels = None
 depends_on = None
 

@@ -1,8 +1,8 @@
 """add api_firewall_allowlist table
 
-Revision ID: 014_add_api_firewall_allowlist
-Revises: 013_add_dashboard_settings_routing_strategy
-Create Date: 2026-02-18
+Revision ID: 20260228_030000_add_api_firewall_allowlist
+Revises: 20260228_020000_align_api_key_limit_enum_types
+Create Date: 2026-02-28
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "014_add_api_firewall_allowlist"
-down_revision = "013_add_dashboard_settings_routing_strategy"
+revision = "20260228_030000_add_api_firewall_allowlist"
+down_revision = "20260228_020000_align_api_key_limit_enum_types"
 branch_labels = None
 depends_on = None
 

@@ -1,7 +1,7 @@
 """add api_key_usage_reservations and reservation_items tables
 
-Revision ID: 011_add_api_key_usage_reservations
-Revises: 010_add_idx_logs_requested_at
+Revision ID: 20260218_000000_add_api_key_usage_reservations
+Revises: 20260215_000000_add_idx_logs_requested_at
 Create Date: 2026-02-18
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "011_add_api_key_usage_reservations"
-down_revision = "010_add_idx_logs_requested_at"
+revision = "20260218_000000_add_api_key_usage_reservations"
+down_revision = "20260215_000000_add_idx_logs_requested_at"
 branch_labels = None
 depends_on = None
 

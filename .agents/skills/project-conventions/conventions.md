@@ -151,3 +151,11 @@ class FeatureResponse(BaseModel):
     name: str
     created_at: datetime
 ```
+
+## 7. DB Migration Governance
+
+- Alembic revision IDs must match `^\d{8}_\d{6}_[a-z0-9_]+$` and migration filenames must be `<revision>.py`.
+- Never edit or reorder an already merged migration file. Add a new forward-only migration to correct behavior.
+- If multiple heads are created in parallel branches, add an explicit Alembic merge revision before merge/release so CI sees a single head.
+- Keep `alembic_version` compatibility during cutovers by remapping legacy revision IDs through application migration tooling; do not patch production tables by hand unless a runbook explicitly requires it.
+- Local verification order for migration changes is: `codex-lb-db upgrade head` -> `codex-lb-db check` -> relevant `pytest` suites.

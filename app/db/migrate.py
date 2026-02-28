@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection
 
 from app.core.config.settings import get_settings
+from app.db.alembic.revision_ids import LEGACY_MIGRATION_TO_NEW_REVISION, OLD_TO_NEW_REVISION_MAP, REVISION_ID_PATTERN
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
 
@@ -46,7 +47,9 @@ LEGACY_MIGRATION_ORDER: tuple[str, ...] = (
     "010_add_idx_logs_requested_at",
 )
 
-LEGACY_TO_REVISION: dict[str, str] = {migration_name: migration_name for migration_name in LEGACY_MIGRATION_ORDER}
+LEGACY_TO_REVISION: dict[str, str] = {
+    migration_name: LEGACY_MIGRATION_TO_NEW_REVISION[migration_name] for migration_name in LEGACY_MIGRATION_ORDER
+}
 
 
 @dataclass(frozen=True)
@@ -106,9 +109,14 @@ def _read_legacy_migration_names(connection: Connection) -> set[str]:
     return names
 
 
-def _read_current_revision_from_connection(connection: Connection) -> str | None:
+def _read_current_revisions_from_connection(connection: Connection) -> tuple[str, ...]:
     rows = connection.execute(text(f"SELECT {_ALEMBIC_VERSION_COLUMN} FROM {_ALEMBIC_VERSION_TABLE}")).fetchall()
-    revisions = [str(row[0]) for row in rows if row and row[0]]
+    revisions = {str(row[0]) for row in rows if row and row[0]}
+    return tuple(sorted(revisions))
+
+
+def _read_current_revision_from_connection(connection: Connection) -> str | None:
+    revisions = list(_read_current_revisions_from_connection(connection))
     if not revisions:
         return None
     if len(revisions) == 1:
@@ -222,6 +230,11 @@ def _head_revision(config: Config) -> str:
     return ",".join(heads)
 
 
+def _known_revisions(config: Config) -> set[str]:
+    script_directory = ScriptDirectory.from_config(config)
+    return {revision.revision for revision in script_directory.walk_revisions() if revision.revision}
+
+
 def _max_revision_id_length(config: Config) -> int:
     script_directory = ScriptDirectory.from_config(config)
     lengths = [len(revision.revision) for revision in script_directory.walk_revisions() if revision.revision]
@@ -276,6 +289,94 @@ def _ensure_alembic_version_table_capacity(config: Config) -> None:
         _ensure_alembic_version_table_capacity_for_connection(connection, required_length=required_length)
 
 
+def _collect_migration_policy_violations(config: Config) -> tuple[str, ...]:
+    violations: list[str] = []
+    script_directory = ScriptDirectory.from_config(config)
+
+    heads = sorted(script_directory.get_heads())
+    if len(heads) != 1:
+        violations.append(f"alembic_head_count_invalid expected=1 actual={len(heads)} heads={','.join(heads)}")
+
+    seen_revision_ids: set[str] = set()
+    for revision in script_directory.walk_revisions():
+        revision_id = revision.revision
+        if not revision_id:
+            continue
+
+        if revision_id in seen_revision_ids:
+            violations.append(f"alembic_revision_duplicate revision={revision_id}")
+        else:
+            seen_revision_ids.add(revision_id)
+
+        if not REVISION_ID_PATTERN.fullmatch(revision_id):
+            violations.append(f"alembic_revision_id_format_invalid revision={revision_id}")
+
+        revision_path = getattr(revision, "path", None)
+        if revision_path:
+            actual_name = Path(str(revision_path)).name
+            expected_name = f"{revision_id}.py"
+            if actual_name != expected_name:
+                violations.append(
+                    "alembic_revision_filename_mismatch "
+                    f"revision={revision_id} expected={expected_name} actual={actual_name}"
+                )
+
+    return tuple(sorted(violations))
+
+
+def check_migration_policy(database_url: str) -> tuple[str, ...]:
+    config = _build_alembic_config(database_url)
+    return _collect_migration_policy_violations(config)
+
+
+def _remap_legacy_alembic_revisions(config: Config) -> tuple[str, ...]:
+    sync_database_url = _required_sqlalchemy_url(config)
+    known_revisions = _known_revisions(config)
+
+    with create_engine(sync_database_url, future=True).begin() as connection:
+        tables = _read_table_names(connection)
+        if _ALEMBIC_VERSION_TABLE not in tables:
+            return ()
+
+        current_revisions = _read_current_revisions_from_connection(connection)
+        if not current_revisions:
+            return ()
+
+        unsupported = tuple(
+            sorted(
+                revision
+                for revision in current_revisions
+                if revision not in known_revisions and revision not in OLD_TO_NEW_REVISION_MAP
+            )
+        )
+        if unsupported:
+            raise MigrationBootstrapError(
+                "Unsupported alembic_version revision ids detected; manual intervention required "
+                f"unsupported={','.join(unsupported)}"
+            )
+
+        remapped = tuple(sorted({OLD_TO_NEW_REVISION_MAP.get(revision, revision) for revision in current_revisions}))
+        if remapped == current_revisions:
+            return ()
+
+        connection.execute(text(f"DELETE FROM {_ALEMBIC_VERSION_TABLE}"))
+        for revision in remapped:
+            connection.execute(
+                text(
+                    f"INSERT INTO {_ALEMBIC_VERSION_TABLE} ({_ALEMBIC_VERSION_COLUMN}) "
+                    f"VALUES (:{_ALEMBIC_VERSION_COLUMN})"
+                ),
+                {_ALEMBIC_VERSION_COLUMN: revision},
+            )
+
+    logger.info(
+        "Remapped legacy alembic revision ids old=%s new=%s",
+        current_revisions,
+        remapped,
+    )
+    return current_revisions
+
+
 def inspect_migration_state(database_url: str) -> MigrationState:
     config = _build_alembic_config(database_url)
     sync_database_url = _required_sqlalchemy_url(config)
@@ -325,6 +426,7 @@ def run_upgrade(
     revision: str = "head",
     *,
     bootstrap_legacy: bool,
+    auto_remap_legacy_revisions: bool = True,
 ) -> MigrationRunResult:
     config = _build_alembic_config(database_url)
 
@@ -339,6 +441,8 @@ def run_upgrade(
         bootstrap_result = _bootstrap_legacy_history(config)
 
     _ensure_alembic_version_table_capacity(config)
+    if auto_remap_legacy_revisions:
+        _remap_legacy_alembic_revisions(config)
     command.upgrade(config, revision)
 
     sync_database_url = _required_sqlalchemy_url(config)
@@ -356,8 +460,14 @@ def run_upgrade(
 
 
 async def run_startup_migrations(database_url: str) -> MigrationRunResult:
+    auto_remap = get_settings().database_alembic_auto_remap_enabled
     return await to_thread.run_sync(
-        lambda: run_upgrade(database_url, "head", bootstrap_legacy=True),
+        lambda: run_upgrade(
+            database_url,
+            "head",
+            bootstrap_legacy=True,
+            auto_remap_legacy_revisions=auto_remap,
+        ),
     )
 
 
@@ -389,10 +499,15 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable automatic legacy schema_migrations bootstrap before upgrade.",
     )
+    upgrade_parser.add_argument(
+        "--no-auto-remap-legacy-revisions",
+        action="store_true",
+        help="Disable automatic remap of legacy Alembic revision IDs.",
+    )
 
     subparsers.add_parser("current", help="Print current alembic revision.")
 
-    subparsers.add_parser("check", help="Check model/schema drift against current database schema.")
+    subparsers.add_parser("check", help="Check Alembic policy and model/schema drift.")
 
     stamp_parser = subparsers.add_parser("stamp", help="Set current revision without running migrations.")
     stamp_parser.add_argument("revision")
@@ -409,6 +524,7 @@ def main() -> None:
             database_url,
             args.revision,
             bootstrap_legacy=not bool(args.no_bootstrap_legacy),
+            auto_remap_legacy_revisions=not bool(args.no_auto_remap_legacy_revisions),
         )
         print(f"current_revision={result.current_revision or 'none'}")
         if result.bootstrap.stamped_revision:
@@ -421,12 +537,19 @@ def main() -> None:
         return
 
     if args.command == "check":
+        policy_violations = check_migration_policy(database_url)
+        if policy_violations:
+            print("migration_policy_violations_detected")
+            for violation in policy_violations:
+                print(violation)
         drift = check_schema_drift(database_url)
         if drift:
             print("schema_drift_detected")
             for diff in drift:
                 print(diff)
+        if policy_violations or drift:
             raise SystemExit(1)
+        print("migration_policy=ok")
         print("schema_drift=none")
         return
 

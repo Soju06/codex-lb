@@ -1,7 +1,7 @@
-"""add password fields to dashboard_settings
+"""add totp fields to dashboard_settings
 
-Revision ID: 007_add_dashboard_settings_password
-Revises: 006_add_dashboard_settings_totp
+Revision ID: 20260213_000600_add_dashboard_settings_totp
+Revises: 20260213_000500_add_dashboard_settings
 Create Date: 2026-02-13
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "007_add_dashboard_settings_password"
-down_revision = "006_add_dashboard_settings_totp"
+revision = "20260213_000600_add_dashboard_settings_totp"
+down_revision = "20260213_000500_add_dashboard_settings"
 branch_labels = None
 depends_on = None
 
@@ -32,18 +32,21 @@ def upgrade() -> None:
         return
 
     with op.batch_alter_table("dashboard_settings") as batch_op:
-        if "password_hash" not in columns:
-            batch_op.add_column(sa.Column("password_hash", sa.Text(), nullable=True))
-
-        if "api_key_auth_enabled" not in columns:
+        if "totp_required_on_login" not in columns:
             batch_op.add_column(
                 sa.Column(
-                    "api_key_auth_enabled",
+                    "totp_required_on_login",
                     sa.Boolean(),
                     nullable=False,
                     server_default=sa.false(),
                 )
             )
+
+        if "totp_secret_encrypted" not in columns:
+            batch_op.add_column(sa.Column("totp_secret_encrypted", sa.LargeBinary(), nullable=True))
+
+        if "totp_last_verified_step" not in columns:
+            batch_op.add_column(sa.Column("totp_last_verified_step", sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:
@@ -53,7 +56,9 @@ def downgrade() -> None:
         return
 
     with op.batch_alter_table("dashboard_settings") as batch_op:
-        if "api_key_auth_enabled" in columns:
-            batch_op.drop_column("api_key_auth_enabled")
-        if "password_hash" in columns:
-            batch_op.drop_column("password_hash")
+        if "totp_last_verified_step" in columns:
+            batch_op.drop_column("totp_last_verified_step")
+        if "totp_secret_encrypted" in columns:
+            batch_op.drop_column("totp_secret_encrypted")
+        if "totp_required_on_login" in columns:
+            batch_op.drop_column("totp_required_on_login")

@@ -1,7 +1,7 @@
 """add api_keys table and request_logs.api_key_id
 
-Revision ID: 008_add_api_keys
-Revises: 007_add_dashboard_settings_password
+Revision ID: 20260213_000800_add_api_keys
+Revises: 20260213_000700_add_dashboard_settings_password
 Create Date: 2026-02-13
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "008_add_api_keys"
-down_revision = "007_add_dashboard_settings_password"
+revision = "20260213_000800_add_api_keys"
+down_revision = "20260213_000700_add_dashboard_settings_password"
 branch_labels = None
 depends_on = None
 

@@ -25,9 +25,9 @@ describe("api keys flow integration", () => {
     window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
-    expect(await screen.findByText("API Keys", {}, { timeout: 5000 })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Create key" }));
+    const createButton = await screen.findByRole("button", { name: "Create key" });
+    expect(createButton).toBeInTheDocument();
+    await user.click(createButton);
     await user.type(screen.getByLabelText("Name"), createdName);
     await user.click(screen.getByRole("button", { name: "Create" }));
 

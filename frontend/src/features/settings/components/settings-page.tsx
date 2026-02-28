@@ -1,9 +1,10 @@
-import { lazy } from "react";
+import { Suspense, lazy } from "react";
 import { Settings } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
+import { FirewallSection } from "@/features/firewall/components/firewall-section";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
@@ -36,7 +37,7 @@ export function SettingsPage() {
           <Settings className="h-5 w-5 text-primary" />
           Settings
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">Configure routing, auth, and API key management.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Configure routing, auth, API key management, and firewall.</p>
       </div>
 
       {!settings ? (
@@ -54,7 +55,9 @@ export function SettingsPage() {
             />
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
-            <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+            <Suspense fallback={null}>
+              <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+            </Suspense>
 
             <ApiKeysSection
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
@@ -70,6 +73,7 @@ export function SettingsPage() {
                 })
               }
             />
+            <FirewallSection />
           </div>
 
           <LoadingOverlay visible={!!settings && busy} label="Saving settings..." />

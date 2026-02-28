@@ -21,6 +21,7 @@ OLD_TO_NEW_REVISION_MAP: dict[str, str] = {
         "20260218_000100_add_import_without_overwrite_and_drop_accounts_email_unique"
     ),
     "013_add_dashboard_settings_routing_strategy": "20260225_000000_add_dashboard_settings_routing_strategy",
+    "014_add_api_firewall_allowlist": "20260228_030000_add_api_firewall_allowlist",
 }
 
 NEW_TO_OLD_REVISION_MAP: dict[str, str] = {new: old for old, new in OLD_TO_NEW_REVISION_MAP.items()}

@@ -50,8 +50,6 @@ def _account_status_enum() -> sa.Enum:
 def upgrade() -> None:
     bind = op.get_bind()
     account_status = _account_status_enum()
-    if bind.dialect.name == "postgresql":
-        account_status.create(bind, checkfirst=True)
 
     if not _table_exists(bind, "accounts"):
         op.create_table(

@@ -97,7 +97,8 @@ def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
     db_path = tmp_path / "remap.db"
     url = _db_url(db_path)
 
-    run_upgrade(url, "head", bootstrap_legacy=False)
+    initial = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert initial.current_revision is not None
 
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).begin() as connection:
@@ -107,7 +108,7 @@ def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
         )
 
     result = run_upgrade(url, "head", bootstrap_legacy=False)
-    assert result.current_revision == OLD_TO_NEW_REVISION_MAP["013_add_dashboard_settings_routing_strategy"]
+    assert result.current_revision == initial.current_revision
 
 
 def test_run_upgrade_without_auto_remap_fails_for_legacy_revision_ids(tmp_path: Path) -> None:

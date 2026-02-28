@@ -1,7 +1,7 @@
 """seed dashboard_settings singleton row
 
-Revision ID: 005_add_dashboard_settings
-Revises: 004_add_accounts_chatgpt_account_id
+Revision ID: 20260213_000500_add_dashboard_settings
+Revises: 20260213_000400_add_accounts_chatgpt_account_id
 Create Date: 2026-02-13
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "005_add_dashboard_settings"
-down_revision = "004_add_accounts_chatgpt_account_id"
+revision = "20260213_000500_add_dashboard_settings"
+down_revision = "20260213_000400_add_accounts_chatgpt_account_id"
 branch_labels = None
 depends_on = None
 

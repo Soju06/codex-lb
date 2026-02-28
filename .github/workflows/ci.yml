@@ -221,14 +221,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev --frozen
 
-      - name: Validate migration drift
+      - name: Validate migration policy and drift
         shell: bash
         run: |
           set -euo pipefail
           TMP_DB="$(mktemp -u /tmp/codex-lb-ci-migrate-XXXXXX.db)"
           DB_URL="sqlite+aiosqlite:///${TMP_DB}"
-          uv run python -m app.db.migrate --db-url "${DB_URL}" upgrade head
-          uv run python -m app.db.migrate --db-url "${DB_URL}" check
+          uv run codex-lb-db --db-url "${DB_URL}" upgrade head
+          uv run codex-lb-db --db-url "${DB_URL}" check
 
   package:
     name: Package (build)

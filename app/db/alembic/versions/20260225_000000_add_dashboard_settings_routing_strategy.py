@@ -1,7 +1,7 @@
 """add dashboard_settings.routing_strategy
 
-Revision ID: 013_add_dashboard_settings_routing_strategy
-Revises: 012_add_import_without_overwrite_and_drop_accounts_email_unique
+Revision ID: 20260225_000000_add_dashboard_settings_routing_strategy
+Revises: 20260218_000100_add_import_without_overwrite_and_drop_accounts_email_unique
 Create Date: 2026-02-25
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "013_add_dashboard_settings_routing_strategy"
-down_revision = "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+revision = "20260225_000000_add_dashboard_settings_routing_strategy"
+down_revision = "20260218_000100_add_import_without_overwrite_and_drop_accounts_email_unique"
 branch_labels = None
 depends_on = None
 

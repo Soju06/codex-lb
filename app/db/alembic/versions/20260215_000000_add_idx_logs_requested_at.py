@@ -1,7 +1,7 @@
 """add index on request_logs.requested_at
 
-Revision ID: 010_add_idx_logs_requested_at
-Revises: 009_add_api_key_limits
+Revision ID: 20260215_000000_add_idx_logs_requested_at
+Revises: 20260214_000000_add_api_key_limits
 Create Date: 2026-02-15
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "010_add_idx_logs_requested_at"
-down_revision = "009_add_api_key_limits"
+revision = "20260215_000000_add_idx_logs_requested_at"
+down_revision = "20260214_000000_add_api_key_limits"
 branch_labels = None
 depends_on = None
 

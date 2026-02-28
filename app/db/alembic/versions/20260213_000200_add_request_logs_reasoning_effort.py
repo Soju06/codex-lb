@@ -1,7 +1,7 @@
 """add reasoning_effort to request_logs
 
-Revision ID: 002_add_request_logs_reasoning_effort
-Revises: 001_normalize_account_plan_types
+Revision ID: 20260213_000200_add_request_logs_reasoning_effort
+Revises: 20260213_000100_normalize_account_plan_types
 Create Date: 2026-02-13
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "002_add_request_logs_reasoning_effort"
-down_revision = "001_normalize_account_plan_types"
+revision = "20260213_000200_add_request_logs_reasoning_effort"
+down_revision = "20260213_000100_normalize_account_plan_types"
 branch_labels = None
 depends_on = None
 

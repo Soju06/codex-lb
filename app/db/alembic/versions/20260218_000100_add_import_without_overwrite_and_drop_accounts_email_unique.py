@@ -1,7 +1,7 @@
 """add import_without_overwrite and drop accounts.email unique constraint
 
-Revision ID: 012_add_import_without_overwrite_and_drop_accounts_email_unique
-Revises: 011_add_api_key_usage_reservations
+Revision ID: 20260218_000100_add_import_without_overwrite_and_drop_accounts_email_unique
+Revises: 20260218_000000_add_api_key_usage_reservations
 Create Date: 2026-02-18
 """
 
@@ -14,8 +14,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "012_add_import_without_overwrite_and_drop_accounts_email_unique"
-down_revision = "011_add_api_key_usage_reservations"
+revision = "20260218_000100_add_import_without_overwrite_and_drop_accounts_email_unique"
+down_revision = "20260218_000000_add_api_key_usage_reservations"
 branch_labels = None
 depends_on = None
 

@@ -257,6 +257,7 @@ export function createDashboardSettings(overrides: Partial<DashboardSettings> = 
   return DashboardSettingsSchema.parse({
     stickyThreadsEnabled: true,
     preferEarlierResetAccounts: false,
+    routingStrategy: "usage_weighted",
     importWithoutOverwrite: false,
     totpRequiredOnLogin: false,
     totpConfigured: true,

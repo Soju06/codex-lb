@@ -63,7 +63,9 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/44970486?v=4",
       "profile": "https://github.com/pcy06",
       "contributions": [
-        "doc"
+        "doc",
+        "code",
+        "test"
       ]
     },
     {
@@ -117,6 +119,26 @@
       "contributions": [
         "bug",
         "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "joeblack2k",
+      "name": "JoeBlack2k",
+      "avatar_url": "https://avatars.githubusercontent.com/u/3456102?v=4",
+      "profile": "https://github.com/joeblack2k",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
+    },
+    {
+      "login": "ink-splatters",
+      "name": "Peter A.",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2706884?v=4",
+      "profile": "https://github.com/ink-splatters",
+      "contributions": [
         "doc"
       ]
     }

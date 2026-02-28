@@ -44,4 +44,4 @@ certs/
 
 .specstory/
 
-.agents/hooks/state
+.agents/hooks/state/

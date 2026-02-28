@@ -326,6 +326,10 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
 
         async with session_factory() as session:
             await session.execute(text("PRAGMA foreign_keys=ON"))
+            routing_strategy = (
+                await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
+            ).scalar_one()
+            assert routing_strategy == "usage_weighted"
             index_rows = (await session.execute(text("PRAGMA index_list(accounts)"))).fetchall()
             has_email_non_unique_index = False
             for row in index_rows:

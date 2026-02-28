@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal
 
 from app.core.balancer.types import UpstreamError
 from app.core.utils.retry import backoff_seconds, parse_retry_after
@@ -18,6 +18,7 @@ PERMANENT_FAILURE_CODES = {
 
 SECONDS_PER_DAY = 60 * 60 * 24
 UNKNOWN_RESET_BUCKET_DAYS = 10_000
+RoutingStrategy = Literal["usage_weighted", "round_robin"]
 
 
 @dataclass
@@ -46,6 +47,7 @@ def select_account(
     now: float | None = None,
     *,
     prefer_earlier_reset: bool = False,
+    routing_strategy: RoutingStrategy = "usage_weighted",
 ) -> SelectionResult:
     current = now or time.time()
     available: list[AccountState] = []
@@ -121,7 +123,14 @@ def select_account(
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
 
-    selected = min(available, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
+    def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
+        # Pick the least recently selected account, then stabilize by account_id.
+        return state.last_selected_at or 0.0, state.account_id
+
+    if routing_strategy == "round_robin":
+        selected = min(available, key=_round_robin_sort_key)
+    else:
+        selected = min(available, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)
 
 

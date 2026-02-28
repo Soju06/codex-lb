@@ -9,6 +9,7 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.proxy.response_context_repository import ResponseContextRepository
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.model_overrides.repository import ModelOverridesRepository
 from app.modules.usage.repository import UsageRepository
 
 
@@ -20,6 +21,7 @@ class ProxyRepositories:
     sticky_sessions: StickySessionsRepository
     api_keys: ApiKeysRepository
     response_context: ResponseContextRepository
+    model_overrides: ModelOverridesRepository
 
 
 ProxyRepoFactory = Callable[[], AsyncContextManager[ProxyRepositories]]

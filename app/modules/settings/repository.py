@@ -22,6 +22,9 @@ class SettingsRepository:
             sticky_threads_enabled=False,
             prefer_earlier_reset_accounts=False,
             routing_strategy="usage_weighted",
+            global_model_force_enabled=False,
+            global_model_force_model=None,
+            global_model_force_reasoning_effort=None,
             import_without_overwrite=False,
             totp_required_on_login=False,
             password_hash=None,
@@ -47,6 +50,9 @@ class SettingsRepository:
         sticky_threads_enabled: bool | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
         routing_strategy: str | None = None,
+        global_model_force_enabled: bool | None = None,
+        global_model_force_model: str | None = None,
+        global_model_force_reasoning_effort: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
@@ -58,6 +64,12 @@ class SettingsRepository:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
         if routing_strategy is not None:
             settings.routing_strategy = routing_strategy
+        if global_model_force_enabled is not None:
+            settings.global_model_force_enabled = global_model_force_enabled
+        if global_model_force_model is not None:
+            settings.global_model_force_model = global_model_force_model
+        if global_model_force_reasoning_effort is not None:
+            settings.global_model_force_reasoning_effort = global_model_force_reasoning_effort
         if import_without_overwrite is not None:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:

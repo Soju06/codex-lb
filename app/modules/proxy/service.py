@@ -34,6 +34,7 @@ from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import Account, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
+from app.modules.model_overrides.service import ModelOverrideMatch, ModelOverridesService, RequestActorContext
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
@@ -63,6 +64,15 @@ _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.ref
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 
 
+@dataclass(slots=True)
+class RequestActorLogData:
+    client_ip: str | None
+    client_app: str | None
+    api_key: str | None
+    requested_model: str
+    override_id: int | None = None
+
+
 class ProxyService:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
@@ -78,6 +88,7 @@ class ProxyService:
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
+        actor_log: RequestActorLogData | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         _maybe_log_proxy_request_shape("stream", payload, headers)
@@ -89,6 +100,7 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
+            actor_log=actor_log,
         )
 
     async def compact_responses(
@@ -98,6 +110,7 @@ class ProxyService:
         *,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
+        actor_log: RequestActorLogData | None = None,
     ) -> OpenAIResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
@@ -324,6 +337,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
+        actor_log: RequestActorLogData | None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         dashboard_settings = await get_settings_cache().get()
@@ -393,6 +407,7 @@ class ProxyService:
                         store_policy=store_policy,
                         settlement=settlement,
                         suppress_text_done_events=suppress_text_done_events,
+                        actor_log=actor_log,
                     ):
                         yield line
                     settled = await self._settle_stream_api_key_usage(
@@ -512,6 +527,7 @@ class ProxyService:
         store_policy: _StorePolicy,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
+        actor_log: RequestActorLogData | None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -664,6 +680,11 @@ class ProxyService:
                             api_key_id=api_key.id if api_key else None,
                             request_id=request_id,
                             model=model,
+                            requested_model=(actor_log.requested_model if actor_log else model),
+                            client_ip=(actor_log.client_ip if actor_log else None),
+                            client_app=(actor_log.client_app if actor_log else None),
+                            auth_key_fingerprint=(actor_log.api_key if actor_log else None),
+                            override_id=(actor_log.override_id if actor_log else None),
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=cached_input_tokens,
@@ -681,6 +702,12 @@ class ProxyService:
                         request_id,
                         exc_info=True,
                     )
+
+
+    async def resolve_model_override(self, actor: RequestActorContext) -> ModelOverrideMatch | None:
+        async with self._repo_factory() as repos:
+            service = ModelOverridesService(repos.model_overrides)
+            return await service.resolve(actor)
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
         latest_usage = await repos.usage.latest_by_account(window="primary")

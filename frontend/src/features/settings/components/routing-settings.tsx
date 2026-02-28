@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Route } from "lucide-react";
 
 import {
@@ -8,6 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { useModels } from "@/features/api-keys/hooks/use-models";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
 export type RoutingSettingsProps = {
@@ -16,16 +18,42 @@ export type RoutingSettingsProps = {
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
 
+const FORCE_REASONING_OPTIONS = [
+  { value: "low", label: "low" },
+  { value: "normal", label: "normal" },
+  { value: "high", label: "high" },
+  { value: "xhigh", label: "xhigh" },
+] as const;
+
 export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
+  const { data: models = [], isLoading: modelsLoading } = useModels();
+
+  const modelOptions = useMemo(() => {
+    const byId = new Map(models.map((item) => [item.id, item]));
+    if (settings.globalModelForceModel && !byId.has(settings.globalModelForceModel)) {
+      byId.set(settings.globalModelForceModel, {
+        id: settings.globalModelForceModel,
+        name: settings.globalModelForceModel,
+      });
+    }
+    return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+  }, [models, settings.globalModelForceModel]);
+
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave({
       stickyThreadsEnabled: settings.stickyThreadsEnabled,
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
       routingStrategy: settings.routingStrategy,
+      globalModelForceEnabled: settings.globalModelForceEnabled,
+      globalModelForceModel: settings.globalModelForceModel,
+      globalModelForceReasoningEffort: settings.globalModelForceReasoningEffort,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
       ...patch,
     });
+
+  const forceModelValue = settings.globalModelForceModel ?? "";
+  const forceEffortValue = (settings.globalModelForceReasoningEffort === "medium" ? "normal" : settings.globalModelForceReasoningEffort) ?? "normal";
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -60,6 +88,75 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="space-y-3 p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium">Force all requests</p>
+                <p className="text-xs text-muted-foreground">Ignore per-app rules and route everything to one model.</p>
+              </div>
+              <Switch
+                checked={settings.globalModelForceEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) => {
+                  if (!checked) {
+                    save({ globalModelForceEnabled: false });
+                    return;
+                  }
+                  const fallbackModel = forceModelValue || modelOptions[0]?.id || "gpt-5.3-codex";
+                  save({
+                    globalModelForceEnabled: true,
+                    globalModelForceModel: fallbackModel,
+                    globalModelForceReasoningEffort: forceEffortValue,
+                  });
+                }}
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">Forced model</p>
+                <Select
+                  value={forceModelValue}
+                  onValueChange={(value) => save({ globalModelForceModel: value })}
+                  disabled={busy || !settings.globalModelForceEnabled || modelOptions.length === 0 || modelsLoading}
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder={modelsLoading ? "Loading models..." : "Select model"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {modelOptions.map((model) => (
+                      <SelectItem key={model.id} value={model.id}>
+                        {model.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">Reasoning effort</p>
+                <Select
+                  value={forceEffortValue}
+                  onValueChange={(value) =>
+                    save({ globalModelForceReasoningEffort: value as "low" | "normal" | "high" | "xhigh" })
+                  }
+                  disabled={busy || !settings.globalModelForceEnabled}
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {FORCE_REASONING_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
           </div>
 
           <div className="flex items-center justify-between p-3">

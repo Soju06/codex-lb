@@ -4,14 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from fastapi import Depends, Request
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
-from app.modules.anthropic.repository import AnthropicRepository
-from app.modules.anthropic.service import AnthropicService
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
 from app.modules.dashboard.repository import DashboardRepository
@@ -19,9 +17,11 @@ from app.modules.dashboard.service import DashboardService
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_auth.service import DashboardAuthService, get_dashboard_session_store
 from app.modules.oauth.service import OauthService
+from app.modules.model_overrides.repository import ModelOverridesRepository
+from app.modules.model_overrides.service import ModelOverridesService
 from app.modules.proxy.repo_bundle import ProxyRepositories
-from app.modules.proxy.response_context_repository import ResponseContextRepository
 from app.modules.proxy.service import ProxyService
+from app.modules.proxy.response_context_repository import ResponseContextRepository
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
@@ -63,11 +63,6 @@ class ProxyContext:
 
 
 @dataclass(slots=True)
-class AnthropicContext:
-    service: AnthropicService
-
-
-@dataclass(slots=True)
 class ApiKeysContext:
     session: AsyncSession
     repository: ApiKeysRepository
@@ -93,6 +88,13 @@ class DashboardContext:
     session: AsyncSession
     repository: DashboardRepository
     service: DashboardService
+
+
+@dataclass(slots=True)
+class ModelOverridesContext:
+    session: AsyncSession
+    repository: ModelOverridesRepository
+    service: ModelOverridesService
 
 
 def get_accounts_context(
@@ -142,6 +144,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
             response_context=ResponseContextRepository(session),
+            model_overrides=ModelOverridesRepository(session),
         )
 
 
@@ -160,20 +163,13 @@ def get_dashboard_auth_context(
     return DashboardAuthContext(session=session, repository=repository, service=service)
 
 
-def get_proxy_context(request: Request) -> ProxyContext:
-    service = getattr(request.app.state, "proxy_service", None)
-    if not isinstance(service, ProxyService):
-        service = ProxyService(repo_factory=_proxy_repo_context)
-        request.app.state.proxy_service = service
-    return ProxyContext(service=service)
+_proxy_service_singleton: ProxyService | None = None
 
-
-def get_anthropic_context(
-    session: AsyncSession = Depends(get_session),
-) -> AnthropicContext:
-    repository = AnthropicRepository(session)
-    service = AnthropicService(repository)
-    return AnthropicContext(service=service)
+def get_proxy_context() -> ProxyContext:
+    global _proxy_service_singleton
+    if _proxy_service_singleton is None:
+        _proxy_service_singleton = ProxyService(repo_factory=_proxy_repo_context)
+    return ProxyContext(service=_proxy_service_singleton)
 
 
 def get_api_keys_context(
@@ -206,3 +202,11 @@ def get_dashboard_context(
     repository = DashboardRepository(session)
     service = DashboardService(repository)
     return DashboardContext(session=session, repository=repository, service=service)
+
+
+def get_model_overrides_context(
+    session: AsyncSession = Depends(get_session),
+) -> ModelOverridesContext:
+    repository = ModelOverridesRepository(session)
+    service = ModelOverridesService(repository)
+    return ModelOverridesContext(session=session, repository=repository, service=service)

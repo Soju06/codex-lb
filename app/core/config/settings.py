@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    embeddings_enabled: bool = False
+    embeddings_upstream_url: str = ""
+    embeddings_upstream_api_key: str | None = None
+    embeddings_upstream_timeout_seconds: float = 30.0
+    embeddings_model_override: str | None = None
     response_context_ttl_seconds: int = Field(default=6 * 60 * 60, gt=0)
     response_context_max_responses: int = Field(default=1024, gt=0)
     response_context_max_items: int = Field(default=4096, gt=0)

@@ -4,6 +4,7 @@ import { Settings } from "lucide-react";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
+import { ModelOverridesSettings } from "@/features/model-overrides/components/model-overrides-settings";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
@@ -55,6 +56,7 @@ export function SettingsPage() {
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
             <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+            <ModelOverridesSettings />
 
             <ApiKeysSection
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}

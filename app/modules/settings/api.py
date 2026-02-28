@@ -25,6 +25,9 @@ async def get_settings(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
         routing_strategy=settings.routing_strategy,
+        global_model_force_enabled=settings.global_model_force_enabled,
+        global_model_force_model=settings.global_model_force_model,
+        global_model_force_reasoning_effort=settings.global_model_force_reasoning_effort,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
@@ -44,6 +47,21 @@ async def update_settings(
                 sticky_threads_enabled=payload.sticky_threads_enabled,
                 prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
+                global_model_force_enabled=(
+                    payload.global_model_force_enabled
+                    if payload.global_model_force_enabled is not None
+                    else current.global_model_force_enabled
+                ),
+                global_model_force_model=(
+                    payload.global_model_force_model
+                    if payload.global_model_force_model is not None
+                    else current.global_model_force_model
+                ),
+                global_model_force_reasoning_effort=(
+                    payload.global_model_force_reasoning_effort
+                    if payload.global_model_force_reasoning_effort is not None
+                    else current.global_model_force_reasoning_effort
+                ),
                 import_without_overwrite=(
                     payload.import_without_overwrite
                     if payload.import_without_overwrite is not None
@@ -62,13 +80,16 @@ async def update_settings(
             )
         )
     except ValueError as exc:
-        raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
+        raise DashboardBadRequestError(str(exc), code="invalid_settings") from exc
 
     await get_settings_cache().invalidate()
     return DashboardSettingsResponse(
         sticky_threads_enabled=updated.sticky_threads_enabled,
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
         routing_strategy=updated.routing_strategy,
+        global_model_force_enabled=updated.global_model_force_enabled,
+        global_model_force_model=updated.global_model_force_model,
+        global_model_force_reasoning_effort=updated.global_model_force_reasoning_effort,
         import_without_overwrite=updated.import_without_overwrite,
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,

@@ -85,7 +85,6 @@ model_provider = "codex-lb"
 name = "OpenAI"                                      # required — enables remote /responses/compact
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
-# requires_openai_auth — do NOT set; triggers OpenAI OAuth, wrong for a load balancer
 ```
 
 **With [API key auth](#api-key-authentication):**

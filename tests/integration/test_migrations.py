@@ -8,13 +8,27 @@ from app.core.auth import DEFAULT_PLAN
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.migrate import LEGACY_MIGRATION_ORDER, run_startup_migrations
+from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
+from app.db.migrate import (
+    LEGACY_MIGRATION_ORDER,
+    check_migration_policy,
+    check_schema_drift,
+    inspect_migration_state,
+    run_startup_migrations,
+)
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.integration
 _DATABASE_URL = get_settings().database_url
+_HEAD_REVISION = inspect_migration_state(_DATABASE_URL).head_revision
+_STAMPED_AFTER_LEGACY_PREFIX_4 = OLD_TO_NEW_REVISION_MAP["004_add_accounts_chatgpt_account_id"]
+_STAMPED_AFTER_LEGACY_PREFIX_1 = OLD_TO_NEW_REVISION_MAP["001_normalize_account_plan_types"]
+
+
+def _is_postgresql_database_url(url: str) -> bool:
+    return url.startswith("postgresql+")
 
 
 def _make_account(account_id: str, email: str, plan_type: str) -> Account:
@@ -41,7 +55,7 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
         await repo.upsert(_make_account("acc_three", "three@example.com", ""))
 
     result = await run_startup_migrations(_DATABASE_URL)
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.current_revision == _HEAD_REVISION
     assert result.bootstrap.stamped_revision is None
 
     async with SessionLocal() as session:
@@ -56,7 +70,7 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
         assert acc_three.plan_type == DEFAULT_PLAN
 
     rerun = await run_startup_migrations(_DATABASE_URL)
-    assert rerun.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert rerun.current_revision == _HEAD_REVISION
 
 
 @pytest.mark.asyncio
@@ -81,13 +95,13 @@ async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
 
     result = await run_startup_migrations(_DATABASE_URL)
 
-    assert result.bootstrap.stamped_revision == "004_add_accounts_chatgpt_account_id"
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.bootstrap.stamped_revision == _STAMPED_AFTER_LEGACY_PREFIX_4
+    assert result.current_revision == _HEAD_REVISION
 
     async with SessionLocal() as session:
         revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
         revisions = [str(row[0]) for row in revision_rows.fetchall()]
-        assert revisions == ["013_add_dashboard_settings_routing_strategy"]
+        assert revisions == [_HEAD_REVISION]
 
 
 @pytest.mark.asyncio
@@ -114,7 +128,7 @@ async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_mi
     result = await run_startup_migrations(_DATABASE_URL)
 
     assert result.bootstrap.stamped_revision is None
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.current_revision == _HEAD_REVISION
 
     async with SessionLocal() as session:
         setting_id = await session.execute(text("SELECT id FROM dashboard_settings WHERE id = 1"))
@@ -146,9 +160,88 @@ async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
 
     result = await run_startup_migrations(_DATABASE_URL)
 
-    assert result.bootstrap.stamped_revision == "001_normalize_account_plan_types"
+    assert result.bootstrap.stamped_revision == _STAMPED_AFTER_LEGACY_PREFIX_1
     assert result.bootstrap.unknown_migrations == ("900_custom_hotfix",)
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.current_revision == _HEAD_REVISION
+
+
+@pytest.mark.asyncio
+async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db_setup):
+    await run_startup_migrations(_DATABASE_URL)
+
+    legacy_head = "013_add_dashboard_settings_routing_strategy"
+    async with SessionLocal() as session:
+        await session.execute(text("UPDATE alembic_version SET version_num = :legacy"), {"legacy": legacy_head})
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
+        revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
+        assert revisions == [_HEAD_REVISION]
+
+
+@pytest.mark.asyncio
+async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_alembic_id_together(db_setup):
+    await run_startup_migrations(_DATABASE_URL)
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+        for index, migration_name in enumerate(LEGACY_MIGRATION_ORDER[:3]):
+            await session.execute(
+                text("INSERT INTO schema_migrations (name, applied_at) VALUES (:name, :applied_at)"),
+                {"name": migration_name, "applied_at": f"2026-02-13T00:00:0{index}Z"},
+            )
+        await session.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "013_add_dashboard_settings_routing_strategy"},
+        )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.bootstrap.stamped_revision is None
+    assert result.current_revision == _HEAD_REVISION
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _is_postgresql_database_url(_DATABASE_URL), reason="PostgreSQL-only migration contract test")
+async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    assert check_migration_policy(_DATABASE_URL) == ()
+    assert check_schema_drift(_DATABASE_URL) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _is_postgresql_database_url(_DATABASE_URL), reason="PostgreSQL-only migration remap test")
+async def test_postgresql_startup_migration_auto_remap_legacy_head(db_setup):
+    await run_startup_migrations(_DATABASE_URL)
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "013_add_dashboard_settings_routing_strategy"},
+        )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        version_num = (await session.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))).scalar_one()
+        assert str(version_num) == _HEAD_REVISION
 
 
 @pytest.mark.asyncio
@@ -314,7 +407,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.commit()
 
         result = await run_startup_migrations(db_url)
-        assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+        assert result.current_revision == _HEAD_REVISION
 
         async with session_factory() as session:
             await session.execute(text("PRAGMA foreign_keys=ON"))

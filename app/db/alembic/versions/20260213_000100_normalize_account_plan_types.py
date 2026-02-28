@@ -1,7 +1,7 @@
 """normalize account plan types
 
-Revision ID: 001_normalize_account_plan_types
-Revises: 000_base_schema
+Revision ID: 20260213_000100_normalize_account_plan_types
+Revises: 20260213_000000_base_schema
 Create Date: 2026-02-13
 """
 
@@ -14,8 +14,8 @@ from app.core.auth import DEFAULT_PLAN
 from app.core.plan_types import coerce_account_plan_type
 
 # revision identifiers, used by Alembic.
-revision = "001_normalize_account_plan_types"
-down_revision = "000_base_schema"
+revision = "20260213_000100_normalize_account_plan_types"
+down_revision = "20260213_000000_base_schema"
 branch_labels = None
 depends_on = None
 

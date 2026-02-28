@@ -1,6 +1,6 @@
 """create base schema
 
-Revision ID: 000_base_schema
+Revision ID: 20260213_000000_base_schema
 Revises:
 Create Date: 2026-02-13
 """
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "000_base_schema"
+revision = "20260213_000000_base_schema"
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -50,8 +50,6 @@ def _account_status_enum() -> sa.Enum:
 def upgrade() -> None:
     bind = op.get_bind()
     account_status = _account_status_enum()
-    if bind.dialect.name == "postgresql":
-        account_status.create(bind, checkfirst=True)
 
     if not _table_exists(bind, "accounts"):
         op.create_table(

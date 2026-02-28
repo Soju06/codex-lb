@@ -4,13 +4,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from alembic.util.exc import CommandError
 from sqlalchemy import create_engine, text
 
+from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
 from app.db.migrate import (
+    MigrationBootstrapError,
     _build_alembic_config,
+    _collect_migration_policy_violations,
     _ensure_alembic_version_table_capacity_for_connection,
     _max_revision_id_length,
+    check_migration_policy,
     check_schema_drift,
     inspect_migration_state,
     run_upgrade,
@@ -45,6 +51,17 @@ def test_inspect_migration_state_no_upgrade_after_head(tmp_path: Path) -> None:
     assert state.has_alembic_version_table is True
 
 
+def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None:
+    """Prisma-style contract: migrated schema must match ORM metadata and policy."""
+    db_path = tmp_path / "contract.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    assert check_migration_policy(url) == ()
+    assert check_schema_drift(url) == ()
+
+
 def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "base.db"
     url = _db_url(db_path)
@@ -54,8 +71,9 @@ def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(Base.metadata, "create_all", _raise_create_all)
 
-    result = run_upgrade(url, "000_base_schema", bootstrap_legacy=False)
-    assert result.current_revision == "000_base_schema"
+    base_revision = OLD_TO_NEW_REVISION_MAP["000_base_schema"]
+    result = run_upgrade(url, base_revision, bootstrap_legacy=False)
+    assert result.current_revision == base_revision
 
 
 def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
@@ -73,6 +91,84 @@ def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
     drift = check_schema_drift(url)
     assert drift
     assert any("rogue_table" in diff for diff in drift)
+
+
+def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "remap.db"
+    url = _db_url(db_path)
+
+    initial = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert initial.current_revision is not None
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "013_add_dashboard_settings_routing_strategy"},
+        )
+
+    result = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert result.current_revision == initial.current_revision
+
+
+def test_run_upgrade_without_auto_remap_fails_for_legacy_revision_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "no-remap.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "013_add_dashboard_settings_routing_strategy"},
+        )
+
+    with pytest.raises(CommandError, match="Can't locate revision identified by"):
+        run_upgrade(url, "head", bootstrap_legacy=False, auto_remap_legacy_revisions=False)
+
+
+def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "unsupported.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(text("UPDATE alembic_version SET version_num = 'legacy_custom_999'"))
+
+    with pytest.raises(MigrationBootstrapError, match="Unsupported alembic_version revision ids"):
+        run_upgrade(url, "head", bootstrap_legacy=False)
+
+
+def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:
+    class _FakeRevision:
+        def __init__(self, revision: str, path: str) -> None:
+            self.revision = revision
+            self.path = path
+
+    class _FakeScriptDirectory:
+        def get_heads(self) -> list[str]:
+            return ["head_a", "head_b"]
+
+        def walk_revisions(self) -> list[_FakeRevision]:
+            return [
+                _FakeRevision("invalid-revision-id", "/tmp/not-matching-name.py"),
+            ]
+
+    fake_script_dir = _FakeScriptDirectory()
+    monkeypatch.setattr("app.db.migrate.ScriptDirectory.from_config", lambda _: fake_script_dir)
+
+    config = _build_alembic_config(_db_url(tmp_path / "policy.db"))
+    violations = _collect_migration_policy_violations(config)
+
+    assert any("alembic_head_count_invalid" in violation for violation in violations)
+    assert any("alembic_revision_id_format_invalid" in violation for violation in violations)
+    assert any("alembic_revision_filename_mismatch" in violation for violation in violations)
+
+    wrapper_violations = check_migration_policy(_db_url(tmp_path / "policy-wrapper.db"))
+    assert wrapper_violations == violations
 
 
 def test_create_sqlite_pre_migration_backup_rotates_old_files(tmp_path: Path) -> None:

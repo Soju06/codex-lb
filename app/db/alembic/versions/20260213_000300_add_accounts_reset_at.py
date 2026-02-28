@@ -1,7 +1,7 @@
-"""add chatgpt_account_id to accounts
+"""add reset_at to accounts
 
-Revision ID: 004_add_accounts_chatgpt_account_id
-Revises: 003_add_accounts_reset_at
+Revision ID: 20260213_000300_add_accounts_reset_at
+Revises: 20260213_000200_add_request_logs_reasoning_effort
 Create Date: 2026-02-13
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "004_add_accounts_chatgpt_account_id"
-down_revision = "003_add_accounts_reset_at"
+revision = "20260213_000300_add_accounts_reset_at"
+down_revision = "20260213_000200_add_request_logs_reasoning_effort"
 branch_labels = None
 depends_on = None
 
@@ -28,18 +28,18 @@ def _columns(connection: Connection, table_name: str) -> set[str]:
 def upgrade() -> None:
     bind = op.get_bind()
     columns = _columns(bind, "accounts")
-    if not columns or "chatgpt_account_id" in columns:
+    if not columns or "reset_at" in columns:
         return
 
     with op.batch_alter_table("accounts") as batch_op:
-        batch_op.add_column(sa.Column("chatgpt_account_id", sa.String(), nullable=True))
+        batch_op.add_column(sa.Column("reset_at", sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     columns = _columns(bind, "accounts")
-    if "chatgpt_account_id" not in columns:
+    if "reset_at" not in columns:
         return
 
     with op.batch_alter_table("accounts") as batch_op:
-        batch_op.drop_column("chatgpt_account_id")
+        batch_op.drop_column("reset_at")

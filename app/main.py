@@ -3,8 +3,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse
 
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings_cache import get_settings_cache
@@ -28,6 +28,38 @@ from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.usage import api as usage_api
+
+
+_ROOT_LANDING_HTML = """<!doctype html>
+<html lang=\"en\">
+  <head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+    <title>codex-lb</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: #0b1020; color: #dbe2f0; }
+      main { max-width: 760px; margin: 8vh auto; padding: 0 24px; }
+      h1 { margin: 0 0 12px; font-size: 30px; }
+      p { margin: 8px 0; color: #9fb0cc; line-height: 1.5; }
+      ul { margin-top: 16px; }
+      a { color: #7fb4ff; }
+      code { background: #131b2f; border: 1px solid #25304c; border-radius: 6px; padding: 1px 6px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>codex-lb endpoint online</h1>
+      <p>This root page is intentionally minimal for desktop custom deployment clients.</p>
+      <ul>
+        <li>Dashboard: <a href=\"/dashboard\">/dashboard</a></li>
+        <li>Health: <a href=\"/health\">/health</a></li>
+        <li>Docs: <a href=\"/docs\">/docs</a></li>
+      </ul>
+    </main>
+  </body>
+</html>
+"""
 
 
 @asynccontextmanager
@@ -94,8 +126,11 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     @app.get("/{path:path}", include_in_schema=False)
-    async def spa_fallback(path: str = ""):
+    async def spa_fallback(request: Request, path: str = ""):
         normalized = path.lstrip("/")
+        if not normalized:
+            return HTMLResponse(_ROOT_LANDING_HTML, media_type="text/html")
+
         if normalized and any(
             normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in excluded_prefixes
         ):

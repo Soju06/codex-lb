@@ -1,17 +1,16 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import App from "@/App";
 import { renderWithProviders } from "@/test/utils";
 import { server } from "@/test/mocks/server";
 
 describe("firewall flow integration", () => {
-  it("loads firewall page and performs add/remove", async () => {
+  it("loads firewall section in settings and performs add/remove", async () => {
     const user = userEvent.setup({ delay: null });
     const entries: Array<{ ipAddress: string; createdAt: string }> = [];
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     server.use(
       http.get("/api/dashboard-auth/session", () =>
@@ -45,22 +44,28 @@ describe("firewall flow integration", () => {
       }),
     );
 
-    window.history.pushState({}, "", "/firewall");
+    window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Firewall" })).toBeInTheDocument();
+    const firewallHeading = await screen.findByRole("heading", { name: "Firewall" });
+    expect(firewallHeading).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText("127.0.0.1 or 2001:db8::1"), "127.0.0.1");
-    await user.click(screen.getByRole("button", { name: "Add IP" }));
+    // Scope queries to the firewall section
+    const firewallSection = firewallHeading.closest("section")!;
+    const fw = within(firewallSection);
 
-    expect(await screen.findByText("127.0.0.1")).toBeInTheDocument();
+    await user.type(fw.getByPlaceholderText("127.0.0.1 or 2001:db8::1"), "127.0.0.1");
+    await user.click(fw.getByRole("button", { name: "Add IP" }));
 
-    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(await fw.findByText("127.0.0.1")).toBeInTheDocument();
+
+    await user.click(fw.getByRole("button", { name: "Remove" }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
 
     await waitFor(() => {
       expect(screen.queryByText("127.0.0.1")).not.toBeInTheDocument();
     });
-
-    confirmSpy.mockRestore();
   });
 });

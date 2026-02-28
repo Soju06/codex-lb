@@ -8,7 +8,6 @@ import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
-import { FirewallPage } from "@/features/firewall/components/firewall-page";
 import { SettingsPage } from "@/features/settings/components/settings-page";
 
 function AppLayout() {
@@ -42,7 +41,7 @@ export default function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<FirewallPage />} />
+            <Route path="/firewall" element={<Navigate to="/settings" replace />} />
           </Route>
         </Routes>
       </AuthGate>

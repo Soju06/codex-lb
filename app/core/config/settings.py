@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    response_context_ttl_seconds: int = Field(default=6 * 60 * 60, gt=0)
+    response_context_max_responses: int = Field(default=1024, gt=0)
+    response_context_max_items: int = Field(default=4096, gt=0)
+    response_context_enable_durable: bool = True
+    response_context_global_fallback_enabled: bool = False
+    response_context_cleanup_enabled: bool = True
+    response_context_cleanup_interval_seconds: int = Field(default=300, gt=0)
 
     @field_validator("database_url")
     @classmethod

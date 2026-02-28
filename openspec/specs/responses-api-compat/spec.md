@@ -5,7 +5,7 @@
 Ensure `/v1/responses` behavior matches OpenAI Responses API expectations for request validation, streaming events, and error envelopes within upstream constraints.
 ## Requirements
 ### Requirement: Validate Responses create requests
-The service MUST accept POST requests to `/v1/responses` with a JSON body and MUST validate required fields according to OpenAI Responses API expectations. The request MUST include `model` and `input`, MAY omit `instructions`, MUST reject mutually exclusive fields (`input` and `messages` when both are present), and MUST reject `store=true` with an OpenAI error envelope.
+The service MUST accept POST requests to `/v1/responses` with a JSON body and MUST validate required fields according to OpenAI Responses API expectations. The request MUST include `model` and `input`, MAY omit `instructions`, and MUST reject mutually exclusive fields (`input` and `messages` when both are present).
 
 #### Scenario: Minimal valid request
 - **WHEN** the client sends `{ "model": "gpt-4.1", "input": "hi" }`
@@ -16,7 +16,7 @@ The service MUST accept POST requests to `/v1/responses` with a JSON body and MU
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 ### Requirement: Support Responses input types and conversation constraints
-The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST reject `previous_response_id` with an OpenAI error envelope because upstream does not support it. The service MUST continue to reject requests that include both `conversation` and `previous_response_id`.
+The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST accept `previous_response_id` and resolve it locally. The service MUST continue to reject requests that include both `conversation` and `previous_response_id`.
 
 #### Scenario: String input
 - **WHEN** the client sends `input` as a string
@@ -30,9 +30,13 @@ The service MUST accept `input` as either a string or an array of input items. W
 - **WHEN** the client provides both `conversation` and `previous_response_id`
 - **THEN** the service returns a 4xx response with an OpenAI error envelope indicating invalid parameters
 
-#### Scenario: previous_response_id provided
-- **WHEN** the client provides `previous_response_id`
-- **THEN** the service returns a 4xx response with an OpenAI error envelope indicating the unsupported parameter
+#### Scenario: previous_response_id provided and resolvable
+- **WHEN** the client provides `previous_response_id` that exists in local response context storage
+- **THEN** the service resolves the reference into expanded input items and continues request processing
+
+#### Scenario: previous_response_id provided and missing
+- **WHEN** the client provides `previous_response_id` that cannot be resolved
+- **THEN** the service returns a 404 OpenAI-style error envelope with code `not_found`
 
 ### Requirement: Reject input_file file_id in Responses
 The service MUST reject `input_file.file_id` in Responses input items and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
@@ -69,9 +73,31 @@ When `stream` is `false` or omitted, the service MUST return a JSON response obj
 ### Requirement: Error envelope parity for invalid or unsupported requests
 For invalid inputs or unsupported features, the service MUST return an OpenAI-style error envelope (`{ "error": { ... } }`) with stable `type`, `code`, and `param` fields. For streaming requests, errors MUST be emitted as `response.failed` events containing the same error envelope.
 
-#### Scenario: Unsupported feature flag
-- **WHEN** the client sets an unsupported feature (e.g., `store=true`)
-- **THEN** the service returns an OpenAI error envelope (or `response.failed` for streaming) with a stable error code and message
+#### Scenario: store=true requested
+- **WHEN** the client sets `store=true`
+- **THEN** the service accepts the request, persists response context locally, and keeps upstream forwarding compatible with `store=false`
+
+### Requirement: Resolve references from local response context storage
+The service MUST resolve response references from local context storage before upstream forwarding. Supported inputs include `item_reference` entries in `input` and `previous_response_id` at request level. If a reference is unresolved, the service MUST return a deterministic OpenAI-style `not_found` error.
+
+#### Scenario: item_reference resolved from local context
+- **WHEN** the request includes an `item_reference` that exists in local context
+- **THEN** the service expands it into concrete input items before forwarding upstream
+
+#### Scenario: item_reference unresolved
+- **WHEN** the request includes an `item_reference` that is missing
+- **THEN** the service returns 404 with code `not_found`
+
+### Requirement: Durable response context lifecycle and scope controls
+When durable response context is enabled, the service MUST store `store=true` response context with TTL metadata, periodically purge expired entries, and enforce API-key scope isolation by default.
+
+#### Scenario: durable context cleanup
+- **WHEN** the cleanup interval elapses
+- **THEN** expired response context entries are purged from durable storage
+
+#### Scenario: scope isolation by api key
+- **WHEN** a response context entry is persisted under API key A
+- **THEN** API key B cannot resolve that reference by default
 
 ### Requirement: Validate include values
 If the client supplies `include`, the service MUST accept only values documented by the Responses API and MUST return a 4xx OpenAI error envelope for unknown include values.

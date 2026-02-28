@@ -76,6 +76,28 @@ class UsageHistory(Base):
     credits_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class ModelOverride(Base):
+    __tablename__ = "model_overrides"
+    __table_args__ = (
+        UniqueConstraint("match_type", "match_value", name="uq_model_overrides_match"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_type: Mapped[str] = mapped_column(String, nullable=False)
+    match_value: Mapped[str] = mapped_column(String, nullable=False)
+    forced_model: Mapped[str] = mapped_column(String, nullable=False)
+    forced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class RequestLog(Base):
     __tablename__ = "request_logs"
 
@@ -85,6 +107,15 @@ class RequestLog(Base):
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
+    requested_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
+    client_app: Mapped[str | None] = mapped_column(String, nullable=True)
+    auth_key_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    override_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("model_overrides.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -131,6 +162,14 @@ class DashboardSettings(Base):
     totp_required_on_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_key_auth_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    global_model_force_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    global_model_force_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    global_model_force_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -266,14 +305,49 @@ class ApiKeyUsageReservationItem(Base):
     limit: Mapped[ApiKeyLimit] = relationship("ApiKeyLimit")
 
 
+class ResponseContext(Base):
+    __tablename__ = "response_context"
+
+    response_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    output_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class ResponseContextItem(Base):
+    __tablename__ = "response_context_items"
+
+    item_id: Mapped[str] = mapped_column(String, primary_key=True)
+    response_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("response_context.response_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    item_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index("idx_accounts_email", Account.email)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
+Index("idx_logs_requested_model", RequestLog.requested_model)
+Index("idx_logs_client_ip", RequestLog.client_ip)
+Index("idx_logs_client_app", RequestLog.client_app)
+Index("idx_logs_auth_key_fingerprint", RequestLog.auth_key_fingerprint)
 Index("idx_sticky_account", StickySession.account_id)
+Index("idx_model_overrides_match_type_value", ModelOverride.match_type, ModelOverride.match_value)
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
+Index("idx_response_context_api_key", ResponseContext.api_key_id)
+Index("idx_response_context_expires_at", ResponseContext.expires_at)
+Index("idx_response_context_items_response_id", ResponseContextItem.response_id)
+Index("idx_response_context_items_api_key", ResponseContextItem.api_key_id)
+Index("idx_response_context_items_expires_at", ResponseContextItem.expires_at)

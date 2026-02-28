@@ -44,6 +44,12 @@ LEGACY_MIGRATION_ORDER: tuple[str, ...] = (
     "008_add_api_keys",
     "009_add_api_key_limits",
     "010_add_idx_logs_requested_at",
+    "011_add_api_key_usage_reservations",
+    "012_add_import_without_overwrite_and_drop_accounts_email_unique",
+    "013_add_dashboard_settings_routing_strategy",
+    "014_add_model_overrides_and_request_actor_fields",
+    "015_add_dashboard_settings_global_model_force",
+    "016_add_response_context_storage",
 )
 
 LEGACY_TO_REVISION: dict[str, str] = {migration_name: migration_name for migration_name in LEGACY_MIGRATION_ORDER}

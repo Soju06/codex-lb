@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from hashlib import sha256
 from typing import AsyncIterator, Mapping
 
@@ -26,6 +27,7 @@ from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
+from app.core.utils.time import utcnow
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -51,6 +53,7 @@ from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.response_context_cache import get_response_context_cache
+from app.modules.proxy.response_context_repository import ResponseContextRepository
 from app.modules.proxy.types import RateLimitStatusPayloadData
 from app.modules.usage.updater import UsageUpdater
 
@@ -323,11 +326,37 @@ class ProxyService:
         suppress_text_done_events: bool,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
-        _expand_cached_input_references(payload, request_id)
-        settings = await get_settings_cache().get()
-        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_threads_enabled = settings.sticky_threads_enabled
-        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
+        dashboard_settings = await get_settings_cache().get()
+        runtime_settings = get_settings()
+        get_response_context_cache().configure(
+            ttl_seconds=runtime_settings.response_context_ttl_seconds,
+            max_responses=runtime_settings.response_context_max_responses,
+            max_items=runtime_settings.response_context_max_items,
+        )
+        store_policy = _store_policy_for_payload(payload, runtime_settings)
+        durable_enabled = runtime_settings.response_context_enable_durable
+
+        async with self._repo_factory() as repos:
+            resolution = await _expand_response_references(
+                payload,
+                request_id,
+                api_key_id=api_key.id if api_key else None,
+                durable_resolver=repos.response_context if durable_enabled else None,
+            )
+            if resolution.unresolved_reference:
+                raise ProxyResponseError(
+                    404,
+                    _response_reference_not_found_error(resolution.unresolved_reference),
+                )
+            if durable_enabled:
+                await repos.response_context.delete_expired()
+
+        payload.previous_response_id = None
+        payload.store = False
+
+        prefer_earlier_reset = dashboard_settings.prefer_earlier_reset_accounts
+        sticky_threads_enabled = dashboard_settings.sticky_threads_enabled
+        routing_strategy = getattr(dashboard_settings, "routing_strategy", "usage_weighted")
         sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
         max_attempts = 3
         settled = False
@@ -361,6 +390,7 @@ class ProxyService:
                         request_id,
                         attempt < max_attempts - 1,
                         api_key=api_key,
+                        store_policy=store_policy,
                         settlement=settlement,
                         suppress_text_done_events=suppress_text_done_events,
                     ):
@@ -391,6 +421,7 @@ class ProxyService:
                             request_id,
                             False,
                             api_key=api_key,
+                            store_policy=store_policy,
                             settlement=settlement,
                             suppress_text_done_events=suppress_text_done_events,
                         ):
@@ -478,6 +509,7 @@ class ProxyService:
         allow_retry: bool,
         *,
         api_key: ApiKeyData | None,
+        store_policy: _StorePolicy,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
     ) -> AsyncIterator[str]:
@@ -508,6 +540,19 @@ class ProxyService:
                 return
             first_payload = parse_sse_data_json(first)
             _capture_response_context(first_payload)
+            if first_payload is not None:
+                response = first_payload.get("response") if is_json_mapping(first_payload) else None
+                if is_json_mapping(response):
+                    event_type_candidate = first_payload.get("type")
+                    if event_type_candidate in ("response.completed", "response.incomplete"):
+                        async with self._repo_factory() as repos:
+                            await _persist_response_context(
+                                payload=response,
+                                api_key_id=api_key.id if api_key else None,
+                                store_policy=store_policy,
+                                request_id=request_id,
+                                durable_repository=repos.response_context,
+                            )
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
             if event and event.type in ("response.failed", "error"):
@@ -545,6 +590,19 @@ class ProxyService:
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
                 _capture_response_context(event_payload)
+                if event_payload is not None:
+                    response = event_payload.get("response") if is_json_mapping(event_payload) else None
+                    if is_json_mapping(response):
+                        event_type_candidate = event_payload.get("type")
+                        if event_type_candidate in ("response.completed", "response.incomplete"):
+                            async with self._repo_factory() as repos:
+                                await _persist_response_context(
+                                    payload=response,
+                                    api_key_id=api_key.id if api_key else None,
+                                    store_policy=store_policy,
+                                    request_id=request_id,
+                                    durable_repository=repos.response_context,
+                                )
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
                 if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
@@ -704,6 +762,18 @@ class _StreamSettlement:
     cached_input_tokens: int | None = None
 
 
+@dataclass(slots=True)
+class _StorePolicy:
+    persist_requested: bool
+    persist_effective: bool
+
+
+@dataclass(slots=True)
+class _ResponseReferenceResolution:
+    unresolved_reference: str | None
+    resolved_count: int
+
+
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
     if event is not None:
         return event.type
@@ -741,22 +811,40 @@ def _is_text_content_part(payload: dict[str, JsonValue] | None) -> bool:
     return isinstance(part_type, str) and part_type in _TEXT_DONE_CONTENT_PART_TYPES
 
 
-def _expand_cached_input_references(payload: ResponsesRequest, request_id: str) -> None:
+async def _expand_response_references(
+    payload: ResponsesRequest,
+    request_id: str,
+    *,
+    api_key_id: str | None,
+    durable_resolver: ResponseContextRepository | None,
+) -> _ResponseReferenceResolution:
     if not is_json_list(payload.input):
-        return
+        return _ResponseReferenceResolution(unresolved_reference=None, resolved_count=0)
 
-    expanded: list[JsonValue] = []
-    unresolved_refs: list[str] = []
-    resolved_count = 0
     cache = get_response_context_cache()
+    unresolved_reference: str | None = None
+    resolved_count = 0
+    expanded: list[JsonValue] = []
+
+    previous_response_id = payload.previous_response_id
+    if isinstance(previous_response_id, str) and previous_response_id:
+        resolved = cache.resolve_reference(previous_response_id)
+        if resolved is None and durable_resolver is not None:
+            resolved = await durable_resolver.resolve_reference(
+                reference_id=previous_response_id,
+                api_key_id=api_key_id,
+            )
+        if resolved is None:
+            return _ResponseReferenceResolution(unresolved_reference=previous_response_id, resolved_count=0)
+        expanded.extend(resolved)
+        resolved_count += 1
 
     for item in payload.input:
         if not is_json_mapping(item):
             expanded.append(item)
             continue
 
-        item_type = item.get("type")
-        if item_type != "item_reference":
+        if item.get("type") != "item_reference":
             expanded.append(item)
             continue
 
@@ -764,23 +852,32 @@ def _expand_cached_input_references(payload: ResponsesRequest, request_id: str) 
         if reference_id is None:
             continue
 
-        resolved_items = cache.resolve_reference(reference_id)
-        if not resolved_items:
-            unresolved_refs.append(reference_id)
+        resolved = cache.resolve_reference(reference_id)
+        if resolved is None and durable_resolver is not None:
+            resolved = await durable_resolver.resolve_reference(
+                reference_id=reference_id,
+                api_key_id=api_key_id,
+            )
+
+        if resolved is None:
+            unresolved_reference = unresolved_reference or reference_id
             continue
 
-        expanded.extend(resolved_items)
+        expanded.extend(resolved)
         resolved_count += 1
 
-    if resolved_count == 0 and not unresolved_refs:
-        return
+    if resolved_count > 0 or unresolved_reference is not None:
+        payload.input = expanded
+        logger.warning(
+            "response_context_resolution request_id=%s resolved=%s unresolved=%s",
+            request_id,
+            resolved_count,
+            [unresolved_reference] if unresolved_reference else [],
+        )
 
-    payload.input = expanded
-    logger.warning(
-        "response_context_resolution request_id=%s resolved=%s unresolved=%s",
-        request_id,
-        resolved_count,
-        unresolved_refs,
+    return _ResponseReferenceResolution(
+        unresolved_reference=unresolved_reference,
+        resolved_count=resolved_count,
     )
 
 
@@ -802,6 +899,58 @@ def _capture_response_context(payload: dict[str, JsonValue] | None) -> None:
     if not is_json_mapping(response):
         return
     get_response_context_cache().store_response(response)
+
+
+def _store_policy_for_payload(payload: ResponsesRequest, settings) -> _StorePolicy:
+    persist_requested = bool(payload.store)
+    persist_effective = bool(settings.response_context_enable_durable)
+    return _StorePolicy(
+        persist_requested=persist_requested,
+        persist_effective=persist_effective,
+    )
+
+
+async def _persist_response_context(
+    *,
+    payload: dict[str, JsonValue],
+    api_key_id: str | None,
+    store_policy: _StorePolicy,
+    request_id: str,
+    durable_repository: ResponseContextRepository | None,
+) -> None:
+    if not store_policy.persist_requested or not store_policy.persist_effective or durable_repository is None:
+        return
+
+    settings = get_settings()
+    expires_at = utcnow() + timedelta(seconds=settings.response_context_ttl_seconds)
+    try:
+        await durable_repository.store_response(
+            response_payload=payload,
+            api_key_id=api_key_id,
+            expires_at=expires_at,
+        )
+    except Exception:
+        logger.warning(
+            "response_context_persist_failed request_id=%s api_key_id=%s",
+            request_id,
+            api_key_id,
+            exc_info=True,
+        )
+
+
+def _response_reference_not_found_error(reference_id: str) -> dict[str, JsonValue]:
+    return {
+        "error": {
+            "message": (
+                f"Item with id '{reference_id}' not found. "
+                "Items are not persisted when `store` is set to false. "
+                "Try again with `store` set to true, or remove this item from your input."
+            ),
+            "type": "invalid_request_error",
+            "code": "not_found",
+            "param": "input",
+        }
+    }
 
 
 

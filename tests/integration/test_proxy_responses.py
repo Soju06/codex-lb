@@ -842,7 +842,125 @@ async def test_v1_responses_resolves_item_reference_from_cached_response(async_c
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_drops_unresolved_item_reference(async_client, monkeypatch):
+async def test_v1_responses_resolves_previous_response_id_from_cached_response(async_client, monkeypatch):
+    cache = get_response_context_cache()
+    cache.clear()
+
+    email = "ctx-prev@example.com"
+    raw_account_id = "acc_ctx_prev"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_inputs.append(json.loads(json.dumps(payload.input)))
+        if len(seen_inputs) == 1:
+            yield (
+                'data: {"type":"response.completed","response":{"id":"rs_prev_1","usage":'
+                '{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":['
+                '{"id":"msg_prev_1","type":"message","role":"assistant","content":['
+                '{"type":"output_text","text":"first reply"}'
+                ']}]}}\n\n'
+            )
+            return
+
+        yield (
+            'data: {"type":"response.completed","response":{"id":"rs_prev_2","usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    first_payload = {"model": "gpt-5.3-codex", "input": "hello", "store": True, "stream": True}
+    async with async_client.stream("POST", "/v1/responses", json=first_payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    second_payload = {
+        "model": "gpt-5.3-codex",
+        "previous_response_id": "rs_prev_1",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]}],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/responses", json=second_payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    assert len(seen_inputs) == 2
+    second_input = seen_inputs[1]
+    assert isinstance(second_input, list)
+    assert second_input[0]["type"] == "message"
+    assert second_input[0]["content"][0]["text"] == "first reply"
+    assert second_input[1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_resolves_previous_response_id_after_cache_clear_with_store_true(async_client, monkeypatch):
+    cache = get_response_context_cache()
+    cache.clear()
+
+    email = "ctx-prev-durable@example.com"
+    raw_account_id = "acc_ctx_prev_durable"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_inputs.append(json.loads(json.dumps(payload.input)))
+        if len(seen_inputs) == 1:
+            yield (
+                'data: {"type":"response.completed","response":{"id":"rs_prev_durable_1","usage":'
+                '{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":['
+                '{"id":"msg_prev_durable_1","type":"message","role":"assistant","content":['
+                '{"type":"output_text","text":"durable reply"}'
+                ']}]}}\n\n'
+            )
+            return
+
+        yield (
+            'data: {"type":"response.completed","response":{"id":"rs_prev_durable_2","usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    first_payload = {
+        "model": "gpt-5.3-codex",
+        "input": "hello",
+        "store": True,
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/responses", json=first_payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    cache.clear()
+
+    second_payload = {
+        "model": "gpt-5.3-codex",
+        "previous_response_id": "rs_prev_durable_1",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]}],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/responses", json=second_payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    assert len(seen_inputs) == 2
+    second_input = seen_inputs[1]
+    assert isinstance(second_input, list)
+    assert second_input[0]["type"] == "message"
+    assert second_input[0]["content"][0]["text"] == "durable reply"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_returns_not_found_for_unresolved_item_reference(async_client, monkeypatch):
     cache = get_response_context_cache()
     cache.clear()
 
@@ -872,13 +990,42 @@ async def test_v1_responses_drops_unresolved_item_reference(async_client, monkey
         ],
         "stream": True,
     }
-    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
-        assert resp.status_code == 200
-        _ = [line async for line in resp.aiter_lines() if line]
+    resp = await async_client.post("/v1/responses", json=payload)
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"]["code"] == "not_found"
+    assert "store" in body["error"]["message"]
+    assert seen_inputs == []
 
-    assert len(seen_inputs) == 1
-    sent_input = seen_inputs[0]
-    assert isinstance(sent_input, list)
-    assert len(sent_input) == 1
-    assert sent_input[0]["role"] == "user"
-    assert sent_input[0]["content"][0]["text"] == "fresh"
+
+@pytest.mark.asyncio
+async def test_v1_responses_returns_not_found_for_unresolved_previous_response_id(async_client, monkeypatch):
+    cache = get_response_context_cache()
+    cache.clear()
+
+    email = "ctx-prev-unresolved@example.com"
+    raw_account_id = "acc_ctx_prev_unresolved"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield (
+            'data: {"type":"response.completed","response":{"id":"rs_ctx_unknown","usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.3-codex",
+        "previous_response_id": "rs_missing_previous",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "fresh"}]}],
+        "stream": True,
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"]["code"] == "not_found"
+    assert "rs_missing_previous" in body["error"]["message"]

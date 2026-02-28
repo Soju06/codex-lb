@@ -15,10 +15,13 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 ## Constraints
 
 - Upstream limitations determine available modalities, tool output, and overflow handling.
-- `store=true` is rejected; responses are not persisted.
+- `store=true` is accepted and persisted in local response context storage.
 - `include` values must be on the documented allowlist.
-- `previous_response_id` and `truncation` are rejected.
+- `previous_response_id` is resolved locally from response context storage.
+- `truncation` is rejected.
 - `/v1/responses/compact` is supported only when the upstream implements it.
+- Local response context durability uses TTL-bound storage with periodic background cleanup.
+- Reference resolution is API-key scoped by default; optional global fallback can be enabled via settings.
 
 ## Include Allowlist (Reference)
 
@@ -35,6 +38,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - **Stream ends without terminal event:** Emit `response.failed` with `stream_incomplete`.
 - **Upstream error / no accounts:** Non-streaming responses return an OpenAI error envelope with 5xx status.
 - **Invalid request payloads:** Return 4xx with `invalid_request_error`.
+- **Missing local response reference:** Return 404 with `not_found` and a message indicating `store=true` for persistence.
 
 ## Error Envelope Mapping (Reference)
 

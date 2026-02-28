@@ -36,6 +36,21 @@ class ResponseContextCache:
             self._responses.clear()
             self._items.clear()
 
+    def configure(
+        self,
+        *,
+        ttl_seconds: int,
+        max_responses: int,
+        max_items: int,
+    ) -> None:
+        if ttl_seconds <= 0 or max_responses <= 0 or max_items <= 0:
+            return
+        with self._lock:
+            self._ttl_seconds = ttl_seconds
+            self._max_responses = max_responses
+            self._max_items = max_items
+            self._prune(time.monotonic())
+
     def store_response(self, response_payload: dict[str, JsonValue]) -> None:
         response_id = response_payload.get("id")
         output = response_payload.get("output")

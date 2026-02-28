@@ -20,6 +20,7 @@ from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_auth.service import DashboardAuthService, get_dashboard_session_store
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.response_context_repository import ResponseContextRepository
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -140,6 +141,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
+            response_context=ResponseContextRepository(session),
         )
 
 

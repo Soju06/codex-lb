@@ -569,6 +569,8 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
 
 
 def _status_for_error(error_value: OpenAIError | None) -> int:
+    if error_value and error_value.code == "not_found":
+        return 404
     if error_value and error_value.code == "no_accounts":
         return 503
     return 502

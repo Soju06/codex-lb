@@ -15,6 +15,7 @@ from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.integration
 _DATABASE_URL = get_settings().database_url
+_HEAD_REVISION = "016_add_response_context_storage"
 
 
 def _make_account(account_id: str, email: str, plan_type: str) -> Account:
@@ -41,7 +42,7 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
         await repo.upsert(_make_account("acc_three", "three@example.com", ""))
 
     result = await run_startup_migrations(_DATABASE_URL)
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.current_revision == _HEAD_REVISION
     assert result.bootstrap.stamped_revision is None
 
     async with SessionLocal() as session:
@@ -56,7 +57,7 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
         assert acc_three.plan_type == DEFAULT_PLAN
 
     rerun = await run_startup_migrations(_DATABASE_URL)
-    assert rerun.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert rerun.current_revision == _HEAD_REVISION
 
 
 @pytest.mark.asyncio
@@ -82,12 +83,12 @@ async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
     result = await run_startup_migrations(_DATABASE_URL)
 
     assert result.bootstrap.stamped_revision == "004_add_accounts_chatgpt_account_id"
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.current_revision == _HEAD_REVISION
 
     async with SessionLocal() as session:
         revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
         revisions = [str(row[0]) for row in revision_rows.fetchall()]
-        assert revisions == ["013_add_dashboard_settings_routing_strategy"]
+        assert revisions == [_HEAD_REVISION]
 
 
 @pytest.mark.asyncio
@@ -114,7 +115,7 @@ async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_mi
     result = await run_startup_migrations(_DATABASE_URL)
 
     assert result.bootstrap.stamped_revision is None
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.current_revision == _HEAD_REVISION
 
     async with SessionLocal() as session:
         setting_id = await session.execute(text("SELECT id FROM dashboard_settings WHERE id = 1"))
@@ -148,7 +149,7 @@ async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
 
     assert result.bootstrap.stamped_revision == "001_normalize_account_plan_types"
     assert result.bootstrap.unknown_migrations == ("900_custom_hotfix",)
-    assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+    assert result.current_revision == _HEAD_REVISION
 
 
 @pytest.mark.asyncio
@@ -314,7 +315,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.commit()
 
         result = await run_startup_migrations(db_url)
-        assert result.current_revision == "013_add_dashboard_settings_routing_strategy"
+        assert result.current_revision == _HEAD_REVISION
 
         async with session_factory() as session:
             await session.execute(text("PRAGMA foreign_keys=ON"))

@@ -202,6 +202,148 @@ def upgrade() -> None:
     if "idx_api_keys_hash" not in api_key_indexes:
         op.create_index("idx_api_keys_hash", "api_keys", ["key_hash"], unique=False)
 
+    if not _table_exists(bind, "model_overrides"):
+        op.create_table(
+            "model_overrides",
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True, nullable=False),
+            sa.Column("match_type", sa.String(), nullable=False),
+            sa.Column("match_value", sa.String(), nullable=False),
+            sa.Column("forced_model", sa.String(), nullable=False),
+            sa.Column("forced_reasoning_effort", sa.String(), nullable=True),
+            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            sa.Column("note", sa.Text(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+            ),
+            sa.UniqueConstraint("match_type", "match_value", name="uq_model_overrides_match"),
+        )
+    model_override_indexes = _indexes(bind, "model_overrides")
+    if "idx_model_overrides_match_type_value" not in model_override_indexes:
+        op.create_index(
+            "idx_model_overrides_match_type_value",
+            "model_overrides",
+            ["match_type", "match_value"],
+            unique=False,
+        )
+
+    request_log_columns = {column["name"] for column in sa.inspect(bind).get_columns("request_logs")}
+    with op.batch_alter_table("request_logs") as batch_op:
+        if "requested_model" not in request_log_columns:
+            batch_op.add_column(sa.Column("requested_model", sa.String(), nullable=True))
+        if "client_ip" not in request_log_columns:
+            batch_op.add_column(sa.Column("client_ip", sa.String(), nullable=True))
+        if "client_app" not in request_log_columns:
+            batch_op.add_column(sa.Column("client_app", sa.String(), nullable=True))
+        if "auth_key_fingerprint" not in request_log_columns:
+            batch_op.add_column(sa.Column("auth_key_fingerprint", sa.String(), nullable=True))
+        if "override_id" not in request_log_columns:
+            batch_op.add_column(sa.Column("override_id", sa.Integer(), nullable=True))
+            batch_op.create_foreign_key(
+                "fk_request_logs_override_id",
+                "model_overrides",
+                ["override_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+
+    request_log_indexes = _indexes(bind, "request_logs")
+    if "idx_logs_requested_model" not in request_log_indexes:
+        op.create_index("idx_logs_requested_model", "request_logs", ["requested_model"], unique=False)
+    if "idx_logs_client_ip" not in request_log_indexes:
+        op.create_index("idx_logs_client_ip", "request_logs", ["client_ip"], unique=False)
+    if "idx_logs_client_app" not in request_log_indexes:
+        op.create_index("idx_logs_client_app", "request_logs", ["client_app"], unique=False)
+    if "idx_logs_auth_key_fingerprint" not in request_log_indexes:
+        op.create_index("idx_logs_auth_key_fingerprint", "request_logs", ["auth_key_fingerprint"], unique=False)
+
+    dashboard_columns = {column["name"] for column in sa.inspect(bind).get_columns("dashboard_settings")}
+    with op.batch_alter_table("dashboard_settings") as batch_op:
+        if "global_model_force_enabled" not in dashboard_columns:
+            batch_op.add_column(
+                sa.Column(
+                    "global_model_force_enabled",
+                    sa.Boolean(),
+                    nullable=False,
+                    server_default=sa.text("0"),
+                )
+            )
+        if "global_model_force_model" not in dashboard_columns:
+            batch_op.add_column(sa.Column("global_model_force_model", sa.String(), nullable=True))
+        if "global_model_force_reasoning_effort" not in dashboard_columns:
+            batch_op.add_column(sa.Column("global_model_force_reasoning_effort", sa.String(), nullable=True))
+
+    if not _table_exists(bind, "response_context"):
+        op.create_table(
+            "response_context",
+            sa.Column("response_id", sa.String(), primary_key=True, nullable=False),
+            sa.Column("api_key_id", sa.String(), nullable=True),
+            sa.Column("output_json", sa.Text(), nullable=False),
+            sa.Column(
+                "created_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+            ),
+            sa.Column("expires_at", sa.DateTime(), nullable=False),
+        )
+    response_context_indexes = _indexes(bind, "response_context")
+    if "idx_response_context_api_key" not in response_context_indexes:
+        op.create_index("idx_response_context_api_key", "response_context", ["api_key_id"], unique=False)
+    if "idx_response_context_expires_at" not in response_context_indexes:
+        op.create_index("idx_response_context_expires_at", "response_context", ["expires_at"], unique=False)
+
+    if not _table_exists(bind, "response_context_items"):
+        op.create_table(
+            "response_context_items",
+            sa.Column("item_id", sa.String(), primary_key=True, nullable=False),
+            sa.Column(
+                "response_id",
+                sa.String(),
+                sa.ForeignKey("response_context.response_id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column("api_key_id", sa.String(), nullable=True),
+            sa.Column("item_json", sa.Text(), nullable=False),
+            sa.Column(
+                "created_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+            ),
+            sa.Column("expires_at", sa.DateTime(), nullable=False),
+        )
+    response_context_item_indexes = _indexes(bind, "response_context_items")
+    if "idx_response_context_items_response_id" not in response_context_item_indexes:
+        op.create_index(
+            "idx_response_context_items_response_id",
+            "response_context_items",
+            ["response_id"],
+            unique=False,
+        )
+    if "idx_response_context_items_api_key" not in response_context_item_indexes:
+        op.create_index(
+            "idx_response_context_items_api_key",
+            "response_context_items",
+            ["api_key_id"],
+            unique=False,
+        )
+    if "idx_response_context_items_expires_at" not in response_context_item_indexes:
+        op.create_index(
+            "idx_response_context_items_expires_at",
+            "response_context_items",
+            ["expires_at"],
+            unique=False,
+        )
+
 
 def downgrade() -> None:
     bind = op.get_bind()
@@ -209,8 +351,11 @@ def downgrade() -> None:
     tables = set(inspector.get_table_names())
 
     for table_name in (
+        "model_overrides",
         "api_keys",
         "dashboard_settings",
+        "response_context_items",
+        "response_context",
         "sticky_sessions",
         "request_logs",
         "usage_history",

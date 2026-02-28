@@ -25,6 +25,7 @@ from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
+from app.modules.proxy.response_context_cleanup_scheduler import build_response_context_cleanup_scheduler
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.usage import api as usage_api
@@ -70,12 +71,15 @@ async def lifespan(_: FastAPI):
     await init_http_client()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()
+    response_context_cleanup_scheduler = build_response_context_cleanup_scheduler()
     await usage_scheduler.start()
     await model_scheduler.start()
+    await response_context_cleanup_scheduler.start()
 
     try:
         yield
     finally:
+        await response_context_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await usage_scheduler.stop()
         try:

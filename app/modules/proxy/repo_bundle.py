@@ -7,6 +7,7 @@ from typing import AsyncContextManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.response_context_repository import ResponseContextRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -18,6 +19,7 @@ class ProxyRepositories:
     request_logs: RequestLogsRepository
     sticky_sessions: StickySessionsRepository
     api_keys: ApiKeysRepository
+    response_context: ResponseContextRepository
 
 
 ProxyRepoFactory = Callable[[], AsyncContextManager[ProxyRepositories]]

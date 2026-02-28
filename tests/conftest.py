@@ -21,6 +21,7 @@ os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
 os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 
 from app.db.models import Base  # noqa: E402
+from app.modules.proxy.response_context_cache import get_response_context_cache  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
 
@@ -86,6 +87,14 @@ def _reset_model_registry():
     registry._snapshot = None
     yield
     registry._snapshot = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_response_context_cache():
+    cache = get_response_context_cache()
+    cache.clear()
+    yield
+    cache.clear()
 
 
 @pytest.fixture(autouse=True)

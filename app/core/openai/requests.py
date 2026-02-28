@@ -114,6 +114,11 @@ def _sanitize_interleaved_reasoning_input_item(item: JsonValue) -> JsonValue | N
     if not is_json_mapping(item):
         return item
 
+    item_type = item.get("type")
+    # Drop top-level reasoning artifacts copied from previous responses.
+    if isinstance(item_type, str) and item_type in _INTERLEAVED_REASONING_PART_TYPES:
+        return None
+
     sanitized_item: dict[str, JsonValue] = {}
     for key, value in item.items():
         if key in _INTERLEAVED_REASONING_KEYS:

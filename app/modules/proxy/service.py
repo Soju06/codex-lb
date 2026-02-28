@@ -17,6 +17,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.clients.proxy import stream_responses as core_stream_responses
+from app.core.clients.proxy import transcribe_audio as core_transcribe_audio
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -164,6 +165,74 @@ class ProxyService:
                     api_key_reservation=api_key_reservation,
                     response=None,
                 )
+                await self._handle_proxy_error(account, exc)
+                raise
+
+    async def transcribe(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str | None,
+        prompt: str | None,
+        headers: Mapping[str, str],
+    ) -> dict[str, JsonValue]:
+        filtered = filter_inbound_headers(headers)
+        settings = await get_settings_cache().get()
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
+        selection = await self._load_balancer.select_account(
+            prefer_earlier_reset_accounts=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
+            model=None,
+        )
+        account = selection.account
+        if not account:
+            raise ProxyResponseError(
+                503,
+                openai_error("no_accounts", selection.error_message or "No active accounts available"),
+            )
+
+        async def _call_transcribe(target: Account) -> dict[str, JsonValue]:
+            access_token = self._encryptor.decrypt(target.access_token_encrypted)
+            account_id = _header_account_id(target.chatgpt_account_id)
+            return await core_transcribe_audio(
+                audio_bytes,
+                filename=filename,
+                content_type=content_type,
+                prompt=prompt,
+                headers=filtered,
+                access_token=access_token,
+                account_id=account_id,
+            )
+
+        try:
+            account = await self._ensure_fresh(account)
+            return await _call_transcribe(account)
+        except RefreshError as refresh_exc:
+            if refresh_exc.is_permanent:
+                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+            raise ProxyResponseError(
+                401,
+                openai_error(
+                    "invalid_api_key",
+                    refresh_exc.message,
+                    error_type="invalid_request_error",
+                ),
+            ) from refresh_exc
+        except ProxyResponseError as exc:
+            if exc.status_code != 401:
+                await self._handle_proxy_error(account, exc)
+                raise
+            try:
+                account = await self._ensure_fresh(account, force=True)
+            except RefreshError as refresh_exc:
+                if refresh_exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                raise exc
+            try:
+                return await _call_transcribe(account)
+            except ProxyResponseError as exc:
                 await self._handle_proxy_error(account, exc)
                 raise
 

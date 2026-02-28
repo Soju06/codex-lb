@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from typing import cast
 
 import pytest
 
@@ -151,6 +153,54 @@ class _DummyResponse:
         self.content = _DummyContent(chunks)
 
 
+class _TranscribeResponse:
+    def __init__(self, payload: dict[str, object], *, json_error: Exception | None = None) -> None:
+        self.status = 200
+        self.reason = "OK"
+        self._payload = payload
+        self._json_error = json_error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self, *, content_type=None):
+        if self._json_error is not None:
+            raise self._json_error
+        return self._payload
+
+
+class _TranscribeSession:
+    def __init__(self, response: _TranscribeResponse) -> None:
+        self._response = response
+        self.calls: list[dict[str, object]] = []
+
+    def post(
+        self,
+        url: str,
+        *,
+        data=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        self.calls.append({"url": url, "data": data, "headers": headers, "timeout": timeout})
+        return self._response
+
+
+class _TimeoutTranscribeSession:
+    def post(
+        self,
+        url: str,
+        *,
+        data=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        raise asyncio.TimeoutError
+
+
 @pytest.mark.asyncio
 async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big():
     large_data = "A" * (200 * 1024)
@@ -204,3 +254,90 @@ def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):
     settings = Settings()
 
     assert settings.image_inline_allowed_hosts == ["a.example", "b.example", "c.example"]
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_strips_content_type_case_insensitively():
+    response = _TranscribeResponse({"text": "ok"})
+    session = _TranscribeSession(response)
+
+    result = await proxy_module.transcribe_audio(
+        b"\x01\x02",
+        filename="sample.wav",
+        content_type="audio/wav",
+        prompt="hello",
+        headers={
+            "content-type": "multipart/form-data; boundary=legacy",
+            "X-Request-Id": "req_transcribe_1",
+        },
+        access_token="token-1",
+        account_id="acc_transcribe_1",
+        base_url="https://upstream.example",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    assert result == {"text": "ok"}
+    assert session.calls
+    raw_headers = session.calls[0]["headers"]
+    assert isinstance(raw_headers, dict)
+    sent_headers = cast(dict[str, str], raw_headers)
+    assert all(name.lower() != "content-type" for name in sent_headers)
+    assert sent_headers["Authorization"] == "Bearer token-1"
+    assert sent_headers["chatgpt-account-id"] == "acc_transcribe_1"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_wraps_timeout_as_upstream_unavailable():
+    session = _TimeoutTranscribeSession()
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.transcribe_audio(
+            b"\x01\x02",
+            filename="sample.wav",
+            content_type="audio/wav",
+            prompt=None,
+            headers={"X-Request-Id": "req_transcribe_timeout"},
+            access_token="token-1",
+            account_id="acc_transcribe_1",
+            base_url="https://upstream.example",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert exc.payload["error"]["message"] == "Request to upstream timed out"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("json_error", "expected_message"),
+    [
+        (asyncio.TimeoutError(), "Request to upstream timed out"),
+        (proxy_module.aiohttp.ClientPayloadError("payload read failed"), "payload read failed"),
+    ],
+)
+async def test_transcribe_audio_maps_body_read_transport_errors_to_upstream_unavailable(
+    json_error: Exception,
+    expected_message: str,
+):
+    response = _TranscribeResponse({"text": "ignored"}, json_error=json_error)
+    session = _TranscribeSession(response)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.transcribe_audio(
+            b"\x01\x02",
+            filename="sample.wav",
+            content_type="audio/wav",
+            prompt=None,
+            headers={"X-Request-Id": "req_transcribe_body_read"},
+            access_token="token-1",
+            account_id="acc_transcribe_1",
+            base_url="https://upstream.example",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert exc.payload["error"]["message"] == expected_message

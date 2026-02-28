@@ -747,3 +747,91 @@ async def compact_responses(
             502,
             openai_error("upstream_unavailable", str(exc)),
         ) from exc
+
+
+async def transcribe_audio(
+    audio_bytes: bytes,
+    *,
+    filename: str,
+    content_type: str | None,
+    prompt: str | None,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    base_url: str | None = None,
+    session: aiohttp.ClientSession | None = None,
+) -> dict[str, JsonValue]:
+    settings = get_settings()
+    upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
+    url = f"{upstream_base}/transcribe"
+    upstream_headers = _build_upstream_headers(
+        headers,
+        access_token,
+        account_id,
+        accept="application/json",
+    )
+    for header_name in tuple(upstream_headers):
+        if header_name.lower() == "content-type":
+            upstream_headers.pop(header_name, None)
+
+    timeout = aiohttp.ClientTimeout(
+        total=120,
+        sock_connect=settings.upstream_connect_timeout_seconds,
+        sock_read=120,
+    )
+
+    normalized_filename = filename.strip() if filename else ""
+    if not normalized_filename:
+        normalized_filename = "audio.wav"
+    normalized_content_type = content_type.strip() if content_type else ""
+    if not normalized_content_type:
+        normalized_content_type = "application/octet-stream"
+
+    form = aiohttp.FormData()
+    form.add_field(
+        "file",
+        audio_bytes,
+        filename=normalized_filename,
+        content_type=normalized_content_type,
+    )
+    if prompt is not None:
+        form.add_field("prompt", prompt)
+
+    client_session = session or get_http_client().session
+    try:
+        async with client_session.post(
+            url,
+            data=form,
+            headers=upstream_headers,
+            timeout=timeout,
+        ) as resp:
+            if resp.status >= 400:
+                error_payload = await _error_payload_from_response(resp)
+                raise ProxyResponseError(resp.status, error_payload)
+            try:
+                data = await resp.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                message = str(exc) or "Request to upstream timed out"
+                raise ProxyResponseError(
+                    502,
+                    openai_error("upstream_unavailable", message),
+                ) from exc
+            except Exception as exc:
+                raise ProxyResponseError(
+                    502,
+                    openai_error("upstream_error", "Invalid JSON from upstream"),
+                ) from exc
+            if isinstance(data, dict):
+                return data
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_error", "Unexpected upstream payload"),
+            )
+    except ProxyResponseError:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        message = str(exc) or "Request to upstream timed out"
+        raise ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", message),
+        ) from exc

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from alembic.util.exc import CommandError
 from sqlalchemy import create_engine, text
 
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
@@ -48,6 +49,17 @@ def test_inspect_migration_state_no_upgrade_after_head(tmp_path: Path) -> None:
     assert state.needs_upgrade is False
     assert state.current_revision == state.head_revision
     assert state.has_alembic_version_table is True
+
+
+def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None:
+    """Prisma-style contract: migrated schema must match ORM metadata and policy."""
+    db_path = tmp_path / "contract.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    assert check_migration_policy(url) == ()
+    assert check_schema_drift(url) == ()
 
 
 def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypatch) -> None:
@@ -96,6 +108,23 @@ def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
 
     result = run_upgrade(url, "head", bootstrap_legacy=False)
     assert result.current_revision == OLD_TO_NEW_REVISION_MAP["013_add_dashboard_settings_routing_strategy"]
+
+
+def test_run_upgrade_without_auto_remap_fails_for_legacy_revision_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "no-remap.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "013_add_dashboard_settings_routing_strategy"},
+        )
+
+    with pytest.raises(CommandError, match="Can't locate revision identified by"):
+        run_upgrade(url, "head", bootstrap_legacy=False, auto_remap_legacy_revisions=False)
 
 
 def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) -> None:

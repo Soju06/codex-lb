@@ -174,6 +174,37 @@ async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db
 
 
 @pytest.mark.asyncio
+async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_alembic_id_together(db_setup):
+    await run_startup_migrations(_DATABASE_URL)
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+        for index, migration_name in enumerate(LEGACY_MIGRATION_ORDER[:3]):
+            await session.execute(
+                text("INSERT INTO schema_migrations (name, applied_at) VALUES (:name, :applied_at)"),
+                {"name": migration_name, "applied_at": f"2026-02-13T00:00:0{index}Z"},
+            )
+        await session.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "013_add_dashboard_settings_routing_strategy"},
+        )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.bootstrap.stamped_revision is None
+    assert result.current_revision == _NEW_HEAD_REVISION
+
+
+@pytest.mark.asyncio
 async def test_run_startup_migrations_drops_accounts_email_unique_with_non_cascade_fks(tmp_path):
     db_path = tmp_path / "legacy-no-cascade.db"
     db_url = f"sqlite+aiosqlite:///{db_path}"

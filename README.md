@@ -82,7 +82,7 @@ model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
 [model_providers.codex-lb]
-name = "OpenAI"                                      # required — enables remote /responses/compact
+name = "OpenAI"  # required — enables remote /responses/compact
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 ```

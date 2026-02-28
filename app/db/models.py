@@ -116,6 +116,7 @@ class RequestLog(Base):
         ForeignKey("model_overrides.id", ondelete="SET NULL"),
         nullable=True,
     )
+    store_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -104,4 +104,5 @@ async def list_request_log_filter_options(
             for option in options.model_options
         ],
         statuses=options.statuses,
+        client_apps=options.client_apps,
     )

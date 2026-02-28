@@ -88,6 +88,8 @@ export function RecentRequestsTable({
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
+              <TableHead className="w-28 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Client</TableHead>
+              <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Store</TableHead>
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
@@ -113,9 +115,24 @@ export function RecentRequestsTable({
                     {accountLabel}
                   </TableCell>
                   <TableCell className="truncate align-top">
-                    <span className="font-mono text-xs">
-                      {formatModelLabel(request.model, request.reasoningEffort)}
-                    </span>
+                    <div className="space-y-0.5">
+                      <span className="font-mono text-xs">
+                        {formatModelLabel(request.model, request.reasoningEffort)}
+                      </span>
+                      {request.forcedModel ? (
+                        <div className="text-[11px] text-amber-600 dark:text-amber-400">
+                          forced from {request.requestedModel ?? "unknown"}
+                        </div>
+                      ) : null}
+                    </div>
+                  </TableCell>
+                  <TableCell className="truncate align-top text-xs text-muted-foreground">
+                    {request.clientApp || "unknown"}
+                  </TableCell>
+                  <TableCell className="align-top">
+                    <Badge variant="outline" className={request.storeRequested ? "bg-blue-500/15 text-blue-700 border-blue-500/20 dark:text-blue-400" : "bg-zinc-500/10 text-zinc-600 border-zinc-500/20 dark:text-zinc-400"}>
+                      {request.storeRequested ? "yes" : "no"}
+                    </Badge>
                   </TableCell>
                   <TableCell className="align-top">
                     <Badge

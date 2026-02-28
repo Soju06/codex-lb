@@ -32,6 +32,7 @@ class RequestLogFilterOptions:
     account_ids: list[str]
     model_options: list[RequestLogModelOption]
     statuses: list[str]
+    client_apps: list[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +97,7 @@ class RequestLogsService:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
         )
-        option_account_ids, option_model_options, status_values = await self._repo.list_filter_options(
+        option_account_ids, option_model_options, status_values, _option_client_ips, option_client_apps, _option_api_keys = await self._repo.list_filter_options(
             since=since,
             until=until,
             account_ids=account_ids,
@@ -111,6 +112,7 @@ class RequestLogsService:
                 for model, reasoning_effort in option_model_options
             ],
             statuses=_normalize_status_values(status_values),
+            client_apps=option_client_apps,
         )
 
 

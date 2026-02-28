@@ -23,11 +23,16 @@ def log_status(log: RequestLog) -> str:
 
 
 def to_request_log_entry(log: RequestLog) -> RequestLogEntry:
+    forced_model = None
+    if log.requested_model and log.requested_model != log.model:
+        forced_model = log.model
     return RequestLogEntry(
         requested_at=log.requested_at,
         account_id=log.account_id,
         request_id=log.request_id,
         model=log.model,
+        requested_model=log.requested_model,
+        forced_model=forced_model,
         reasoning_effort=log.reasoning_effort,
         status=log_status(log),
         error_code=log.error_code,
@@ -36,4 +41,8 @@ def to_request_log_entry(log: RequestLog) -> RequestLogEntry:
         cached_input_tokens=cached_input_tokens_from_log(log),
         cost_usd=cost_from_log(log, precision=6),
         latency_ms=log.latency_ms,
+        client_app=log.client_app,
+        client_ip=log.client_ip,
+        auth_key_fingerprint=log.auth_key_fingerprint,
+        store_requested=log.store_requested,
     )

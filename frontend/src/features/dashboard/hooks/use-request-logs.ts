@@ -109,8 +109,8 @@ export function useRequestLogs() {
   const logsQuery = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
     queryFn: () => getRequestLogs(listFilters),
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   });
@@ -118,8 +118,8 @@ export function useRequestLogs() {
   const optionsQuery = useQuery({
     queryKey: ["dashboard", "request-log-options", facetFilters],
     queryFn: () => getRequestLogOptions(facetFilters),
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
   });
 

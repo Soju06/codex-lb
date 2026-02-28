@@ -46,6 +46,7 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
+                func.coalesce(func.sum(cast(RequestLog.store_requested, Integer)), 0).label("store_requested_count"),
             )
             .where(RequestLog.requested_at >= since)
             .group_by(bucket_col, RequestLog.model)
@@ -62,6 +63,7 @@ class RequestLogsRepository:
                 output_tokens=int(row.output_tokens),
                 cached_input_tokens=int(row.cached_input_tokens),
                 reasoning_tokens=int(row.reasoning_tokens),
+                store_requested_count=int(row.store_requested_count),
             )
             for row in result.all()
         ]
@@ -87,6 +89,7 @@ class RequestLogsRepository:
         client_app: str | None = None,
         auth_key_fingerprint: str | None = None,
         override_id: int | None = None,
+        store_requested: bool = False,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         log = RequestLog(
@@ -104,6 +107,7 @@ class RequestLogsRepository:
             client_app=client_app,
             auth_key_fingerprint=auth_key_fingerprint,
             override_id=override_id,
+            store_requested=store_requested,
             latency_ms=latency_ms,
             status=status,
             error_code=error_code,

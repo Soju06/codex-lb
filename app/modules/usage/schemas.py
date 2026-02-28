@@ -27,6 +27,9 @@ class UsageMetrics(DashboardModel):
     cached_tokens_secondary_window: int | None = None
     error_rate_7d: float | None = Field(default=None, alias="errorRate7d")
     top_error: str | None = None
+    store_requested_7d: int | None = Field(default=None, alias="storeRequested7d")
+    response_context_responses: int | None = None
+    response_context_items: int | None = None
 
 
 class UsageSummaryResponse(DashboardModel):

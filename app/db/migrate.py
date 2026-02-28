@@ -50,6 +50,7 @@ LEGACY_MIGRATION_ORDER: tuple[str, ...] = (
     "014_add_model_overrides_and_request_actor_fields",
     "015_add_dashboard_settings_global_model_force",
     "016_add_response_context_storage",
+    "017_add_request_logs_store_requested",
 )
 
 LEGACY_TO_REVISION: dict[str, str] = {migration_name: migration_name for migration_name in LEGACY_MIGRATION_ORDER}

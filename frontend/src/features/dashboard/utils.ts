@@ -156,6 +156,14 @@ export function buildDashboardView(
       trend: trendPointsToValues(trends.errorRate),
       trendColor: TREND_COLORS[3],
     },
+    {
+      label: "Store=true (7d)",
+      value: formatCompactNumber(metrics?.storeRequested7d ?? 0),
+      meta: `context: ${formatCompactNumber(metrics?.responseContextResponses ?? 0)} responses / ${formatCompactNumber(metrics?.responseContextItems ?? 0)} items`,
+      icon: Activity,
+      trend: trendPointsToValues(trends.requests),
+      trendColor: TREND_COLORS[0],
+    },
   ];
 
   return {

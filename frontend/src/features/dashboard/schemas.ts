@@ -38,6 +38,9 @@ export const DashboardMetricsSchema = z.object({
   cachedTokensSecondaryWindow: z.number().nullable(),
   errorRate7d: z.number().nullable(),
   topError: z.string().nullable(),
+  storeRequested7d: z.number().nullable().optional(),
+  responseContextResponses: z.number().nullable().optional(),
+  responseContextItems: z.number().nullable().optional(),
 });
 
 export const TrendPointSchema = z.object({
@@ -73,6 +76,12 @@ export const RequestLogSchema = z.object({
   accountId: z.string(),
   requestId: z.string(),
   model: z.string(),
+  requestedModel: z.string().nullable().optional(),
+  forcedModel: z.string().nullable().optional(),
+  clientApp: z.string().nullable().optional(),
+  clientIp: z.string().nullable().optional(),
+  authKeyFingerprint: z.string().nullable().optional(),
+  storeRequested: z.boolean().optional(),
   status: z.string(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
@@ -98,6 +107,7 @@ export const RequestLogFilterOptionsSchema = z.object({
   accountIds: z.array(z.string()),
   modelOptions: z.array(RequestLogModelOptionSchema),
   statuses: z.array(z.string()),
+  clientApps: z.array(z.string()).optional(),
 });
 
 export const FilterStateSchema = z.object({

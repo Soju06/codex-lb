@@ -62,6 +62,7 @@ def build_trends_from_buckets(
     total_errors = 0
     total_tokens = 0
     total_cached_tokens = 0
+    store_requested_total = 0
 
     for row in rows:
         epoch = row.bucket_epoch
@@ -85,6 +86,7 @@ def build_trends_from_buckets(
         total_errors += row.error_count
         total_tokens += row.input_tokens + row.output_tokens
         total_cached_tokens += row.cached_input_tokens
+        store_requested_total += int(getattr(row, "store_requested_count", 0) or 0)
 
     requests_points: list[TrendPoint] = []
     tokens_points: list[TrendPoint] = []
@@ -126,6 +128,7 @@ def build_trends_from_buckets(
         cached_tokens_secondary_window=total_cached_tokens,
         error_rate_7d=error_rate_total,
         top_error=None,
+        store_requested_7d=store_requested_total,
     )
 
     # Compute total cost from all rows
@@ -329,4 +332,7 @@ def _metrics_summary_to_model(metrics: UsageMetricsSummary) -> UsageMetrics:
         cached_tokens_secondary_window=metrics.cached_tokens_secondary_window,
         error_rate_7d=metrics.error_rate_7d,
         top_error=metrics.top_error,
+        store_requested_7d=metrics.store_requested_7d,
+        response_context_responses=metrics.response_context_responses,
+        response_context_items=metrics.response_context_items,
     )

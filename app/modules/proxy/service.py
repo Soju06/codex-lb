@@ -685,6 +685,7 @@ class ProxyService:
                             client_app=(actor_log.client_app if actor_log else None),
                             auth_key_fingerprint=(actor_log.api_key if actor_log else None),
                             override_id=(actor_log.override_id if actor_log else None),
+                            store_requested=store_policy.persist_requested,
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=cached_input_tokens,

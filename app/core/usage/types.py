@@ -72,6 +72,9 @@ class UsageMetricsSummary:
     cached_tokens_secondary_window: int | None = None
     error_rate_7d: float | None = None
     top_error: str | None = None
+    store_requested_7d: int | None = None
+    response_context_responses: int | None = None
+    response_context_items: int | None = None
 
 
 @dataclass(frozen=True)
@@ -117,3 +120,4 @@ class BucketModelAggregate:
     output_tokens: int
     cached_input_tokens: int
     reasoning_tokens: int
+    store_requested_count: int = 0

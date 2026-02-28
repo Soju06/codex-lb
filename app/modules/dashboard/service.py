@@ -49,6 +49,17 @@ class DashboardService:
         bucket_since = now - timedelta(minutes=secondary_minutes) if secondary_minutes else now - timedelta(days=7)
         bucket_rows = await self._repo.aggregate_logs_by_bucket(bucket_since)
         trends, bucket_metrics, bucket_cost = build_trends_from_buckets(bucket_rows, bucket_since)
+        context_responses, context_items = await self._repo.count_response_context(bucket_since)
+        bucket_metrics = type(bucket_metrics)(
+            requests_7d=bucket_metrics.requests_7d,
+            tokens_secondary_window=bucket_metrics.tokens_secondary_window,
+            cached_tokens_secondary_window=bucket_metrics.cached_tokens_secondary_window,
+            error_rate_7d=bucket_metrics.error_rate_7d,
+            top_error=bucket_metrics.top_error,
+            store_requested_7d=bucket_metrics.store_requested_7d,
+            response_context_responses=context_responses,
+            response_context_items=context_items,
+        )
 
         summary = build_usage_summary_response(
             accounts=accounts,

@@ -273,6 +273,20 @@ Notes:
 - API compatibility for `/claude/v1/messages` includes request normalization and optional CLI header/system-prompt parity helpers.
 - OpenAI compatibility routes (`/v1/responses`, `/v1/chat/completions`) stay available in the same server instance.
 
+### Claude Desktop custom deployment note
+
+Claude Desktop custom deployment can point at `codex-lb` for API/bootstrap compatibility routes, but this project does not implement a full `claude.ai` web application clone.
+
+- In custom deployment mode, Desktop loads the configured root page (`/`).
+- `codex-lb` intentionally serves a minimal root page and keeps dashboard UI on `/dashboard`.
+- If you need normal Claude Desktop UI, disable custom deployment and use the default Claude backend.
+
+If you want Desktop traffic to run through `codex-lb` while keeping the stock app UX, use a local shim/proxy that:
+
+- accepts Desktop-specific endpoints/stream shape,
+- translates requests to `codex-lb` API routes (`/claude/v1/messages` or `/v1/responses`),
+- returns Desktop-expected payload/event formats.
+
 ## API Key Authentication
 
 API key auth is **disabled by default** — the proxy is open to any client. Enable it in **Settings → API Key Auth** on the dashboard.

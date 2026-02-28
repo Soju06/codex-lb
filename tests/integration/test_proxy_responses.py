@@ -400,6 +400,42 @@ async def test_v1_responses_sanitizes_interleaved_reasoning_fields(async_client,
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_drops_top_level_reasoning_artifact_items(async_client, monkeypatch):
+    email = "reasoning-top-level@example.com"
+    raw_account_id = "acc_reasoning_top_level"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_input: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_input["input"] = payload.input
+        yield 'data: {"type":"response.completed","response":{"id":"resp_reasoning_top_level"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"id": "rs_abc123", "type": "reasoning", "summary": []},
+            {"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]},
+        ],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_input["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_forces_stream(async_client, monkeypatch):
     email = "stream-force@example.com"
     raw_account_id = "acc_stream_force"

@@ -132,6 +132,15 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "ink-splatters",
+      "name": "Peter A.",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2706884?v=4",
+      "profile": "https://github.com/ink-splatters",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

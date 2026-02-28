@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
+from app.modules.proxy.response_context_cache import get_response_context_cache
 from app.core.auth import generate_unique_account_id
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
@@ -744,3 +745,104 @@ async def test_v1_responses_normalizes_tool_messages(async_client, monkeypatch):
         {"type": "function_call_output", "call_id": "call_1", "output": '{"ok":true}'},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_resolves_item_reference_from_cached_response(async_client, monkeypatch):
+    cache = get_response_context_cache()
+    cache.clear()
+
+    email = "ctx-cache@example.com"
+    raw_account_id = "acc_ctx_cache"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_inputs.append(json.loads(json.dumps(payload.input)))
+        if len(seen_inputs) == 1:
+            yield (
+                'data: {"type":"response.completed","response":{"id":"rs_ctx_1","usage":'
+                '{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":['
+                '{"id":"msg_ctx_1","type":"message","role":"assistant","content":['
+                '{"type":"output_text","text":"cached reply"}]'
+                '}]}}\n\n'
+            )
+            return
+
+        yield (
+            'data: {"type":"response.completed","response":{"id":"rs_ctx_2","usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    first_payload = {"model": "gpt-5.3-codex", "input": "hello", "stream": True}
+    async with async_client.stream("POST", "/v1/responses", json=first_payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    second_payload = {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {"type": "item_reference", "id": "rs_ctx_1"},
+            {"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]},
+        ],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/responses", json=second_payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    assert len(seen_inputs) == 2
+    second_input = seen_inputs[1]
+    assert isinstance(second_input, list)
+    assert second_input[0]["type"] == "message"
+    assert second_input[0]["content"][0]["text"] == "cached reply"
+    assert second_input[1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_drops_unresolved_item_reference(async_client, monkeypatch):
+    cache = get_response_context_cache()
+    cache.clear()
+
+    email = "ctx-unresolved@example.com"
+    raw_account_id = "acc_ctx_unresolved"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_inputs.append(json.loads(json.dumps(payload.input)))
+        yield (
+            'data: {"type":"response.completed","response":{"id":"rs_ctx_unknown","usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {"type": "item_reference", "id": "rs_not_in_cache"},
+            {"role": "user", "content": [{"type": "input_text", "text": "fresh"}]},
+        ],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    assert len(seen_inputs) == 1
+    sent_input = seen_inputs[0]
+    assert isinstance(sent_input, list)
+    assert len(sent_input) == 1
+    assert sent_input[0]["role"] == "user"
+    assert sent_input[0]["content"][0]["text"] == "fresh"

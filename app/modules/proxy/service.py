@@ -25,6 +25,7 @@ from app.core.openai.models import OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -49,6 +50,7 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.response_context_cache import get_response_context_cache
 from app.modules.proxy.types import RateLimitStatusPayloadData
 from app.modules.usage.updater import UsageUpdater
 
@@ -321,6 +323,7 @@ class ProxyService:
         suppress_text_done_events: bool,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
+        _expand_cached_input_references(payload, request_id)
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
@@ -504,6 +507,7 @@ class ProxyService:
             except StopAsyncIteration:
                 return
             first_payload = parse_sse_data_json(first)
+            _capture_response_context(first_payload)
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
             if event and event.type in ("response.failed", "error"):
@@ -540,6 +544,7 @@ class ProxyService:
 
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
+                _capture_response_context(event_payload)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
                 if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
@@ -734,6 +739,70 @@ def _is_text_content_part(payload: dict[str, JsonValue] | None) -> bool:
         return False
     part_type = part.get("type")
     return isinstance(part_type, str) and part_type in _TEXT_DONE_CONTENT_PART_TYPES
+
+
+def _expand_cached_input_references(payload: ResponsesRequest, request_id: str) -> None:
+    if not is_json_list(payload.input):
+        return
+
+    expanded: list[JsonValue] = []
+    unresolved_refs: list[str] = []
+    resolved_count = 0
+    cache = get_response_context_cache()
+
+    for item in payload.input:
+        if not is_json_mapping(item):
+            expanded.append(item)
+            continue
+
+        item_type = item.get("type")
+        if item_type != "item_reference":
+            expanded.append(item)
+            continue
+
+        reference_id = _extract_reference_id(item)
+        if reference_id is None:
+            continue
+
+        resolved_items = cache.resolve_reference(reference_id)
+        if not resolved_items:
+            unresolved_refs.append(reference_id)
+            continue
+
+        expanded.extend(resolved_items)
+        resolved_count += 1
+
+    if resolved_count == 0 and not unresolved_refs:
+        return
+
+    payload.input = expanded
+    logger.warning(
+        "response_context_resolution request_id=%s resolved=%s unresolved=%s",
+        request_id,
+        resolved_count,
+        unresolved_refs,
+    )
+
+
+def _extract_reference_id(item: Mapping[str, JsonValue]) -> str | None:
+    for key in ("id", "item_id", "response_id"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _capture_response_context(payload: dict[str, JsonValue] | None) -> None:
+    if not is_json_mapping(payload):
+        return
+    event_type = payload.get("type")
+    if event_type not in ("response.completed", "response.incomplete"):
+        return
+    response = payload.get("response")
+    if not is_json_mapping(response):
+        return
+    get_response_context_cache().store_response(response)
+
 
 
 def _maybe_log_proxy_request_shape(

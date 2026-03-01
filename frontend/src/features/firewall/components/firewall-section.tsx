@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { RefreshCw, Shield } from "lucide-react";
+import { Shield } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -41,7 +41,6 @@ export function FirewallSection() {
   const entries = firewallQuery.data?.entries ?? [];
   const mode = firewallQuery.data?.mode ?? "allow_all";
   const busy = createMutation.isPending || deleteMutation.isPending;
-  const refreshing = firewallQuery.isFetching;
 
   const handleAdd = async () => {
     const normalized = ipAddress.trim();
@@ -54,44 +53,26 @@ export function FirewallSection() {
 
   return (
     <section className="space-y-3 rounded-xl border bg-card p-5">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-            <Shield className="h-4 w-4 text-primary" aria-hidden="true" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold">Firewall</h3>
-            <p className="text-xs text-muted-foreground">Restrict proxy APIs to allowed client IPs.</p>
-          </div>
+      <div className="flex items-center gap-2.5">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+          <Shield className="h-4 w-4 text-primary" aria-hidden="true" />
         </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 text-xs"
-          onClick={() => void firewallQuery.refetch()}
-          disabled={refreshing || busy}
-        >
-          <RefreshCw className={`mr-1.5 h-3.5 w-3.5${refreshing ? " animate-spin" : ""}`} />
-          Refresh
-        </Button>
+        <div>
+          <h3 className="text-sm font-semibold">Firewall</h3>
+          <p className="text-xs text-muted-foreground">Restrict proxy APIs to allowed client IPs.</p>
+        </div>
       </div>
 
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
 
-      <div className="divide-y rounded-lg border">
-        <div className="flex items-center justify-between p-3">
-          <div>
-            <p className="text-sm font-medium">Mode</p>
-            <p className="text-xs text-muted-foreground">Current firewall enforcement mode.</p>
-          </div>
+      <div className="flex items-center gap-3 rounded-lg border px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">Mode</span>
           <Badge variant="outline">{modeLabel(mode)}</Badge>
         </div>
-        <div className="flex items-center justify-between p-3">
-          <div>
-            <p className="text-sm font-medium">Allowed IPs</p>
-            <p className="text-xs text-muted-foreground">Total IPs on the allowlist.</p>
-          </div>
+        <div className="h-4 w-px bg-border" />
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">Allowed IPs</span>
           <span className="text-sm font-medium tabular-nums">{entries.length}</span>
         </div>
       </div>

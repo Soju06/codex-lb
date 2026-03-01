@@ -9,6 +9,9 @@ export function useFirewall() {
   const firewallQuery = useQuery({
     queryKey: ["firewall", "ips"],
     queryFn: listFirewallIps,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 
   const invalidate = () => {

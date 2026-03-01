@@ -390,7 +390,11 @@ class ResponsesCompactRequest(BaseModel):
         return _strip_unsupported_fields(payload)
 
 
-_UNSUPPORTED_UPSTREAM_FIELDS = {"max_output_tokens"}
+_UNSUPPORTED_UPSTREAM_FIELDS = {
+    "max_output_tokens",
+    "prompt_cache_retention",
+    "temperature",
+}
 
 
 def _strip_unsupported_fields(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:

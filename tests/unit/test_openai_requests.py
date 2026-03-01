@@ -39,12 +39,38 @@ def test_store_false_is_preserved():
     assert request.to_payload()["store"] is False
 
 
-def test_extra_fields_are_preserved():
-    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "max_output_tokens": 32000}
+def test_known_unsupported_upstream_fields_are_stripped():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "max_output_tokens": 32000,
+        "prompt_cache_retention": "4h",
+        "temperature": 0.2,
+        "custom_field": "kept",
+    }
     request = ResponsesRequest.model_validate(payload)
 
     dumped = request.to_payload()
     assert "max_output_tokens" not in dumped
+    assert "prompt_cache_retention" not in dumped
+    assert "temperature" not in dumped
+    assert dumped["custom_field"] == "kept"
+
+
+def test_compact_known_unsupported_upstream_fields_are_stripped():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "prompt_cache_retention": "4h",
+        "temperature": 0.2,
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert "prompt_cache_retention" not in dumped
+    assert "temperature" not in dumped
 
 
 def test_openai_compatible_reasoning_aliases_are_normalized():

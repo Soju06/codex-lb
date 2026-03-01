@@ -59,6 +59,10 @@ uvx codex-lb
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
+## Upstream Sync (Fork-safe)
+
+If you run custom features in your fork, follow [SYNC_RUNBOOK.md](SYNC_RUNBOOK.md) to merge upstream updates without losing custom behavior.
+
 ## Client Setup
 
 Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authentication) is enabled, pass a key from the dashboard as a Bearer token.

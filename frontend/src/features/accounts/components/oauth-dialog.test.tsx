@@ -84,6 +84,64 @@ describe("OauthDialog", () => {
     expect(screen.getByRole("button", { name: "Change method" })).toBeInTheDocument();
   });
 
+  it("allows manual callback completion in browser stage", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    const browserPendingState = {
+      ...idleState,
+      status: "pending" as const,
+      method: "browser" as const,
+      authorizationUrl: "https://auth.example.com/start",
+    };
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByPlaceholderText(
+      "http://127.0.0.1:1455/auth/callback?code=...&state=...",
+    );
+    await user.type(input, "http://127.0.0.1:1455/auth/callback?code=abc&state=xyz");
+
+    await user.click(screen.getByRole("button", { name: "Complete with callback URL" }));
+    expect(onComplete).toHaveBeenCalledWith(
+      "http://127.0.0.1:1455/auth/callback?code=abc&state=xyz",
+    );
+  });
+
+  it("shows validation error when manual callback submit is empty", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    const browserPendingState = {
+      ...idleState,
+      status: "pending" as const,
+      method: "browser" as const,
+      authorizationUrl: "https://auth.example.com/start",
+    };
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Complete with callback URL" }));
+    expect(screen.getByText("Paste the callback URL first.")).toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("renders success stage", () => {
     render(
       <OauthDialog

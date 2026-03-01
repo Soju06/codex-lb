@@ -7,6 +7,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import parse_qs, urlparse
 
 from aiohttp import web
 
@@ -154,6 +155,8 @@ class OauthService:
 
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
+        if payload.callback_url:
+            return await self._complete_browser_with_callback_url(payload.callback_url)
         async with self._store.lock:
             state = self._store.state
             if payload.device_auth_id:
@@ -181,6 +184,38 @@ class OauthService:
             )
             state.poll_task = asyncio.create_task(self._poll_device_tokens(poll_context))
             return OauthCompleteResponse(status="pending")
+
+    async def _complete_browser_with_callback_url(self, callback_url: str) -> OauthCompleteResponse:
+        code, state_token = _extract_code_state_from_callback_url(callback_url)
+        if not code or not state_token:
+            await self._set_error("Invalid callback URL. Missing code/state.")
+            return OauthCompleteResponse(status="error")
+
+        async with self._store.lock:
+            expected_state = self._store.state.state_token
+            verifier = self._store.state.code_verifier
+            method = self._store.state.method
+
+        if method != "browser":
+            await self._set_error("Browser PKCE flow is not initialized.")
+            return OauthCompleteResponse(status="error")
+
+        if not verifier or not expected_state or state_token != expected_state:
+            await self._set_error("Invalid OAuth callback state.")
+            return OauthCompleteResponse(status="error")
+
+        try:
+            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
+            await self._persist_tokens(tokens)
+            await self._set_success()
+            asyncio.create_task(self._stop_callback_server())
+            return OauthCompleteResponse(status="success")
+        except OAuthError as exc:
+            await self._set_error(exc.message)
+            return OauthCompleteResponse(status="error")
+        except AccountIdentityConflictError as exc:
+            await self._set_error(str(exc))
+            return OauthCompleteResponse(status="error")
 
     async def _start_browser_flow(self) -> OauthStartResponse:
         await self._store.reset()
@@ -364,3 +399,11 @@ def _success_html() -> str:
 
 def _error_html(message: str) -> str:
     return f"<html><body><h1>Login failed</h1><p>{message}</p></body></html>"
+
+
+def _extract_code_state_from_callback_url(callback_url: str) -> tuple[str | None, str | None]:
+    parsed = urlparse(callback_url.strip())
+    values = parse_qs(parsed.query)
+    code = values.get("code", [None])[0]
+    state = values.get("state", [None])[0]
+    return code, state

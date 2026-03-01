@@ -84,6 +84,7 @@ export const OauthStatusResponseSchema = z.object({
 export const OauthCompleteRequestSchema = z.object({
   deviceAuthId: z.string().optional(),
   userCode: z.string().optional(),
+  callbackUrl: z.string().optional(),
 });
 
 export const OauthCompleteResponseSchema = z.object({

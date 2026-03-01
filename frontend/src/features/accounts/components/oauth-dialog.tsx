@@ -2,6 +2,7 @@ import { Check, CircleAlert, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -61,7 +62,7 @@ export type OauthDialogProps = {
   state: OAuthState;
   onOpenChange: (open: boolean) => void;
   onStart: (method?: "browser" | "device") => Promise<void>;
-  onComplete: () => Promise<void>;
+  onComplete: (callbackUrl?: string) => Promise<void>;
   onReset: () => void;
 };
 
@@ -74,6 +75,8 @@ export function OauthDialog({
   onReset,
 }: OauthDialogProps) {
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
+  const [manualCallbackUrl, setManualCallbackUrl] = useState("");
+  const [manualCallbackError, setManualCallbackError] = useState<string | null>(null);
   const stage = getStage(state);
   const completedRef = useRef(false);
 
@@ -87,11 +90,26 @@ export function OauthDialog({
     }
   }, [stage, onComplete]);
 
+  useEffect(() => {
+    if (stage === "browser") {
+      setManualCallbackError(null);
+    }
+  }, [stage]);
+
+  useEffect(() => {
+    if (state.status === "success") {
+      setManualCallbackUrl("");
+      setManualCallbackError(null);
+    }
+  }, [state.status]);
+
   const close = (next: boolean) => {
     onOpenChange(next);
     if (!next) {
       onReset();
       setSelectedMethod("browser");
+      setManualCallbackUrl("");
+      setManualCallbackError(null);
     }
   };
 
@@ -101,6 +119,18 @@ export function OauthDialog({
 
   const handleChangeMethod = () => {
     onReset();
+    setManualCallbackUrl("");
+    setManualCallbackError(null);
+  };
+
+  const handleManualCallbackSubmit = () => {
+    const value = manualCallbackUrl.trim();
+    if (!value) {
+      setManualCallbackError("Paste the callback URL first.");
+      return;
+    }
+    setManualCallbackError(null);
+    void onComplete(value);
   };
 
   return (
@@ -166,6 +196,23 @@ export function OauthDialog({
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>Waiting for authorization to complete...</span>
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Paste callback URL (for remote/browserless setups)</p>
+              <Input
+                value={manualCallbackUrl}
+                onChange={(event) => {
+                  setManualCallbackUrl(event.target.value);
+                  if (manualCallbackError) {
+                    setManualCallbackError(null);
+                  }
+                }}
+                placeholder="http://127.0.0.1:1455/auth/callback?code=...&state=..."
+                className="font-mono text-xs"
+              />
+              {manualCallbackError ? (
+                <p className="text-xs text-destructive">{manualCallbackError}</p>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -243,6 +290,9 @@ export function OauthDialog({
             <>
               <Button type="button" variant="outline" onClick={handleChangeMethod}>
                 Change method
+              </Button>
+              <Button type="button" variant="outline" onClick={handleManualCallbackSubmit}>
+                Complete with callback URL
               </Button>
               {state.authorizationUrl ? (
                 <Button type="button" asChild>

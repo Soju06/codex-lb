@@ -26,6 +26,7 @@ class OauthStatusResponse(DashboardModel):
 class OauthCompleteRequest(DashboardModel):
     device_auth_id: str | None = None
     user_code: str | None = None
+    callback_url: str | None = None
 
 
 class OauthCompleteResponse(DashboardModel):

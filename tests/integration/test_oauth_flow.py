@@ -329,3 +329,78 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+
+
+@pytest.mark.asyncio
+async def test_browser_oauth_manual_callback_url_completes_success(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_exchange_authorization_code(*, code, code_verifier):
+        assert code == "ac_test_code"
+        assert code_verifier == "verifier_123"
+        payload = {
+            "email": "manual-callback@example.com",
+            "chatgpt_account_id": "acc_manual_callback",
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    async with oauth_module._OAUTH_STORE.lock:
+        state = oauth_module._OAUTH_STORE.state
+        state.status = "pending"
+        state.method = "browser"
+        state.state_token = "state_123"
+        state.code_verifier = "verifier_123"
+        state.error_message = None
+
+    complete = await async_client.post(
+        "/api/oauth/complete",
+        json={"callbackUrl": "http://127.0.0.1:1455/auth/callback?code=ac_test_code&state=state_123"},
+    )
+    assert complete.status_code == 200
+    assert complete.json()["status"] == "success"
+
+    status = await async_client.get("/api/oauth/status")
+    assert status.status_code == 200
+    assert status.json()["status"] == "success"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    data = accounts.json()["accounts"]
+    expected_account_id = generate_unique_account_id("acc_manual_callback", "manual-callback@example.com")
+    assert any(account["accountId"] == expected_account_id for account in data)
+
+
+@pytest.mark.asyncio
+async def test_browser_oauth_manual_callback_url_rejects_bad_state(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_exchange_authorization_code(*, code, code_verifier):
+        raise AssertionError("exchange_authorization_code should not be called for invalid state")
+
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    async with oauth_module._OAUTH_STORE.lock:
+        state = oauth_module._OAUTH_STORE.state
+        state.status = "pending"
+        state.method = "browser"
+        state.state_token = "state_expected"
+        state.code_verifier = "verifier_123"
+        state.error_message = None
+
+    complete = await async_client.post(
+        "/api/oauth/complete",
+        json={"callbackUrl": "http://127.0.0.1:1455/auth/callback?code=ac_test_code&state=state_other"},
+    )
+    assert complete.status_code == 200
+    assert complete.json()["status"] == "error"
+
+    status = await async_client.get("/api/oauth/status")
+    assert status.status_code == 200
+    assert status.json()["status"] == "error"

@@ -120,8 +120,8 @@ export function AccountsPage() {
         onStart={async (method) => {
           await oauth.start(method);
         }}
-        onComplete={async () => {
-          await oauth.complete();
+        onComplete={async (callbackUrl?: string) => {
+          await oauth.complete(callbackUrl);
           await accountsQuery.refetch();
         }}
         onReset={oauth.reset}

@@ -101,11 +101,12 @@ export function useOauth() {
     }
   }, [clearCountdownTimer, clearPollTimer]);
 
-  const complete = useCallback(async () => {
+  const complete = useCallback(async (callbackUrl?: string) => {
     try {
       await completeOauth({
         deviceAuthId: state.deviceAuthId ?? undefined,
         userCode: state.userCode ?? undefined,
+        callbackUrl: callbackUrl?.trim() || undefined,
       });
       setState((prev) =>
         OAuthStateSchema.parse({

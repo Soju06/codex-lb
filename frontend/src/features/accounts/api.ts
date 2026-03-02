@@ -10,6 +10,7 @@ import {
   OauthStartRequestSchema,
   OauthStartResponseSchema,
   OauthStatusResponseSchema,
+  RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
@@ -71,4 +72,8 @@ export function completeOauth(payload?: unknown) {
   return post(`${OAUTH_BASE_PATH}/complete`, OauthCompleteResponseSchema, {
     body: validated,
   });
+}
+
+export function getRuntimeConnectAddress() {
+  return get("/api/settings/runtime/connect-address", RuntimeConnectAddressResponseSchema);
 }

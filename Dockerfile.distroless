@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1.7
+FROM python:3.13-slim-bookworm AS python-build
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy
+
+WORKDIR /app
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
+
+RUN mkdir -p /var/lib/codex-lb
+
+FROM gcr.io/distroless/base-debian12:nonroot AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:/usr/local/bin:$PATH"
+
+WORKDIR /app
+
+COPY --from=python-build /lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+COPY --from=python-build /usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu
+COPY --from=python-build /usr/local /usr/local
+COPY --from=python-build /opt/venv /opt/venv
+COPY --from=python-build --chown=nonroot:nonroot /var/lib/codex-lb /var/lib/codex-lb
+COPY --chown=nonroot:nonroot app app
+COPY --chown=nonroot:nonroot scripts scripts
+
+EXPOSE 2455 1455
+
+USER nonroot:nonroot
+CMD ["python", "/app/scripts/distroless-entrypoint.py"]

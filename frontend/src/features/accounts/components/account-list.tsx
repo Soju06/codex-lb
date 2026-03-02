@@ -1,4 +1,4 @@
-import { Plus, Search, Upload } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Search, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
+import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
@@ -34,6 +35,7 @@ export function AccountList({
 }: AccountListProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -90,6 +92,21 @@ export function AccountList({
           Add Account
         </Button>
       </div>
+
+      <div>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto px-0 text-xs"
+          onClick={() => setHelpOpen((current) => !current)}
+        >
+          Need help?
+          {helpOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+
+      {helpOpen ? <WindowsOauthHelp /> : null}
 
       <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1">
         {filtered.length === 0 ? (

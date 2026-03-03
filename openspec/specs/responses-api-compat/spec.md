@@ -126,3 +126,80 @@ When usage data is provided by the upstream, the service MUST include `input_tok
 #### Scenario: Usage included
 - **WHEN** the upstream includes usage in `response.completed`
 - **THEN** the service forwards usage fields in the completed event and in the final response object
+
+### Requirement: Strip safety_identifier before upstream forwarding
+Before forwarding Responses payloads upstream, the service MUST remove `safety_identifier` from normalized payloads for both standard and compact Responses endpoints.
+
+#### Scenario: safety_identifier provided in Responses request
+- **WHEN** a client sends a valid Responses request including `safety_identifier`
+- **THEN** the service accepts the request and forwards payload without `safety_identifier`
+
+#### Scenario: safety_identifier provided in Chat-mapped request
+- **WHEN** a client sends a Chat Completions request including `safety_identifier`
+- **THEN** the mapped Responses payload forwarded upstream excludes `safety_identifier`
+
+### Requirement: Strip known unsupported advisory parameters before upstream forwarding
+Before forwarding Responses payloads upstream, the service MUST remove known unsupported advisory parameters that upstream rejects with `unknown_parameter`. At minimum, the service MUST strip `prompt_cache_retention` and `temperature` from normalized payloads for both standard and compact Responses endpoints.
+
+#### Scenario: prompt_cache_retention provided
+- **WHEN** a client sends a valid Responses request that includes `prompt_cache_retention`
+- **THEN** the service accepts the request and forwards payload without `prompt_cache_retention`
+
+#### Scenario: temperature provided
+- **WHEN** a client sends a valid Responses or Chat-mapped request that includes `temperature`
+- **THEN** the service accepts the request and forwards payload without `temperature`
+
+#### Scenario: unrelated extra field provided
+- **WHEN** a client sends a valid request with an unrelated extra field not in the unsupported list
+- **THEN** the service preserves that field in forwarded payload
+
+### Requirement: Sanitize unsupported interleaved and legacy chat input fields
+Before forwarding Responses requests upstream, the service MUST remove unsupported interleaved reasoning and legacy chat fields from `input` items and content parts. The service MUST strip `reasoning_content`, `reasoning_details`, `tool_calls`, and `function_call` fields when they appear in `input` structures, and MUST remove unsupported reasoning-only content parts that are not accepted by upstream.
+
+#### Scenario: Interleaved reasoning and legacy chat fields in input item
+- **WHEN** a request includes an input item containing `reasoning_content`, `reasoning_details`, `tool_calls`, or `function_call`
+- **THEN** the service strips those fields before forwarding upstream
+
+#### Scenario: Unsupported reasoning-only content part in input
+- **WHEN** a request includes a content part that represents interleaved reasoning-only payload
+- **THEN** the service removes that content part before forwarding upstream
+
+### Requirement: Preserve supported top-level reasoning controls
+When sanitizing interleaved reasoning input fields, the service MUST preserve supported top-level reasoning controls (`reasoning.effort`, `reasoning.summary`) and continue forwarding them unchanged.
+
+#### Scenario: Top-level reasoning with interleaved input fields
+- **WHEN** a request includes top-level `reasoning` plus interleaved reasoning fields inside `input`
+- **THEN** top-level `reasoning` is preserved while unsupported `input` fields are removed
+
+### Requirement: Normalize assistant text content part types for upstream compatibility
+Before forwarding Responses requests upstream, the service MUST normalize assistant-role text content parts in `input` so they use `output_text` (not `input_text`) to satisfy upstream role-specific validation.
+
+#### Scenario: Assistant input message uses input_text
+- **WHEN** a request includes an `input` message with `role: "assistant"` and a text content part typed as `input_text`
+- **THEN** the service rewrites that content part type to `output_text` before forwarding upstream
+
+### Requirement: Normalize tool message history for upstream compatibility
+Before forwarding Responses requests upstream, the service MUST normalize tool-role message history into Responses-native function call output items. Tool messages MUST include a non-empty call identifier and MUST be rewritten as `type: "function_call_output"` with the same call identifier.
+
+#### Scenario: Tool message in conversation history
+- **WHEN** a request includes a message with `role: "tool"`, `tool_call_id`, and text content
+- **THEN** the service rewrites it to a `function_call_output` input item using `call_id` and tool output text before forwarding upstream
+
+### Requirement: Reject unsupported message roles with client errors
+When coercing v1 `messages` into Responses input, the service MUST reject messages that do not include a string role or use an unsupported role value.
+
+#### Scenario: Unsupported message role
+- **WHEN** a request includes a message role outside the supported set
+- **THEN** the service returns a client-facing invalid payload error referencing `messages`
+
+### Requirement: Strip proxy identity headers before upstream forwarding
+Before forwarding requests to the upstream Responses endpoint, the service MUST strip network/proxy identity headers derived from downstream edges. The service MUST remove `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `True-Client-IP`, and `CF-*` headers, and MUST continue to set upstream auth/account headers from internal account state.
+
+#### Scenario: Request contains reverse-proxy forwarding headers
+- **WHEN** the inbound request includes headers such as `X-Forwarded-For`, `X-Forwarded-Proto`, `Forwarded`, or `X-Real-IP`
+- **THEN** those headers are not forwarded to upstream
+
+#### Scenario: Request contains Cloudflare identity headers
+- **WHEN** the inbound request includes headers such as `CF-Connecting-IP` or `CF-Ray`
+- **THEN** those headers are not forwarded to upstream
+

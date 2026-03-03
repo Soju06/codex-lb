@@ -99,7 +99,7 @@ The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings
 
 ### Requirement: API Key Bearer authentication guard
 
-The system SHALL validate API keys on proxy routes (`/v1/*`, `/backend-api/codex/*`) when `api_key_auth_enabled` is true. Validation MUST be implemented as a router-level `Security` dependency, not ASGI middleware. The dependency MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
+The system SHALL validate API keys on proxy routes (`/v1/*`, `/backend-api/codex/*`, `/backend-api/transcribe`) when `api_key_auth_enabled` is true. Validation MUST be implemented as a router-level `Security` dependency, not ASGI middleware. The dependency MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
 
 The dependency SHALL return a typed `ApiKeyData` value directly to the route handler. Route handlers MUST NOT access API key data via `request.state`.
 
@@ -109,7 +109,7 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 
 #### Scenario: API key guard route scope
 
-- **WHEN** `api_key_auth_enabled` is true and a request is made to `/v1/responses` or `/backend-api/codex/responses`
+- **WHEN** `api_key_auth_enabled` is true and a request is made to `/v1/responses`, `/backend-api/codex/responses`, `/v1/audio/transcriptions`, or `/backend-api/transcribe`
 - **THEN** the API key guard validation is applied
 
 #### Scenario: Codex usage excluded from API key guard scope
@@ -131,6 +131,8 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 
 The system SHALL enforce per-key model restrictions in the proxy service layer (not middleware). When `allowed_models` is set (non-null, non-empty) and the requested model is not in the list, the system MUST reject the request. The `/v1/models` endpoint MUST filter the model list based on the authenticated key's `allowed_models`.
 
+For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/transcribe`, the service MUST evaluate restrictions against fixed effective model `gpt-4o-transcribe`.
+
 #### Scenario: Requested model not allowed
 
 - **WHEN** a key has `allowed_models: ["o3-pro"]` and a request is made for model `gpt-4.1`
@@ -150,6 +152,11 @@ The system SHALL enforce per-key model restrictions in the proxy service layer (
 
 - **WHEN** `api_key_auth_enabled` is false and a request is made to `/v1/models`
 - **THEN** the full model catalog is returned
+
+#### Scenario: Fixed transcription model not allowed
+
+- **WHEN** a key has `allowed_models: ["gpt-5.1"]` and a request is made to `/v1/audio/transcriptions` or `/backend-api/transcribe`
+- **THEN** the proxy returns 403 with OpenAI-format error code `model_not_allowed` for model `gpt-4o-transcribe`
 
 ### Requirement: Weekly token usage tracking
 

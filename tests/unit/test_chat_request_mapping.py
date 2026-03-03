@@ -83,11 +83,13 @@ def test_chat_temperature_is_stripped_for_upstream_compat():
         "model": "gpt-5.2",
         "messages": [{"role": "user", "content": "hi"}],
         "temperature": 0.2,
+        "safety_identifier": "safe_123",
     }
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
     dumped = responses.to_payload()
     assert "temperature" not in dumped
+    assert "safety_identifier" not in dumped
 
 
 def test_chat_reasoning_effort_maps_to_responses_reasoning():

@@ -46,6 +46,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
         "input": [],
         "max_output_tokens": 32000,
         "prompt_cache_retention": "4h",
+        "safety_identifier": "safe_123",
         "temperature": 0.2,
         "custom_field": "kept",
     }
@@ -54,6 +55,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
     dumped = request.to_payload()
     assert "max_output_tokens" not in dumped
     assert "prompt_cache_retention" not in dumped
+    assert "safety_identifier" not in dumped
     assert "temperature" not in dumped
     assert dumped["custom_field"] == "kept"
 
@@ -64,12 +66,14 @@ def test_compact_known_unsupported_upstream_fields_are_stripped():
         "instructions": "hi",
         "input": [],
         "prompt_cache_retention": "4h",
+        "safety_identifier": "safe_123",
         "temperature": 0.2,
     }
     request = ResponsesCompactRequest.model_validate(payload)
 
     dumped = request.to_payload()
     assert "prompt_cache_retention" not in dumped
+    assert "safety_identifier" not in dumped
     assert "temperature" not in dumped
 
 

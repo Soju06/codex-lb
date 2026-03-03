@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/Soju06/codex-lb/compare/v1.1.0...v1.1.1) (2026-03-03)
+
+
+### Bug Fixes
+
+* **responses:** strip unsupported safety_identifier before upstream ([#130](https://github.com/Soju06/codex-lb/issues/130)) ([528e7fd](https://github.com/Soju06/codex-lb/commit/528e7fd85152f8e6f39c5551b5ae085e90935356))
+
 ## [1.1.0](https://github.com/Soju06/codex-lb/compare/v1.0.4...v1.1.0) (2026-03-02)
 
 

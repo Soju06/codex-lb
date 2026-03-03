@@ -111,11 +111,12 @@ export function DashboardSkeleton() {
         {/* Table */}
         <div className="rounded-xl border bg-card">
           <div className="overflow-x-auto">
-            <div className="min-w-[800px]">
+            <div className="min-w-[960px]">
               {/* Table header */}
               <div className="flex items-center gap-4 border-b px-4 py-2.5">
                 <Skeleton className="h-3 w-16" />
                 <Skeleton className="h-3 w-20 flex-1" />
+                <Skeleton className="h-3 w-16 flex-1" />
                 <Skeleton className="h-3 w-16 flex-1" />
                 <Skeleton className="h-3 w-14" />
                 <Skeleton className="h-3 w-14" />
@@ -130,6 +131,7 @@ export function DashboardSkeleton() {
                     <Skeleton className="h-3 w-16" />
                   </div>
                   <Skeleton className="h-3.5 w-24 flex-1" />
+                  <Skeleton className="h-3.5 w-20 flex-1" />
                   <Skeleton className="h-3.5 w-28 flex-1 font-mono" />
                   <Skeleton className="h-5 w-14 rounded-full" />
                   <div className="w-14 space-y-1">

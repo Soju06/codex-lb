@@ -77,7 +77,15 @@ class RequestLogsService:
             error_codes_in=status_filter.error_codes_in,
             error_codes_excluding=status_filter.error_codes_excluding,
         )
-        requests = [to_request_log_entry(log) for log in logs]
+        api_key_ids = [log.api_key_id for log in logs if log.api_key_id]
+        api_key_name_by_id = await self._repo.get_api_key_names_by_ids(api_key_ids)
+        requests = [
+            to_request_log_entry(
+                log,
+                api_key_name=api_key_name_by_id.get(log.api_key_id or ""),
+            )
+            for log in logs
+        ]
         return RequestLogsPage(
             requests=requests,
             total=total,

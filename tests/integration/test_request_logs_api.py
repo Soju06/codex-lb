@@ -6,7 +6,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -35,6 +35,15 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
         await accounts_repo.upsert(_make_account("acc_logs", "logs@example.com"))
+        session.add(
+            ApiKey(
+                id="key_logs_1",
+                name="Debug Key",
+                key_hash="hash_logs_1",
+                key_prefix="sk-test",
+            )
+        )
+        await session.commit()
 
         now = utcnow()
         await logs_repo.add_log(
@@ -59,6 +68,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
             error_code="rate_limit_exceeded",
             error_message="Rate limit reached",
             requested_at=now,
+            api_key_id="key_logs_1",
         )
 
     response = await async_client.get("/api/request-logs?limit=2")
@@ -71,10 +81,12 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
     latest = payload[0]
     assert latest["status"] == "rate_limit"
+    assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
     assert latest["errorMessage"] == "Rate limit reached"
 
     older = payload[1]
     assert older["status"] == "ok"
+    assert older["apiKeyName"] is None
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None

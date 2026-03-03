@@ -110,6 +110,32 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(result.success).toBe(false);
   });
+
+  it("parses request rows including apiKeyName", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          apiKeyName: "Key A",
+          requestId: "req-1",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
+  });
 });
 
 describe("UsageWindowSchema", () => {

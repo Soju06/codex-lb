@@ -6,7 +6,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -387,3 +387,41 @@ async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, d
     assert entry["reasoningEffort"] == "xhigh"
     expected = round(_cost(1000, 400, 100), 6)
     assert entry["costUsd"] == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+async def test_request_logs_search_matches_api_key_name(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_key_search", "key-search@example.com"))
+        session.add(
+            ApiKey(
+                id="key_search_1",
+                name="Window-Runner",
+                key_hash="hash_key_search_1",
+                key_prefix="sk-test",
+            )
+        )
+        await session.commit()
+
+        await logs_repo.add_log(
+            account_id="acc_key_search",
+            request_id="req_key_search_1",
+            model="gpt-5.1",
+            input_tokens=3,
+            output_tokens=2,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=now,
+            api_key_id="key_search_1",
+        )
+
+    response = await async_client.get("/api/request-logs?search=window-runner&limit=50")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert len(payload) == 1
+    assert payload[0]["requestId"] == "req_key_search_1"
+    assert payload[0]["apiKeyName"] == "Window-Runner"

@@ -22,10 +22,11 @@ def log_status(log: RequestLog) -> str:
     return normalize_log_status(log.status, log.error_code)
 
 
-def to_request_log_entry(log: RequestLog) -> RequestLogEntry:
+def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) -> RequestLogEntry:
     return RequestLogEntry(
         requested_at=log.requested_at,
         account_id=log.account_id,
+        api_key_name=api_key_name,
         request_id=log.request_id,
         model=log.model,
         reasoning_effort=log.reasoning_effort,

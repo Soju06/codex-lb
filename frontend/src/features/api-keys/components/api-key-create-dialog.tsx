@@ -18,6 +18,13 @@ import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import type { ApiKeyCreateRequest, LimitRuleCreate } from "@/features/api-keys/schemas";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -41,12 +48,16 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>([]);
   const [expiresAt, setExpiresAt] = useState<Date | null>(null);
+  const [enforcedModel, setEnforcedModel] = useState("");
+  const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState("none");
 
   const handleSubmit = async (values: FormValues) => {
     const validLimits = limitRules.filter((r) => r.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : undefined,
+      enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
+      enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       expiresAt: expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
@@ -55,6 +66,8 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
     setSelectedModels([]);
     setLimitRules([]);
     setExpiresAt(null);
+    setEnforcedModel("");
+    setEnforcedReasoningEffort("none");
     onOpenChange(false);
   };
 
@@ -90,6 +103,33 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                 <div className="space-y-1">
                   <label className="text-sm font-medium">Allowed models</label>
                   <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Enforced model</label>
+                  <Input
+                    value={enforcedModel}
+                    onChange={(e) => setEnforcedModel(e.target.value)}
+                    placeholder="e.g. gpt-5.3-codex"
+                    autoComplete="off"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Enforced reasoning</label>
+                  <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="minimal">Minimal</SelectItem>
+                      <SelectItem value="low">Low</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="high">High</SelectItem>
+                      <SelectItem value="xhigh">XHigh</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="space-y-1">

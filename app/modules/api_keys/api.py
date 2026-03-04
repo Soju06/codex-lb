@@ -33,6 +33,8 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=row.allowed_models,
+        enforced_model=row.enforced_model,
+        enforced_reasoning_effort=row.enforced_reasoning_effort,
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
@@ -94,6 +96,8 @@ async def create_api_key(
             ApiKeyCreateData(
                 name=payload.name,
                 allowed_models=payload.allowed_models,
+                enforced_model=payload.enforced_model,
+                enforced_reasoning_effort=payload.enforced_reasoning_effort,
                 expires_at=payload.expires_at,
                 limits=limit_inputs,
             )
@@ -131,6 +135,10 @@ async def update_api_key(
         name_set="name" in fields,
         allowed_models=payload.allowed_models,
         allowed_models_set="allowed_models" in fields,
+        enforced_model=payload.enforced_model,
+        enforced_model_set="enforced_model" in fields,
+        enforced_reasoning_effort=payload.enforced_reasoning_effort,
+        enforced_reasoning_effort_set="enforced_reasoning_effort" in fields,
         expires_at=payload.expires_at,
         expires_at_set="expires_at" in fields,
         is_active=payload.is_active,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import AsyncIterator
 
@@ -28,9 +29,10 @@ from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
 )
 from app.core.openai.parsing import parse_response_payload
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context
@@ -49,6 +51,8 @@ from app.modules.proxy.schemas import (
     RateLimitStatusPayload,
     ReasoningLevelSchema,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -184,6 +188,9 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     reservation = await _enforce_request_limits(api_key, request_model=None)
 
     allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    if api_key and api_key.enforced_model:
+        forced = {api_key.enforced_model}
+        allowed_models = forced if allowed_models is None else (allowed_models & forced)
     created = int(time.time())
 
     registry = get_model_registry()
@@ -250,7 +257,8 @@ async def v1_chat_completions(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    _validate_model_access(api_key, payload.model)
+    effective_model = _effective_model_for_api_key(api_key, payload.model)
+    _validate_model_access(api_key, effective_model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
@@ -261,8 +269,9 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = _openai_validation_error(exc)
         return JSONResponse(status_code=400, content=error, headers=rate_limit_headers)
-    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
+    reservation = await _enforce_request_limits(api_key, request_model=effective_model)
     responses_payload.stream = True
+    _apply_api_key_enforcement(responses_payload, api_key)
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
@@ -283,12 +292,12 @@ async def v1_chat_completions(
         stream_options = payload.stream_options
         include_usage = bool(stream_options and stream_options.include_usage)
         return StreamingResponse(
-            stream_chat_chunks(stream_with_first, model=payload.model, include_usage=include_usage),
+            stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
 
-    result = await collect_chat_completion(stream_with_first, model=payload.model)
+    result = await collect_chat_completion(stream_with_first, model=responses_payload.model)
     if isinstance(result, OpenAIErrorEnvelopeModel):
         error = result.error
         code = error.code if error else None
@@ -313,6 +322,7 @@ async def _stream_responses(
     *,
     suppress_text_done_events: bool = False,
 ) -> Response:
+    _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
     reservation = await _enforce_request_limits(api_key, request_model=payload.model)
 
@@ -352,6 +362,7 @@ async def _collect_responses(
     *,
     suppress_text_done_events: bool = False,
 ) -> Response:
+    _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
     reservation = await _enforce_request_limits(api_key, request_model=payload.model)
 
@@ -430,6 +441,7 @@ async def _compact_responses(
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> JSONResponse:
+    _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
     reservation = await _enforce_request_limits(api_key, request_model=payload.model)
 
@@ -560,6 +572,45 @@ def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> Non
     if model is None or model in allowed_models:
         return
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
+
+
+def _apply_api_key_enforcement(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    api_key: ApiKeyData | None,
+) -> None:
+    if api_key is None:
+        return
+
+    if api_key.enforced_model and payload.model != api_key.enforced_model:
+        logger.info(
+            "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
+            get_request_id(),
+            api_key.id,
+            payload.model,
+            api_key.enforced_model,
+        )
+        payload.model = api_key.enforced_model
+
+    if isinstance(payload, ResponsesRequest) and api_key.enforced_reasoning_effort is not None:
+        requested_effort = payload.reasoning.effort if payload.reasoning else None
+        if payload.reasoning is None:
+            payload.reasoning = ResponsesReasoning(effort=api_key.enforced_reasoning_effort)
+        else:
+            payload.reasoning.effort = api_key.enforced_reasoning_effort
+        if requested_effort != api_key.enforced_reasoning_effort:
+            logger.info(
+                "api_key_reasoning_enforced request_id=%s key_id=%s requested_effort=%s enforced_effort=%s",
+                get_request_id(),
+                api_key.id,
+                requested_effort,
+                api_key.enforced_reasoning_effort,
+            )
+
+
+def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:
+    if api_key is None or api_key.enforced_model is None:
+        return requested_model
+    return api_key.enforced_model
 
 
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:

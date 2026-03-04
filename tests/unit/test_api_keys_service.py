@@ -6,7 +6,7 @@ import pytest
 
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType
-from app.modules.api_keys.repository import ReservationResult, UsageReservationData, UsageReservationItemData
+from app.modules.api_keys.repository import _UNSET, ReservationResult, UsageReservationData, UsageReservationItemData
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyInvalidError,
@@ -54,6 +54,8 @@ class _FakeApiKeysRepository:
         if row is None:
             return None
         for field, value in kwargs.items():
+            if value is _UNSET:
+                continue
             setattr(row, field, value)
         row.limits = self._limits.get(key_id, [])
         return row
@@ -352,6 +354,39 @@ async def test_create_key_stores_hash_and_prefix() -> None:
     assert stored is not None
     assert stored.key_hash != created.key
     assert stored.key_prefix == created.key[:15]
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_enforced_model_outside_allowed_models() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    with pytest.raises(ValueError, match="enforced_model"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="invalid-policy",
+                allowed_models=["model-alpha"],
+                enforced_model="model-beta",
+                expires_at=None,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_key_normalizes_enforced_reasoning_effort() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reasoning-policy",
+            allowed_models=None,
+            enforced_reasoning_effort="HIGH",
+            expires_at=None,
+        )
+    )
+
+    assert created.enforced_reasoning_effort == "high"
 
 
 @pytest.mark.asyncio

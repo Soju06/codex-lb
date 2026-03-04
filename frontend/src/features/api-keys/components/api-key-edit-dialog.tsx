@@ -15,6 +15,13 @@ import {
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
@@ -67,12 +74,18 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
+  const [enforcedModel, setEnforcedModel] = useState<string>(apiKey.enforcedModel || "");
+  const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState<string>(
+    apiKey.enforcedReasoningEffort || "none",
+  );
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(limitRules);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
+      enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
+      enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
@@ -108,6 +121,33 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <label className="text-sm font-medium">Allowed models</label>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Enforced model</label>
+              <Input
+                value={enforcedModel}
+                onChange={(e) => setEnforcedModel(e.target.value)}
+                placeholder="e.g. gpt-5.3-codex"
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Enforced reasoning</label>
+              <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
+                <SelectTrigger>
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="minimal">Minimal</SelectItem>
+                  <SelectItem value="low">Low</SelectItem>
+                  <SelectItem value="medium">Medium</SelectItem>
+                  <SelectItem value="high">High</SelectItem>
+                  <SelectItem value="xhigh">XHigh</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-1">

@@ -27,6 +27,8 @@ class LimitRuleResponse(DashboardModel):
 class ApiKeyCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
     allowed_models: list[str] | None = None
+    enforced_model: str | None = Field(default=None, min_length=1)
+    enforced_reasoning_effort: str | None = Field(default=None, pattern=r"^(none|minimal|low|medium|high|xhigh)$")
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     limits: list[LimitRuleCreate] | None = None
@@ -35,6 +37,8 @@ class ApiKeyCreateRequest(DashboardModel):
 class ApiKeyUpdateRequest(DashboardModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     allowed_models: list[str] | None = None
+    enforced_model: str | None = Field(default=None, min_length=1)
+    enforced_reasoning_effort: str | None = Field(default=None, pattern=r"^(none|minimal|low|medium|high|xhigh)$")
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     is_active: bool | None = None
@@ -47,6 +51,8 @@ class ApiKeyResponse(DashboardModel):
     name: str
     key_prefix: str
     allowed_models: list[str] | None
+    enforced_model: str | None
+    enforced_reasoning_effort: str | None
     expires_at: datetime | None
     is_active: bool
     created_at: datetime

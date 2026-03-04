@@ -24,6 +24,12 @@ describe("AccountSummarySchema", () => {
       resetAtSecondary: null,
       windowMinutesPrimary: null,
       windowMinutesSecondary: 10080,
+      requestUsage: {
+        requestCount: 3,
+        totalTokens: 1500,
+        cachedInputTokens: 1100,
+        totalCostUsd: 0.02,
+      },
       auth: {
         access: {
           expiresAt: ISO,
@@ -41,6 +47,7 @@ describe("AccountSummarySchema", () => {
     expect(parsed.accountId).toBe("acc-1");
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
     expect(parsed.windowMinutesSecondary).toBe(10080);
+    expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
   });
 });
 

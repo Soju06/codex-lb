@@ -12,6 +12,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -337,6 +338,67 @@ async def test_accounts_list_includes_per_account_reset_times(async_client, db_s
     assert accounts["acc_reset_b"]["windowMinutesPrimary"] == 300
     assert accounts["acc_reset_a"]["windowMinutesSecondary"] == 10080
     assert accounts["acc_reset_b"]["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_includes_request_usage_cost_rollup(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_cost", "cost@example.com"))
+        await accounts_repo.upsert(_make_account("acc_other", "other@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_cost",
+            request_id="req_cost_1",
+            model="gpt-5.3-codex",
+            input_tokens=100_000,
+            output_tokens=20_000,
+            cached_input_tokens=90_000,
+            latency_ms=200,
+            status="success",
+            error_code=None,
+        )
+        await logs_repo.add_log(
+            account_id="acc_cost",
+            request_id="req_cost_2",
+            model="gpt-5.1-codex",
+            input_tokens=50_000,
+            output_tokens=10_000,
+            cached_input_tokens=0,
+            latency_ms=180,
+            status="success",
+            error_code=None,
+        )
+        await logs_repo.add_log(
+            account_id="acc_other",
+            request_id="req_other_1",
+            model="gpt-5.1-codex-mini",
+            input_tokens=1_000,
+            output_tokens=500,
+            cached_input_tokens=0,
+            latency_ms=150,
+            status="success",
+            error_code=None,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    request_usage = accounts["acc_cost"]["requestUsage"]
+    assert request_usage is not None
+    assert request_usage["requestCount"] == 2
+    assert request_usage["totalTokens"] == 180_000
+    assert request_usage["cachedInputTokens"] == 90_000
+    assert request_usage["totalCostUsd"] == pytest.approx(0.47575, abs=1e-6)
+
+    other_usage = accounts["acc_other"]["requestUsage"]
+    assert other_usage is not None
+    assert other_usage["requestCount"] == 1
+    assert other_usage["totalTokens"] == 1_500
 
 
 @pytest.mark.asyncio

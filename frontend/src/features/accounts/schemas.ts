@@ -15,6 +15,13 @@ export const AccountUsageSchema = z.object({
   secondaryRemainingPercent: z.number().nullable(),
 });
 
+export const AccountRequestUsageSchema = z.object({
+  requestCount: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative(),
+  totalCostUsd: z.number().nonnegative(),
+});
+
 export const AccountTokenStatusSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   state: z.string().nullable().optional(),
@@ -37,6 +44,7 @@ export const AccountSummarySchema = z.object({
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
   windowMinutesPrimary: z.number().nullable().optional(),
   windowMinutesSecondary: z.number().nullable().optional(),
+  requestUsage: AccountRequestUsageSchema.nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
 });
 

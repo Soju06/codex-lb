@@ -47,19 +47,19 @@ export function AppHeader({
         {/* Desktop nav pills */}
         <nav className="hidden items-center rounded-lg border border-border/50 bg-muted/40 p-0.5 sm:flex">
           {NAV_ITEMS.map((item) => (
-            <NavLink key={item.to} to={item.to}>
-              {({ isActive }) => (
-                <span
-                  className={cn(
-                    "relative rounded-md px-3.5 py-1.5 text-xs font-medium transition-colors duration-200",
-                    isActive
-                      ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {item.label}
-                </span>
-              )}
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) =>
+                cn(
+                  "relative inline-flex h-7 items-center rounded-md px-3.5 text-xs leading-none font-medium transition-colors duration-200",
+                  isActive
+                    ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                    : "text-muted-foreground hover:text-foreground",
+                )
+              }
+            >
+              {item.label}
             </NavLink>
           ))}
         </nav>

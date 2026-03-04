@@ -46,6 +46,12 @@ class ApiKeyUpdateRequest(DashboardModel):
     reset_usage: bool | None = None
 
 
+class ApiKeyUsageSummaryResponse(DashboardModel):
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
+
+
 class ApiKeyResponse(DashboardModel):
     id: str
     name: str
@@ -58,6 +64,7 @@ class ApiKeyResponse(DashboardModel):
     created_at: datetime
     last_used_at: datetime | None
     limits: list[LimitRuleResponse] = Field(default_factory=list)
+    usage_summary: ApiKeyUsageSummaryResponse | None = None
 
 
 class ApiKeyCreateResponse(ApiKeyResponse):

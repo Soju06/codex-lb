@@ -16,6 +16,7 @@ from app.core.usage.pricing import (
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import (
+    ApiKeyUsageSummary,
     _UNSET,
     ReservationResult,
     UsageReservationData,
@@ -32,6 +33,7 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
 
     async def list_all(self) -> list[ApiKey]: ...
+    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
 
     async def update(
         self,
@@ -203,11 +205,19 @@ class ApiKeyData:
     created_at: datetime
     last_used_at: datetime | None
     limits: list[LimitRuleData] = field(default_factory=list)
+    usage_summary: "ApiKeyUsageSummaryData | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreatedData(ApiKeyData):
     key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyUsageSummaryData:
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +265,11 @@ class ApiKeysService:
 
     async def list_keys(self) -> list[ApiKeyData]:
         rows = await self._repository.list_all()
-        return [_to_api_key_data(row) for row in rows]
+        usage_summary_by_key = await self._repository.list_usage_summary_by_key()
+        return [
+            _to_api_key_data(row, usage_summary=_to_usage_summary_data(usage_summary_by_key.get(row.id)))
+            for row in rows
+        ]
 
     async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
         if payload.allowed_models_set:
@@ -733,11 +747,12 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         created_at=data.created_at,
         last_used_at=data.last_used_at,
         limits=data.limits,
+        usage_summary=data.usage_summary,
         key=key,
     )
 
 
-def _to_api_key_data(row: ApiKey) -> ApiKeyData:
+def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | None = None) -> ApiKeyData:
     limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     return ApiKeyData(
         id=row.id,
@@ -751,6 +766,17 @@ def _to_api_key_data(row: ApiKey) -> ApiKeyData:
         created_at=row.created_at,
         last_used_at=row.last_used_at,
         limits=limits,
+        usage_summary=usage_summary,
+    )
+
+
+def _to_usage_summary_data(summary: ApiKeyUsageSummary | None) -> ApiKeyUsageSummaryData | None:
+    if summary is None:
+        return None
+    return ApiKeyUsageSummaryData(
+        request_count=summary.request_count,
+        total_tokens=summary.total_tokens,
+        cached_input_tokens=summary.cached_input_tokens,
     )
 
 

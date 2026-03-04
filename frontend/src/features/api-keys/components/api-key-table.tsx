@@ -53,6 +53,17 @@ function formatLimitSummary(limits: LimitRule[]): string {
     .join(" | ");
 }
 
+function formatUsageSummary(
+  requestCount: number,
+  totalTokens: number,
+  cachedInputTokens: number,
+): string {
+  const total = formatCompactNumber(totalTokens);
+  const cached = formatCompactNumber(cachedInputTokens);
+  const requests = formatCompactNumber(requestCount);
+  return `${total} tok | ${cached} cached | ${requests} req`;
+}
+
 export type ApiKeyTableProps = {
   keys: ApiKey[];
   busy: boolean;
@@ -83,7 +94,15 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
       <TableBody>
         {keys.map((apiKey) => {
           const models = apiKey.allowedModels?.join(", ") || "All";
-          const usageText = formatLimitSummary(apiKey.limits);
+          const usageText = apiKey.limits.length > 0
+            ? formatLimitSummary(apiKey.limits)
+            : apiKey.usageSummary && apiKey.usageSummary.requestCount > 0
+              ? formatUsageSummary(
+                  apiKey.usageSummary.requestCount,
+                  apiKey.usageSummary.totalTokens,
+                  apiKey.usageSummary.cachedInputTokens,
+                )
+              : "No usage";
 
           return (
             <TableRow key={apiKey.id}>

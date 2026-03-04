@@ -6,7 +6,7 @@ import pytest
 
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType
-from app.modules.api_keys.repository import _UNSET, ReservationResult, UsageReservationData, UsageReservationItemData
+from app.modules.api_keys.repository import ReservationResult, UsageReservationData, UsageReservationItemData, _UNSET
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyInvalidError,
@@ -48,6 +48,9 @@ class _FakeApiKeysRepository:
         for row in result:
             row.limits = self._limits.get(row.id, [])
         return result
+
+    async def list_usage_summary_by_key(self) -> dict[str, object]:
+        return {}
 
     async def update(self, key_id: str, **kwargs: object) -> ApiKey | None:
         row = self.rows.get(key_id)

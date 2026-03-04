@@ -389,6 +389,16 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
         assert latest_log is not None
         assert latest_log.api_key_id == key_id
 
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    listed_rows = listed.json()
+    usage_key_row = next((row for row in listed_rows if row["id"] == key_id), None)
+    assert usage_key_row is not None
+    assert usage_key_row["usageSummary"] is not None
+    assert usage_key_row["usageSummary"]["requestCount"] == 1
+    assert usage_key_row["usageSummary"]["totalTokens"] == 15
+    assert usage_key_row["usageSummary"]["cachedInputTokens"] == 0
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])

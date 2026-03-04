@@ -23,6 +23,12 @@ export const LimitRuleCreateSchema = z.object({
   modelFilter: z.string().nullable().optional(),
 });
 
+export const ApiKeyUsageSummarySchema = z.object({
+  requestCount: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative(),
+});
+
 export const ApiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -38,6 +44,7 @@ export const ApiKeySchema = z.object({
   createdAt: z.string().datetime({ offset: true }),
   lastUsedAt: z.string().datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
+  usageSummary: ApiKeyUsageSummarySchema.nullable().default(null),
 });
 
 export const ApiKeyCreateRequestSchema = z.object({

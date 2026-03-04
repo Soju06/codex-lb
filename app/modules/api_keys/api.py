@@ -9,6 +9,7 @@ from app.modules.api_keys.schemas import (
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
     ApiKeyResponse,
+    ApiKeyUsageSummaryResponse,
     ApiKeyUpdateRequest,
     LimitRuleResponse,
 )
@@ -51,6 +52,15 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
             )
             for li in row.limits
         ],
+        usage_summary=(
+            ApiKeyUsageSummaryResponse(
+                request_count=row.usage_summary.request_count,
+                total_tokens=row.usage_summary.total_tokens,
+                cached_input_tokens=row.usage_summary.cached_input_tokens,
+            )
+            if row.usage_summary is not None
+            else None
+        ),
     )
 
 

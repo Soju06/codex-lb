@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -12,6 +12,7 @@ from app.core.utils.time import utcnow
 from app.db.models import (
     ApiKey,
     ApiKeyLimit,
+    RequestLog,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     LimitType,
@@ -46,6 +47,13 @@ class UsageReservationData:
     items: list[UsageReservationItemData]
 
 
+@dataclass(frozen=True, slots=True)
+class ApiKeyUsageSummary:
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
+
+
 class _Unset(Enum):
     UNSET = "UNSET"
 
@@ -75,6 +83,33 @@ class ApiKeysRepository:
     async def list_all(self) -> list[ApiKey]:
         result = await self._session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
         return list(result.scalars().unique().all())
+
+    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
+        total_tokens_expr = (
+            func.coalesce(RequestLog.input_tokens, 0)
+            + func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        )
+        stmt = (
+            select(
+                RequestLog.api_key_id,
+                func.count(RequestLog.id).label("request_count"),
+                func.coalesce(func.sum(total_tokens_expr), 0).label("total_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            )
+            .where(RequestLog.api_key_id.is_not(None))
+            .group_by(RequestLog.api_key_id)
+        )
+        result = await self._session.execute(stmt)
+        summary: dict[str, ApiKeyUsageSummary] = {}
+        for api_key_id, request_count, total_tokens, cached_input_tokens in result.all():
+            if not api_key_id:
+                continue
+            summary[api_key_id] = ApiKeyUsageSummary(
+                request_count=int(request_count or 0),
+                total_tokens=int(total_tokens or 0),
+                cached_input_tokens=int(cached_input_tokens or 0),
+            )
+        return summary
 
     async def update(
         self,

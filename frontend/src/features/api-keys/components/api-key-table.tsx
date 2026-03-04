@@ -71,13 +71,13 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
     <Table className="table-fixed">
       <TableHeader>
         <TableRow>
-          <TableHead className="w-[12%] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
-          <TableHead className="w-[10%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
-          <TableHead className="w-[14%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
-          <TableHead className="w-[24%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
-          <TableHead className="w-[18%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
-          <TableHead className="w-[12%] text-[11px] uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
-          <TableHead className="w-[10%] pr-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Actions</TableHead>
+          <TableHead className="w-[22%] min-w-[14rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
+          <TableHead className="w-[13%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
+          <TableHead className="w-[28%] min-w-[16rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
+          <TableHead className="w-[14%] min-w-[10rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
+          <TableHead className="w-[10%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
+          <TableHead className="w-[7%] min-w-[6rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
+          <TableHead className="w-[6%] min-w-[5rem] pr-4 text-right text-[11px] uppercase tracking-wider text-muted-foreground/80">Actions</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -87,17 +87,17 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
 
           return (
             <TableRow key={apiKey.id}>
-              <TableCell className="pl-4 font-medium">{apiKey.name}</TableCell>
-              <TableCell className="font-mono text-xs">{apiKey.keyPrefix}</TableCell>
-              <TableCell className="max-w-[14rem] truncate">{models}</TableCell>
+              <TableCell className="pl-4 font-medium truncate">{apiKey.name}</TableCell>
+              <TableCell className="truncate font-mono text-xs">{apiKey.keyPrefix}</TableCell>
+              <TableCell className="truncate">{models}</TableCell>
               <TableCell className="truncate text-xs tabular-nums">{usageText}</TableCell>
-              <TableCell className="text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt)}</TableCell>
+              <TableCell className="truncate text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt)}</TableCell>
               <TableCell>
                 <Badge className={apiKey.isActive ? "bg-emerald-500 text-white" : "bg-zinc-500 text-white"}>
                   {apiKey.isActive ? "Active" : "Disabled"}
                 </Badge>
               </TableCell>
-              <TableCell className="pr-4">
+              <TableCell className="pr-4 text-right">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button type="button" size="icon-sm" variant="ghost" disabled={busy}>

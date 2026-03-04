@@ -57,6 +57,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
                 request_count=row.usage_summary.request_count,
                 total_tokens=row.usage_summary.total_tokens,
                 cached_input_tokens=row.usage_summary.cached_input_tokens,
+                total_cost_usd=row.usage_summary.total_cost_usd,
             )
             if row.usage_summary is not None
             else None

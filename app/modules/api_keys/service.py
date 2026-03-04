@@ -218,6 +218,7 @@ class ApiKeyUsageSummaryData:
     request_count: int
     total_tokens: int
     cached_input_tokens: int
+    total_cost_usd: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -777,6 +778,7 @@ def _to_usage_summary_data(summary: ApiKeyUsageSummary | None) -> ApiKeyUsageSum
         request_count=summary.request_count,
         total_tokens=summary.total_tokens,
         cached_input_tokens=summary.cached_input_tokens,
+        total_cost_usd=summary.total_cost_usd,
     )
 
 

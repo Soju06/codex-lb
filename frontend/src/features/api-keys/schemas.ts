@@ -27,6 +27,7 @@ export const ApiKeyUsageSummarySchema = z.object({
   requestCount: z.number().int().nonnegative(),
   totalTokens: z.number().int().nonnegative(),
   cachedInputTokens: z.number().int().nonnegative(),
+  totalCostUsd: z.number().nonnegative().default(0),
 });
 
 export const ApiKeySchema = z.object({

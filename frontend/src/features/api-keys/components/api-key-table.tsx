@@ -19,7 +19,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ApiKey, LimitRule, LimitType } from "@/features/api-keys/schemas";
-import { formatCompactNumber, formatTimeLong } from "@/utils/formatters";
+import { formatCompactNumber, formatCurrency, formatTimeLong } from "@/utils/formatters";
 
 function formatExpiry(value: string | null): string {
   if (!value) {
@@ -57,11 +57,13 @@ function formatUsageSummary(
   requestCount: number,
   totalTokens: number,
   cachedInputTokens: number,
+  totalCostUsd: number,
 ): string {
   const total = formatCompactNumber(totalTokens);
   const cached = formatCompactNumber(cachedInputTokens);
   const requests = formatCompactNumber(requestCount);
-  return `${total} tok | ${cached} cached | ${requests} req`;
+  const cost = formatCurrency(totalCostUsd);
+  return `${total} tok | ${cached} cached | ${requests} req | ${cost}`;
 }
 
 export type ApiKeyTableProps = {
@@ -101,6 +103,7 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
                   apiKey.usageSummary.requestCount,
                   apiKey.usageSummary.totalTokens,
                   apiKey.usageSummary.cachedInputTokens,
+                  apiKey.usageSummary.totalCostUsd,
                 )
               : "No usage";
 

@@ -8,6 +8,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.usage.pricing import UsageTokens, calculate_cost_from_usage, get_pricing_for_model
 from app.core.utils.time import utcnow
 from app.db.models import (
     ApiKey,
@@ -52,6 +53,7 @@ class ApiKeyUsageSummary:
     request_count: int
     total_tokens: int
     cached_input_tokens: int
+    total_cost_usd: float
 
 
 class _Unset(Enum):
@@ -85,31 +87,69 @@ class ApiKeysRepository:
         return list(result.scalars().unique().all())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
-        total_tokens_expr = (
-            func.coalesce(RequestLog.input_tokens, 0)
-            + func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
-        )
         stmt = (
             select(
                 RequestLog.api_key_id,
+                RequestLog.model,
                 func.count(RequestLog.id).label("request_count"),
-                func.coalesce(func.sum(total_tokens_expr), 0).label("total_tokens"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(
+                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                    0,
+                ).label("output_tokens"),
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             )
             .where(RequestLog.api_key_id.is_not(None))
-            .group_by(RequestLog.api_key_id)
+            .group_by(RequestLog.api_key_id, RequestLog.model)
         )
         result = await self._session.execute(stmt)
-        summary: dict[str, ApiKeyUsageSummary] = {}
-        for api_key_id, request_count, total_tokens, cached_input_tokens in result.all():
+        rollup: dict[str, dict[str, float | int]] = {}
+        for api_key_id, model, request_count, input_tokens, output_tokens, cached_input_tokens in result.all():
             if not api_key_id:
                 continue
-            summary[api_key_id] = ApiKeyUsageSummary(
-                request_count=int(request_count or 0),
-                total_tokens=int(total_tokens or 0),
-                cached_input_tokens=int(cached_input_tokens or 0),
+            input_sum = int(input_tokens or 0)
+            output_sum = int(output_tokens or 0)
+            cached_sum = int(cached_input_tokens or 0)
+            cached_sum = max(0, min(cached_sum, input_sum))
+            tokens_sum = input_sum + output_sum
+
+            entry = rollup.setdefault(
+                api_key_id,
+                {
+                    "request_count": 0,
+                    "total_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "total_cost_usd": 0.0,
+                },
             )
-        return summary
+            entry["request_count"] += int(request_count or 0)
+            entry["total_tokens"] += tokens_sum
+            entry["cached_input_tokens"] += cached_sum
+
+            resolved = get_pricing_for_model(model or "", None, None)
+            if resolved is None:
+                continue
+            _, price = resolved
+            cost_usd = calculate_cost_from_usage(
+                UsageTokens(
+                    input_tokens=float(input_sum),
+                    output_tokens=float(output_sum),
+                    cached_input_tokens=float(cached_sum),
+                ),
+                price,
+            )
+            if cost_usd is not None:
+                entry["total_cost_usd"] += cost_usd
+
+        return {
+            api_key_id: ApiKeyUsageSummary(
+                request_count=int(values["request_count"]),
+                total_tokens=int(values["total_tokens"]),
+                cached_input_tokens=int(values["cached_input_tokens"]),
+                total_cost_usd=round(float(values["total_cost_usd"]), 6),
+            )
+            for api_key_id, values in rollup.items()
+        }
 
     async def update(
         self,

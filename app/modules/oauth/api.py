@@ -8,6 +8,7 @@ from app.core.clients.oauth import OAuthError
 from app.core.errors import dashboard_error
 from app.dependencies import OauthContext, get_oauth_context
 from app.modules.oauth.schemas import (
+    ManualCallbackRequest,
     OauthCompleteRequest,
     OauthCompleteResponse,
     OauthStartRequest,
@@ -59,4 +60,19 @@ async def complete_oauth(
         return JSONResponse(
             status_code=501,
             content=dashboard_error("not_implemented", "OAuth complete is not implemented"),
+        )
+
+
+@router.post("/manual-callback")
+async def manual_callback(
+    request: ManualCallbackRequest,
+    context: OauthContext = Depends(get_oauth_context),
+) -> JSONResponse:
+    try:
+        status = await context.service.manual_callback(request.callback_url)
+        return JSONResponse(content={"status": status})
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "manual_callback_failed", "message": str(exc)},
         )

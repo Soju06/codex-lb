@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -563,11 +563,13 @@ def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> Non
 
 
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
+    output_items: dict[int, dict[str, JsonValue]] = {}
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
             continue
         event_type = payload.get("type")
+        _collect_output_item_event(payload, output_items)
         if event_type == "error":
             return _parse_event_error_envelope(payload)
         if event_type == "response.failed":
@@ -586,11 +588,41 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIRespon
         if event_type in ("response.completed", "response.incomplete"):
             response = payload.get("response")
             if isinstance(response, dict):
-                parsed = parse_response_payload(response)
+                parsed = parse_response_payload(_merge_collected_output_items(response, output_items))
                 if parsed is not None:
                     return parsed
             return _default_error_envelope()
     return _default_error_envelope()
+
+
+def _collect_output_item_event(
+    payload: dict[str, JsonValue],
+    output_items: dict[int, dict[str, JsonValue]],
+) -> None:
+    event_type = payload.get("type")
+    if event_type not in ("response.output_item.added", "response.output_item.done"):
+        return
+    output_index = payload.get("output_index")
+    item = payload.get("item")
+    if not isinstance(output_index, int) or not isinstance(item, dict):
+        return
+    output_items[output_index] = dict(item)
+
+
+def _merge_collected_output_items(
+    response: Mapping[str, JsonValue],
+    output_items: dict[int, dict[str, JsonValue]],
+) -> dict[str, JsonValue]:
+    merged = dict(response)
+    if not output_items:
+        return merged
+
+    existing_output = response.get("output")
+    if isinstance(existing_output, list) and existing_output:
+        return merged
+
+    merged["output"] = [item for _, item in sorted(output_items.items())]
+    return merged
 
 
 def _parse_event_error_envelope(payload: dict[str, JsonValue]) -> OpenAIErrorEnvelopeModel:

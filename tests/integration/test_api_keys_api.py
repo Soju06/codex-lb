@@ -237,6 +237,93 @@ async def test_api_key_model_restriction_and_models_filter(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_rejects_enforced_model_outside_allowed_models(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "invalid-enforcement",
+            "allowedModels": ["model-alpha"],
+            "enforcedModel": "model-beta",
+        },
+    )
+    assert created.status_code == 400
+    assert created.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, monkeypatch):
+    _populate_test_registry()
+    model_ids = sorted(_TEST_MODELS)
+    forced_model = model_ids[0]
+    requested_model = model_ids[1]
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "enforced-policy",
+            "allowedModels": [forced_model],
+            "enforcedModel": forced_model,
+            "enforcedReasoningEffort": "high",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    models = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
+    assert models.status_code == 200
+    assert [item["id"] for item in models.json()["data"]] == [forced_model]
+
+    await _import_account(async_client, "acc_enforced_key", "enforced-key@example.com")
+
+    seen: dict[str, str | None] = {}
+
+    async def fake_stream(payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        seen["model"] = payload.model
+        seen["effort"] = payload.reasoning.effort if payload.reasoning else None
+        usage = {"input_tokens": 3, "output_tokens": 2}
+        event = {"type": "response.completed", "response": {"id": "resp_enforced", "usage": usage}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": requested_model,
+            "instructions": "hi",
+            "input": [],
+            "reasoning": {"effort": "low"},
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    assert seen["model"] == forced_model
+    assert seen["effort"] == "high"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+        assert latest_log is not None
+        assert latest_log.model == forced_model
+        assert latest_log.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
 async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",
@@ -301,6 +388,17 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
         latest_log = result.scalars().first()
         assert latest_log is not None
         assert latest_log.api_key_id == key_id
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    listed_rows = listed.json()
+    usage_key_row = next((row for row in listed_rows if row["id"] == key_id), None)
+    assert usage_key_row is not None
+    assert usage_key_row["usageSummary"] is not None
+    assert usage_key_row["usageSummary"]["requestCount"] == 1
+    assert usage_key_row["usageSummary"]["totalTokens"] == 15
+    assert usage_key_row["usageSummary"]["cachedInputTokens"] == 0
+    assert usage_key_row["usageSummary"]["totalCostUsd"] == 0.0
 
 
 @pytest.mark.asyncio

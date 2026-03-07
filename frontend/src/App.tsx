@@ -22,7 +22,7 @@ function AppLayout() {
         }}
         showLogout={passwordRequired}
       />
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
+      <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-8 sm:px-6">
         <Outlet />
       </main>
       <StatusBar />

@@ -163,6 +163,7 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
     if (search.length > 0) {
       const haystack = [
         entry.accountId,
+        entry.apiKeyName,
         entry.requestId,
         entry.model,
         entry.reasoningEffort,

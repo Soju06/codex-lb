@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.usage.types import BucketModelAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, RequestLog
+from app.db.models import Account, ApiKey, RequestLog
 
 
 class RequestLogsRepository:
@@ -145,6 +145,7 @@ class RequestLogsRepository:
         stmt = (
             select(RequestLog, total_col)
             .outerjoin(Account, Account.id == RequestLog.account_id)
+            .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
             .order_by(RequestLog.requested_at.desc())
         )
         if conditions:
@@ -166,6 +167,7 @@ class RequestLogsRepository:
             select(func.count(RequestLog.id))
             .select_from(RequestLog)
             .outerjoin(Account, Account.id == RequestLog.account_id)
+            .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
         )
         if conditions:
             count_stmt = count_stmt.where(and_(*conditions))
@@ -219,6 +221,13 @@ class RequestLogsRepository:
         model_options = [(row[0], row[1]) for row in model_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
         return account_ids, model_options, status_values
+
+    async def get_api_key_names_by_ids(self, api_key_ids: list[str]) -> dict[str, str]:
+        unique_ids = sorted({key_id for key_id in api_key_ids if key_id})
+        if not unique_ids:
+            return {}
+        result = await self._session.execute(select(ApiKey.id, ApiKey.name).where(ApiKey.id.in_(unique_ids)))
+        return {key_id: name for key_id, name in result.all() if key_id and name}
 
     def _build_filters(
         self,
@@ -290,6 +299,8 @@ class RequestLogsRepository:
                     RequestLog.status.ilike(search_pattern),
                     RequestLog.error_code.ilike(search_pattern),
                     RequestLog.error_message.ilike(search_pattern),
+                    RequestLog.api_key_id.ilike(search_pattern),
+                    ApiKey.name.ilike(search_pattern),
                     cast(RequestLog.requested_at, String).ilike(search_pattern),
                     cast(RequestLog.input_tokens, String).ilike(search_pattern),
                     cast(RequestLog.output_tokens, String).ilike(search_pattern),

@@ -3,6 +3,15 @@
 ## Environment
 
 - Python: .venv/bin/python (uv, CPython 3.13.3)
+- GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
+- For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
+
+## Deployment Topology
+
+- `LXC 124` (`codex-lb-dev`) is the development master.
+- `LXC 123` (`codex-lb`) is production.
+- Promotion flow is manual: validate changes on `124` first, then apply the same tested state to `123`.
+- `123` must stay clean (no uncommitted/untracked local repo changes). If drift is detected, stop and report before deployment actions.
 
 ## Code Conventions
 

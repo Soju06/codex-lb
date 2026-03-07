@@ -16,6 +16,7 @@ from app.core.usage.pricing import (
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import (
+    ApiKeyUsageSummary,
     _UNSET,
     ReservationResult,
     UsageReservationData,
@@ -32,6 +33,7 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
 
     async def list_all(self) -> list[ApiKey]: ...
+    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
 
     async def update(
         self,
@@ -39,6 +41,8 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
+        enforced_model: str | None | _Unset = ...,
+        enforced_reasoning_effort: str | None | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
@@ -163,7 +167,9 @@ class LimitRuleInput:
 class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
-    expires_at: datetime | None
+    enforced_model: str | None = None
+    enforced_reasoning_effort: str | None = None
+    expires_at: datetime | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
 
@@ -173,6 +179,10 @@ class ApiKeyUpdateData:
     name_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
+    enforced_model: str | None = None
+    enforced_model_set: bool = False
+    enforced_reasoning_effort: str | None = None
+    enforced_reasoning_effort_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
@@ -188,16 +198,27 @@ class ApiKeyData:
     name: str
     key_prefix: str
     allowed_models: list[str] | None
+    enforced_model: str | None
+    enforced_reasoning_effort: str | None
     expires_at: datetime | None
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
     limits: list[LimitRuleData] = field(default_factory=list)
+    usage_summary: "ApiKeyUsageSummaryData | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreatedData(ApiKeyData):
     key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyUsageSummaryData:
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
+    total_cost_usd: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,12 +235,18 @@ class ApiKeysService:
     async def create_key(self, payload: ApiKeyCreateData) -> ApiKeyCreatedData:
         now = utcnow()
         plain_key = _generate_plain_key()
+        normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
+        enforced_model = _normalize_model_slug(payload.enforced_model)
+        enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
+        _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
             name=_normalize_name(payload.name),
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
-            allowed_models=_serialize_allowed_models(payload.allowed_models),
+            allowed_models=_serialize_allowed_models(normalized_allowed_models),
+            enforced_model=enforced_model,
+            enforced_reasoning_effort=enforced_reasoning_effort,
             expires_at=payload.expires_at,
             is_active=True,
             created_at=now,
@@ -239,13 +266,51 @@ class ApiKeysService:
 
     async def list_keys(self) -> list[ApiKeyData]:
         rows = await self._repository.list_all()
-        return [_to_api_key_data(row) for row in rows]
+        usage_summary_by_key = await self._repository.list_usage_summary_by_key()
+        return [
+            _to_api_key_data(row, usage_summary=_to_usage_summary_data(usage_summary_by_key.get(row.id)))
+            for row in rows
+        ]
 
     async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
+        if payload.allowed_models_set:
+            allowed_models = _normalize_allowed_models(payload.allowed_models)
+        else:
+            allowed_models = None
+
+        if payload.enforced_model_set:
+            enforced_model = _normalize_model_slug(payload.enforced_model)
+        else:
+            enforced_model = None
+
+        if payload.enforced_reasoning_effort_set:
+            enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
+        else:
+            enforced_reasoning_effort = None
+
+        if payload.allowed_models_set or payload.enforced_model_set:
+            existing = await self._repository.get_by_id(key_id)
+            if existing is None:
+                raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+            effective_allowed_models = (
+                allowed_models if payload.allowed_models_set else _deserialize_allowed_models(existing.allowed_models)
+            )
+            effective_enforced_model = (
+                enforced_model if payload.enforced_model_set else _normalize_model_slug(existing.enforced_model)
+            )
+            _validate_model_enforcement(
+                enforced_model=effective_enforced_model,
+                allowed_models=effective_allowed_models,
+            )
+
         row = await self._repository.update(
             key_id,
             name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
-            allowed_models=_serialize_allowed_models(payload.allowed_models) if payload.allowed_models_set else _UNSET,
+            allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
+            enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
+            enforced_reasoning_effort=(
+                enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
+            ),
             expires_at=payload.expires_at if payload.expires_at_set else _UNSET,
             is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
         )
@@ -516,8 +581,7 @@ def _hash_key(plain_key: str) -> str:
 def _serialize_allowed_models(allowed_models: list[str] | None) -> str | None:
     if allowed_models is None:
         return None
-    normalized = [model.strip() for model in allowed_models if model and model.strip()]
-    return json.dumps(normalized)
+    return json.dumps(allowed_models)
 
 
 def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
@@ -528,6 +592,54 @@ def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
         return None
     models = [str(value).strip() for value in parsed if str(value).strip()]
     return models
+
+
+def _normalize_allowed_models(allowed_models: list[str] | None) -> list[str] | None:
+    if allowed_models is None:
+        return None
+    return [model.strip() for model in allowed_models if model and model.strip()]
+
+
+def _normalize_model_slug(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+_SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+
+
+def _normalize_reasoning_effort(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized not in _SUPPORTED_REASONING_EFFORTS:
+        options = ", ".join(sorted(_SUPPORTED_REASONING_EFFORTS))
+        raise ValueError(f"Unsupported enforced reasoning effort '{normalized}'. Expected one of: {options}")
+    return normalized
+
+
+def _normalize_reasoning_effort_lenient(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized in _SUPPORTED_REASONING_EFFORTS:
+        return normalized
+    return None
+
+
+def _validate_model_enforcement(*, enforced_model: str | None, allowed_models: list[str] | None) -> None:
+    if enforced_model is None or not allowed_models:
+        return
+    if enforced_model not in allowed_models:
+        raise ValueError("enforced_model must be present in allowed_models when allowed_models is configured")
 
 
 def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
@@ -629,27 +741,44 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         name=data.name,
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
+        enforced_model=data.enforced_model,
+        enforced_reasoning_effort=data.enforced_reasoning_effort,
         expires_at=data.expires_at,
         is_active=data.is_active,
         created_at=data.created_at,
         last_used_at=data.last_used_at,
         limits=data.limits,
+        usage_summary=data.usage_summary,
         key=key,
     )
 
 
-def _to_api_key_data(row: ApiKey) -> ApiKeyData:
+def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | None = None) -> ApiKeyData:
     limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     return ApiKeyData(
         id=row.id,
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
+        enforced_model=_normalize_model_slug(row.enforced_model),
+        enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
         last_used_at=row.last_used_at,
         limits=limits,
+        usage_summary=usage_summary,
+    )
+
+
+def _to_usage_summary_data(summary: ApiKeyUsageSummary | None) -> ApiKeyUsageSummaryData | None:
+    if summary is None:
+        return None
+    return ApiKeyUsageSummaryData(
+        request_count=summary.request_count,
+        total_tokens=summary.total_tokens,
+        cached_input_tokens=summary.cached_input_tokens,
+        total_cost_usd=summary.total_cost_usd,
     )
 
 

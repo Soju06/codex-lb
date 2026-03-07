@@ -1,8 +1,8 @@
 """add api key enforcement fields
 
-Revision ID: 013_add_api_key_enforcement_fields
-Revises: 012_add_import_without_overwrite_and_drop_accounts_email_unique
-Create Date: 2026-03-04
+Revision ID: 20260307_000000_add_api_key_enforcement_fields
+Revises: 20260228_030000_add_api_firewall_allowlist
+Create Date: 2026-03-07
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "013_add_api_key_enforcement_fields"
-down_revision = "012_add_import_without_overwrite_and_drop_accounts_email_unique"
+revision = "20260307_000000_add_api_key_enforcement_fields"
+down_revision = "20260228_030000_add_api_firewall_allowlist"
 branch_labels = None
 depends_on = None
 

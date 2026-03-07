@@ -51,6 +51,17 @@ LEGACY_TO_REVISION: dict[str, str] = {
     migration_name: LEGACY_MIGRATION_TO_NEW_REVISION[migration_name] for migration_name in LEGACY_MIGRATION_ORDER
 }
 
+_BRANCHED_ENFORCEMENT_LEGACY_REVISION = "013_add_api_key_enforcement_fields"
+_BRANCHED_ENFORCEMENT_REPAIR_ANCESTOR = OLD_TO_NEW_REVISION_MAP[_BRANCHED_ENFORCEMENT_LEGACY_REVISION]
+_BRANCHED_ENFORCEMENT_DESCENDANT_REVISIONS = frozenset(
+    {
+        "20260225_000000_add_dashboard_settings_routing_strategy",
+        "20260228_020000_align_api_key_limit_enum_types",
+        "20260228_030000_add_api_firewall_allowlist",
+        "20260307_000000_add_api_key_enforcement_fields",
+    }
+)
+
 
 @dataclass(frozen=True)
 class LegacyBootstrapResult:
@@ -355,7 +366,16 @@ def _remap_legacy_alembic_revisions(config: Config) -> tuple[str, ...]:
                 f"unsupported={','.join(unsupported)}"
             )
 
-        remapped = tuple(sorted({OLD_TO_NEW_REVISION_MAP.get(revision, revision) for revision in current_revisions}))
+        remapped_set = {OLD_TO_NEW_REVISION_MAP.get(revision, revision) for revision in current_revisions}
+
+        if (
+            _BRANCHED_ENFORCEMENT_LEGACY_REVISION in current_revisions
+            and _BRANCHED_ENFORCEMENT_REPAIR_ANCESTOR in remapped_set
+            and remapped_set & _BRANCHED_ENFORCEMENT_DESCENDANT_REVISIONS
+        ):
+            remapped_set.discard(_BRANCHED_ENFORCEMENT_REPAIR_ANCESTOR)
+
+        remapped = tuple(sorted(remapped_set))
         if remapped == current_revisions:
             return ()
 

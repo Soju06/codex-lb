@@ -591,7 +591,7 @@ def _apply_api_key_enforcement(
         )
         payload.model = api_key.enforced_model
 
-    if isinstance(payload, ResponsesRequest) and api_key.enforced_reasoning_effort is not None:
+    if api_key.enforced_reasoning_effort is not None:
         requested_effort = payload.reasoning.effort if payload.reasoning else None
         if payload.reasoning is None:
             payload.reasoning = ResponsesReasoning(effort=api_key.enforced_reasoning_effort)

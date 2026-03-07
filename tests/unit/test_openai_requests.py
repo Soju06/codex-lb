@@ -348,6 +348,18 @@ def test_v1_compact_input_string_passthrough():
     assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
 
 
+def test_v1_compact_reasoning_passthrough():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "reasoning": {"effort": "high"},
+    }
+    request = V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "high"
+
+
 def test_responses_normalizes_assistant_input_text_to_output_text():
     payload = {
         "model": "gpt-5.1",

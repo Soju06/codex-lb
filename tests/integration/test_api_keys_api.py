@@ -324,6 +324,78 @@ async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
+async def test_api_key_enforces_model_and_reasoning_for_compact_responses(async_client, monkeypatch, endpoint):
+    _populate_test_registry()
+    model_ids = sorted(_TEST_MODELS)
+    forced_model = model_ids[0]
+    requested_model = model_ids[1]
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "enforced-compact-policy",
+            "allowedModels": [forced_model],
+            "enforcedModel": forced_model,
+            "enforcedReasoningEffort": "high",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    await _import_account(async_client, "acc_enforced_compact_key", "enforced-compact-key@example.com")
+
+    seen: dict[str, str | None] = {}
+
+    async def fake_compact(payload, _headers, _access_token, _account_id):
+        seen["model"] = payload.model
+        seen["effort"] = payload.reasoning.effort if payload.reasoning else None
+        return OpenAIResponsePayload.model_validate(
+            {
+                "id": "resp_compact_enforced",
+                "model": payload.model,
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 3,
+                    "output_tokens": 2,
+                    "reasoning_tokens": 4,
+                    "total_tokens": 9,
+                },
+                "output": [],
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": requested_model,
+            "instructions": "hi",
+            "input": [],
+            "reasoning": {"effort": "low"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == forced_model
+
+    assert seen["model"] == forced_model
+    assert seen["effort"] == "high"
+
+
+@pytest.mark.asyncio
 async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

@@ -97,6 +97,7 @@ class V1ResponsesCompactRequest(BaseModel):
     messages: list[JsonValue] | None = None
     input: JsonValue | None = None
     instructions: str | None = None
+    reasoning: ResponsesReasoning | None = None
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesCompactRequest":

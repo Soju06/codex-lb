@@ -370,6 +370,7 @@ class ResponsesCompactRequest(BaseModel):
     model: str = Field(min_length=1)
     instructions: str
     input: JsonValue
+    reasoning: ResponsesReasoning | None = None
 
     @field_validator("input")
     @classmethod

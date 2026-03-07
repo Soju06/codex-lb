@@ -56,6 +56,55 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+function ManualCallbackInput() {
+  const [callbackUrl, setCallbackUrl] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = useCallback(async () => {
+    if (!callbackUrl.trim()) return;
+    setSubmitting(true);
+    try {
+      await fetch("/api/oauth/manual-callback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callback_url: callbackUrl.trim() }),
+        credentials: "include",
+      });
+      setCallbackUrl("");
+    } catch {
+      // status polling will surface the error
+    } finally {
+      setSubmitting(false);
+    }
+  }, [callbackUrl]);
+
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">
+        Paste callback URL (for remote server)
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={callbackUrl}
+          onChange={(e) => setCallbackUrl(e.target.value)}
+          placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+          className="flex-1 rounded-lg border bg-muted/20 px-3 py-2 font-mono text-xs outline-none focus:ring-1 focus:ring-primary"
+        />
+        <Button
+          type="button"
+          size="sm"
+          className="h-8 px-3 text-xs"
+          disabled={!callbackUrl.trim() || submitting}
+          onClick={() => void handleSubmit()}
+        >
+          {submitting ? "Submitting..." : "Submit"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export type OauthDialogProps = {
   open: boolean;
   state: OAuthState;
@@ -163,6 +212,7 @@ export function OauthDialog({
                 </div>
               </div>
             ) : null}
+            <ManualCallbackInput />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>Waiting for authorization to complete...</span>

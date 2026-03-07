@@ -30,3 +30,7 @@ class OauthCompleteRequest(DashboardModel):
 
 class OauthCompleteResponse(DashboardModel):
     status: str
+
+
+class ManualCallbackRequest(DashboardModel):
+    callback_url: str

@@ -37,6 +37,8 @@ def _resolve_hostname_ipv4(hostname: str) -> str | None:
         return None
     for info in infos:
         candidate = info[4][0]
+        if not isinstance(candidate, str):
+            continue
         if _is_non_loopback_ipv4(candidate):
             return candidate
     return None

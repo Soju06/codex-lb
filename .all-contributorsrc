@@ -141,6 +141,16 @@
       "contributions": [
         "doc"
       ]
+    },
+    {
+      "login": "xCatalitY",
+      "name": "Hannah Markfort",
+      "avatar_url": "https://avatars.githubusercontent.com/u/74815681?v=4",
+      "profile": "https://github.com/xCatalitY",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

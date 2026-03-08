@@ -95,7 +95,7 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _stream_responses(request, payload, context, api_key)
+    return await _stream_responses(request, payload, context, api_key, codex_session_affinity=True)
 
 
 @v1_router.post(
@@ -328,6 +328,7 @@ async def _stream_responses(
     context: ProxyContext,
     api_key: ApiKeyData | None,
     *,
+    codex_session_affinity: bool = False,
     suppress_text_done_events: bool = False,
 ) -> Response:
     _apply_api_key_enforcement(payload, api_key)
@@ -343,6 +344,7 @@ async def _stream_responses(
     stream = context.service.stream_responses(
         payload,
         request.headers,
+        codex_session_affinity=codex_session_affinity,
         propagate_http_errors=True,
         api_key=api_key,
         api_key_reservation=reservation,
@@ -372,6 +374,7 @@ async def _collect_responses(
     context: ProxyContext,
     api_key: ApiKeyData | None,
     *,
+    codex_session_affinity: bool = False,
     suppress_text_done_events: bool = False,
 ) -> Response:
     _apply_api_key_enforcement(payload, api_key)
@@ -387,6 +390,7 @@ async def _collect_responses(
     stream = context.service.stream_responses(
         payload,
         request.headers,
+        codex_session_affinity=codex_session_affinity,
         propagate_http_errors=True,
         api_key=api_key,
         api_key_reservation=reservation,
@@ -430,7 +434,7 @@ async def responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    return await _compact_responses(request, payload, context, api_key)
+    return await _compact_responses(request, payload, context, api_key, codex_session_affinity=True)
 
 
 @v1_router.post("/responses/compact", response_model=OpenAIResponseResult)
@@ -456,6 +460,7 @@ async def _compact_responses(
     payload: ResponsesCompactRequest,
     context: ProxyContext,
     api_key: ApiKeyData | None,
+    codex_session_affinity: bool = False,
 ) -> JSONResponse:
     _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
@@ -470,6 +475,7 @@ async def _compact_responses(
         result = await context.service.compact_responses(
             payload,
             request.headers,
+            codex_session_affinity=codex_session_affinity,
             api_key=api_key,
             api_key_reservation=reservation,
         )

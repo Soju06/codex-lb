@@ -70,6 +70,7 @@ class ProxyService:
         payload: ResponsesRequest,
         headers: Mapping[str, str],
         *,
+        codex_session_affinity: bool = False,
         propagate_http_errors: bool = False,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
@@ -81,6 +82,7 @@ class ProxyService:
         return self._stream_with_retry(
             payload,
             filtered,
+            codex_session_affinity=codex_session_affinity,
             propagate_http_errors=propagate_http_errors,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
@@ -92,6 +94,7 @@ class ProxyService:
         payload: ResponsesCompactRequest,
         headers: Mapping[str, str],
         *,
+        codex_session_affinity: bool = False,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> OpenAIResponsePayload:
@@ -102,10 +105,15 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
-        sticky_key = _sticky_key_from_compact_payload(payload) if sticky_threads_enabled else None
+        sticky_key, reallocate_sticky = _sticky_key_for_compact_request(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            sticky_threads_enabled=sticky_threads_enabled,
+        )
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
-            reallocate_sticky=sticky_key is not None,
+            reallocate_sticky=reallocate_sticky,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
             routing_strategy=routing_strategy,
             model=payload.model,
@@ -401,6 +409,7 @@ class ProxyService:
         payload: ResponsesRequest,
         headers: Mapping[str, str],
         *,
+        codex_session_affinity: bool,
         propagate_http_errors: bool,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
@@ -411,7 +420,12 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
-        sticky_key = _sticky_key_from_payload(payload) if sticky_threads_enabled else None
+        sticky_key = _sticky_key_for_responses_request(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            sticky_threads_enabled=sticky_threads_enabled,
+        )
         max_attempts = 3
         settled = False
         settlement = _StreamSettlement()
@@ -934,6 +948,7 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
         "user-agent",
         "x-request-id",
         "request-id",
+        "session_id",
         "x-openai-client-id",
         "x-openai-client-version",
         "x-openai-client-arch",
@@ -953,6 +968,31 @@ def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
     return stripped or None
 
 
+def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
+    for key, value in headers.items():
+        if key.lower() != "session_id":
+            continue
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
+def _sticky_key_for_responses_request(
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    *,
+    codex_session_affinity: bool,
+    sticky_threads_enabled: bool,
+) -> str | None:
+    if codex_session_affinity:
+        session_key = _sticky_key_from_session_header(headers)
+        if session_key:
+            return session_key
+    if sticky_threads_enabled:
+        return _sticky_key_from_payload(payload)
+    return None
+
+
 def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
     if not payload.model_extra:
         return None
@@ -961,6 +1001,22 @@ def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | 
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _sticky_key_for_compact_request(
+    payload: ResponsesCompactRequest,
+    headers: Mapping[str, str],
+    *,
+    codex_session_affinity: bool,
+    sticky_threads_enabled: bool,
+) -> tuple[str | None, bool]:
+    if codex_session_affinity:
+        session_key = _sticky_key_from_session_header(headers)
+        if session_key:
+            return session_key, False
+    if sticky_threads_enabled:
+        return _sticky_key_from_compact_payload(payload), True
+    return None, False
 
 
 def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:

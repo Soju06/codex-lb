@@ -11,6 +11,7 @@ from app.core.utils.time import utcnow
 
 try:
     from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
+
     _HAS_REVISION_REMAP = True
 except ImportError:
     OLD_TO_NEW_REVISION_MAP = {
@@ -252,7 +253,10 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif((not _is_postgresql_database_url(_DATABASE_URL)) or check_migration_policy is None, reason="PostgreSQL-only migration contract test")
+@pytest.mark.skipif(
+    (not _is_postgresql_database_url(_DATABASE_URL)) or check_migration_policy is None,
+    reason="PostgreSQL-only migration contract test",
+)
 async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.current_revision == _HEAD_REVISION
@@ -262,7 +266,10 @@ async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif((not _is_postgresql_database_url(_DATABASE_URL)) or (not _HAS_REVISION_REMAP), reason="PostgreSQL-only migration remap test")
+@pytest.mark.skipif(
+    (not _is_postgresql_database_url(_DATABASE_URL)) or (not _HAS_REVISION_REMAP),
+    reason="PostgreSQL-only migration remap test",
+)
 async def test_postgresql_startup_migration_auto_remap_legacy_head(db_setup):
     await run_startup_migrations(_DATABASE_URL)
 
@@ -448,9 +455,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
 
         async with session_factory() as session:
             await session.execute(text("PRAGMA foreign_keys=ON"))
-            dashboard_columns_rows = (
-                await session.execute(text("PRAGMA table_info(dashboard_settings)"))
-            ).fetchall()
+            dashboard_columns_rows = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).fetchall()
             dashboard_columns = {str(row[1]) for row in dashboard_columns_rows if len(row) > 1}
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (

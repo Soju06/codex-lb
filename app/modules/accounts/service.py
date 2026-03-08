@@ -52,7 +52,9 @@ class AccountsService:
             return []
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
-        request_usage_rows = await self._repo.list_request_usage_summary_by_account([account.id for account in accounts])
+        request_usage_rows = await self._repo.list_request_usage_summary_by_account(
+            [account.id for account in accounts]
+        )
         request_usage_by_account = {
             account_id: AccountRequestUsage(
                 request_count=row.request_count,

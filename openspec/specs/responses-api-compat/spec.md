@@ -203,3 +203,13 @@ Before forwarding requests to the upstream Responses endpoint, the service MUST 
 - **WHEN** the inbound request includes headers such as `CF-Connecting-IP` or `CF-Ray`
 - **THEN** those headers are not forwarded to upstream
 
+### Requirement: Codex backend session_id preserves account affinity
+When a backend Codex Responses or compact request includes a non-empty `session_id` header, the service MUST use that value as the routing affinity key for upstream account selection. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled.
+
+#### Scenario: Codex Responses request with session_id and sticky threads disabled
+- **WHEN** `/backend-api/codex/responses` is called with a non-empty `session_id` header and `sticky_threads_enabled=false`
+- **THEN** the selected upstream account is pinned to that `session_id` for later backend Codex requests on the same thread
+
+#### Scenario: Compact request reuses pinned Codex session account
+- **WHEN** `/backend-api/codex/responses/compact` is called with the same non-empty `session_id` header after routing preferences change
+- **THEN** the service reuses the previously pinned upstream account for that thread instead of reallocating to a different account

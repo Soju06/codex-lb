@@ -161,6 +161,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "quangdo126",
+      "name": "Quang Do",
+      "avatar_url": "https://avatars.githubusercontent.com/u/88663250?v=4",
+      "profile": "http://hextra.us",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

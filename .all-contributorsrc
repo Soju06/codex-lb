@@ -151,6 +151,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "mws-weekend-projects",
+      "name": "mws-weekend-projects",
+      "avatar_url": "https://avatars.githubusercontent.com/u/255546191?v=4",
+      "profile": "https://github.com/mws-weekend-projects",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

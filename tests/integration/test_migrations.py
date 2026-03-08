@@ -476,6 +476,12 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     has_email_non_unique_index = True
                     break
             assert has_email_non_unique_index
+            usage_index_rows = (await session.execute(text("PRAGMA index_list(usage_history)"))).fetchall()
+            usage_index_names = {str(row[1]) for row in usage_index_rows if len(row) > 1}
+            assert "idx_usage_window_account_latest" in usage_index_names
+            request_log_index_rows = (await session.execute(text("PRAGMA index_list(request_logs)"))).fetchall()
+            request_log_index_names = {str(row[1]) for row in request_log_index_rows if len(row) > 1}
+            assert "idx_logs_requested_at_id" in request_log_index_names
 
             await session.execute(
                 text(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 
@@ -9,6 +10,11 @@ from pathlib import Path
 class IntegrityCheck:
     ok: bool
     details: str | None
+
+
+class SqliteIntegrityCheckMode(str, Enum):
+    QUICK = "quick"
+    FULL = "full"
 
 
 def sqlite_db_path_from_url(url: str) -> Path | None:
@@ -30,13 +36,23 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
     return Path(path).expanduser()
 
 
-def check_sqlite_integrity(path: Path) -> IntegrityCheck:
+def _integrity_check_pragma(mode: SqliteIntegrityCheckMode) -> str:
+    if mode == SqliteIntegrityCheckMode.QUICK:
+        return "PRAGMA quick_check;"
+    return "PRAGMA integrity_check;"
+
+
+def check_sqlite_integrity(
+    path: Path,
+    *,
+    mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL,
+) -> IntegrityCheck:
     if not path.exists():
         return IntegrityCheck(ok=True, details=None)
 
     try:
         with sqlite3.connect(str(path)) as conn:
-            cursor = conn.execute("PRAGMA integrity_check;")
+            cursor = conn.execute(_integrity_check_pragma(mode))
             rows = [row[0] for row in cursor.fetchall()]
     except sqlite3.DatabaseError as exc:
         return IntegrityCheck(ok=False, details=str(exc))
@@ -45,7 +61,7 @@ def check_sqlite_integrity(path: Path) -> IntegrityCheck:
         return IntegrityCheck(ok=True, details=None)
 
     if not rows:
-        return IntegrityCheck(ok=False, details="integrity_check returned no rows")
+        return IntegrityCheck(ok=False, details=f"{mode.value}_check returned no rows")
 
     details = "; ".join(str(row) for row in rows)
     return IntegrityCheck(ok=False, details=details)

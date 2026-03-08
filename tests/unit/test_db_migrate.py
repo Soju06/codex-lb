@@ -93,6 +93,21 @@ def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
     assert any("rogue_table" in diff for diff in drift)
 
 
+def test_check_schema_drift_detects_missing_manual_performance_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-index.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(text("DROP INDEX idx_usage_window_account_latest"))
+        connection.commit()
+
+    drift = check_schema_drift(url)
+    assert any("idx_usage_window_account_latest" in diff for diff in drift)
+
+
 def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
     db_path = tmp_path / "remap.db"
     url = _db_url(db_path)
@@ -179,7 +194,7 @@ def test_run_upgrade_repairs_branched_legacy_revision_ids_with_parallel_head(tmp
         )
 
     result = run_upgrade(url, "head", bootstrap_legacy=False)
-    assert result.current_revision == "20260307_000000_add_api_key_enforcement_fields"
+    assert result.current_revision == inspect_migration_state(url).head_revision
 
 
 def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) -> None:

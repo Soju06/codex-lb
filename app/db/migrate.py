@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +62,10 @@ _BRANCHED_ENFORCEMENT_DESCENDANT_REVISIONS = frozenset(
         "20260307_000000_add_api_key_enforcement_fields",
     }
 )
+_MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
+    "usage_history": frozenset({"idx_usage_window_account_latest"}),
+    "request_logs": frozenset({"idx_logs_requested_at_id"}),
+}
 
 
 @dataclass(frozen=True)
@@ -423,6 +428,48 @@ def inspect_migration_state(database_url: str) -> MigrationState:
     )
 
 
+def _sqlite_index_names(connection: Connection, table_name: str) -> set[str]:
+    escaped_name = table_name.replace('"', '""')
+    rows = connection.execute(text(f'PRAGMA index_list("{escaped_name}")')).fetchall()
+    return {str(row[1]) for row in rows if len(row) > 1 and row[1] is not None}
+
+
+def _postgresql_index_names(connection: Connection, table_name: str) -> set[str]:
+    rows = connection.execute(
+        text(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = ANY (current_schemas(false))
+              AND tablename = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    ).fetchall()
+    return {str(row[0]) for row in rows if row and row[0] is not None}
+
+
+def _read_index_names_for_drift(connection: Connection, table_name: str) -> set[str]:
+    if connection.dialect.name == "sqlite":
+        return _sqlite_index_names(connection, table_name)
+    if connection.dialect.name == "postgresql":
+        return _postgresql_index_names(connection, table_name)
+
+    inspector = inspect(connection)
+    if not inspector.has_table(table_name):
+        return set()
+    return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
+
+
+def _manual_schema_drift_diffs(connection: Connection) -> tuple[str, ...]:
+    diffs: list[str] = []
+    for table_name, required_indexes in _MANUAL_DRIFT_INDEX_REQUIREMENTS.items():
+        existing_indexes = _read_index_names_for_drift(connection, table_name)
+        for index_name in sorted(required_indexes - existing_indexes):
+            diffs.append(repr(("missing_index", table_name, index_name)))
+    return tuple(diffs)
+
+
 def check_schema_drift(database_url: str) -> tuple[str, ...]:
     config = _build_alembic_config(database_url)
     sync_database_url = _required_sqlalchemy_url(config)
@@ -436,9 +483,19 @@ def check_schema_drift(database_url: str) -> tuple[str, ...]:
                 "compare_server_default": True,
             },
         )
-        diffs = compare_metadata(migration_context, Base.metadata)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Skipped unsupported reflection of expression-based index .*",
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message=r"autogenerate skipping metadata-specified expression-based index .*",
+            )
+            diffs = compare_metadata(migration_context, Base.metadata)
+        manual_diffs = _manual_schema_drift_diffs(connection)
 
-    return tuple(repr(diff) for diff in diffs)
+    return tuple(repr(diff) for diff in diffs) + manual_diffs
 
 
 def run_upgrade(

@@ -2,12 +2,24 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Integer, cast, func, or_, select
+from sqlalchemy import Integer, cast, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
+
+_PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
+
+
+def _normalized_window_expr():
+    return func.coalesce(UsageHistory.window, _PRIMARY_WINDOW_LITERAL)
+
+
+def _window_clause(window: str | None):
+    if not window or window == "primary":
+        return _normalized_window_expr() == "primary"
+    return UsageHistory.window == window
 
 
 class UsageRepository:
@@ -53,10 +65,7 @@ class UsageRepository:
     ) -> list[UsageAggregateRow]:
         conditions = [UsageHistory.recorded_at >= since]
         if window:
-            if window == "primary":
-                conditions.append(or_(UsageHistory.window == "primary", UsageHistory.window.is_(None)))
-            else:
-                conditions.append(UsageHistory.window == window)
+            conditions.append(_window_clause(window))
         stmt = (
             select(
                 UsageHistory.account_id,
@@ -88,13 +97,7 @@ class UsageRepository:
         ]
 
     async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
-        if window:
-            if window == "primary":
-                conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
-            else:
-                conditions = UsageHistory.window == window
-        else:
-            conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
+        conditions = _window_clause(window)
         subq = (
             select(
                 UsageHistory.id.label("usage_id"),
@@ -130,14 +133,11 @@ class UsageRepository:
 
         conditions: list = [UsageHistory.recorded_at >= since]
         if window:
-            if window == "primary":
-                conditions.append(or_(UsageHistory.window == "primary", UsageHistory.window.is_(None)))
-            else:
-                conditions.append(UsageHistory.window == window)
+            conditions.append(_window_clause(window))
         if account_id:
             conditions.append(UsageHistory.account_id == account_id)
 
-        window_expr = func.coalesce(UsageHistory.window, "primary")
+        window_expr = _normalized_window_expr()
         stmt = (
             select(
                 bucket_col,
@@ -167,10 +167,7 @@ class UsageRepository:
         ]
 
     async def latest_window_minutes(self, window: str) -> int | None:
-        if window == "primary":
-            conditions = or_(UsageHistory.window == "primary", UsageHistory.window.is_(None))
-        else:
-            conditions = UsageHistory.window == window
+        conditions = _window_clause(window)
         result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None

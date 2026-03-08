@@ -4,7 +4,9 @@ import asyncio
 import base64
 import ipaddress
 import json
+import logging
 import socket
+import time
 from dataclasses import dataclass
 from typing import AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, cast
 from urllib.parse import ParseResult, urlparse, urlunparse
@@ -49,6 +51,26 @@ _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
 _BLOCKED_LITERAL_HOSTS = {"localhost", "localhost.localdomain"}
+_UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
+    {
+        "accept",
+        "chatgpt-account-id",
+        "content-type",
+        "request-id",
+        "session_id",
+        "user-agent",
+        "x-codex-conversation-id",
+        "x-codex-session-id",
+        "x-openai-client-arch",
+        "x-openai-client-id",
+        "x-openai-client-os",
+        "x-openai-client-user-agent",
+        "x-openai-client-version",
+        "x-request-id",
+    }
+)
+
+logger = logging.getLogger(__name__)
 
 
 class StreamIdleTimeoutError(Exception):
@@ -134,6 +156,147 @@ def _build_upstream_headers(
     if account_id:
         headers["chatgpt-account-id"] = account_id
     return headers
+
+
+def _interesting_upstream_header_keys(headers: Mapping[str, str]) -> list[str]:
+    return sorted({key.lower() for key in headers if key.lower() in _UPSTREAM_TRACE_HEADER_ALLOWLIST})
+
+
+def _summarize_upstream_target(url: str) -> str:
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
+def _summarize_input_value(value: JsonValue | None) -> str:
+    if value is None:
+        return "0"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, list):
+        if not value:
+            return "0"
+        type_counts: dict[str, int] = {}
+        for item in value:
+            type_name = type(item).__name__
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
+        summary = ",".join(f"{key}={type_counts[key]}" for key in sorted(type_counts))
+        return f"{len(value)}({summary})"
+    return type(value).__name__
+
+
+def _summarize_json_payload(payload: Mapping[str, JsonValue]) -> str:
+    keys = sorted(payload.keys())
+    model = payload.get("model")
+    stream = payload.get("stream")
+    input_summary = _summarize_input_value(payload.get("input"))
+    return f"model={model} stream={stream} input={input_summary} keys={keys}"
+
+
+def _summarize_transcription_payload(
+    *,
+    filename: str,
+    content_type: str | None,
+    prompt: str | None,
+    audio_bytes: bytes,
+) -> dict[str, JsonValue]:
+    return {
+        "filename": filename,
+        "content_type": content_type,
+        "prompt_present": prompt is not None,
+        "audio_bytes": len(audio_bytes),
+    }
+
+
+def _error_details_from_envelope(payload: OpenAIErrorEnvelope) -> tuple[str | None, str | None]:
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None, None
+    code = error.get("code")
+    message = error.get("message")
+    return code if isinstance(code, str) else None, message if isinstance(message, str) else None
+
+
+def _error_details_from_failed_event(payload: ResponseFailedEvent) -> tuple[str | None, str | None]:
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None, None
+    error = response.get("error")
+    if not isinstance(error, dict):
+        return None, None
+    code = error.get("code")
+    message = error.get("message")
+    return code if isinstance(code, str) else None, message if isinstance(message, str) else None
+
+
+def _maybe_log_upstream_request_start(
+    *,
+    kind: str,
+    url: str,
+    headers: Mapping[str, str],
+    payload_summary: str,
+    payload_json: str | None = None,
+) -> None:
+    settings = get_settings()
+    if not settings.log_upstream_request_summary and not settings.log_upstream_request_payload:
+        return
+
+    request_id = get_request_id()
+    target = _summarize_upstream_target(url)
+    account_id = headers.get("chatgpt-account-id")
+    header_keys = _interesting_upstream_header_keys(headers)
+
+    if settings.log_upstream_request_summary:
+        logger.info(
+            "upstream_request_start request_id=%s kind=%s method=POST target=%s account_id=%s headers=%s payload=%s",
+            request_id,
+            kind,
+            target,
+            account_id,
+            header_keys,
+            payload_summary,
+        )
+    if settings.log_upstream_request_payload and payload_json is not None:
+        logger.info(
+            "upstream_request_payload request_id=%s kind=%s target=%s payload=%s",
+            request_id,
+            kind,
+            target,
+            payload_json,
+        )
+
+
+def _maybe_log_upstream_request_complete(
+    *,
+    kind: str,
+    url: str,
+    headers: Mapping[str, str],
+    started_at: float,
+    status_code: int | None,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    settings = get_settings()
+    if not settings.log_upstream_request_summary:
+        return
+
+    level = logging.INFO
+    if status_code is not None and status_code >= 500:
+        level = logging.ERROR
+    elif (status_code is not None and status_code >= 400) or error_code is not None:
+        level = logging.WARNING
+
+    logger.log(
+        level,
+        "upstream_request_complete request_id=%s kind=%s method=POST target=%s account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s",
+        get_request_id(),
+        kind,
+        _summarize_upstream_target(url),
+        headers.get("chatgpt-account-id"),
+        status_code,
+        int((time.monotonic() - started_at) * 1000),
+        error_code,
+        error_message,
+    )
 
 
 def _normalize_error_code(code: str | None, error_type: str | None) -> str:
@@ -610,6 +773,10 @@ async def stream_responses(
     )
 
     seen_terminal = False
+    started_at = time.monotonic()
+    status_code: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
     client_session = session or get_http_client().session
     payload_dict = payload.to_payload()
     if settings.image_inline_fetch_enabled:
@@ -618,6 +785,15 @@ async def stream_responses(
             _as_image_fetch_session(client_session),
             settings.upstream_connect_timeout_seconds,
         )
+    _maybe_log_upstream_request_start(
+        kind="responses",
+        url=url,
+        headers=upstream_headers,
+        payload_summary=_summarize_json_payload(payload_dict),
+        payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+        if settings.log_upstream_request_payload
+        else None,
+    )
     try:
         async with client_session.post(
             url,
@@ -625,11 +801,14 @@ async def stream_responses(
             headers=upstream_headers,
             timeout=timeout,
         ) as resp:
+            status_code = resp.status
             if resp.status >= 400:
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)
+                    error_code, error_message = _error_details_from_envelope(error_payload)
                     raise ProxyResponseError(resp.status, error_payload)
                 event = await _error_event_from_response(resp)
+                error_code, error_message = _error_details_from_failed_event(event)
                 yield format_sse_event(event)
                 return
 
@@ -648,6 +827,8 @@ async def stream_responses(
     except ProxyResponseError:
         raise
     except StreamIdleTimeoutError:
+        error_code = "stream_idle_timeout"
+        error_message = "Upstream stream idle timeout"
         yield format_sse_event(
             response_failed_event(
                 "stream_idle_timeout",
@@ -657,6 +838,8 @@ async def stream_responses(
         )
         return
     except StreamEventTooLargeError as exc:
+        error_code = "stream_event_too_large"
+        error_message = str(exc)
         yield format_sse_event(
             response_failed_event(
                 "stream_event_too_large",
@@ -666,6 +849,8 @@ async def stream_responses(
         )
         return
     except aiohttp.ClientError as exc:
+        error_code = "upstream_unavailable"
+        error_message = str(exc)
         yield format_sse_event(
             response_failed_event("upstream_unavailable", str(exc), response_id=get_request_id()),
         )
@@ -673,16 +858,30 @@ async def stream_responses(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        error_code = "upstream_error"
+        error_message = str(exc)
         yield format_sse_event(response_failed_event("upstream_error", str(exc), response_id=get_request_id()))
         return
-
-    if not seen_terminal:
-        yield format_sse_event(
-            response_failed_event(
-                "stream_incomplete",
-                "Upstream closed stream without completion",
-                response_id=get_request_id(),
-            ),
+    else:
+        if not seen_terminal:
+            error_code = "stream_incomplete"
+            error_message = "Upstream closed stream without completion"
+            yield format_sse_event(
+                response_failed_event(
+                    "stream_incomplete",
+                    "Upstream closed stream without completion",
+                    response_id=get_request_id(),
+                ),
+            )
+    finally:
+        _maybe_log_upstream_request_complete(
+            kind="responses",
+            url=url,
+            headers=upstream_headers,
+            started_at=started_at,
+            status_code=status_code,
+            error_code=error_code,
+            error_message=error_message,
         )
 
 
@@ -716,6 +915,19 @@ async def compact_responses(
             _as_image_fetch_session(client_session),
             settings.upstream_connect_timeout_seconds,
         )
+    started_at = time.monotonic()
+    status_code: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    _maybe_log_upstream_request_start(
+        kind="responses_compact",
+        url=url,
+        headers=upstream_headers,
+        payload_summary=_summarize_json_payload(payload_dict),
+        payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+        if settings.log_upstream_request_payload
+        else None,
+    )
     try:
         async with client_session.post(
             url,
@@ -723,8 +935,10 @@ async def compact_responses(
             headers=upstream_headers,
             timeout=timeout,
         ) as resp:
+            status_code = resp.status
             if resp.status >= 400:
                 error_payload = await _error_payload_from_response(resp)
+                error_code, error_message = _error_details_from_envelope(error_payload)
                 raise ProxyResponseError(resp.status, error_payload)
             try:
                 data = await resp.json(content_type=None)
@@ -740,13 +954,27 @@ async def compact_responses(
                 502,
                 openai_error("upstream_error", "Unexpected upstream payload"),
             )
-    except ProxyResponseError:
+    except ProxyResponseError as exc:
+        if error_code is None and error_message is None:
+            error_code, error_message = _error_details_from_envelope(exc.payload)
         raise
     except aiohttp.ClientError as exc:
+        error_code = "upstream_unavailable"
+        error_message = str(exc)
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", str(exc)),
         ) from exc
+    finally:
+        _maybe_log_upstream_request_complete(
+            kind="responses_compact",
+            url=url,
+            headers=upstream_headers,
+            started_at=started_at,
+            status_code=status_code,
+            error_code=error_code,
+            error_message=error_message,
+        )
 
 
 async def transcribe_audio(
@@ -798,6 +1026,25 @@ async def transcribe_audio(
         form.add_field("prompt", prompt)
 
     client_session = session or get_http_client().session
+    started_at = time.monotonic()
+    status_code: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    metadata = _summarize_transcription_payload(
+        filename=normalized_filename,
+        content_type=normalized_content_type,
+        prompt=prompt,
+        audio_bytes=audio_bytes,
+    )
+    _maybe_log_upstream_request_start(
+        kind="transcribe",
+        url=url,
+        headers=upstream_headers,
+        payload_summary=json.dumps(metadata, ensure_ascii=True, separators=(",", ":")),
+        payload_json=json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
+        if settings.log_upstream_request_payload
+        else None,
+    )
     try:
         async with client_session.post(
             url,
@@ -805,18 +1052,24 @@ async def transcribe_audio(
             headers=upstream_headers,
             timeout=timeout,
         ) as resp:
+            status_code = resp.status
             if resp.status >= 400:
                 error_payload = await _error_payload_from_response(resp)
+                error_code, error_message = _error_details_from_envelope(error_payload)
                 raise ProxyResponseError(resp.status, error_payload)
             try:
                 data = await resp.json(content_type=None)
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 message = str(exc) or "Request to upstream timed out"
+                error_code = "upstream_unavailable"
+                error_message = message
                 raise ProxyResponseError(
                     502,
                     openai_error("upstream_unavailable", message),
                 ) from exc
             except Exception as exc:
+                error_code = "upstream_error"
+                error_message = "Invalid JSON from upstream"
                 raise ProxyResponseError(
                     502,
                     openai_error("upstream_error", "Invalid JSON from upstream"),
@@ -827,11 +1080,25 @@ async def transcribe_audio(
                 502,
                 openai_error("upstream_error", "Unexpected upstream payload"),
             )
-    except ProxyResponseError:
+    except ProxyResponseError as exc:
+        if error_code is None and error_message is None:
+            error_code, error_message = _error_details_from_envelope(exc.payload)
         raise
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         message = str(exc) or "Request to upstream timed out"
+        error_code = "upstream_unavailable"
+        error_message = message
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", message),
         ) from exc
+    finally:
+        _maybe_log_upstream_request_complete(
+            kind="transcribe",
+            url=url,
+            headers=upstream_headers,
+            started_at=started_at,
+            status_code=status_code,
+            error_code=error_code,
+            error_message=error_message,
+        )

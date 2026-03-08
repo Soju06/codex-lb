@@ -6,12 +6,14 @@ import logging
 from typing import cast
 
 import pytest
+from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import reset_request_id, set_request_id
+from app.modules.proxy import api as proxy_api
 from app.modules.proxy import service as proxy_service
 
 pytestmark = pytest.mark.unit
@@ -245,6 +247,76 @@ def test_log_proxy_request_payload(monkeypatch, caplog):
 
     assert "proxy_request_payload" in caplog.text
     assert '"model":"gpt-5.1"' in caplog.text
+
+
+def test_log_upstream_request_trace(monkeypatch, caplog):
+    class Settings:
+        log_upstream_request_summary = True
+        log_upstream_request_payload = True
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+
+    token = set_request_id("req_upstream_1")
+    try:
+        caplog.set_level(logging.INFO)
+        headers = _build_upstream_headers({"session_id": "sid_1"}, "token", "acc_upstream_1")
+        payload_json = '{"model":"gpt-5.1","input":"hi"}'
+        proxy_module._maybe_log_upstream_request_start(
+            kind="responses",
+            url="https://chatgpt.com/backend-api/codex/responses",
+            headers=headers,
+            payload_summary="model=gpt-5.1 stream=True input=str keys=['input','model','stream']",
+            payload_json=payload_json,
+        )
+        proxy_module._maybe_log_upstream_request_complete(
+            kind="responses",
+            url="https://chatgpt.com/backend-api/codex/responses",
+            headers=headers,
+            started_at=0.0,
+            status_code=502,
+            error_code="upstream_error",
+            error_message="backend exploded",
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "upstream_request_start request_id=req_upstream_1" in caplog.text
+    assert "upstream_request_payload request_id=req_upstream_1" in caplog.text
+    assert "upstream_request_complete request_id=req_upstream_1" in caplog.text
+    assert "target=https://chatgpt.com/backend-api/codex/responses" in caplog.text
+    assert "error_message=backend exploded" in caplog.text
+
+
+def test_logged_error_json_response_emits_proxy_error_log(caplog):
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1234),
+        "server": ("testserver", 2455),
+    }
+    request = Request(scope)
+
+    token = set_request_id("req_proxy_error_1")
+    try:
+        caplog.set_level(logging.WARNING)
+        response = proxy_api._logged_error_json_response(
+            request,
+            502,
+            {"error": {"code": "upstream_error", "message": "provider failed"}},
+        )
+    finally:
+        reset_request_id(token)
+
+    assert response.status_code == 502
+    assert "proxy_error_response request_id=req_proxy_error_1" in caplog.text
+    assert "code=upstream_error" in caplog.text
+    assert "message=provider failed" in caplog.text
 
 
 def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):

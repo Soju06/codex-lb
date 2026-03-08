@@ -474,6 +474,111 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_api_key_usage_summary_cost_respects_service_tier(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "priority-usage-summary",
+            "limits": [
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 100_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_priority_usage_summary", "priority-usage-summary@example.com")
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        event = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_priority_usage_summary",
+                "status": "completed",
+                "service_tier": "priority",
+                "usage": {
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 1_000_000,
+                    "total_tokens": 2_000_000,
+                },
+            },
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "service_tier": "priority",
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    listed_rows = listed.json()
+    usage_key_row = next((row for row in listed_rows if row["id"] == key_id), None)
+    assert usage_key_row is not None
+    assert usage_key_row["usageSummary"] is not None
+    assert usage_key_row["usageSummary"]["totalCostUsd"] == pytest.approx(35.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_api_key_create_accepts_uppercase_enforced_reasoning(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "uppercase-enforcement",
+            "enforcedReasoningEffort": "HIGH",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["enforcedReasoningEffort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_accepts_uppercase_enforced_reasoning(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "uppercase-enforcement-update",
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "enforcedReasoningEffort": "HIGH",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["enforcedReasoningEffort"] == "high"
+
+
+@pytest.mark.asyncio
 async def test_stream_usage_prefers_actual_response_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

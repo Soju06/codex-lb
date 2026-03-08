@@ -13,11 +13,11 @@ from app.core.utils.time import utcnow
 from app.db.models import (
     ApiKey,
     ApiKeyLimit,
-    RequestLog,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     LimitType,
     LimitWindow,
+    RequestLog,
 )
 
 
@@ -91,6 +91,7 @@ class ApiKeysRepository:
             select(
                 RequestLog.api_key_id,
                 RequestLog.model,
+                RequestLog.service_tier,
                 func.count(RequestLog.id).label("request_count"),
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
                 func.coalesce(
@@ -100,11 +101,19 @@ class ApiKeysRepository:
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             )
             .where(RequestLog.api_key_id.is_not(None))
-            .group_by(RequestLog.api_key_id, RequestLog.model)
+            .group_by(RequestLog.api_key_id, RequestLog.model, RequestLog.service_tier)
         )
         result = await self._session.execute(stmt)
         rollup: dict[str, dict[str, float | int]] = {}
-        for api_key_id, model, request_count, input_tokens, output_tokens, cached_input_tokens in result.all():
+        for (
+            api_key_id,
+            model,
+            service_tier,
+            request_count,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        ) in result.all():
             if not api_key_id:
                 continue
             input_sum = int(input_tokens or 0)
@@ -137,6 +146,7 @@ class ApiKeysRepository:
                     cached_input_tokens=float(cached_sum),
                 ),
                 price,
+                service_tier=service_tier,
             )
             if cost_usd is not None:
                 entry["total_cost_usd"] += cost_usd

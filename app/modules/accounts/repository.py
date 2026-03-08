@@ -48,23 +48,29 @@ class AccountsRepository:
         account_ids: list[str] | None = None,
     ) -> dict[str, AccountRequestUsageSummary]:
         output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
-        stmt = (
-            select(
-                RequestLog.account_id,
-                RequestLog.model,
-                func.count(RequestLog.id).label("request_count"),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-            )
-            .group_by(RequestLog.account_id, RequestLog.model)
-        )
+        stmt = select(
+            RequestLog.account_id,
+            RequestLog.model,
+            RequestLog.service_tier,
+            func.count(RequestLog.id).label("request_count"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+        ).group_by(RequestLog.account_id, RequestLog.model, RequestLog.service_tier)
         if account_ids:
             stmt = stmt.where(RequestLog.account_id.in_(account_ids))
 
         result = await self._session.execute(stmt)
         rollup: dict[str, dict[str, float | int]] = {}
-        for account_id, model, request_count, input_tokens, output_tokens, cached_input_tokens in result.all():
+        for (
+            account_id,
+            model,
+            service_tier,
+            request_count,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        ) in result.all():
             if not account_id:
                 continue
             input_sum = int(input_tokens or 0)
@@ -97,6 +103,7 @@ class AccountsRepository:
                     cached_input_tokens=float(cached_sum),
                 ),
                 price,
+                service_tier=service_tier,
             )
             if cost_usd is not None:
                 entry["total_cost_usd"] += cost_usd

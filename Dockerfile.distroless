@@ -1,4 +1,15 @@
 # syntax=docker/dockerfile:1.7
+FROM oven/bun:1.3.7-alpine AS frontend-build
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/bun.lock ./
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
+
+COPY frontend ./
+RUN bun run build
+
 FROM python:3.13-slim-bookworm AS python-build
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -34,6 +45,7 @@ COPY --from=python-build /opt/venv /opt/venv
 COPY --from=python-build --chown=nonroot:nonroot /var/lib/codex-lb /var/lib/codex-lb
 COPY --chown=nonroot:nonroot app app
 COPY --chown=nonroot:nonroot scripts scripts
+COPY --from=frontend-build --chown=nonroot:nonroot /app/app/static app/static
 
 EXPOSE 2455 1455
 

@@ -402,6 +402,39 @@ async def test_accounts_list_includes_request_usage_cost_rollup(async_client, db
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_request_usage_cost_rollup_respects_service_tier(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_priority_cost", "priority-cost@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_priority_cost",
+            request_id="req_priority_cost_1",
+            model="gpt-5.4",
+            service_tier="priority",
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            latency_ms=200,
+            status="success",
+            error_code=None,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    request_usage = accounts["acc_priority_cost"]["requestUsage"]
+    assert request_usage is not None
+    assert request_usage["requestCount"] == 1
+    assert request_usage["totalTokens"] == 2_000_000
+    assert request_usage["cachedInputTokens"] == 0
+    assert request_usage["totalCostUsd"] == pytest.approx(35.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

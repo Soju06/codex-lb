@@ -108,6 +108,19 @@ def test_chat_reasoning_effort_maps_to_responses_reasoning():
     assert reasoning_map.get("effort") == "high"
 
 
+def test_chat_service_tier_is_preserved_in_responses_payload():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "service_tier": "priority",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+
+    assert dumped["service_tier"] == "priority"
+
+
 def test_chat_tools_are_normalized():
     payload = {
         "model": "gpt-5.2",

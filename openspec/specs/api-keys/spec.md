@@ -230,7 +230,7 @@ Limit applicability rules:
 
 For model-less requests (e.g., `/v1/models`), only global limits SHALL be evaluated.
 
-The service contract SHALL be typed explicitly: `enforce_limits_for_request(key_id: str, *, request_model: str | None) -> None`.
+The service contract SHALL be typed explicitly: `enforce_limits_for_request(key_id: str, *, request_model: str | None, request_service_tier: str | None = None) -> None`.
 
 #### Scenario: Model-scoped limit does not block other models
 
@@ -416,4 +416,3 @@ Reservation 생성 후 upstream API 호출에 진입하지 않고 종료되는 �
 
 - **WHEN** 동일 `reservation_id`로 `finalize_usage_reservation()`이 2회 호출되면
 - **THEN** 사용량은 정확히 1회만 반영되어야 한다 (SHALL)
-

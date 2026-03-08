@@ -22,3 +22,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None
+
+
+class RuntimeConnectAddressResponse(DashboardModel):
+    connect_address: str

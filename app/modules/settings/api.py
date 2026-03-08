@@ -1,13 +1,66 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends
+import ipaddress
+import os
+import socket
+
+from fastapi import APIRouter, Body, Depends, Request
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import SettingsContext, get_settings_context
-from app.modules.settings.schemas import DashboardSettingsResponse, DashboardSettingsUpdateRequest
+from app.modules.settings.schemas import (
+    DashboardSettingsResponse,
+    DashboardSettingsUpdateRequest,
+    RuntimeConnectAddressResponse,
+)
 from app.modules.settings.service import DashboardSettingsUpdateData
+
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _is_non_loopback_ipv4(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return isinstance(address, ipaddress.IPv4Address) and not address.is_loopback and not address.is_unspecified
+
+
+def _resolve_hostname_ipv4(hostname: str) -> str | None:
+    try:
+        infos = socket.getaddrinfo(hostname, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    for info in infos:
+        candidate = info[4][0]
+        if not isinstance(candidate, str):
+            continue
+        if _is_non_loopback_ipv4(candidate):
+            return candidate
+    return None
+
+
+def _resolve_runtime_connect_address(request: Request) -> str:
+    override = os.getenv("CODEX_LB_CONNECT_ADDRESS", "").strip()
+    if override:
+        return override
+
+    request_host = request.url.hostname or ""
+    if _is_non_loopback_ipv4(request_host):
+        return request_host
+
+    normalized_host = request_host.strip().lower()
+    if normalized_host and normalized_host not in LOOPBACK_HOSTS:
+        resolved_host = _resolve_hostname_ipv4(request_host)
+        if resolved_host:
+            return resolved_host
+        return request_host
+    return "<codex-lb-ip-or-dns>"
+
 
 router = APIRouter(
     prefix="/api/settings",
@@ -30,6 +83,11 @@ async def get_settings(
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
     )
+
+
+@router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
+async def get_runtime_connect_address(request: Request) -> RuntimeConnectAddressResponse:
+    return RuntimeConnectAddressResponse(connect_address=_resolve_runtime_connect_address(request))
 
 
 @router.put("", response_model=DashboardSettingsResponse)

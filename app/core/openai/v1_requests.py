@@ -28,6 +28,7 @@ class V1ResponsesRequest(BaseModel):
     store: bool | None = None
     stream: bool | None = None
     include: list[str] = Field(default_factory=list)
+    service_tier: str | None = None
     conversation: str | None = None
     previous_response_id: str | None = None
     truncation: str | None = None
@@ -97,6 +98,7 @@ class V1ResponsesCompactRequest(BaseModel):
     messages: list[JsonValue] | None = None
     input: JsonValue | None = None
     instructions: str | None = None
+    reasoning: ResponsesReasoning | None = None
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesCompactRequest":

@@ -4,7 +4,12 @@ import { cn } from "@/lib/utils";
 import { AccountTrendChart } from "@/features/accounts/components/account-trend-chart";
 import type { AccountSummary, AccountTrendsResponse } from "@/features/accounts/schemas";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
-import { formatPercentNullable, formatQuotaResetLabel } from "@/utils/formatters";
+import {
+  formatCompactNumber,
+  formatCurrency,
+  formatPercentNullable,
+  formatQuotaResetLabel,
+} from "@/utils/formatters";
 
 export type AccountUsagePanelProps = {
   account: AccountSummary;
@@ -58,6 +63,8 @@ function QuotaRow({
 export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
+  const requestUsage = account.requestUsage ?? null;
+  const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
   const hasTrends = trends && (trends.primary.length > 0 || trends.secondary.length > 0);
 
@@ -67,6 +74,17 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
       <div className={cn("grid gap-4", weeklyOnly ? "grid-cols-1" : "grid-cols-2")}>
         {!weeklyOnly && <QuotaRow label="Primary" percent={primary} resetAt={account.resetAtPrimary} />}
         <QuotaRow label="Secondary" percent={secondary} resetAt={account.resetAtSecondary} />
+      </div>
+      <div className="rounded-md border bg-background/60 px-3 py-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Request logs total</p>
+        {hasRequestUsage ? (
+          <p className="mt-1 text-xs tabular-nums text-muted-foreground">
+            {formatCompactNumber(requestUsage?.totalTokens)} tok | {formatCompactNumber(requestUsage?.cachedInputTokens)} cached |{" "}
+            {formatCompactNumber(requestUsage?.requestCount)} req | {formatCurrency(requestUsage?.totalCostUsd)}
+          </p>
+        ) : (
+          <p className="mt-1 text-xs text-muted-foreground">No request usage yet.</p>
+        )}
       </div>
       {hasTrends && (
         <div className="pt-3">

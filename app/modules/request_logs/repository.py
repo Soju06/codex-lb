@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.usage.types import BucketModelAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, RequestLog
+from app.db.models import Account, ApiKey, RequestLog
 
 
 class RequestLogsRepository:
@@ -40,6 +40,7 @@ class RequestLogsRepository:
             select(
                 bucket_col,
                 RequestLog.model,
+                RequestLog.service_tier,
                 func.count().label("request_count"),
                 func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)).label("error_count"),
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
@@ -48,7 +49,7 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
             )
             .where(RequestLog.requested_at >= since)
-            .group_by(bucket_col, RequestLog.model)
+            .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
             .order_by(bucket_col)
         )
         result = await self._session.execute(stmt)
@@ -56,6 +57,7 @@ class RequestLogsRepository:
             BucketModelAggregate(
                 bucket_epoch=int(row.bucket_epoch),
                 model=row.model,
+                service_tier=row.service_tier,
                 request_count=int(row.request_count),
                 error_count=int(row.error_count),
                 input_tokens=int(row.input_tokens),
@@ -81,6 +83,7 @@ class RequestLogsRepository:
         cached_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        service_tier: str | None = None,
         api_key_id: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
@@ -89,6 +92,7 @@ class RequestLogsRepository:
             api_key_id=api_key_id,
             request_id=resolved_request_id,
             model=model,
+            service_tier=service_tier,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
@@ -145,6 +149,7 @@ class RequestLogsRepository:
         stmt = (
             select(RequestLog, total_col)
             .outerjoin(Account, Account.id == RequestLog.account_id)
+            .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
             .order_by(RequestLog.requested_at.desc())
         )
         if conditions:
@@ -166,6 +171,7 @@ class RequestLogsRepository:
             select(func.count(RequestLog.id))
             .select_from(RequestLog)
             .outerjoin(Account, Account.id == RequestLog.account_id)
+            .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
         )
         if conditions:
             count_stmt = count_stmt.where(and_(*conditions))
@@ -219,6 +225,13 @@ class RequestLogsRepository:
         model_options = [(row[0], row[1]) for row in model_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
         return account_ids, model_options, status_values
+
+    async def get_api_key_names_by_ids(self, api_key_ids: list[str]) -> dict[str, str]:
+        unique_ids = sorted({key_id for key_id in api_key_ids if key_id})
+        if not unique_ids:
+            return {}
+        result = await self._session.execute(select(ApiKey.id, ApiKey.name).where(ApiKey.id.in_(unique_ids)))
+        return {key_id: name for key_id, name in result.all() if key_id and name}
 
     def _build_filters(
         self,
@@ -290,6 +303,8 @@ class RequestLogsRepository:
                     RequestLog.status.ilike(search_pattern),
                     RequestLog.error_code.ilike(search_pattern),
                     RequestLog.error_message.ilike(search_pattern),
+                    RequestLog.api_key_id.ilike(search_pattern),
+                    ApiKey.name.ilike(search_pattern),
                     cast(RequestLog.requested_at, String).ilike(search_pattern),
                     cast(RequestLog.input_tokens, String).ilike(search_pattern),
                     cast(RequestLog.output_tokens, String).ilike(search_pattern),

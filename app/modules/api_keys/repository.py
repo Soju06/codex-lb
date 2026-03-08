@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.usage.pricing import UsageTokens, calculate_cost_from_usage, get_pricing_for_model
 from app.core.utils.time import utcnow
 from app.db.models import (
     ApiKey,
@@ -16,6 +17,7 @@ from app.db.models import (
     ApiKeyUsageReservationItem,
     LimitType,
     LimitWindow,
+    RequestLog,
 )
 
 
@@ -44,6 +46,14 @@ class UsageReservationData:
     model: str
     status: str
     items: list[UsageReservationItemData]
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyUsageSummary:
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
+    total_cost_usd: float
 
 
 class _Unset(Enum):
@@ -76,12 +86,89 @@ class ApiKeysRepository:
         result = await self._session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
         return list(result.scalars().unique().all())
 
+    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
+        stmt = (
+            select(
+                RequestLog.api_key_id,
+                RequestLog.model,
+                RequestLog.service_tier,
+                func.count(RequestLog.id).label("request_count"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(
+                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                    0,
+                ).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            )
+            .where(RequestLog.api_key_id.is_not(None))
+            .group_by(RequestLog.api_key_id, RequestLog.model, RequestLog.service_tier)
+        )
+        result = await self._session.execute(stmt)
+        rollup: dict[str, dict[str, float | int]] = {}
+        for (
+            api_key_id,
+            model,
+            service_tier,
+            request_count,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        ) in result.all():
+            if not api_key_id:
+                continue
+            input_sum = int(input_tokens or 0)
+            output_sum = int(output_tokens or 0)
+            cached_sum = int(cached_input_tokens or 0)
+            cached_sum = max(0, min(cached_sum, input_sum))
+            tokens_sum = input_sum + output_sum
+
+            entry = rollup.setdefault(
+                api_key_id,
+                {
+                    "request_count": 0,
+                    "total_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "total_cost_usd": 0.0,
+                },
+            )
+            entry["request_count"] += int(request_count or 0)
+            entry["total_tokens"] += tokens_sum
+            entry["cached_input_tokens"] += cached_sum
+
+            resolved = get_pricing_for_model(model or "", None, None)
+            if resolved is None:
+                continue
+            _, price = resolved
+            cost_usd = calculate_cost_from_usage(
+                UsageTokens(
+                    input_tokens=float(input_sum),
+                    output_tokens=float(output_sum),
+                    cached_input_tokens=float(cached_sum),
+                ),
+                price,
+                service_tier=service_tier,
+            )
+            if cost_usd is not None:
+                entry["total_cost_usd"] += cost_usd
+
+        return {
+            api_key_id: ApiKeyUsageSummary(
+                request_count=int(values["request_count"]),
+                total_tokens=int(values["total_tokens"]),
+                cached_input_tokens=int(values["cached_input_tokens"]),
+                total_cost_usd=round(float(values["total_cost_usd"]), 6),
+            )
+            for api_key_id, values in rollup.items()
+        }
+
     async def update(
         self,
         key_id: str,
         *,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
+        enforced_model: str | None | _Unset = _UNSET,
+        enforced_reasoning_effort: str | None | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
@@ -96,6 +183,12 @@ class ApiKeysRepository:
         if allowed_models is not _UNSET:
             assert allowed_models is None or isinstance(allowed_models, str)
             row.allowed_models = allowed_models
+        if enforced_model is not _UNSET:
+            assert enforced_model is None or isinstance(enforced_model, str)
+            row.enforced_model = enforced_model
+        if enforced_reasoning_effort is not _UNSET:
+            assert enforced_reasoning_effort is None or isinstance(enforced_reasoning_effort, str)
+            row.enforced_reasoning_effort = enforced_reasoning_effort
         if expires_at is not _UNSET:
             assert expires_at is None or isinstance(expires_at, datetime)
             row.expires_at = expires_at

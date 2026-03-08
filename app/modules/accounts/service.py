@@ -20,6 +20,7 @@ from app.modules.accounts.mappers import build_account_summaries, build_account_
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountImportResponse,
+    AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
 )
@@ -51,11 +52,24 @@ class AccountsService:
             return []
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
+        request_usage_rows = await self._repo.list_request_usage_summary_by_account(
+            [account.id for account in accounts]
+        )
+        request_usage_by_account = {
+            account_id: AccountRequestUsage(
+                request_count=row.request_count,
+                total_tokens=row.total_tokens,
+                cached_input_tokens=row.cached_input_tokens,
+                total_cost_usd=row.total_cost_usd,
+            )
+            for account_id, row in request_usage_rows.items()
+        }
 
         return build_account_summaries(
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
+            request_usage_by_account=request_usage_by_account,
             encryptor=self._encryptor,
         )
 

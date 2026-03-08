@@ -36,6 +36,7 @@ class ChatCompletionsRequest(BaseModel):
     logprobs: bool | None = None
     top_logprobs: int | None = None
     seed: int | None = None
+    service_tier: str | None = None
     response_format: JsonValue | None = None
     max_tokens: int | None = None
     max_completion_tokens: int | None = None

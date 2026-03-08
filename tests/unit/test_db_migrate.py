@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from alembic.util.exc import CommandError
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
@@ -126,6 +126,60 @@ def test_run_upgrade_without_auto_remap_fails_for_legacy_revision_ids(tmp_path: 
 
     with pytest.raises(CommandError, match="Can't locate revision identified by"):
         run_upgrade(url, "head", bootstrap_legacy=False, auto_remap_legacy_revisions=False)
+
+
+def test_run_upgrade_repairs_branched_legacy_revision_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "branch-repair.db"
+    url = _db_url(db_path)
+
+    ancestor = "20260218_000100_add_import_without_overwrite_and_drop_accounts_email_unique"
+    run_upgrade(url, ancestor, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(text("ALTER TABLE api_keys ADD COLUMN enforced_model VARCHAR"))
+        connection.execute(text("ALTER TABLE api_keys ADD COLUMN enforced_reasoning_effort VARCHAR"))
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "013_add_api_key_enforcement_fields"},
+        )
+
+    result = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert result.current_revision is not None
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        inspector = inspect(connection)
+        dashboard_columns = {column["name"] for column in inspector.get_columns("dashboard_settings")}
+        api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
+
+        assert "routing_strategy" in dashboard_columns
+        assert "enforced_model" in api_key_columns
+        assert "enforced_reasoning_effort" in api_key_columns
+        assert inspector.has_table("api_firewall_allowlist")
+
+
+def test_run_upgrade_repairs_branched_legacy_revision_ids_with_parallel_head(tmp_path: Path) -> None:
+    db_path = tmp_path / "branch-repair-parallel.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "20260228_030000_add_api_firewall_allowlist", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(text("ALTER TABLE api_keys ADD COLUMN enforced_model VARCHAR"))
+        connection.execute(text("ALTER TABLE api_keys ADD COLUMN enforced_reasoning_effort VARCHAR"))
+        connection.execute(text("DELETE FROM alembic_version"))
+        connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": "013_add_api_key_enforcement_fields"},
+        )
+        connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": "014_add_api_firewall_allowlist"},
+        )
+
+    result = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert result.current_revision == "20260307_000000_add_api_key_enforcement_fields"
 
 
 def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) -> None:

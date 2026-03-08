@@ -294,6 +294,7 @@ class ResponsesRequest(BaseModel):
     store: bool = False
     stream: bool | None = None
     include: list[str] = Field(default_factory=list)
+    service_tier: str | None = None
     conversation: str | None = None
     previous_response_id: str | None = None
     truncation: str | None = None
@@ -370,6 +371,7 @@ class ResponsesCompactRequest(BaseModel):
     model: str = Field(min_length=1)
     instructions: str
     input: JsonValue
+    reasoning: ResponsesReasoning | None = None
 
     @field_validator("input")
     @classmethod

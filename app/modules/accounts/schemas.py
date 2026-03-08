@@ -23,6 +23,13 @@ class AccountUsage(DashboardModel):
     secondary_remaining_percent: float | None = None
 
 
+class AccountRequestUsage(DashboardModel):
+    request_count: int = 0
+    total_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_cost_usd: float = 0.0
+
+
 class AccountTokenStatus(DashboardModel):
     expires_at: datetime | None = None
     state: str | None = None
@@ -50,6 +57,7 @@ class AccountSummary(DashboardModel):
     remaining_credits_primary: float | None = None
     capacity_credits_secondary: float | None = None
     remaining_credits_secondary: float | None = None
+    request_usage: AccountRequestUsage | None = None
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
 

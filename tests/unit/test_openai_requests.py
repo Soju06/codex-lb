@@ -60,6 +60,19 @@ def test_known_unsupported_upstream_fields_are_stripped():
     assert dumped["custom_field"] == "kept"
 
 
+def test_responses_preserves_service_tier():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "priority",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "priority"
+
+
 def test_compact_known_unsupported_upstream_fields_are_stripped():
     payload = {
         "model": "gpt-5.1",
@@ -119,6 +132,18 @@ def test_openai_compatible_top_level_verbosity_is_normalized():
     dumped = request.to_payload()
     assert dumped["text"] == {"verbosity": "medium"}
     assert "verbosity" not in dumped
+
+
+def test_v1_responses_preserves_service_tier():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "service_tier": "priority",
+    }
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "priority"
 
 
 def test_interleaved_reasoning_fields_are_sanitized_from_input():
@@ -346,6 +371,18 @@ def test_v1_compact_input_string_passthrough():
     request = V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
 
     assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+
+
+def test_v1_compact_reasoning_passthrough():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "reasoning": {"effort": "high"},
+    }
+    request = V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "high"
 
 
 def test_responses_normalizes_assistant_input_text_to_output_text():

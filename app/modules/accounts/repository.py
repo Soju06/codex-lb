@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.usage.pricing import UsageTokens, calculate_cost_from_usage, get_pricing_for_model
 from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
+
+
+@dataclass(frozen=True, slots=True)
+class AccountRequestUsageSummary:
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
+    total_cost_usd: float
 
 
 class AccountIdentityConflictError(Exception):
@@ -32,6 +42,81 @@ class AccountsRepository:
     async def list_accounts(self) -> list[Account]:
         result = await self._session.execute(select(Account).order_by(Account.email))
         return list(result.scalars().all())
+
+    async def list_request_usage_summary_by_account(
+        self,
+        account_ids: list[str] | None = None,
+    ) -> dict[str, AccountRequestUsageSummary]:
+        output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        stmt = select(
+            RequestLog.account_id,
+            RequestLog.model,
+            RequestLog.service_tier,
+            func.count(RequestLog.id).label("request_count"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+        ).group_by(RequestLog.account_id, RequestLog.model, RequestLog.service_tier)
+        if account_ids:
+            stmt = stmt.where(RequestLog.account_id.in_(account_ids))
+
+        result = await self._session.execute(stmt)
+        rollup: dict[str, dict[str, float | int]] = {}
+        for (
+            account_id,
+            model,
+            service_tier,
+            request_count,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        ) in result.all():
+            if not account_id:
+                continue
+            input_sum = int(input_tokens or 0)
+            output_sum = int(output_tokens or 0)
+            cached_sum = int(cached_input_tokens or 0)
+            cached_sum = max(0, min(cached_sum, input_sum))
+            tokens_sum = input_sum + output_sum
+
+            entry = rollup.setdefault(
+                account_id,
+                {
+                    "request_count": 0,
+                    "total_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "total_cost_usd": 0.0,
+                },
+            )
+            entry["request_count"] += int(request_count or 0)
+            entry["total_tokens"] += tokens_sum
+            entry["cached_input_tokens"] += cached_sum
+
+            resolved = get_pricing_for_model(model or "", None, None)
+            if resolved is None:
+                continue
+            _, price = resolved
+            cost_usd = calculate_cost_from_usage(
+                UsageTokens(
+                    input_tokens=float(input_sum),
+                    output_tokens=float(output_sum),
+                    cached_input_tokens=float(cached_sum),
+                ),
+                price,
+                service_tier=service_tier,
+            )
+            if cost_usd is not None:
+                entry["total_cost_usd"] += cost_usd
+
+        return {
+            account_id: AccountRequestUsageSummary(
+                request_count=int(values["request_count"]),
+                total_tokens=int(values["total_tokens"]),
+                cached_input_tokens=int(values["cached_input_tokens"]),
+                total_cost_usd=round(float(values["total_cost_usd"]), 6),
+            )
+            for account_id, values in rollup.items()
+        }
 
     async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
         result = await self._session.execute(

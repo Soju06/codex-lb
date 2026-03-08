@@ -82,11 +82,12 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="min-w-[800px] table-fixed">
+        <Table className="min-w-[960px] table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
+              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
@@ -112,9 +113,12 @@ export function RecentRequestsTable({
                   <TableCell className="truncate align-top text-sm">
                     {accountLabel}
                   </TableCell>
+                  <TableCell className="truncate align-top text-xs text-muted-foreground">
+                    {request.apiKeyName || "--"}
+                  </TableCell>
                   <TableCell className="truncate align-top">
                     <span className="font-mono text-xs">
-                      {formatModelLabel(request.model, request.reasoningEffort)}
+                      {formatModelLabel(request.model, request.reasoningEffort, request.serviceTier)}
                     </span>
                   </TableCell>
                   <TableCell className="align-top">

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -28,9 +29,10 @@ from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
 )
 from app.core.openai.parsing import parse_response_payload
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context
@@ -49,6 +51,8 @@ from app.modules.proxy.schemas import (
     RateLimitStatusPayload,
     ReasoningLevelSchema,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -181,9 +185,16 @@ async def v1_audio_transcriptions(
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
-    reservation = await _enforce_request_limits(api_key, request_model=None)
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=None,
+        request_service_tier=None,
+    )
 
     allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    if api_key and api_key.enforced_model:
+        forced = {api_key.enforced_model}
+        allowed_models = forced if allowed_models is None else (allowed_models & forced)
     created = int(time.time())
 
     registry = get_model_registry()
@@ -250,7 +261,8 @@ async def v1_chat_completions(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    _validate_model_access(api_key, payload.model)
+    effective_model = _effective_model_for_api_key(api_key, payload.model)
+    _validate_model_access(api_key, effective_model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
@@ -261,8 +273,13 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = _openai_validation_error(exc)
         return JSONResponse(status_code=400, content=error, headers=rate_limit_headers)
-    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=effective_model,
+        request_service_tier=responses_payload.service_tier,
+    )
     responses_payload.stream = True
+    _apply_api_key_enforcement(responses_payload, api_key)
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
@@ -283,12 +300,12 @@ async def v1_chat_completions(
         stream_options = payload.stream_options
         include_usage = bool(stream_options and stream_options.include_usage)
         return StreamingResponse(
-            stream_chat_chunks(stream_with_first, model=payload.model, include_usage=include_usage),
+            stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
 
-    result = await collect_chat_completion(stream_with_first, model=payload.model)
+    result = await collect_chat_completion(stream_with_first, model=responses_payload.model)
     if isinstance(result, OpenAIErrorEnvelopeModel):
         error = result.error
         code = error.code if error else None
@@ -313,8 +330,13 @@ async def _stream_responses(
     *,
     suppress_text_done_events: bool = False,
 ) -> Response:
+    _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
-    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=payload.model,
+        request_service_tier=payload.service_tier,
+    )
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
@@ -352,8 +374,13 @@ async def _collect_responses(
     *,
     suppress_text_done_events: bool = False,
 ) -> Response:
+    _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
-    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=payload.model,
+        request_service_tier=payload.service_tier,
+    )
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
@@ -430,8 +457,13 @@ async def _compact_responses(
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> JSONResponse:
+    _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
-    reservation = await _enforce_request_limits(api_key, request_model=payload.model)
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=payload.model,
+        request_service_tier=_compact_request_service_tier(payload),
+    )
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
@@ -478,7 +510,11 @@ async def _transcribe_request(
     api_key: ApiKeyData | None,
 ) -> JSONResponse:
     _validate_model_access(api_key, _TRANSCRIPTION_MODEL)
-    reservation = await _enforce_request_limits(api_key, request_model=_TRANSCRIPTION_MODEL)
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=_TRANSCRIPTION_MODEL,
+        request_service_tier=None,
+    )
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
         audio_bytes = await file.read()
@@ -525,6 +561,7 @@ async def _enforce_request_limits(
     api_key: ApiKeyData | None,
     *,
     request_model: str | None,
+    request_service_tier: str | None,
 ) -> ApiKeyUsageReservationData | None:
     if api_key is None:
         return None
@@ -535,6 +572,7 @@ async def _enforce_request_limits(
             return await service.enforce_limits_for_request(
                 api_key.id,
                 request_model=request_model,
+                request_service_tier=request_service_tier,
             )
         except ApiKeyRateLimitExceededError as exc:
             message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
@@ -562,12 +600,63 @@ def _validate_model_access(api_key: ApiKeyData | None, model: str | None) -> Non
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
+def _apply_api_key_enforcement(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    api_key: ApiKeyData | None,
+) -> None:
+    if api_key is None:
+        return
+
+    if api_key.enforced_model and payload.model != api_key.enforced_model:
+        logger.info(
+            "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
+            get_request_id(),
+            api_key.id,
+            payload.model,
+            api_key.enforced_model,
+        )
+        payload.model = api_key.enforced_model
+
+    if api_key.enforced_reasoning_effort is not None:
+        requested_effort = payload.reasoning.effort if payload.reasoning else None
+        if payload.reasoning is None:
+            payload.reasoning = ResponsesReasoning(effort=api_key.enforced_reasoning_effort)
+        else:
+            payload.reasoning.effort = api_key.enforced_reasoning_effort
+        if requested_effort != api_key.enforced_reasoning_effort:
+            logger.info(
+                "api_key_reasoning_enforced request_id=%s key_id=%s requested_effort=%s enforced_effort=%s",
+                get_request_id(),
+                api_key.id,
+                requested_effort,
+                api_key.enforced_reasoning_effort,
+            )
+
+
+def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:
+    if api_key is None or api_key.enforced_model is None:
+        return requested_model
+    return api_key.enforced_model
+
+
+def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | None:
+    if not payload.model_extra:
+        return None
+    value = payload.model_extra.get("service_tier")
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
+    output_items: dict[int, dict[str, JsonValue]] = {}
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
             continue
         event_type = payload.get("type")
+        _collect_output_item_event(payload, output_items)
         if event_type == "error":
             return _parse_event_error_envelope(payload)
         if event_type == "response.failed":
@@ -586,11 +675,41 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIRespon
         if event_type in ("response.completed", "response.incomplete"):
             response = payload.get("response")
             if isinstance(response, dict):
-                parsed = parse_response_payload(response)
+                parsed = parse_response_payload(_merge_collected_output_items(response, output_items))
                 if parsed is not None:
                     return parsed
             return _default_error_envelope()
     return _default_error_envelope()
+
+
+def _collect_output_item_event(
+    payload: dict[str, JsonValue],
+    output_items: dict[int, dict[str, JsonValue]],
+) -> None:
+    event_type = payload.get("type")
+    if event_type not in ("response.output_item.added", "response.output_item.done"):
+        return
+    output_index = payload.get("output_index")
+    item = payload.get("item")
+    if not isinstance(output_index, int) or not isinstance(item, dict):
+        return
+    output_items[output_index] = dict(item)
+
+
+def _merge_collected_output_items(
+    response: Mapping[str, JsonValue],
+    output_items: dict[int, dict[str, JsonValue]],
+) -> dict[str, JsonValue]:
+    merged = dict(response)
+    if not output_items:
+        return merged
+
+    existing_output = response.get("output")
+    if isinstance(existing_output, list) and existing_output:
+        return merged
+
+    merged["output"] = [item for _, item in sorted(output_items.items())]
+    return merged
 
 
 def _parse_event_error_envelope(payload: dict[str, JsonValue]) -> OpenAIErrorEnvelopeModel:

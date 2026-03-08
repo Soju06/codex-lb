@@ -86,6 +86,8 @@ describe("formatters", () => {
 
   it("formats model and datetime labels", () => {
     expect(formatModelLabel("gpt-4.1", "high")).toBe("gpt-4.1 (high)");
+    expect(formatModelLabel("gpt-4.1", "high", "priority")).toBe("gpt-4.1 (high, priority)");
+    expect(formatModelLabel("gpt-4.1", null, "priority")).toBe("gpt-4.1 (priority)");
     expect(formatModelLabel("gpt-4.1", null)).toBe("gpt-4.1");
     expect(formatModelLabel(null, null)).toBe("--");
 

@@ -111,6 +111,7 @@ class UsageTrendBucket:
 class BucketModelAggregate:
     bucket_epoch: int
     model: str
+    service_tier: str | None
     request_count: int
     error_count: int
     input_tokens: int

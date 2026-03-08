@@ -23,21 +23,39 @@ export const LimitRuleCreateSchema = z.object({
   modelFilter: z.string().nullable().optional(),
 });
 
+export const ApiKeyUsageSummarySchema = z.object({
+  requestCount: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative(),
+  totalCostUsd: z.number().nonnegative().default(0),
+});
+
 export const ApiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
+  enforcedModel: z.string().nullable().default(null),
+  enforcedReasoningEffort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .nullable()
+    .default(null),
   expiresAt: z.string().datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
   createdAt: z.string().datetime({ offset: true }),
   lastUsedAt: z.string().datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
+  usageSummary: ApiKeyUsageSummarySchema.nullable().default(null),
 });
 
 export const ApiKeyCreateRequestSchema = z.object({
   name: z.string().min(1).max(128),
   allowedModels: z.array(z.string()).optional(),
+  enforcedModel: z.string().min(1).nullable().optional(),
+  enforcedReasoningEffort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .nullable()
+    .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
@@ -50,6 +68,11 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
 export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
+  enforcedModel: z.string().min(1).nullable().optional(),
+  enforcedReasoningEffort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .nullable()
+    .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),

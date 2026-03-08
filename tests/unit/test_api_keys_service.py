@@ -6,11 +6,19 @@ import pytest
 
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType
-from app.modules.api_keys.repository import ReservationResult, UsageReservationData, UsageReservationItemData
+from app.modules.api_keys.repository import (
+    _UNSET,
+    ApiKeyUsageSummary,
+    ReservationResult,
+    UsageReservationData,
+    UsageReservationItemData,
+    _Unset,
+)
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
+    ApiKeysRepositoryProtocol,
     ApiKeysService,
     LimitRuleInput,
 )
@@ -18,7 +26,7 @@ from app.modules.api_keys.service import (
 pytestmark = pytest.mark.unit
 
 
-class _FakeApiKeysRepository:
+class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
     def __init__(self) -> None:
         self.rows: dict[str, ApiKey] = {}
         self._limits: dict[str, list[ApiKeyLimit]] = {}
@@ -49,11 +57,37 @@ class _FakeApiKeysRepository:
             row.limits = self._limits.get(row.id, [])
         return result
 
-    async def update(self, key_id: str, **kwargs: object) -> ApiKey | None:
+    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
+        return {}
+
+    async def update(
+        self,
+        key_id: str,
+        *,
+        name: str | _Unset = _UNSET,
+        allowed_models: str | None | _Unset = _UNSET,
+        enforced_model: str | None | _Unset = _UNSET,
+        enforced_reasoning_effort: str | None | _Unset = _UNSET,
+        expires_at: datetime | None | _Unset = _UNSET,
+        is_active: bool | _Unset = _UNSET,
+        key_hash: str | _Unset = _UNSET,
+        key_prefix: str | _Unset = _UNSET,
+    ) -> ApiKey | None:
         row = self.rows.get(key_id)
         if row is None:
             return None
-        for field, value in kwargs.items():
+        for field, value in {
+            "name": name,
+            "allowed_models": allowed_models,
+            "enforced_model": enforced_model,
+            "enforced_reasoning_effort": enforced_reasoning_effort,
+            "expires_at": expires_at,
+            "is_active": is_active,
+            "key_hash": key_hash,
+            "key_prefix": key_prefix,
+        }.items():
+            if value is _UNSET:
+                continue
             setattr(row, field, value)
         row.limits = self._limits.get(key_id, [])
         return row
@@ -355,6 +389,39 @@ async def test_create_key_stores_hash_and_prefix() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_key_rejects_enforced_model_outside_allowed_models() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    with pytest.raises(ValueError, match="enforced_model"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="invalid-policy",
+                allowed_models=["model-alpha"],
+                enforced_model="model-beta",
+                expires_at=None,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_key_normalizes_enforced_reasoning_effort() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reasoning-policy",
+            allowed_models=None,
+            enforced_reasoning_effort="HIGH",
+            expires_at=None,
+        )
+    )
+
+    assert created.enforced_reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
 async def test_create_key_with_limits() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -504,6 +571,54 @@ async def test_validate_key_multi_limit_all_must_pass() -> None:
 
 
 @pytest.mark.asyncio
+async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    priority_created = await service.create_key(
+        ApiKeyCreateData(
+            name="priority-cost-reserve-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=1_000_000),
+            ],
+        )
+    )
+
+    priority_reservation = await service.enforce_limits_for_request(
+        priority_created.id,
+        request_model="gpt-5.1",
+        request_service_tier="priority",
+    )
+    assert priority_reservation.key_id == priority_created.id
+
+    priority_limits = await repo.get_limits_by_key(priority_created.id)
+    priority_cost_limit = next(lim for lim in priority_limits if lim.limit_type == LimitType.COST_USD)
+    assert priority_cost_limit.current_value == 184_319
+
+    standard_created = await service.create_key(
+        ApiKeyCreateData(
+            name="standard-cost-reserve-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=1_000_000),
+            ],
+        )
+    )
+    standard_reservation = await service.enforce_limits_for_request(
+        standard_created.id,
+        request_model="gpt-5.1",
+        request_service_tier=None,
+    )
+    assert standard_reservation.key_id == standard_created.id
+
+    standard_limits = await repo.get_limits_by_key(standard_created.id)
+    standard_cost_limit = next(lim for lim in standard_limits if lim.limit_type == LimitType.COST_USD)
+    assert standard_cost_limit.current_value == 92_159
+
+
+@pytest.mark.asyncio
 async def test_regenerate_key_rotates_hash_and_prefix() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -603,6 +718,62 @@ async def test_record_usage_model_filter_matching() -> None:
     model_limit = next(lim for lim in limits if lim.model_filter == "gpt-5.1")
     assert global_limit.current_value == 450  # 150 + 300
     assert model_limit.current_value == 150  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_record_usage_cost_limit_uses_service_tier_pricing() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="priority-cost-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=100_000_000),
+            ],
+        )
+    )
+
+    await service.record_usage(
+        created.id,
+        model="gpt-5.4",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        service_tier="priority",
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
+    assert cost_limit.current_value == 35_000_000
+
+
+@pytest.mark.asyncio
+async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="flex-cost-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=100_000_000),
+            ],
+        )
+    )
+
+    await service.record_usage(
+        created.id,
+        model="gpt-5.1",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        service_tier="flex",
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
+    assert cost_limit.current_value == 5_625_000
 
 
 @pytest.mark.asyncio

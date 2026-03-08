@@ -90,6 +90,15 @@ export const OauthCompleteResponseSchema = z.object({
   status: z.string(),
 });
 
+export const ManualOauthCallbackRequestSchema = z.object({
+  callbackUrl: z.string(),
+});
+
+export const ManualOauthCallbackResponseSchema = z.object({
+  status: z.string(),
+  errorMessage: z.string().nullable(),
+});
+
 export const OAuthStateSchema = z.object({
   status: z.enum(["idle", "starting", "pending", "success", "error"]),
   method: z.enum(["browser", "device"]).nullable(),
@@ -114,5 +123,6 @@ export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
+export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;
 export type OAuthState = z.infer<typeof OAuthStateSchema>;
 export type ImportState = z.infer<typeof ImportStateSchema>;

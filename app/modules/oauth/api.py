@@ -9,6 +9,7 @@ from app.core.errors import dashboard_error
 from app.dependencies import OauthContext, get_oauth_context
 from app.modules.oauth.schemas import (
     ManualCallbackRequest,
+    ManualCallbackResponse,
     OauthCompleteRequest,
     OauthCompleteResponse,
     OauthStartRequest,
@@ -63,16 +64,15 @@ async def complete_oauth(
         )
 
 
-@router.post("/manual-callback")
+@router.post("/manual-callback", response_model=ManualCallbackResponse)
 async def manual_callback(
     request: ManualCallbackRequest,
     context: OauthContext = Depends(get_oauth_context),
-) -> JSONResponse:
+) -> ManualCallbackResponse | JSONResponse:
     try:
-        status = await context.service.manual_callback(request.callback_url)
-        return JSONResponse(content={"status": status})
+        return await context.service.manual_callback(request.callback_url)
     except Exception as exc:
         return JSONResponse(
             status_code=500,
-            content={"error": "manual_callback_failed", "message": str(exc)},
+            content=dashboard_error("manual_callback_failed", str(exc)),
         )

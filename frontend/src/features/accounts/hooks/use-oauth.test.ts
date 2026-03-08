@@ -5,10 +5,12 @@ import { useOauth } from "@/features/accounts/hooks/use-oauth";
 
 const startOauthMock = vi.fn();
 const completeOauthMock = vi.fn();
+const submitManualOauthCallbackMock = vi.fn();
 
 vi.mock("@/features/accounts/api", () => ({
   startOauth: (...args: unknown[]) => startOauthMock(...args),
   completeOauth: (...args: unknown[]) => completeOauthMock(...args),
+  submitManualOauthCallback: (...args: unknown[]) => submitManualOauthCallbackMock(...args),
   getOauthStatus: vi.fn().mockResolvedValue({ status: "pending", errorMessage: null }),
 }));
 
@@ -62,5 +64,40 @@ describe("useOauth", () => {
     });
 
     expect(completeOauthMock).not.toHaveBeenCalled();
+  });
+
+  it("updates state to success after a successful manual callback", async () => {
+    submitManualOauthCallbackMock.mockResolvedValue({
+      status: "success",
+      errorMessage: null,
+    });
+
+    const { result } = renderHook(() => useOauth());
+
+    await act(async () => {
+      await result.current.manualCallback("http://localhost:1455/auth/callback?code=ok&state=state");
+    });
+
+    expect(submitManualOauthCallbackMock).toHaveBeenCalledWith({
+      callbackUrl: "http://localhost:1455/auth/callback?code=ok&state=state",
+    });
+    expect(result.current.state.status).toBe("success");
+    expect(result.current.state.errorMessage).toBeNull();
+  });
+
+  it("updates state with the backend error after a failed manual callback", async () => {
+    submitManualOauthCallbackMock.mockResolvedValue({
+      status: "error",
+      errorMessage: "Invalid OAuth callback: state mismatch or missing code.",
+    });
+
+    const { result } = renderHook(() => useOauth());
+
+    await act(async () => {
+      await result.current.manualCallback("http://localhost:1455/auth/callback?code=bad&state=wrong");
+    });
+
+    expect(result.current.state.status).toBe("error");
+    expect(result.current.state.errorMessage).toBe("Invalid OAuth callback: state mismatch or missing code.");
   });
 });

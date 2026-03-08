@@ -56,34 +56,26 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function ManualCallbackInput() {
+function ManualCallbackInput({
+  onSubmit,
+}: {
+  onSubmit: (callbackUrl: string) => Promise<void>;
+}) {
   const [callbackUrl, setCallbackUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = useCallback(async () => {
     if (!callbackUrl.trim()) return;
     setSubmitting(true);
-    setError(null);
     try {
-      const res = await fetch("/api/oauth/manual-callback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ callback_url: callbackUrl.trim() }),
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (!res.ok || data.status === "error") {
-        setError(data.message || data.error_message || "Callback processing failed.");
-        return;
-      }
+      await onSubmit(callbackUrl.trim());
       setCallbackUrl("");
     } catch {
-      setError("Network error. Please try again.");
+      // Parent state renders the error stage/message.
     } finally {
       setSubmitting(false);
     }
-  }, [callbackUrl]);
+  }, [callbackUrl, onSubmit]);
 
   return (
     <div className="space-y-1.5">
@@ -108,9 +100,6 @@ function ManualCallbackInput() {
           {submitting ? "Submitting..." : "Submit"}
         </Button>
       </div>
-      {error ? (
-        <p className="text-xs text-destructive">{error}</p>
-      ) : null}
     </div>
   );
 }
@@ -121,6 +110,7 @@ export type OauthDialogProps = {
   onOpenChange: (open: boolean) => void;
   onStart: (method?: "browser" | "device") => Promise<void>;
   onComplete: () => Promise<void>;
+  onManualCallback: (callbackUrl: string) => Promise<void>;
   onReset: () => void;
 };
 
@@ -130,6 +120,7 @@ export function OauthDialog({
   onOpenChange,
   onStart,
   onComplete,
+  onManualCallback,
   onReset,
 }: OauthDialogProps) {
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
@@ -222,7 +213,7 @@ export function OauthDialog({
                 </div>
               </div>
             ) : null}
-            <ManualCallbackInput />
+            <ManualCallbackInput onSubmit={onManualCallback} />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>Waiting for authorization to complete...</span>

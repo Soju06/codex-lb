@@ -555,6 +555,44 @@ async def test_v1_responses_non_streaming_returns_response(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_non_streaming_reconstructs_reasoning_output(async_client, monkeypatch):
+    email = "responses-reasoning-output@example.com"
+    raw_account_id = "acc_responses_reasoning_output"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1",'
+            '"type":"reasoning","summary":[{"type":"summary_text","text":"Need more steps"}],'
+            '"reasoning_details":{"tokens":4}}}\n\n'
+        )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_reasoning_1","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}], "stream": False}
+    resp = await async_client.post("/v1/responses", json=payload)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "resp_reasoning_1"
+    assert body["output"] == [
+        {
+            "id": "rs_1",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Need more steps"}],
+            "reasoning_details": {"tokens": 4},
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_non_streaming_preserves_sse_error_payload(async_client, monkeypatch):
     email = "responses-error-event@example.com"
     raw_account_id = "acc_responses_error_event"

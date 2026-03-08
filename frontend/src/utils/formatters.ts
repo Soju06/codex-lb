@@ -161,13 +161,19 @@ export function formatCachedTokensMeta(totalTokens: unknown, cachedInputTokens: 
   return `Cached: ${formatCompactNumber(cached)} (${Math.round(percent)}%)`;
 }
 
-export function formatModelLabel(model: string | null | undefined, reasoningEffort: string | null | undefined): string {
+export function formatModelLabel(
+  model: string | null | undefined,
+  reasoningEffort: string | null | undefined,
+  serviceTier?: string | null | undefined,
+): string {
   const base = (model || "").trim();
   if (!base) {
     return "--";
   }
   const effort = (reasoningEffort || "").trim();
-  return effort ? `${base} (${effort})` : base;
+  const tier = (serviceTier || "").trim();
+  const suffix = [effort, tier].filter(Boolean).join(", ");
+  return suffix ? `${base} (${suffix})` : base;
 }
 
 export function formatTimeLong(iso: string | null | undefined): FormattedDateTime {

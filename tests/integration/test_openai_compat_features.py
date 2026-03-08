@@ -186,6 +186,29 @@ async def test_v1_responses_forwards_include_logprobs(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_forwards_service_tier(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_service_tier", "backend-service-tier@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_service_tier")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Fast"}]}],
+        "service_tier": "priority",
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"].service_tier == "priority"
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_rejects_invalid_include(async_client):
     payload = {"model": "gpt-5.2", "input": "hi", "include": ["not_allowed"]}
     resp = await async_client.post("/v1/responses", json=payload)
@@ -513,3 +536,25 @@ async def test_v1_chat_completions_maps_reasoning_effort(async_client, monkeypat
     assert resp.status_code == 200
     assert seen["payload"].reasoning is not None
     assert seen["payload"].reasoning.effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_forwards_service_tier(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_service_tier", "chat-service-tier@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_chat_service_tier")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Think fast."}],
+        "service_tier": "priority",
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"].service_tier == "priority"

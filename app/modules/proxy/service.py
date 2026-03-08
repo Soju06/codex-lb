@@ -118,6 +118,7 @@ class ProxyService:
             )
         account = await self._ensure_fresh(account)
         account_id = _header_account_id(account.chatgpt_account_id)
+        request_service_tier = _service_tier_from_compact_payload(payload)
 
         async def _call_compact(target: Account) -> OpenAIResponsePayload:
             access_token = self._encryptor.decrypt(target.access_token_encrypted)
@@ -129,6 +130,7 @@ class ProxyService:
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
                 response=response,
+                request_service_tier=request_service_tier,
             )
             return response
         except ProxyResponseError as exc:
@@ -137,6 +139,7 @@ class ProxyService:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     response=None,
+                    request_service_tier=request_service_tier,
                 )
                 await self._handle_proxy_error(account, exc)
                 raise
@@ -149,6 +152,7 @@ class ProxyService:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     response=None,
+                    request_service_tier=request_service_tier,
                 )
                 raise exc
             try:
@@ -157,6 +161,7 @@ class ProxyService:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     response=response,
+                    request_service_tier=request_service_tier,
                 )
                 return response
             except ProxyResponseError as exc:
@@ -164,6 +169,7 @@ class ProxyService:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     response=None,
+                    request_service_tier=request_service_tier,
                 )
                 await self._handle_proxy_error(account, exc)
                 raise
@@ -242,6 +248,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         response: OpenAIResponsePayload | None,
+        request_service_tier: str | None,
     ) -> None:
         if api_key is None or api_key_reservation is None:
             return
@@ -252,6 +259,14 @@ class ProxyService:
         output_tokens = usage.output_tokens if usage else None
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else 0
         model_name = api_key_reservation.model or (getattr(response, "model", None) or "")
+        response_service_tier = _service_tier_from_response(response)
+        service_tier = (
+            response_service_tier
+            if isinstance(response_service_tier, str)
+            else request_service_tier
+            if isinstance(request_service_tier, str)
+            else None
+        )
 
         with anyio.CancelScope(shield=True):
             try:
@@ -264,6 +279,7 @@ class ProxyService:
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=cached_input_tokens or 0,
+                            service_tier=service_tier,
                         )
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
@@ -305,6 +321,7 @@ class ProxyService:
                             input_tokens=settlement.input_tokens,
                             output_tokens=settlement.output_tokens,
                             cached_input_tokens=settlement.cached_input_tokens or 0,
+                            service_tier=settlement.service_tier,
                         )
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
@@ -551,6 +568,7 @@ class ProxyService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
+        service_tier = payload.service_tier
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         start = time.monotonic()
         status = "success"
@@ -575,6 +593,9 @@ class ProxyService:
             first_payload = parse_sse_data_json(first)
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
+            actual_service_tier = _service_tier_from_event_payload(first_payload)
+            if actual_service_tier is not None:
+                service_tier = actual_service_tier
             if event and event.type in ("response.failed", "error"):
                 if event.type == "response.failed":
                     response = event.response
@@ -611,6 +632,9 @@ class ProxyService:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
+                actual_service_tier = _service_tier_from_event_payload(event_payload)
+                if actual_service_tier is not None:
+                    service_tier = actual_service_tier
                 if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _should_suppress_text_done_event(
@@ -659,6 +683,7 @@ class ProxyService:
             )
             settlement.status = status
             settlement.model = model
+            settlement.service_tier = service_tier
             settlement.input_tokens = input_tokens
             settlement.output_tokens = output_tokens
             settlement.cached_input_tokens = cached_input_tokens
@@ -675,6 +700,7 @@ class ProxyService:
                             cached_input_tokens=cached_input_tokens,
                             reasoning_tokens=reasoning_tokens,
                             reasoning_effort=reasoning_effort,
+                            service_tier=service_tier,
                             latency_ms=latency_ms,
                             status=status,
                             error_code=error_code,
@@ -763,6 +789,7 @@ class _StreamSettlement:
 
     status: str = "success"
     model: str = ""
+    service_tier: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
@@ -930,6 +957,37 @@ def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | 
     if not payload.model_extra:
         return None
     value = payload.model_extra.get("prompt_cache_key")
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
+    if not payload.model_extra:
+        return None
+    return _normalize_service_tier_value(payload.model_extra.get("service_tier"))
+
+
+def _service_tier_from_response(response: OpenAIResponsePayload | None) -> str | None:
+    if response is None:
+        return None
+    extra = response.model_extra
+    if not isinstance(extra, Mapping):
+        return None
+    return _normalize_service_tier_value(extra.get("service_tier"))
+
+
+def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    return _normalize_service_tier_value(response.get("service_tier"))
+
+
+def _normalize_service_tier_value(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()

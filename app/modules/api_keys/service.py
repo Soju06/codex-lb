@@ -16,8 +16,8 @@ from app.core.usage.pricing import (
 from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import (
-    ApiKeyUsageSummary,
     _UNSET,
+    ApiKeyUsageSummary,
     ReservationResult,
     UsageReservationData,
     UsageReservationItemData,
@@ -308,9 +308,7 @@ class ApiKeysService:
             name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
             allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
             enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
-            enforced_reasoning_effort=(
-                enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
-            ),
+            enforced_reasoning_effort=(enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET),
             expires_at=payload.expires_at if payload.expires_at_set else _UNSET,
             is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
         )
@@ -381,6 +379,7 @@ class ApiKeysService:
         key_id: str,
         *,
         request_model: str | None,
+        request_service_tier: str | None = None,
     ) -> ApiKeyUsageReservationData:
         now = utcnow()
         row = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
@@ -398,7 +397,11 @@ class ApiKeysService:
                     continue
                 if limit.current_value >= limit.max_value:
                     raise _rate_limit_exceeded_error(limit)
-                reserve_delta = _reserve_delta_for_limit(limit)
+                reserve_delta = _reserve_delta_for_limit(
+                    limit,
+                    request_model=request_model,
+                    request_service_tier=request_service_tier,
+                )
                 if reserve_delta <= 0:
                     continue
                 result = await self._repository.try_reserve_usage(
@@ -443,6 +446,7 @@ class ApiKeysService:
         input_tokens: int,
         output_tokens: int,
         cached_input_tokens: int = 0,
+        service_tier: str | None = None,
     ) -> None:
         reservation = await self._repository.get_usage_reservation(reservation_id)
         if reservation is None or reservation.status != "reserved":
@@ -462,6 +466,7 @@ class ApiKeysService:
             input_tokens,
             output_tokens,
             cached_input_tokens,
+            service_tier,
         )
 
         try:
@@ -547,12 +552,14 @@ class ApiKeysService:
         input_tokens: int,
         output_tokens: int,
         cached_input_tokens: int = 0,
+        service_tier: str | None = None,
     ) -> None:
         cost_microdollars = _calculate_cost_microdollars(
             model,
             input_tokens,
             output_tokens,
             cached_input_tokens,
+            service_tier,
         )
         await self._repository.increment_limit_usage(
             key_id,
@@ -693,15 +700,29 @@ def _limit_applies_for_request(limit: ApiKeyLimit, *, request_model: str | None)
     return limit.model_filter == request_model
 
 
-def _reserve_delta_for_limit(limit: ApiKeyLimit) -> int:
+def _reserve_delta_for_limit(
+    limit: ApiKeyLimit,
+    *,
+    request_model: str | None,
+    request_service_tier: str | None,
+) -> int:
     remaining = limit.max_value - limit.current_value
     if remaining <= 0:
         return 0
-    budget = _reserve_budget_for_limit_type(limit.limit_type)
+    budget = _reserve_budget_for_limit_type(
+        limit.limit_type,
+        request_model=request_model,
+        request_service_tier=request_service_tier,
+    )
     return min(remaining, budget)
 
 
-def _reserve_budget_for_limit_type(limit_type: LimitType) -> int:
+def _reserve_budget_for_limit_type(
+    limit_type: LimitType,
+    *,
+    request_model: str | None,
+    request_service_tier: str | None,
+) -> int:
     if limit_type == LimitType.TOTAL_TOKENS:
         return 8_192
     if limit_type == LimitType.INPUT_TOKENS:
@@ -709,8 +730,21 @@ def _reserve_budget_for_limit_type(limit_type: LimitType) -> int:
     if limit_type == LimitType.OUTPUT_TOKENS:
         return 8_192
     if limit_type == LimitType.COST_USD:
-        return 2_000_000
+        return _reserve_cost_budget_microdollars(request_model, request_service_tier)
     return 1
+
+
+def _reserve_cost_budget_microdollars(model: str | None, service_tier: str | None) -> int:
+    if not model:
+        return 2_000_000
+    cost_microdollars = _calculate_cost_microdollars(
+        model,
+        8_192,
+        8_192,
+        0,
+        service_tier,
+    )
+    return cost_microdollars if cost_microdollars > 0 else 2_000_000
 
 
 def _compute_increment_for_limit_type(
@@ -897,6 +931,7 @@ def _calculate_cost_microdollars(
     input_tokens: int,
     output_tokens: int,
     cached_input_tokens: int,
+    service_tier: str | None = None,
 ) -> int:
     resolved = get_pricing_for_model(model)
     if resolved is None:
@@ -907,7 +942,7 @@ def _calculate_cost_microdollars(
         output_tokens=float(output_tokens),
         cached_input_tokens=float(cached_input_tokens),
     )
-    cost_usd = calculate_cost_from_usage(usage, price)
+    cost_usd = calculate_cost_from_usage(usage, price, service_tier=service_tier)
     if cost_usd is None:
         return 0
     return int(cost_usd * 1_000_000)

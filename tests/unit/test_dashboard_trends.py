@@ -17,6 +17,7 @@ FIRST_SLOT_EPOCH = (SINCE_EPOCH // BUCKET_SECONDS) * BUCKET_SECONDS + BUCKET_SEC
 def _make_row(
     slot_index: int = 0,
     model: str = "gpt-5.1",
+    service_tier: str | None = None,
     request_count: int = 10,
     error_count: int = 1,
     input_tokens: int = 500,
@@ -27,6 +28,7 @@ def _make_row(
     return BucketModelAggregate(
         bucket_epoch=FIRST_SLOT_EPOCH + slot_index * BUCKET_SECONDS,
         model=model,
+        service_tier=service_tier,
         request_count=request_count,
         error_count=error_count,
         input_tokens=input_tokens,
@@ -125,6 +127,7 @@ class TestBuildTrendsFromBuckets:
             BucketModelAggregate(
                 bucket_epoch=FIRST_SLOT_EPOCH + 100 * BUCKET_SECONDS,
                 model="gpt-5.1",
+                service_tier=None,
                 request_count=999,
                 error_count=0,
                 input_tokens=0,
@@ -152,3 +155,18 @@ class TestBuildTrendsFromBuckets:
 
         assert trends.requests[27].v == 5
         assert metrics.requests_7d == 5
+
+    def test_cost_uses_service_tier_pricing(self):
+        rows = [
+            _make_row(
+                slot_index=0,
+                model="gpt-5.4",
+                service_tier="priority",
+                input_tokens=1_000_000,
+                output_tokens=1_000_000,
+                cached_input_tokens=0,
+            ),
+        ]
+        _, _, cost = build_trends_from_buckets(rows, SINCE)
+
+        assert cost.total_usd_7d == pytest.approx(35.0)

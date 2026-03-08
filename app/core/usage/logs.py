@@ -9,6 +9,8 @@ class RequestLogLike(Protocol):
     @property
     def model(self) -> str | None: ...
     @property
+    def service_tier(self) -> str | None: ...
+    @property
     def input_tokens(self) -> int | None: ...
     @property
     def output_tokens(self) -> int | None: ...
@@ -54,7 +56,7 @@ def cost_from_log(log: RequestLogLike, *, precision: int | None = None) -> float
     if not resolved:
         return None
     _, price = resolved
-    cost = calculate_cost_from_usage(usage, price)
+    cost = calculate_cost_from_usage(usage, price, service_tier=log.service_tier)
     if cost is None:
         return None
     if precision is None:

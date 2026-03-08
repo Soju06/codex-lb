@@ -73,6 +73,7 @@ def build_trends_from_buckets(
         bucket_cost_items[epoch].append(
             CostItem(
                 model=row.model,
+                service_tier=row.service_tier,
                 usage=UsageTokens(
                     input_tokens=float(row.input_tokens),
                     output_tokens=float(row.output_tokens),
@@ -132,6 +133,7 @@ def build_trends_from_buckets(
     all_cost_items = [
         CostItem(
             model=row.model,
+            service_tier=row.service_tier,
             usage=UsageTokens(
                 input_tokens=float(row.input_tokens),
                 output_tokens=float(row.output_tokens),
@@ -246,7 +248,7 @@ def _log_to_cost_item(log: RequestLog) -> CostItem | None:
     usage = usage_tokens_from_log(log)
     if not model or not usage:
         return None
-    return CostItem(model=model, usage=usage)
+    return CostItem(model=model, usage=usage, service_tier=log.service_tier)
 
 
 def _usage_metrics(logs_secondary: list[RequestLog]) -> UsageMetricsSummary:

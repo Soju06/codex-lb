@@ -40,6 +40,7 @@ class RequestLogsRepository:
             select(
                 bucket_col,
                 RequestLog.model,
+                RequestLog.service_tier,
                 func.count().label("request_count"),
                 func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)).label("error_count"),
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
@@ -48,7 +49,7 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
             )
             .where(RequestLog.requested_at >= since)
-            .group_by(bucket_col, RequestLog.model)
+            .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
             .order_by(bucket_col)
         )
         result = await self._session.execute(stmt)
@@ -56,6 +57,7 @@ class RequestLogsRepository:
             BucketModelAggregate(
                 bucket_epoch=int(row.bucket_epoch),
                 model=row.model,
+                service_tier=row.service_tier,
                 request_count=int(row.request_count),
                 error_count=int(row.error_count),
                 input_tokens=int(row.input_tokens),
@@ -81,6 +83,7 @@ class RequestLogsRepository:
         cached_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        service_tier: str | None = None,
         api_key_id: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
@@ -89,6 +92,7 @@ class RequestLogsRepository:
             api_key_id=api_key_id,
             request_id=resolved_request_id,
             model=model,
+            service_tier=service_tier,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,

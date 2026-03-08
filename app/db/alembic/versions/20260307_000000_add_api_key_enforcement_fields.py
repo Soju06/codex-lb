@@ -1,7 +1,7 @@
 """add api key enforcement fields
 
 Revision ID: 20260307_000000_add_api_key_enforcement_fields
-Revises: 20260228_030000_add_api_firewall_allowlist
+Revises: 20260306_000000_add_request_logs_service_tier
 Create Date: 2026-03-07
 """
 
@@ -13,7 +13,7 @@ from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
 revision = "20260307_000000_add_api_key_enforcement_fields"
-down_revision = "20260228_030000_add_api_firewall_allowlist"
+down_revision = "20260306_000000_add_request_logs_service_tier"
 branch_labels = None
 depends_on = None
 

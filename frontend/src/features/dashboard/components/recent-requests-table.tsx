@@ -118,7 +118,7 @@ export function RecentRequestsTable({
                   </TableCell>
                   <TableCell className="truncate align-top">
                     <span className="font-mono text-xs">
-                      {formatModelLabel(request.model, request.reasoningEffort)}
+                      {formatModelLabel(request.model, request.reasoningEffort, request.serviceTier)}
                     </span>
                   </TableCell>
                   <TableCell className="align-top">

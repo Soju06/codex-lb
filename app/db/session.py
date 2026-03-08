@@ -13,7 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config.settings import get_settings
-from app.db.sqlite_utils import check_sqlite_integrity, sqlite_db_path_from_url
+from app.db.sqlite_utils import SqliteIntegrityCheckMode, check_sqlite_integrity, sqlite_db_path_from_url
 
 if TYPE_CHECKING:
     from app.db.migrate import MigrationRunResult, MigrationState
@@ -105,6 +105,12 @@ def _ensure_sqlite_dir(url: str) -> None:
     Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 
+def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None:
+    if raw_mode == "off":
+        return None
+    return SqliteIntegrityCheckMode(raw_mode)
+
+
 async def _shielded(awaitable: Awaitable[_T]) -> _T:
     with anyio.CancelScope(shield=True):
         return await awaitable
@@ -173,24 +179,32 @@ async def init_db() -> None:
     _ensure_sqlite_dir(_settings.database_url)
     sqlite_path = sqlite_db_path_from_url(_settings.database_url)
     if sqlite_path is not None:
-        integrity = check_sqlite_integrity(sqlite_path)
-        if not integrity.ok:
-            details = integrity.details or "unknown error"
-            logger.error("SQLite integrity check failed path=%s details=%s", sqlite_path, details)
-            if "locked" in details.lower():
-                message = (
-                    f"SQLite integrity check failed for {sqlite_path} ({details}). "
-                    "Another instance may be running. Stop it and retry."
+        check_mode = _startup_sqlite_check_mode(_settings.database_sqlite_startup_check_mode)
+        if check_mode is not None:
+            integrity = check_sqlite_integrity(sqlite_path, mode=check_mode)
+            if not integrity.ok:
+                details = integrity.details or "unknown error"
+                pragma_name = "quick_check" if check_mode == SqliteIntegrityCheckMode.QUICK else "integrity_check"
+                logger.error(
+                    "SQLite %s failed path=%s details=%s",
+                    pragma_name,
+                    sqlite_path,
+                    details,
                 )
-            else:
-                message = (
-                    f"SQLite integrity check failed for {sqlite_path} ({details}). "
-                    "The database appears corrupted or the filesystem is unhealthy. "
-                    "Stop the app and run "
-                    f'`python -m app.db.recover --db "{sqlite_path}" --replace` '
-                    "or restore a backup from the same directory."
-                )
-            raise RuntimeError(message)
+                if "locked" in details.lower():
+                    message = (
+                        f"SQLite {pragma_name} failed for {sqlite_path} ({details}). "
+                        "Another instance may be running. Stop it and retry."
+                    )
+                else:
+                    message = (
+                        f"SQLite {pragma_name} failed for {sqlite_path} ({details}). "
+                        "The database appears corrupted or the filesystem is unhealthy. "
+                        "Stop the app and run "
+                        f'`python -m app.db.recover --db "{sqlite_path}" --replace` '
+                        "or restore a backup from the same directory."
+                    )
+                raise RuntimeError(message)
 
     if not _settings.database_migrate_on_startup:
         logger.info("Startup database migration is disabled")

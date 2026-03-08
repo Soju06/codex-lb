@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import text
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -103,3 +104,43 @@ async def test_latest_by_account_uses_recorded_at_with_deterministic_tie_breaker
 
         latest = await repo.latest_by_account(window="primary")
         assert latest["acc1"].used_percent == 30.0
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_primary_query_plan_uses_normalized_window_index(db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+        await accounts_repo.upsert(_make_account("acc2"))
+
+        await repo.add_entry("acc1", 10.0, window=None, recorded_at=now - timedelta(hours=2))
+        await repo.add_entry("acc1", 20.0, window="primary", recorded_at=now)
+        await repo.add_entry("acc2", 30.0, window=None, recorded_at=now - timedelta(hours=1))
+        await repo.add_entry("acc2", 40.0, window="secondary", recorded_at=now)
+
+        plan_rows = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT uh.id
+                    FROM usage_history AS uh
+                    JOIN (
+                        SELECT id AS usage_id,
+                               row_number() OVER (
+                                   PARTITION BY account_id
+                                   ORDER BY recorded_at DESC, id DESC
+                               ) AS row_number
+                        FROM usage_history
+                        WHERE coalesce("window", 'primary') = 'primary'
+                    ) AS ranked ON uh.id = ranked.usage_id
+                    WHERE ranked.row_number = 1
+                    """
+                )
+            )
+        ).fetchall()
+
+    details = " ".join(str(row[-1]) for row in plan_rows)
+    assert "idx_usage_window_account_latest" in details

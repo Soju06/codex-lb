@@ -9,10 +9,12 @@ For higher concurrency or infrastructure-managed deployments, PostgreSQL support
 - Keep SQLite as default to preserve zero-config startup.
 - Accept PostgreSQL through `CODEX_LB_DATABASE_URL` only; no new configuration key aliases.
 - Keep SQLite-specific recovery tooling SQLite-only; PostgreSQL operations should use PostgreSQL-native backup/recovery practices.
+- Default SQLite startup validation to `quick` so normal boots stay fast while operators can still opt into `full` or `off`.
 
 ## Operational Notes
 
 - SQLite default URL: `sqlite+aiosqlite:///~/.codex-lb/store.db`
+- SQLite startup check mode: `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=quick|full|off` (default `quick`)
 - PostgreSQL example URL: `postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb`
 - Pool controls (`database_pool_size`, `database_max_overflow`, `database_pool_timeout_seconds`) apply to non-memory SQLite and PostgreSQL engine creation.
 
@@ -22,4 +24,10 @@ Use PostgreSQL while keeping all other defaults:
 
 ```bash
 CODEX_LB_DATABASE_URL=postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb codex-lb
+```
+
+Use SQLite with explicit full startup validation:
+
+```bash
+CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=full codex-lb
 ```

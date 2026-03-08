@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import event
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -117,3 +118,81 @@ async def test_list_recent_offset_past_end_preserves_total(db_setup):
         logs, total = await repo.list_recent(limit=3, offset=10)
         assert logs == []
         assert total == 4
+
+
+@pytest.mark.asyncio
+async def test_list_recent_without_search_avoids_related_joins(db_setup):
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        now = utcnow()
+        async with SessionLocal() as session:
+            accounts_repo = AccountsRepository(session)
+            repo = RequestLogsRepository(session)
+            await accounts_repo.upsert(_make_account("acc1"))
+            await repo.add_log(
+                account_id="acc1",
+                request_id="req_joinless_1",
+                model="gpt-5.1",
+                input_tokens=10,
+                output_tokens=20,
+                latency_ms=100,
+                status="success",
+                error_code=None,
+                requested_at=now,
+            )
+
+            statements.clear()
+            logs, total = await repo.list_recent(limit=3, offset=0)
+
+        assert len(logs) == 1
+        assert total == 1
+        select_statements = [statement for statement in statements if "FROM request_logs" in statement]
+        assert select_statements
+        assert all("JOIN accounts" not in statement for statement in select_statements)
+        assert all("JOIN api_keys" not in statement for statement in select_statements)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+
+@pytest.mark.asyncio
+async def test_list_recent_with_search_keeps_related_joins(db_setup):
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        now = utcnow()
+        async with SessionLocal() as session:
+            accounts_repo = AccountsRepository(session)
+            repo = RequestLogsRepository(session)
+            await accounts_repo.upsert(_make_account("acc_search"))
+            await repo.add_log(
+                account_id="acc_search",
+                request_id="req_join_1",
+                model="gpt-5.1",
+                input_tokens=10,
+                output_tokens=20,
+                latency_ms=100,
+                status="success",
+                error_code=None,
+                requested_at=now,
+            )
+
+            statements.clear()
+            logs, total = await repo.list_recent(limit=3, offset=0, search="example.com")
+
+        assert len(logs) == 1
+        assert total == 1
+        select_statements = [statement for statement in statements if "FROM request_logs" in statement]
+        assert select_statements
+        assert any("JOIN accounts" in statement for statement in select_statements)
+        assert any("JOIN api_keys" in statement for statement in select_statements)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)

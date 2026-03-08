@@ -20,6 +20,28 @@ The service MUST accept a PostgreSQL SQLAlchemy async DSN (`postgresql+asyncpg:/
 - **WHEN** `CODEX_LB_DATABASE_URL` is set to `postgresql+asyncpg://...`
 - **THEN** service startup uses PostgreSQL for ORM operations and migration execution
 
+### Requirement: SQLite startup validation mode is configurable
+The service MUST support configurable startup validation for SQLite file databases via `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE`.
+
+#### Scenario: Default SQLite startup uses quick validation
+- **GIVEN** the configured database URL is a SQLite file
+- **AND** `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE` is unset
+- **WHEN** the service starts
+- **THEN** it runs `PRAGMA quick_check`
+- **AND** it does not run `PRAGMA integrity_check`
+
+#### Scenario: Full SQLite startup validation is explicitly enabled
+- **GIVEN** the configured database URL is a SQLite file
+- **AND** `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=full`
+- **WHEN** the service starts
+- **THEN** it runs `PRAGMA integrity_check`
+
+#### Scenario: SQLite startup validation can be skipped
+- **GIVEN** the configured database URL is a SQLite file
+- **AND** `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=off`
+- **WHEN** the service starts
+- **THEN** it skips startup SQLite validation
+
 ### Requirement: Test suite supports backend selection
 The test bootstrap MUST allow callers to override `CODEX_LB_DATABASE_URL` via environment and MUST default to SQLite when no override is provided.
 

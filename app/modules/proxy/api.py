@@ -651,34 +651,46 @@ def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | Non
 
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
+    terminal_result: OpenAIResponseResult | None = None
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
             continue
         event_type = payload.get("type")
         _collect_output_item_event(payload, output_items)
+        if terminal_result is not None:
+            continue
         if event_type == "error":
-            return _parse_event_error_envelope(payload)
+            terminal_result = _parse_event_error_envelope(payload)
+            continue
         if event_type == "response.failed":
             response = payload.get("response")
             if isinstance(response, dict):
                 error_value = response.get("error")
                 if isinstance(error_value, dict):
                     try:
-                        return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
+                        terminal_result = OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
+                        continue
                     except ValidationError:
-                        return _default_error_envelope()
+                        terminal_result = _default_error_envelope()
+                        continue
                 parsed = parse_response_payload(response)
                 if parsed is not None and parsed.error is not None:
-                    return _error_envelope_from_response(parsed.error)
-            return _default_error_envelope()
+                    terminal_result = _error_envelope_from_response(parsed.error)
+                    continue
+            terminal_result = _default_error_envelope()
+            continue
         if event_type in ("response.completed", "response.incomplete"):
             response = payload.get("response")
             if isinstance(response, dict):
                 parsed = parse_response_payload(_merge_collected_output_items(response, output_items))
                 if parsed is not None:
-                    return parsed
-            return _default_error_envelope()
+                    terminal_result = parsed
+                    continue
+            terminal_result = _default_error_envelope()
+
+    if terminal_result is not None:
+        return terminal_result
     return _default_error_envelope()
 
 

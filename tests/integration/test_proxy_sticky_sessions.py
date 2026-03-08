@@ -296,3 +296,167 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
     assert response.status_code == 200
     assert stream_seen == ["acc_c1", "acc_c2"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_threads(async_client, monkeypatch):
+    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    acc_a_id = await _import_account(async_client, "acc_sid_a", "sid_a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_sid_b", "sid_b@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    stream_seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        stream_seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_session"}}\n\n'
+
+    compact_seen: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        compact_seen.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    headers = {"session_id": "codex-thread-123"}
+    stream_payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_sid_a"]
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=95.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    compact_payload = {
+        "model": "gpt-5.1",
+        "instructions": "summarize",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+    }
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=compact_payload,
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert compact_seen == ["acc_sid_a"]
+
+    response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_sid_a", "acc_sid_a"]
+
+
+@pytest.mark.asyncio
+async def test_v1_session_id_does_not_pin_routing_without_sticky_threads(async_client, monkeypatch):
+    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    acc_a_id = await _import_account(async_client, "acc_v1_sid_a", "v1_sid_a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_v1_sid_b", "v1_sid_b@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    stream_seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        stream_seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_v1_session"}}\n\n'
+
+    compact_seen: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        compact_seen.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    headers = {"session_id": "v1-thread-123"}
+    stream_payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "stream": True,
+    }
+    response = await async_client.post("/v1/responses", json=stream_payload, headers=headers)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_v1_sid_a"]
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=95.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    compact_payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+    }
+    response = await async_client.post("/v1/responses/compact", json=compact_payload, headers=headers)
+    assert response.status_code == 200
+    assert compact_seen == ["acc_v1_sid_b"]

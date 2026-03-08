@@ -74,7 +74,7 @@ export const RequestLogSchema = z.object({
   apiKeyName: z.string().nullable(),
   requestId: z.string(),
   model: z.string(),
-  serviceTier: z.string().nullable(),
+  serviceTier: z.string().nullable().optional().default(null),
   status: z.string(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),

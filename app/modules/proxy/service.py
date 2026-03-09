@@ -225,7 +225,7 @@ class ProxyService:
                     usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
                 ),
                 reasoning_effort=reasoning_effort,
-                service_tier=request_service_tier if account_id_value else None,
+                service_tier=_service_tier_from_response(response) or _service_tier_from_compact_payload(payload),
             )
 
     async def transcribe(

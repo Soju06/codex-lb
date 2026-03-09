@@ -530,8 +530,6 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     assert timeout.sock_connect == 2.0
     assert timeout.sock_read is None
     assert result.model_extra == {"output": []}
-
-
 def test_logged_error_json_response_emits_proxy_error_log(caplog):
     scope = {
         "type": "http",

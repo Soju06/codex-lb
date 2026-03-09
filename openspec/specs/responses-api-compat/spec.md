@@ -66,6 +66,17 @@ When `stream` is `false` or omitted, the service MUST return a JSON response obj
 - **WHEN** the client sends a valid request with `stream=false`
 - **THEN** the service returns a single JSON response object containing output items and status
 
+### Requirement: Reconstruct non-streaming Responses output from streamed item events
+When serving non-streaming `/v1/responses`, the service MUST preserve output items emitted on upstream SSE item events even when the terminal `response.completed` or `response.incomplete` payload omits `response.output` or returns it as an empty list.
+
+#### Scenario: Reasoning item emitted before terminal response
+- **WHEN** upstream emits a reasoning or other output item on `response.output_item.done` and the terminal response omits `output`
+- **THEN** the final non-streaming JSON response includes that output item in `output`
+
+#### Scenario: Terminal response already includes output
+- **WHEN** the terminal response already includes a non-empty `output` array
+- **THEN** the service returns the terminal `output` array unchanged
+
 ### Requirement: Error envelope parity for invalid or unsupported requests
 For invalid inputs or unsupported features, the service MUST return an OpenAI-style error envelope (`{ "error": { ... } }`) with stable `type`, `code`, and `param` fields. For streaming requests, errors MUST be emitted as `response.failed` events containing the same error envelope.
 
@@ -94,6 +105,13 @@ The service MUST accept Responses requests that include tools with type `web_sea
 #### Scenario: unsupported built-in tool rejected
 - **WHEN** the client sends `tools=[{"type":"code_interpreter"}]`
 - **THEN** the service returns a 4xx response with an OpenAI invalid_request_error indicating the unsupported tool type
+
+### Requirement: Preserve supported service_tier values
+When a Responses request includes `service_tier`, the service MUST preserve that field in the normalized upstream payload instead of dropping or rewriting it locally.
+
+#### Scenario: Responses request includes fast-mode tier
+- **WHEN** a client sends a valid Responses request with `service_tier: "priority"`
+- **THEN** the service accepts the request and forwards `service_tier: "priority"` upstream unchanged
 
 ### Requirement: Inline input_image URLs when possible
 When a request includes `input_image` parts with HTTP(S) URLs, the service MUST attempt to fetch the image and replace the URL with a data URL if the image is within size limits. If the image cannot be fetched or exceeds size limits, the service MUST preserve the original URL and allow upstream to handle the error.

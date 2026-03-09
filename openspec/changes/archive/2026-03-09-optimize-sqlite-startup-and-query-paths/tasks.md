@@ -1,0 +1,5 @@
+- [x] 1.1 Add OpenSpec requirements and context for SQLite startup validation mode and SQLite query-path tuning
+- [x] 1.2 Add runtime support for configurable SQLite startup validation with default `quick`
+- [x] 1.3 Add the new usage-history and request-log indexes through Alembic and ORM metadata
+- [x] 1.4 Update usage-history and request-log repositories to use the new query shape without changing API behavior
+- [x] 1.5 Add regression tests for startup validation mode, migration/index creation, and query behavior

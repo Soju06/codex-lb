@@ -33,6 +33,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.oauth.schemas import (
+    ManualCallbackResponse,
     OauthCompleteRequest,
     OauthCompleteResponse,
     OauthStartRequest,
@@ -202,16 +203,66 @@ class OauthService:
             host=settings.oauth_callback_host,
             port=settings.oauth_callback_port,
         )
-        await callback_server.start()
-
-        async with self._store.lock:
-            self._store.state.callback_server = callback_server
+        try:
+            await callback_server.start()
+            async with self._store.lock:
+                self._store.state.callback_server = callback_server
+        except OSError:
+            pass
 
         return OauthStartResponse(
             method="browser",
             authorization_url=authorization_url,
             callback_url=settings.oauth_redirect_uri,
         )
+
+    async def manual_callback(self, callback_url: str) -> ManualCallbackResponse:
+        """Process an OAuth callback URL pasted manually by the user.
+
+        This is useful when the server is accessed remotely and the
+        OAuth callback (localhost:1455) is not reachable from the
+        user's browser.
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(callback_url)
+        params = parse_qs(parsed.query)
+
+        error = params.get("error", [None])[0]
+        code = params.get("code", [None])[0]
+        state = params.get("state", [None])[0]
+
+        if error:
+            message = f"OAuth error: {error}"
+            await self._set_error(message)
+            return ManualCallbackResponse(status="error", error_message=message)
+
+        async with self._store.lock:
+            expected_state = self._store.state.state_token
+            verifier = self._store.state.code_verifier
+
+        if not code or not state or state != expected_state or not verifier:
+            message = "Invalid OAuth callback: state mismatch or missing code."
+            await self._set_error(message)
+            return ManualCallbackResponse(status="error", error_message=message)
+
+        try:
+            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
+            await self._persist_tokens(tokens)
+            await self._set_success()
+            asyncio.create_task(self._stop_callback_server())
+            return ManualCallbackResponse(status="success")
+        except OAuthError as exc:
+            await self._set_error(exc.message)
+            return ManualCallbackResponse(status="error", error_message=exc.message)
+        except AccountIdentityConflictError as exc:
+            message = str(exc)
+            await self._set_error(message)
+            return ManualCallbackResponse(status="error", error_message=message)
+        except Exception as exc:
+            message = f"Unexpected error: {exc}"
+            await self._set_error(message)
+            return ManualCallbackResponse(status="error", error_message=message)
 
     async def _start_device_flow(self) -> OauthStartResponse:
         await self._store.reset()

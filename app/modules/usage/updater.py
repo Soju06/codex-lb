@@ -251,7 +251,10 @@ def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: 
     return now_epoch + max(0, int(reset_after_seconds))
 
 
-_DEACTIVATING_USAGE_STATUS_CODES = {402, 403, 404}
+# The usage endpoint can return 403 for accounts that are still otherwise usable
+# for proxy traffic, so treat it as a refresh failure instead of a permanent
+# account-level deactivation signal.
+_DEACTIVATING_USAGE_STATUS_CODES = {402, 404}
 
 
 def _should_deactivate_for_usage_error(status_code: int) -> bool:

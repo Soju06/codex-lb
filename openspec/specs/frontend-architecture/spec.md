@@ -85,6 +85,14 @@ The Dashboard page SHALL display: summary metric cards (requests 7d, tokens, cos
 - **WHEN** a user changes the page size or navigates to the next page
 - **THEN** the request logs query refetches with updated offset/limit parameters and the response includes `total` count and `has_more` flag for pagination state
 
+### Requirement: Request logs display fast-mode service tier
+When a request log entry includes `service_tier`, the dashboard request-log API response MUST expose it and the recent-requests UI MUST render it alongside the model label.
+
+#### Scenario: Fast-mode request log entry is visible
+- **WHEN** a request log entry is recorded with `service_tier: "priority"`
+- **THEN** the `GET /api/request-logs` response includes `serviceTier: "priority"`
+- **AND** the dashboard recent-requests table renders the model label with the priority tier visible
+
 ### Requirement: Accounts page
 
 The Accounts page SHALL display a two-column layout: left panel with searchable account list, import button, and add account button; right panel with selected account details including usage, token info, and actions (pause/resume/delete/re-authenticate).
@@ -263,4 +271,3 @@ The React dashboard MUST provide a Firewall page that displays current mode (`al
 #### Scenario: User removes IP entry
 - **WHEN** user confirms deletion for an existing firewall entry
 - **THEN** frontend calls `DELETE /api/firewall/ips/{ip}` and refreshes rendered list
-

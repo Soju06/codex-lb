@@ -125,6 +125,9 @@ export function AccountsPage() {
             await oauth.complete();
             await accountsQuery.refetch();
           }}
+          onManualCallback={async (callbackUrl) => {
+            await oauth.manualCallback(callbackUrl);
+          }}
           onReset={oauth.reset}
         />
       </Suspense>

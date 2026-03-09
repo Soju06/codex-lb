@@ -37,6 +37,13 @@ The service MUST map chat messages into the Responses request format by merging 
 - **WHEN** the client sets `tool_choice` to `none`, `auto`, or `required`
 - **THEN** the service forwards the value consistently in the mapped Responses request
 
+### Requirement: Preserve service_tier in Chat Completions mapping
+When a Chat Completions request includes `service_tier`, the service MUST preserve that field when mapping the request to the internal Responses payload.
+
+#### Scenario: Chat request includes fast-mode tier
+- **WHEN** a client sends a valid Chat Completions request with `service_tier: "priority"`
+- **THEN** the mapped Responses payload forwarded upstream includes `service_tier: "priority"`
+
 ### Requirement: Allow web_search tools in Chat Completions
 The service MUST accept Chat Completions requests that include tools with type `web_search` or `web_search_preview`. The service MUST normalize `web_search_preview` to `web_search` when mapping to the Responses tool schema. The service MUST continue to reject other built-in tool types (file_search, code_interpreter, computer_use, computer_use_preview, image_generation) with an OpenAI invalid_request_error.
 

@@ -5,6 +5,8 @@ import {
   AccountImportResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
+  ManualOauthCallbackRequestSchema,
+  ManualOauthCallbackResponseSchema,
   OauthCompleteRequestSchema,
   OauthCompleteResponseSchema,
   OauthStartRequestSchema,
@@ -70,6 +72,12 @@ export function getOauthStatus() {
 export function completeOauth(payload?: unknown) {
   const validated = OauthCompleteRequestSchema.parse(payload ?? {});
   return post(`${OAUTH_BASE_PATH}/complete`, OauthCompleteResponseSchema, {
+    body: validated,
+  });
+}
+export function submitManualOauthCallback(payload: unknown) {
+  const validated = ManualOauthCallbackRequestSchema.parse(payload);
+  return post(`${OAUTH_BASE_PATH}/manual-callback`, ManualOauthCallbackResponseSchema, {
     body: validated,
   });
 }

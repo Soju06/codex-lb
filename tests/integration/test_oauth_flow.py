@@ -329,3 +329,88 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_returns_success_and_creates_account(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    email = "manual@example.com"
+    raw_account_id = "acc_manual"
+
+    async def fake_exchange_authorization_code(**_):
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="manual-access-token",
+            refresh_token="manual-refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert start.status_code == 200
+    assert start.json()["method"] == "browser"
+
+    async with oauth_module._OAUTH_STORE.lock:
+        state_token = oauth_module._OAUTH_STORE.state.state_token
+
+    response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "success", "errorMessage": None}
+
+    status = await async_client.get("/api/oauth/status")
+    assert status.status_code == 200
+    assert status.json()["status"] == "success"
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    data = accounts.json()["accounts"]
+    assert any(account["accountId"] == expected_account_id for account in data)
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_returns_error_message_for_invalid_state(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert start.status_code == 200
+    assert start.json()["method"] == "browser"
+
+    response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": "http://localhost:1455/auth/callback?code=manual-code&state=wrong",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "error",
+        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    }
+
+    status = await async_client.get("/api/oauth/status")
+    assert status.status_code == 200
+    assert status.json() == {
+        "status": "error",
+        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    }

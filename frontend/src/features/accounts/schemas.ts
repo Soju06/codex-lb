@@ -98,6 +98,15 @@ export const OauthCompleteResponseSchema = z.object({
   status: z.string(),
 });
 
+export const ManualOauthCallbackRequestSchema = z.object({
+  callbackUrl: z.string(),
+});
+
+export const ManualOauthCallbackResponseSchema = z.object({
+  status: z.string(),
+  errorMessage: z.string().nullable(),
+});
+
 export const RuntimeConnectAddressResponseSchema = z.object({
   connectAddress: z.string(),
 });
@@ -126,6 +135,7 @@ export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
+export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;
 export type RuntimeConnectAddressResponse = z.infer<
   typeof RuntimeConnectAddressResponseSchema
 >;

@@ -151,6 +151,37 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "mws-weekend-projects",
+      "name": "mws-weekend-projects",
+      "avatar_url": "https://avatars.githubusercontent.com/u/255546191?v=4",
+      "profile": "https://github.com/mws-weekend-projects",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "quangdo126",
+      "name": "Quang Do",
+      "avatar_url": "https://avatars.githubusercontent.com/u/88663250?v=4",
+      "profile": "http://hextra.us",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "aaiyer",
+      "name": "Anand Aiyer",
+      "avatar_url": "https://avatars.githubusercontent.com/u/426027?v=4",
+      "profile": "https://github.com/aaiyer",
+      "contributions": [
+        "bug",
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

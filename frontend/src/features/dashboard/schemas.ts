@@ -70,7 +70,7 @@ export const DashboardOverviewSchema = z.object({
 
 export const RequestLogSchema = z.object({
   requestedAt: z.string().datetime({ offset: true }),
-  accountId: z.string(),
+  accountId: z.string().nullable(),
   apiKeyName: z.string().nullable(),
   requestId: z.string(),
   model: z.string(),

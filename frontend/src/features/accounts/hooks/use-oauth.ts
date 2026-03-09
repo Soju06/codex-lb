@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { completeOauth, getOauthStatus, startOauth } from "@/features/accounts/api";
+import {
+  completeOauth,
+  getOauthStatus,
+  startOauth,
+  submitManualOauthCallback,
+} from "@/features/accounts/api";
 import { OAuthStateSchema, type OAuthState } from "@/features/accounts/schemas";
 
 const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
@@ -137,6 +142,29 @@ export function useOauth() {
     }
   }, [state.deviceAuthId, state.userCode]);
 
+  const manualCallback = useCallback(async (callbackUrl: string) => {
+    try {
+      const response = await submitManualOauthCallback({ callbackUrl });
+      setState((prev) =>
+        OAuthStateSchema.parse({
+          ...prev,
+          status: response.status === "success" ? "success" : "error",
+          errorMessage: response.errorMessage,
+        }),
+      );
+      return response;
+    } catch (error) {
+      setState((prev) =>
+        OAuthStateSchema.parse({
+          ...prev,
+          status: "error",
+          errorMessage: error instanceof Error ? error.message : "Failed to process OAuth callback",
+        }),
+      );
+      throw error;
+    }
+  }, []);
+
   useEffect(() => {
     if (state.status !== "pending" || !state.intervalSeconds || state.intervalSeconds <= 0) {
       clearPollTimer();
@@ -178,6 +206,7 @@ export function useOauth() {
     start,
     poll,
     complete,
+    manualCallback,
     reset,
   };
 }

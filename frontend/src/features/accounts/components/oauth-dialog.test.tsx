@@ -30,6 +30,19 @@ const devicePendingState = {
   errorMessage: null,
 };
 
+const browserPendingState = {
+  status: "pending" as const,
+  method: "browser" as const,
+  authorizationUrl: "https://auth.example.com/authorize",
+  callbackUrl: "http://127.0.0.1:1455/auth/callback",
+  verificationUrl: null,
+  userCode: null,
+  deviceAuthId: null,
+  intervalSeconds: null,
+  expiresInSeconds: null,
+  errorMessage: null,
+};
+
 const successState = {
   ...idleState,
   status: "success" as const,
@@ -53,6 +66,7 @@ describe("OauthDialog", () => {
         onOpenChange={vi.fn()}
         onStart={onStart}
         onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
         onReset={vi.fn()}
       />,
     );
@@ -74,6 +88,7 @@ describe("OauthDialog", () => {
         onOpenChange={vi.fn()}
         onStart={vi.fn().mockResolvedValue(undefined)}
         onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
         onReset={vi.fn()}
       />,
     );
@@ -92,6 +107,7 @@ describe("OauthDialog", () => {
         onOpenChange={vi.fn()}
         onStart={vi.fn().mockResolvedValue(undefined)}
         onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
         onReset={vi.fn()}
       />,
     );
@@ -108,6 +124,7 @@ describe("OauthDialog", () => {
         onOpenChange={vi.fn()}
         onStart={vi.fn().mockResolvedValue(undefined)}
         onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
         onReset={vi.fn()}
       />,
     );
@@ -117,5 +134,32 @@ describe("OauthDialog", () => {
     // Dialog footer has both "Try again" and "Close" buttons (plus the dialog's X close button)
     const closeButtons = screen.getAllByRole("button", { name: "Close" });
     expect(closeButtons.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("submits the pasted callback URL through the manual callback handler", async () => {
+    const user = userEvent.setup();
+    const onManualCallback = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={onManualCallback}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.type(
+      screen.getByPlaceholderText("http://localhost:1455/auth/callback?code=...&state=..."),
+      "http://localhost:1455/auth/callback?code=abc&state=expected",
+    );
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+
+    expect(onManualCallback).toHaveBeenCalledWith(
+      "http://localhost:1455/auth/callback?code=abc&state=expected",
+    );
   });
 });

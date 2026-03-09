@@ -127,6 +127,7 @@ class ProxyService:
         account = await self._ensure_fresh(account)
         account_id = _header_account_id(account.chatgpt_account_id)
         request_service_tier = _service_tier_from_compact_payload(payload)
+        actual_service_tier: str | None = None
 
         async def _call_compact(target: Account) -> OpenAIResponsePayload:
             access_token = self._encryptor.decrypt(target.access_token_encrypted)
@@ -134,6 +135,7 @@ class ProxyService:
 
         try:
             response = await _call_compact(account)
+            actual_service_tier = _service_tier_from_response(response)
             await self._settle_compact_api_key_usage(
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
@@ -165,6 +167,7 @@ class ProxyService:
                 raise exc
             try:
                 response = await _call_compact(account)
+                actual_service_tier = _service_tier_from_response(response)
                 await self._settle_compact_api_key_usage(
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
@@ -181,6 +184,12 @@ class ProxyService:
                 )
                 await self._handle_proxy_error(account, exc)
                 raise
+        finally:
+            _maybe_log_proxy_service_tier_trace(
+                "compact",
+                requested_service_tier=request_service_tier,
+                actual_service_tier=actual_service_tier,
+            )
 
     async def transcribe(
         self,
@@ -582,7 +591,9 @@ class ProxyService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
-        service_tier = payload.service_tier
+        requested_service_tier = payload.service_tier
+        service_tier = requested_service_tier
+        actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         start = time.monotonic()
         status = "success"
@@ -607,9 +618,10 @@ class ProxyService:
             first_payload = parse_sse_data_json(first)
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
-            actual_service_tier = _service_tier_from_event_payload(first_payload)
-            if actual_service_tier is not None:
-                service_tier = actual_service_tier
+            event_service_tier = _service_tier_from_event_payload(first_payload)
+            if event_service_tier is not None:
+                actual_service_tier = event_service_tier
+                service_tier = event_service_tier
             if event and event.type in ("response.failed", "error"):
                 if event.type == "response.failed":
                     response = event.response
@@ -646,9 +658,10 @@ class ProxyService:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
-                actual_service_tier = _service_tier_from_event_payload(event_payload)
-                if actual_service_tier is not None:
-                    service_tier = actual_service_tier
+                event_service_tier = _service_tier_from_event_payload(event_payload)
+                if event_service_tier is not None:
+                    actual_service_tier = event_service_tier
+                    service_tier = event_service_tier
                 if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _should_suppress_text_done_event(
@@ -727,6 +740,11 @@ class ProxyService:
                         request_id,
                         exc_info=True,
                     )
+                _maybe_log_proxy_service_tier_trace(
+                    "stream",
+                    requested_service_tier=requested_service_tier,
+                    actual_service_tier=actual_service_tier,
+                )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
         latest_usage = await repos.usage.latest_by_account(window="primary")
@@ -912,6 +930,25 @@ def _maybe_log_proxy_request_payload(
         kind,
         payload_json,
         header_keys,
+    )
+
+
+def _maybe_log_proxy_service_tier_trace(
+    kind: str,
+    *,
+    requested_service_tier: str | None,
+    actual_service_tier: str | None,
+) -> None:
+    settings = get_settings()
+    if not settings.log_proxy_service_tier_trace:
+        return
+
+    logger.warning(
+        "proxy_service_tier_trace request_id=%s kind=%s requested_service_tier=%s actual_service_tier=%s",
+        get_request_id(),
+        kind,
+        requested_service_tier,
+        actual_service_tier,
     )
 
 

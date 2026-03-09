@@ -247,6 +247,67 @@ def test_log_proxy_request_payload(monkeypatch, caplog):
     assert '"model":"gpt-5.1"' in caplog.text
 
 
+def test_log_proxy_service_tier_trace(monkeypatch, caplog):
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "secret instructions",
+            "input": [{"role": "user", "content": "secret prompt"}],
+            "service_tier": "priority",
+        }
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    token = set_request_id("req_tier_trace_1")
+    try:
+        caplog.set_level(logging.WARNING)
+        proxy_service._maybe_log_proxy_service_tier_trace(
+            "stream",
+            requested_service_tier=payload.service_tier,
+            actual_service_tier="default",
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "proxy_service_tier_trace" in caplog.text
+    assert "request_id=req_tier_trace_1" in caplog.text
+    assert "kind=stream" in caplog.text
+    assert "requested_service_tier=priority" in caplog.text
+    assert "actual_service_tier=default" in caplog.text
+    assert "secret instructions" not in caplog.text
+    assert "secret prompt" not in caplog.text
+
+
+def test_log_proxy_service_tier_trace_disabled(monkeypatch, caplog):
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    token = set_request_id("req_tier_trace_2")
+    try:
+        caplog.set_level(logging.WARNING)
+        proxy_service._maybe_log_proxy_service_tier_trace(
+            "compact",
+            requested_service_tier="priority",
+            actual_service_tier=None,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "proxy_service_tier_trace" not in caplog.text
+
+
 def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):
     monkeypatch.setenv("CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS", "a.example, b.example ,,C.Example")
     from app.core.config.settings import Settings

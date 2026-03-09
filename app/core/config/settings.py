@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False
     log_proxy_request_payload: bool = False
+    log_proxy_service_tier_trace: bool = False
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)

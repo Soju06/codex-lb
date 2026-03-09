@@ -498,6 +498,7 @@ class ProxyService:
         suppress_text_done_events: bool,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
+        start = time.monotonic()
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
@@ -521,12 +522,25 @@ class ProxyService:
                 )
                 account = selection.account
                 if not account:
+                    no_accounts_msg = selection.error_message or "No active accounts available"
                     event = response_failed_event(
                         "no_accounts",
-                        selection.error_message or "No active accounts available",
+                        no_accounts_msg,
                         response_id=request_id,
                     )
                     yield format_sse_event(event)
+                    await self._write_request_log(
+                        account_id=None,
+                        api_key=api_key,
+                        request_id=request_id,
+                        model=payload.model,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                        status="error",
+                        error_code="no_accounts",
+                        error_message=no_accounts_msg,
+                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                        service_tier=payload.service_tier,
+                    )
                     return
 
                 account_id_value = account.id

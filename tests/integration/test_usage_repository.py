@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -28,6 +30,11 @@ def _make_account(account_id: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+def _dialect_name(session: AsyncSession) -> str:
+    bind = session.get_bind()
+    return bind.dialect.name if bind is not None else "sqlite"
 
 
 @pytest.mark.asyncio
@@ -110,6 +117,9 @@ async def test_latest_by_account_uses_recorded_at_with_deterministic_tie_breaker
 async def test_latest_by_account_primary_query_plan_uses_normalized_window_index(db_setup):
     now = utcnow()
     async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite-only query plan test")
+
         accounts_repo = AccountsRepository(session)
         repo = UsageRepository(session)
         await accounts_repo.upsert(_make_account("acc1"))
@@ -144,3 +154,46 @@ async def test_latest_by_account_primary_query_plan_uses_normalized_window_index
 
     details = " ".join(str(row[-1]) for row in plan_rows)
     assert "idx_usage_window_account_latest" in details
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_primary_query_plan_uses_normalized_window_index_postgresql(db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only query plan test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+        await accounts_repo.upsert(_make_account("acc2"))
+
+        await repo.add_entry("acc1", 10.0, window=None, recorded_at=now - timedelta(hours=2))
+        await repo.add_entry("acc1", 20.0, window="primary", recorded_at=now)
+        await repo.add_entry("acc2", 30.0, window=None, recorded_at=now - timedelta(hours=1))
+        await repo.add_entry("acc2", 40.0, window="secondary", recorded_at=now)
+
+        await session.execute(text("SET enable_seqscan = off"))
+        plan = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN (FORMAT JSON)
+                    SELECT uh.id
+                    FROM usage_history AS uh
+                    JOIN (
+                        SELECT id AS usage_id,
+                               row_number() OVER (
+                                   PARTITION BY account_id
+                                   ORDER BY recorded_at DESC, id DESC
+                               ) AS row_number
+                        FROM usage_history
+                        WHERE coalesce("window", 'primary') = 'primary'
+                    ) AS ranked ON uh.id = ranked.usage_id
+                    WHERE ranked.row_number = 1
+                    """
+                )
+            )
+        ).scalar_one()
+
+    assert "idx_usage_window_account_latest" in json.dumps(plan)

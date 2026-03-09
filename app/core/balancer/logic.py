@@ -51,6 +51,7 @@ def select_account(
 ) -> SelectionResult:
     current = now or time.time()
     available: list[AccountState] = []
+    in_error_backoff: list[AccountState] = []
     all_states = list(states)
 
     for state in all_states:
@@ -81,31 +82,44 @@ def select_account(
         if state.error_count >= 3:
             backoff = min(300, 30 * (2 ** (state.error_count - 3)))
             if state.last_error_at and current - state.last_error_at < backoff:
+                in_error_backoff.append(state)
                 continue
         available.append(state)
 
     if not available:
-        deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
-        paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
-        rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
-        quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
+        # If accounts are only blocked by error backoff (not paused,
+        # deactivated, rate-limited, or quota-exceeded), select the one
+        # closest to backoff expiry.  This prevents #140: all accounts
+        # locked out during a widespread upstream outage.
+        if in_error_backoff:
 
-        if paused and deactivated and not rate_limited and not quota_exceeded:
-            return SelectionResult(None, "All accounts are paused or require re-authentication")
-        if paused and not rate_limited and not quota_exceeded:
-            return SelectionResult(None, "All accounts are paused")
-        if deactivated and not rate_limited and not quota_exceeded:
-            return SelectionResult(None, "All accounts require re-authentication")
-        if quota_exceeded:
-            reset_candidates = [s.reset_at for s in quota_exceeded if s.reset_at]
-            if reset_candidates:
-                wait_seconds = max(0, min(reset_candidates) - int(current))
+            def _backoff_expires_at(s: AccountState) -> float:
+                backoff = min(300, 30 * (2 ** (s.error_count - 3)))
+                return (s.last_error_at or 0.0) + backoff
+
+            available.append(min(in_error_backoff, key=_backoff_expires_at))
+        else:
+            deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
+            paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
+            rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
+            quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
+
+            if paused and deactivated and not rate_limited and not quota_exceeded:
+                return SelectionResult(None, "All accounts are paused or require re-authentication")
+            if paused and not rate_limited and not quota_exceeded:
+                return SelectionResult(None, "All accounts are paused")
+            if deactivated and not rate_limited and not quota_exceeded:
+                return SelectionResult(None, "All accounts require re-authentication")
+            if quota_exceeded:
+                reset_candidates = [s.reset_at for s in quota_exceeded if s.reset_at]
+                if reset_candidates:
+                    wait_seconds = max(0, min(reset_candidates) - int(current))
+                    return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
+            cooldowns = [s.cooldown_until for s in all_states if s.cooldown_until and s.cooldown_until > current]
+            if cooldowns:
+                wait_seconds = max(0.0, min(cooldowns) - current)
                 return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
-        cooldowns = [s.cooldown_until for s in all_states if s.cooldown_until and s.cooldown_until > current]
-        if cooldowns:
-            wait_seconds = max(0.0, min(cooldowns) - current)
-            return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
-        return SelectionResult(None, "No available accounts")
+            return SelectionResult(None, "No available accounts")
 
     def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
         primary_used = state.used_percent if state.used_percent is not None else 0.0

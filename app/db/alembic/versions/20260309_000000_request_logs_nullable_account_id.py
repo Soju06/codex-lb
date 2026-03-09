@@ -7,6 +7,7 @@ Create Date: 2026-03-09
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -22,5 +23,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(sa.text("DELETE FROM request_logs WHERE account_id IS NULL"))
     with op.batch_alter_table("request_logs") as batch_op:
         batch_op.alter_column("account_id", nullable=False)

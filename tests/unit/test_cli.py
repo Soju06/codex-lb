@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 import pytest
 
@@ -10,7 +11,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_main_passes_timestamped_log_config(monkeypatch):
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     def fake_run(*args, **kwargs):
         captured["args"] = args

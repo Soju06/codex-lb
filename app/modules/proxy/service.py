@@ -801,14 +801,11 @@ class ProxyService:
             await self._load_balancer.mark_permanent_failure(account, code)
             return
         # Transient upstream errors (5xx) are not the account's fault;
-        # skip record_error to prevent backoff from locking out all
-        # accounts.  Fixes #140.
+        # use a capped error count so the account gets a short backoff
+        # (30s) but never escalates to the long backoffs (300s) that
+        # lock out all accounts.  Fixes #140.
         if upstream_status is not None and upstream_status >= 500:
-            logger.debug(
-                "Skipping record_error for transient upstream %d account_id=%s",
-                upstream_status,
-                account.id,
-            )
+            await self._load_balancer.record_transient_error(account)
             return
         await self._load_balancer.record_error(account)
 

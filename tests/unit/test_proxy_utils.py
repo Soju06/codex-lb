@@ -379,9 +379,7 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _SseSession(
-        _SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'])
-    )
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
 
     events = [
         event

@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_connect_timeout_seconds: float = 30.0
-    upstream_compact_timeout_seconds: float = 300.0
+    upstream_compact_timeout_seconds: float | None = None
     stream_idle_timeout_seconds: float = 300.0
     max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
@@ -149,6 +149,15 @@ class Settings(BaseSettings):
             except ValueError as exc:
                 raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
         return cidrs
+
+    @field_validator("upstream_compact_timeout_seconds")
+    @classmethod
+    def _validate_upstream_compact_timeout_seconds(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
+        return value
 
 
 @lru_cache(maxsize=1)

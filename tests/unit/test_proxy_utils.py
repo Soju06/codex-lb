@@ -408,7 +408,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
-        upstream_compact_timeout_seconds = 60.0
+        upstream_compact_timeout_seconds = None
         image_inline_fetch_enabled = True
         log_upstream_request_payload = False
 
@@ -496,6 +496,40 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
     assert exc_info.value.payload["error"]["message"] == "Timeout on reading data from socket"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        upstream_compact_timeout_seconds = None
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _CompactSession(_JsonCompactResponse({"output": []}))
+
+    result = await proxy_module.compact_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total is None
+    assert timeout.sock_connect == 2.0
+    assert timeout.sock_read is None
+    assert result.model_extra == {"output": []}
 
 
 def test_logged_error_json_response_emits_proxy_error_log(caplog):

@@ -201,6 +201,30 @@ async def test_usage_updater_deactivates_on_account_invalid_4xx(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_usage_updater_does_not_deactivate_on_403(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage_403(**_: Any) -> UsagePayload:
+        raise UsageFetchError(403, "Forbidden")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_403)
+
+    usage_repo = StubUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    acc = _make_account("acc_403", "workspace_403", email="forbidden@example.com")
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert len(accounts_repo.status_updates) == 0
+
+
+@pytest.mark.asyncio
 async def test_usage_updater_does_not_deactivate_on_transient_4xx(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError

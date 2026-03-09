@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.2.0](https://github.com/Soju06/codex-lb/compare/v1.1.1...v1.2.0) (2026-03-08)
+
+
+### Features
+
+* add manual OAuth callback URL paste for remote server deployments ([#136](https://github.com/Soju06/codex-lb/issues/136)) ([7651336](https://github.com/Soju06/codex-lb/commit/7651336a4ab867e06784f6b307666e5488dab259))
+* enforce model/effort per API key and add real usage+cost visibility in settings; fixes; layout ([#135](https://github.com/Soju06/codex-lb/issues/135)) ([f014136](https://github.com/Soju06/codex-lb/commit/f014136fc9cf3c63cf6a1567c7f7f0967fb9af7a))
+* **proxy:** support service_tier forwarding ([#137](https://github.com/Soju06/codex-lb/issues/137)) ([8bde95a](https://github.com/Soju06/codex-lb/commit/8bde95a33445149a4310a71f10d494d1c62bf7fc))
+
+
+### Bug Fixes
+
+* **app-header:** apply desktop nav pill classes to NavLink ([#133](https://github.com/Soju06/codex-lb/issues/133)) ([c6b801e](https://github.com/Soju06/codex-lb/commit/c6b801e3e5c8ce90326f6c145c8914d1f036fe0e))
+* **proxy:** finalize v1 responses non-stream reservations ([#146](https://github.com/Soju06/codex-lb/issues/146)) ([a8ebe6c](https://github.com/Soju06/codex-lb/commit/a8ebe6cd6612417d90750b9c72d0046875bc1f1d))
+* **proxy:** preserve v1 response reasoning output ([#138](https://github.com/Soju06/codex-lb/issues/138)) ([0327279](https://github.com/Soju06/codex-lb/commit/032727968628610617b72925d7c76f68c9c8ef67))
+* **usage:** avoid deactivating accounts on usage 403 ([#147](https://github.com/Soju06/codex-lb/issues/147)) ([fec1256](https://github.com/Soju06/codex-lb/commit/fec1256010ffb0b7318e9eef933345b0fcd6023a))
+
+
+### Documentation
+
+* add mws-weekend-projects as a contributor for code, and test ([#141](https://github.com/Soju06/codex-lb/issues/141)) ([7cbb181](https://github.com/Soju06/codex-lb/commit/7cbb181da441ec38251b9d370fe5c1d6050cd921))
+* add quangdo126 as a contributor for code, and test ([#142](https://github.com/Soju06/codex-lb/issues/142)) ([b44f63d](https://github.com/Soju06/codex-lb/commit/b44f63d16b984ad7c420607aa65711f16c63bb21))
+* add xCatalitY as a contributor for code, and test ([#139](https://github.com/Soju06/codex-lb/issues/139)) ([c68231b](https://github.com/Soju06/codex-lb/commit/c68231bdfbd5ed5ebef7ed394981318505f8969b))
+
 ## [1.1.1](https://github.com/Soju06/codex-lb/compare/v1.1.0...v1.1.1) (2026-03-03)
 
 

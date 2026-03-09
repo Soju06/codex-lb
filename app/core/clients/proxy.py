@@ -287,7 +287,10 @@ def _maybe_log_upstream_request_complete(
 
     logger.log(
         level,
-        "upstream_request_complete request_id=%s kind=%s method=POST target=%s account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s",
+        (
+            "upstream_request_complete request_id=%s kind=%s method=POST target=%s "
+            "account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s"
+        ),
         get_request_id(),
         kind,
         _summarize_upstream_target(url),

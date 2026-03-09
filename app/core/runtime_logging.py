@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import Request
@@ -12,12 +13,16 @@ from uvicorn.logging import AccessFormatter, DefaultFormatter
 from app.core.utils.request_id import get_request_id
 
 
+def _utc_converter(seconds: float | None) -> time.struct_time:
+    return time.gmtime(seconds)
+
+
 class UtcDefaultFormatter(DefaultFormatter):
-    converter = time.gmtime
+    converter: Callable[[float | None], time.struct_time] = _utc_converter
 
 
 class UtcAccessFormatter(AccessFormatter):
-    converter = time.gmtime
+    converter: Callable[[float | None], time.struct_time] = _utc_converter
 
 
 def build_log_config() -> dict[str, Any]:

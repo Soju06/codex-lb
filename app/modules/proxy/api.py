@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import AsyncIterator, Mapping
+from typing import cast
 
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -588,14 +589,18 @@ def _logged_error_json_response(
 def _error_details_from_content(content: object) -> tuple[str | None, str | None]:
     if isinstance(content, OpenAIErrorEnvelopeModel):
         error = content.error
+        if error is None:
+            return None, None
         return error.code, error.message
     if not isinstance(content, dict):
         return None, None
-    error = content.get("error")
+    content_dict = cast(dict[str, object], content)
+    error = content_dict.get("error")
     if not isinstance(error, dict):
         return None, None
-    code = error.get("code")
-    message = error.get("message")
+    error_dict = cast(dict[str, object], error)
+    code = error_dict.get("code")
+    message = error_dict.get("message")
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
 
 

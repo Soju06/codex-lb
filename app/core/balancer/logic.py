@@ -48,6 +48,7 @@ def select_account(
     *,
     prefer_earlier_reset: bool = False,
     routing_strategy: RoutingStrategy = "usage_weighted",
+    allow_backoff_fallback: bool = True,
 ) -> SelectionResult:
     current = now or time.time()
     available: list[AccountState] = []
@@ -91,7 +92,7 @@ def select_account(
         # deactivated, rate-limited, or quota-exceeded), select the one
         # closest to backoff expiry.  This prevents #140: all accounts
         # locked out during a widespread upstream outage.
-        if in_error_backoff:
+        if in_error_backoff and allow_backoff_fallback:
 
             def _backoff_expires_at(s: AccountState) -> float:
                 backoff = min(300, 30 * (2 ** (s.error_count - 3)))

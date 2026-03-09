@@ -181,6 +181,7 @@ class LoadBalancer:
                     [pinned],
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
+                    allow_backoff_fallback=False,
                 )
                 if pinned_result.account is not None:
                     return pinned_result

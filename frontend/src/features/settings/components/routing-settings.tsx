@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { Route } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -17,15 +20,29 @@ export type RoutingSettingsProps = {
 };
 
 export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
+  const [httpProxyUrl, setHttpProxyUrl] = useState(settings.httpProxyUrl ?? "");
+
+  useEffect(() => {
+    setHttpProxyUrl(settings.httpProxyUrl ?? "");
+  }, [settings.httpProxyUrl]);
+
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave({
       stickyThreadsEnabled: settings.stickyThreadsEnabled,
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
       routingStrategy: settings.routingStrategy,
+      httpProxyUrl: settings.httpProxyUrl,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
       ...patch,
     });
+  const trimmedHttpProxyUrl = httpProxyUrl.trim();
+  const savedHttpProxyUrl = settings.httpProxyUrl ?? "";
+  const proxyDirty = trimmedHttpProxyUrl !== savedHttpProxyUrl;
+
+  const handleProxySave = () => {
+    save({ httpProxyUrl: trimmedHttpProxyUrl.length > 0 ? trimmedHttpProxyUrl : null });
+  };
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -84,6 +101,45 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               disabled={busy}
               onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
             />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 p-3">
+            <div className="max-w-sm">
+              <p className="text-sm font-medium">HTTP proxy</p>
+              <p className="text-xs text-muted-foreground">
+                Route outgoing backend requests through an HTTP or HTTPS proxy.
+              </p>
+            </div>
+            <form
+              className="flex w-full max-w-md items-center gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                handleProxySave();
+              }}
+            >
+              <Input
+                type="url"
+                value={httpProxyUrl}
+                disabled={busy}
+                placeholder="http://127.0.0.1:8080"
+                onChange={(event) => setHttpProxyUrl(event.target.value)}
+              />
+              <Button type="submit" size="sm" disabled={busy || !proxyDirty}>
+                Save
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={busy || (!settings.httpProxyUrl && !httpProxyUrl)}
+                onClick={() => {
+                  setHttpProxyUrl("");
+                  save({ httpProxyUrl: null });
+                }}
+              >
+                Clear
+              </Button>
+            </form>
           </div>
         </div>
       </div>

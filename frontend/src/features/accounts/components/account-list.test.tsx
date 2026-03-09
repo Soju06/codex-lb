@@ -8,6 +8,7 @@ describe("AccountList", () => {
   it("renders items and filters by search", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
+    const onDownloadAuthExport = vi.fn();
 
     render(
       <AccountList
@@ -30,6 +31,7 @@ describe("AccountList", () => {
         selectedAccountId="acc-1"
         onSelect={onSelect}
         onOpenImport={() => {}}
+        onDownloadAuthExport={onDownloadAuthExport}
         onOpenOauth={() => {}}
       />,
     );
@@ -43,6 +45,9 @@ describe("AccountList", () => {
 
     await user.click(screen.getByText("secondary@example.com"));
     expect(onSelect).toHaveBeenCalledWith("acc-2");
+
+    await user.click(screen.getByRole("button", { name: "All Auth ZIP" }));
+    expect(onDownloadAuthExport).toHaveBeenCalledTimes(1);
   });
 
   it("shows empty state when no items match filter", async () => {
@@ -62,6 +67,7 @@ describe("AccountList", () => {
         selectedAccountId={null}
         onSelect={() => {}}
         onOpenImport={() => {}}
+        onDownloadAuthExport={() => {}}
         onOpenOauth={() => {}}
       />,
     );
@@ -99,6 +105,7 @@ describe("AccountList", () => {
         selectedAccountId={null}
         onSelect={() => {}}
         onOpenImport={() => {}}
+        onDownloadAuthExport={() => {}}
         onOpenOauth={() => {}}
       />,
     );

@@ -4,6 +4,11 @@ import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
+import { downloadBlob } from "@/lib/download";
+
+vi.mock("@/lib/download", () => ({
+  downloadBlob: vi.fn(),
+}));
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -38,9 +43,18 @@ describe("useAccounts", () => {
     await result.current.resumeMutation.mutateAsync(firstAccountId as string);
 
     const imported = await result.current.importMutation.mutateAsync(
-      new File(["{}"], "auth.json", { type: "application/json" }),
+      [
+        new File(["{}"], "auth-1.json", { type: "application/json" }),
+        new File(["{}"], "auth-2.json", { type: "application/json" }),
+      ],
     );
-    await result.current.deleteMutation.mutateAsync(imported.accountId);
+    expect(imported.imported).toHaveLength(2);
+
+    await result.current.exportAuthArchiveMutation.mutateAsync();
+    expect(downloadBlob).toHaveBeenCalledTimes(1);
+    expect(downloadBlob).toHaveBeenCalledWith(expect.anything(), "auth-export-test.zip");
+
+    await result.current.deleteMutation.mutateAsync(imported.imported[0]?.accountId ?? "");
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });

@@ -59,10 +59,23 @@ export const AccountsResponseSchema = z.object({
 });
 
 export const AccountImportResponseSchema = z.object({
+  filename: z.string().nullable().optional(),
   accountId: z.string(),
   email: z.string(),
   planType: z.string(),
   status: z.string(),
+  refreshedOnImport: z.boolean().optional().default(false),
+});
+
+export const AccountImportFailureSchema = z.object({
+  filename: z.string().nullable().optional(),
+  code: z.string(),
+  message: z.string(),
+});
+
+export const AccountImportBatchResponseSchema = z.object({
+  imported: z.array(AccountImportResponseSchema),
+  failed: z.array(AccountImportFailureSchema),
 });
 
 export const AccountActionResponseSchema = z.object({
@@ -133,6 +146,9 @@ export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
+export type AccountImportResponse = z.infer<typeof AccountImportResponseSchema>;
+export type AccountImportFailure = z.infer<typeof AccountImportFailureSchema>;
+export type AccountImportBatchResponse = z.infer<typeof AccountImportBatchResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;

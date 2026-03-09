@@ -67,10 +67,23 @@ class AccountsResponse(DashboardModel):
 
 
 class AccountImportResponse(DashboardModel):
+    filename: str | None = None
     account_id: str
     email: str
     plan_type: str
     status: str
+    refreshed_on_import: bool = False
+
+
+class AccountImportFailure(DashboardModel):
+    filename: str | None = None
+    code: str
+    message: str
+
+
+class AccountImportBatchResponse(DashboardModel):
+    imported: list[AccountImportResponse] = Field(default_factory=list)
+    failed: list[AccountImportFailure] = Field(default_factory=list)
 
 
 class AccountPauseResponse(DashboardModel):

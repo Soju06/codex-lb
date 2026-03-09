@@ -22,6 +22,7 @@ const baseSettings = {
   preferEarlierResetAccounts: false,
   routingStrategy: "usage_weighted" as const,
   importWithoutOverwrite: false,
+  httpProxyUrl: null,
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
@@ -105,6 +106,7 @@ describe("TotpSettings", () => {
       preferEarlierResetAccounts: false,
       routingStrategy: "usage_weighted",
       importWithoutOverwrite: false,
+      httpProxyUrl: null,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: true,
     });

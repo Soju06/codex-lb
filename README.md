@@ -43,6 +43,8 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 </tr>
 </table>
 
+- Accounts UI supports batch `auth.json` import and one-click auth archive export.
+
 ## Quick Start
 
 ```bash
@@ -240,6 +242,8 @@ When enabled, clients must pass a valid API key as a Bearer token:
 Authorization: Bearer sk-clb-...
 ```
 
+Optional extra hardening: enable `CODEX_LB_PROXY_KEY_AUTH_ENABLED=true` with `CODEX_LB_PROXY_KEY` to require `X-Codex-Proxy-Key` on proxy requests in addition to Bearer auth.
+
 **Creating keys**: Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
 
 ## Configuration
@@ -247,6 +251,7 @@ Authorization: Bearer sk-clb-...
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
 Dashboard auth is configured in Settings.
 SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
+Container startup also honors `PORT` and auto-loads `/app/.env` when that file is mounted.
 
 ## Data
 

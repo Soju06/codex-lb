@@ -15,6 +15,7 @@ __pycache__/
 .env.*
 !.env.example
 .python-version
+*.iml
 
 # Build artifacts
 build/

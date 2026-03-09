@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -30,9 +31,12 @@ from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.usage import api as usage_api
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    logger.info("Application startup: initializing settings caches, database, HTTP client, and schedulers")
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     await init_db()
@@ -41,16 +45,19 @@ async def lifespan(_: FastAPI):
     model_scheduler = build_model_refresh_scheduler()
     await usage_scheduler.start()
     await model_scheduler.start()
+    logger.info("Application startup complete")
 
     try:
         yield
     finally:
+        logger.info("Application shutdown: stopping schedulers and closing resources")
         await model_scheduler.stop()
         await usage_scheduler.stop()
         try:
             await close_http_client()
         finally:
             await close_db()
+        logger.info("Application shutdown complete")
 
 
 def create_app() -> FastAPI:
@@ -82,10 +89,12 @@ def create_app() -> FastAPI:
     app.include_router(health_api.router)
 
     static_dir = Path(__file__).parent / "static"
+    static_dir.mkdir(parents=True, exist_ok=True)
     index_html = static_dir / "index.html"
     static_root = static_dir.resolve()
     frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
     excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
+    logger.debug("Created FastAPI application and registered API routers")
 
     def _is_static_asset_path(path: str) -> bool:
         if path.startswith("assets/"):

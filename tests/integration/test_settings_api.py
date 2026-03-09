@@ -14,6 +14,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["preferEarlierResetAccounts"] is False
     assert payload["routingStrategy"] == "usage_weighted"
     assert payload["importWithoutOverwrite"] is False
+    assert payload["httpProxyUrl"] is None
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
@@ -25,6 +26,7 @@ async def test_settings_api_get_and_update(async_client):
             "preferEarlierResetAccounts": True,
             "routingStrategy": "round_robin",
             "importWithoutOverwrite": True,
+            "httpProxyUrl": "http://proxy.internal:8080",
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
         },
@@ -35,6 +37,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["preferEarlierResetAccounts"] is True
     assert updated["routingStrategy"] == "round_robin"
     assert updated["importWithoutOverwrite"] is True
+    assert updated["httpProxyUrl"] == "http://proxy.internal:8080"
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
@@ -46,6 +49,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["preferEarlierResetAccounts"] is True
     assert payload["routingStrategy"] == "round_robin"
     assert payload["importWithoutOverwrite"] is True
+    assert payload["httpProxyUrl"] == "http://proxy.internal:8080"
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True

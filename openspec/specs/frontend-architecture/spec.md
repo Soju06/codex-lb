@@ -95,17 +95,24 @@ When a request log entry includes `service_tier`, the dashboard request-log API 
 
 ### Requirement: Accounts page
 
-The Accounts page SHALL display a two-column layout: left panel with searchable account list, import button, and add account button; right panel with selected account details including usage, token info, and actions (pause/resume/delete/re-authenticate).
+The Accounts page SHALL display a two-column layout: left panel with searchable account list, import button, export button, and add account button; right panel with selected account details including usage, token info, and actions (pause/resume/delete/re-authenticate).
 
 #### Scenario: Account selection
 
 - **WHEN** a user clicks an account in the list
 - **THEN** the right panel shows the selected account's details
 
-#### Scenario: Account import
+#### Scenario: Batch account import
 
-- **WHEN** a user clicks the import button and uploads an auth.json file
-- **THEN** the app calls `POST /api/accounts/import` and refreshes the account list on success
+- **WHEN** a user clicks the import button and uploads one or more `auth.json` files
+- **THEN** the app calls `POST /api/accounts/import/batch`
+- **AND** the response reports imported and failed files independently
+- **AND** the account list is refreshed when at least one file imports successfully
+
+#### Scenario: Export current auth payload archive
+
+- **WHEN** a user clicks the export button
+- **THEN** the app downloads a zip archive containing one current `auth.json` payload per stored account
 
 #### Scenario: Ambiguous duplicate identity import conflict
 

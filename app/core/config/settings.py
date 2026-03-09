@@ -8,6 +8,8 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.config.proxy import normalize_http_proxy_url
+
 BASE_DIR = Path(__file__).resolve().parents[3]
 
 DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
@@ -69,6 +71,7 @@ class Settings(BaseSettings):
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
+    http_proxy_url: str | None = None
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
     log_proxy_request_shape: bool = False
@@ -86,6 +89,8 @@ class Settings(BaseSettings):
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
+    proxy_key_auth_enabled: bool = False
+    proxy_key: str | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -148,6 +153,25 @@ class Settings(BaseSettings):
             except ValueError as exc:
                 raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
         return cidrs
+
+    @field_validator("http_proxy_url", mode="before")
+    @classmethod
+    def _normalize_http_proxy_url(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return normalize_http_proxy_url(value)
+        raise TypeError("http_proxy_url must be a string")
+
+    @field_validator("proxy_key", mode="before")
+    @classmethod
+    def _normalize_proxy_key(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            key = value.strip()
+            return key or None
+        raise TypeError("proxy_key must be a string")
 
 
 @lru_cache(maxsize=1)

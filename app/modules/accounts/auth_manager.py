@@ -53,7 +53,7 @@ class AuthManager:
             result = await refresh_access_token(refresh_token)
         except RefreshError as exc:
             if exc.is_permanent:
-                reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
+                reason = _permanent_refresh_failure_reason(exc)
                 await self._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
                 account.status = AccountStatus.DEACTIVATED
                 account.deactivation_reason = reason
@@ -119,3 +119,15 @@ def _chatgpt_account_id_from_id_token(id_token: str) -> str | None:
     claims = extract_id_token_claims(id_token)
     auth_claims = claims.auth or OpenAIAuthClaims()
     return auth_claims.chatgpt_account_id or claims.chatgpt_account_id
+
+
+def _permanent_refresh_failure_reason(exc: RefreshError) -> str:
+    if exc.code in PERMANENT_FAILURE_CODES:
+        return PERMANENT_FAILURE_CODES[exc.code]
+
+    normalized_message = exc.message.strip().lower()
+    if "refresh token has already been used" in normalized_message:
+        return PERMANENT_FAILURE_CODES["refresh_token_reused"]
+    if "provided authentication token is expired" in normalized_message or "token expired" in normalized_message:
+        return PERMANENT_FAILURE_CODES["refresh_token_expired"]
+    return exc.message

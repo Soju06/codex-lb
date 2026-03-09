@@ -11,6 +11,7 @@ class DashboardSettingsData:
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
     import_without_overwrite: bool
+    http_proxy_url: str | None
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
@@ -22,6 +23,7 @@ class DashboardSettingsUpdateData:
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
     import_without_overwrite: bool
+    http_proxy_url: str | None
     totp_required_on_login: bool
     api_key_auth_enabled: bool
 
@@ -37,6 +39,7 @@ class SettingsService:
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
             import_without_overwrite=row.import_without_overwrite,
+            http_proxy_url=row.http_proxy_url,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
@@ -51,6 +54,7 @@ class SettingsService:
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             routing_strategy=payload.routing_strategy,
             import_without_overwrite=payload.import_without_overwrite,
+            http_proxy_url=payload.http_proxy_url,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
         )
@@ -59,6 +63,7 @@ class SettingsService:
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
             import_without_overwrite=row.import_without_overwrite,
+            http_proxy_url=row.http_proxy_url,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,

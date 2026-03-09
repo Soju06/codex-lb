@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import DashboardSettings
 
 _SETTINGS_ID = 1
+_UNSET = object()
 
 
 class SettingsRepository:
@@ -23,6 +24,7 @@ class SettingsRepository:
             prefer_earlier_reset_accounts=False,
             routing_strategy="usage_weighted",
             import_without_overwrite=False,
+            http_proxy_url=None,
             totp_required_on_login=False,
             password_hash=None,
             api_key_auth_enabled=False,
@@ -48,6 +50,7 @@ class SettingsRepository:
         prefer_earlier_reset_accounts: bool | None = None,
         routing_strategy: str | None = None,
         import_without_overwrite: bool | None = None,
+        http_proxy_url: str | None | object = _UNSET,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
     ) -> DashboardSettings:
@@ -60,6 +63,8 @@ class SettingsRepository:
             settings.routing_strategy = routing_strategy
         if import_without_overwrite is not None:
             settings.import_without_overwrite = import_without_overwrite
+        if http_proxy_url is not _UNSET:
+            settings.http_proxy_url = http_proxy_url if isinstance(http_proxy_url, str) or http_proxy_url is None else None
         if totp_required_on_login is not None:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:

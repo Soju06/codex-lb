@@ -12,7 +12,7 @@ import aiohttp
 from pydantic import ValidationError
 
 from app.core.auth.models import DeviceCodePayload, OAuthTokenPayload
-from app.core.clients.http import get_http_client
+from app.core.clients.http import get_http_client, get_http_proxy_request_kwargs
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.utils.request_id import get_request_id
@@ -109,11 +109,13 @@ async def exchange_authorization_code(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
+    proxy_kwargs = await get_http_proxy_request_kwargs()
     async with client_session.post(
         url,
         data=encoded,
         headers=headers,
         timeout=timeout,
+        **proxy_kwargs,
     ) as resp:
         data = await _safe_json(resp)
         try:
@@ -155,7 +157,8 @@ async def request_device_code(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+    proxy_kwargs = await get_http_proxy_request_kwargs()
+    async with client_session.post(url, json=payload, headers=headers, timeout=timeout, **proxy_kwargs) as resp:
         data = await _safe_json(resp)
         if resp.status >= 400:
             if resp.status == 404:
@@ -223,7 +226,8 @@ async def exchange_device_token(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+    proxy_kwargs = await get_http_proxy_request_kwargs()
+    async with client_session.post(url, json=payload, headers=headers, timeout=timeout, **proxy_kwargs) as resp:
         data = await _safe_json(resp)
         try:
             payload_data = OAuthTokenPayload.model_validate(data)

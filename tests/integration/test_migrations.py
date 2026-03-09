@@ -41,6 +41,34 @@ _STAMPED_AFTER_LEGACY_PREFIX_4 = OLD_TO_NEW_REVISION_MAP["004_add_accounts_chatg
 _STAMPED_AFTER_LEGACY_PREFIX_1 = OLD_TO_NEW_REVISION_MAP["001_normalize_account_plan_types"]
 
 
+def _expected_head_revisions() -> list[str]:
+    return sorted(revision for revision in _HEAD_REVISION.split(",") if revision)
+
+
+def _normalize_revision_rows(raw_revisions: list[str]) -> list[str]:
+    revisions: set[str] = set()
+    for raw in raw_revisions:
+        revisions.update(part for part in str(raw).split(",") if part)
+    return sorted(revisions)
+
+
+async def _read_alembic_version_revisions() -> list[str]:
+    async with SessionLocal() as session:
+        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
+        raw = [str(row[0]) for row in revision_rows.fetchall()]
+    return _normalize_revision_rows(raw)
+
+
+async def _replace_alembic_versions_with_single_revision(revision: str) -> None:
+    async with SessionLocal() as session:
+        await session.execute(text("DELETE FROM alembic_version"))
+        await session.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": revision},
+        )
+        await session.commit()
+
+
 def _is_postgresql_database_url(url: str) -> bool:
     return url.startswith("postgresql+")
 
@@ -61,7 +89,7 @@ def _make_account(account_id: str, email: str, plan_type: str) -> Account:
 
 
 @pytest.mark.asyncio
-async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
+async def test_run_startup_migrations_preserves_unknown_plan_types(raw_db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
         await repo.upsert(_make_account("acc_one", "one@example.com", "education"))
@@ -88,7 +116,7 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
 
 
 @pytest.mark.asyncio
-async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
+async def test_run_startup_migrations_bootstraps_legacy_history(raw_db_setup):
     async with SessionLocal() as session:
         await session.execute(
             text(
@@ -112,14 +140,12 @@ async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
     assert result.bootstrap.stamped_revision == _STAMPED_AFTER_LEGACY_PREFIX_4
     assert result.current_revision == _HEAD_REVISION
 
-    async with SessionLocal() as session:
-        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
-        revisions = [str(row[0]) for row in revision_rows.fetchall()]
-        assert revisions == [_HEAD_REVISION]
+    revisions = await _read_alembic_version_revisions()
+    assert revisions == _expected_head_revisions()
 
 
 @pytest.mark.asyncio
-async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_missing(db_setup):
+async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_missing(raw_db_setup):
     async with SessionLocal() as session:
         await session.execute(text("DROP TABLE dashboard_settings"))
         await session.execute(
@@ -150,7 +176,7 @@ async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_mi
 
 
 @pytest.mark.asyncio
-async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
+async def test_run_startup_migrations_handles_unknown_legacy_rows(raw_db_setup):
     async with SessionLocal() as session:
         await session.execute(
             text(
@@ -181,48 +207,37 @@ async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
-async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db_setup):
+async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(raw_db_setup):
     await run_startup_migrations(_DATABASE_URL)
 
     legacy_head = "013_add_dashboard_settings_routing_strategy"
-    async with SessionLocal() as session:
-        await session.execute(text("UPDATE alembic_version SET version_num = :legacy"), {"legacy": legacy_head})
-        await session.commit()
+    await _replace_alembic_versions_with_single_revision(legacy_head)
 
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.current_revision == _HEAD_REVISION
 
-    async with SessionLocal() as session:
-        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
-        revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
-        assert revisions == [_HEAD_REVISION]
+    revisions = await _read_alembic_version_revisions()
+    assert revisions == _expected_head_revisions()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
-async def test_run_startup_migrations_auto_remaps_firewall_legacy_revision_id(db_setup):
+async def test_run_startup_migrations_auto_remaps_firewall_legacy_revision_id(raw_db_setup):
     await run_startup_migrations(_DATABASE_URL)
 
     legacy_firewall_revision = "014_add_api_firewall_allowlist"
-    async with SessionLocal() as session:
-        await session.execute(
-            text("UPDATE alembic_version SET version_num = :legacy"),
-            {"legacy": legacy_firewall_revision},
-        )
-        await session.commit()
+    await _replace_alembic_versions_with_single_revision(legacy_firewall_revision)
 
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.current_revision == _HEAD_REVISION
 
-    async with SessionLocal() as session:
-        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
-        revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
-        assert revisions == [_HEAD_REVISION]
+    revisions = await _read_alembic_version_revisions()
+    assert revisions == _expected_head_revisions()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
-async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_alembic_id_together(db_setup):
+async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_alembic_id_together(raw_db_setup):
     await run_startup_migrations(_DATABASE_URL)
 
     async with SessionLocal() as session:
@@ -241,8 +256,9 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
                 text("INSERT INTO schema_migrations (name, applied_at) VALUES (:name, :applied_at)"),
                 {"name": migration_name, "applied_at": f"2026-02-13T00:00:0{index}Z"},
             )
+        await session.execute(text("DELETE FROM alembic_version"))
         await session.execute(
-            text("UPDATE alembic_version SET version_num = :legacy"),
+            text("INSERT INTO alembic_version (version_num) VALUES (:legacy)"),
             {"legacy": "013_add_dashboard_settings_routing_strategy"},
         )
         await session.commit()
@@ -257,7 +273,7 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
     (not _is_postgresql_database_url(_DATABASE_URL)) or check_migration_policy is None,
     reason="PostgreSQL-only migration contract test",
 )
-async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
+async def test_postgresql_migration_contract_policy_and_drift_match(raw_db_setup):
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.current_revision == _HEAD_REVISION
 
@@ -270,7 +286,7 @@ async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
     (not _is_postgresql_database_url(_DATABASE_URL)) or (not _HAS_REVISION_REMAP),
     reason="PostgreSQL-only migration remap test",
 )
-async def test_postgresql_startup_migration_auto_remap_legacy_head(db_setup):
+async def test_postgresql_startup_migration_auto_remap_legacy_head(raw_db_setup):
     await run_startup_migrations(_DATABASE_URL)
 
     async with SessionLocal() as session:
@@ -462,6 +478,10 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
                 ).scalar_one()
                 assert routing_strategy == "usage_weighted"
+            http_proxy_url = (
+                await session.execute(text("SELECT http_proxy_url FROM dashboard_settings WHERE id=1"))
+            ).scalar_one()
+            assert http_proxy_url is None
             index_rows = (await session.execute(text("PRAGMA index_list(accounts)"))).fetchall()
             has_email_non_unique_index = False
             for row in index_rows:

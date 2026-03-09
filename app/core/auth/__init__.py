@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,6 +77,18 @@ def extract_id_token_claims(id_token: str) -> IdTokenClaims:
         return IdTokenClaims.model_validate(data)
     except Exception:
         return IdTokenClaims()
+
+
+def token_expiry(token: str | None) -> datetime | None:
+    if not token:
+        return None
+    claims = extract_id_token_claims(token)
+    exp = claims.exp
+    if isinstance(exp, (int, float)):
+        return datetime.fromtimestamp(exp, tz=UTC)
+    if isinstance(exp, str) and exp.isdigit():
+        return datetime.fromtimestamp(int(exp), tz=UTC)
+    return None
 
 
 def claims_from_auth(auth: AuthFile) -> AccountClaims:

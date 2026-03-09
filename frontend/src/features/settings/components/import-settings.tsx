@@ -16,6 +16,7 @@ export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) 
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
       routingStrategy: settings.routingStrategy,
       importWithoutOverwrite: settings.importWithoutOverwrite,
+      httpProxyUrl: settings.httpProxyUrl,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
       ...patch,

@@ -7,6 +7,7 @@ import time
 import aiohttp
 import anyio
 
+from app.core.clients.http import get_http_proxy_request_kwargs
 from app.core.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -59,9 +60,10 @@ class CodexVersionCache:
     async def _fetch_latest_version(self) -> str | None:
         try:
             timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
+            proxy_kwargs = await get_http_proxy_request_kwargs()
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 headers = {"Accept": "application/vnd.github+json"}
-                async with session.get(_GITHUB_RELEASES_URL, headers=headers) as resp:
+                async with session.get(_GITHUB_RELEASES_URL, headers=headers, **proxy_kwargs) as resp:
                     if resp.status != 200:
                         logger.warning("GitHub releases API returned HTTP %d", resp.status)
                         return None

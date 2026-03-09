@@ -127,6 +127,32 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 - **WHEN** `api_key_auth_enabled` is false
 - **THEN** the dependency returns `None` and the request proceeds without authentication
 
+### Requirement: Optional additional proxy header guard
+
+The system SHALL support an optional additional proxy guard controlled by `CODEX_LB_PROXY_KEY_AUTH_ENABLED` and `CODEX_LB_PROXY_KEY`. When enabled, proxy requests MUST provide a matching `X-Codex-Proxy-Key` header in addition to standard Bearer validation (when API key auth is enabled). This header MUST NOT act as an alternative credential path.
+
+#### Scenario: Optional proxy key guard disabled by default
+
+- **WHEN** `CODEX_LB_PROXY_KEY_AUTH_ENABLED` is not enabled
+- **THEN** requests are evaluated without requiring `X-Codex-Proxy-Key`
+
+#### Scenario: Optional proxy key guard enabled
+
+- **WHEN** `CODEX_LB_PROXY_KEY_AUTH_ENABLED=true` and `CODEX_LB_PROXY_KEY` is configured
+- **THEN** a request missing `X-Codex-Proxy-Key` is rejected with 401
+- **AND** a request with a non-matching `X-Codex-Proxy-Key` is rejected with 401
+- **AND** a request with a matching `X-Codex-Proxy-Key` continues to normal Bearer API key validation flow
+
+#### Scenario: Optional proxy key header is not a Bearer substitute
+
+- **WHEN** `api_key_auth_enabled` is true and a request sends only `X-Codex-Proxy-Key`
+- **THEN** the request is rejected with 401 due to missing/invalid Bearer API key
+
+#### Scenario: Misconfigured enabled guard fails closed
+
+- **WHEN** `CODEX_LB_PROXY_KEY_AUTH_ENABLED=true` but `CODEX_LB_PROXY_KEY` is missing or blank
+- **THEN** guarded proxy requests are rejected with 401
+
 ### Requirement: Model restriction enforcement
 
 The system SHALL enforce per-key model restrictions in the proxy service layer (not middleware). When `allowed_models` is set (non-null, non-empty) and the requested model is not in the list, the system MUST reject the request. The `/v1/models` endpoint MUST filter the model list based on the authenticated key's `allowed_models`.

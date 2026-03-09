@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -10,13 +11,15 @@ from pydantic import ValidationError
 from app.core.auth import OpenAIAuthClaims, extract_id_token_claims
 from app.core.auth.models import OAuthTokenPayload
 from app.core.balancer import PERMANENT_FAILURE_CODES
-from app.core.clients.http import get_http_client
+from app.core.clients.http import get_http_client, get_http_proxy_request_kwargs
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import to_utc_naive, utcnow
 
 TOKEN_REFRESH_INTERVAL_DAYS = 8
+DEFAULT_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR = "CODEX_REFRESH_TOKEN_URL_OVERRIDE"
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +55,20 @@ def classify_refresh_error(code: str | None) -> bool:
     return code in PERMANENT_FAILURE_CODES
 
 
+def refresh_token_endpoint() -> str:
+    override = os.getenv(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR)
+    if override and override.strip():
+        return override.strip()
+    return DEFAULT_REFRESH_TOKEN_URL
+
+
 async def refresh_access_token(
     refresh_token: str,
     *,
     session: aiohttp.ClientSession | None = None,
 ) -> TokenRefreshResult:
     settings = get_settings()
-    url = f"{settings.auth_base_url.rstrip('/')}/oauth/token"
+    url = refresh_token_endpoint()
     payload = {
         "grant_type": "refresh_token",
         "client_id": settings.oauth_client_id,
@@ -72,7 +82,8 @@ async def refresh_access_token(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+    proxy_kwargs = await get_http_proxy_request_kwargs()
+    async with client_session.post(url, json=payload, headers=headers, timeout=timeout, **proxy_kwargs) as resp:
         data = await _safe_json(resp)
         try:
             payload_data = OAuthTokenPayload.model_validate(data)
@@ -119,9 +130,9 @@ async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
 
 
 def _refresh_error_from_payload(payload: OAuthTokenPayload, status_code: int) -> RefreshError:
-    code = _extract_error_code(payload) or f"http_{status_code}"
     message = _extract_error_message(payload) or f"Token refresh failed ({status_code})"
-    return RefreshError(code, message, classify_refresh_error(code))
+    code = _normalize_refresh_error_code(_extract_error_code(payload), message, status_code)
+    return RefreshError(code, message, _is_permanent_refresh_failure(code, message, status_code))
 
 
 def _extract_error_code(payload: OAuthTokenPayload) -> str | None:
@@ -142,3 +153,44 @@ def _extract_error_message(payload: OAuthTokenPayload) -> str | None:
     if isinstance(error, str):
         return payload.error_description or error
     return payload.message
+
+
+def _is_permanent_refresh_failure(code: str | None, message: str, status_code: int) -> bool:
+    if classify_refresh_error(code):
+        return True
+
+    normalized_code = (code or "").strip().lower()
+    normalized_message = message.strip().lower()
+    if status_code != 401:
+        return False
+
+    permanent_codes = {
+        "invalid_grant",
+        "token_expired",
+        "session_expired",
+    }
+    if normalized_code in permanent_codes:
+        return True
+
+    permanent_message_fragments = (
+        "refresh token has already been used",
+        "provided authentication token is expired",
+        "please try signing in again",
+        "re-login required",
+        "token is expired",
+        "token expired",
+    )
+    return any(fragment in normalized_message for fragment in permanent_message_fragments)
+
+
+def _normalize_refresh_error_code(code: str | None, message: str, status_code: int) -> str:
+    normalized_code = (code or "").strip().lower()
+    normalized_message = message.strip().lower()
+
+    if status_code == 401:
+        if "refresh token has already been used" in normalized_message:
+            return "refresh_token_reused"
+        if "provided authentication token is expired" in normalized_message or "token expired" in normalized_message:
+            return "refresh_token_expired"
+
+    return code or f"http_{status_code}"

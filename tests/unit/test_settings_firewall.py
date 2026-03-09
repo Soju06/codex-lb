@@ -18,3 +18,17 @@ def test_settings_rejects_invalid_firewall_trusted_proxy_cidr(monkeypatch):
     monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", "not-a-cidr")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_settings_parses_optional_proxy_key(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_PROXY_KEY_AUTH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_PROXY_KEY", "  shared-secret  ")
+    settings = Settings()
+    assert settings.proxy_key_auth_enabled is True
+    assert settings.proxy_key == "shared-secret"
+
+
+def test_settings_normalizes_empty_optional_proxy_key(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_PROXY_KEY", "   ")
+    settings = Settings()
+    assert settings.proxy_key is None

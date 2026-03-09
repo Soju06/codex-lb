@@ -29,6 +29,7 @@ class UsageClientState:
     calls: int = 0
     auth: str | None = None
     account: str | None = None
+    proxy: str | None = None
 
 
 class StubRequestContext:
@@ -77,7 +78,9 @@ class StubRetryClient:
         headers: dict[str, str] | None = None,
         timeout: object | None = None,
         retry_options: object | None = None,
+        proxy: str | None = None,
     ) -> StubRequestContext:
+        self._state.proxy = proxy
         return StubRequestContext(self._responses, self._state, headers or {}, retry_options)
 
 
@@ -146,3 +149,25 @@ async def test_fetch_usage_raises_after_retries(failing_usage_server):
     exc = excinfo.value
     assert isinstance(exc, UsageFetchError)
     assert exc.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_sanitizes_html_error_body() -> None:
+    state = UsageClientState()
+    client = StubRetryClient(
+        [StubResponse(403, None, "<html><body>forbidden</body></html>")],
+        state,
+    )
+
+    with pytest.raises(UsageFetchError) as excinfo:
+        await fetch_usage(
+            access_token="access-token",
+            account_id=None,
+            base_url="http://usage.test/backend-api",
+            max_retries=0,
+            timeout_seconds=1.0,
+            client=client,
+        )
+
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.message == "Upstream returned an HTML error response"

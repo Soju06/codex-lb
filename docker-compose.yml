@@ -33,6 +33,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    restart: unless-stopped
     build:
       context: ./frontend
       dockerfile_inline: |

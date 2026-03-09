@@ -172,6 +172,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                 preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
                 routingStrategy: settings.routingStrategy,
                 importWithoutOverwrite: settings.importWithoutOverwrite,
+                httpProxyUrl: settings.httpProxyUrl,
                 totpRequiredOnLogin: checked,
                 apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
               })

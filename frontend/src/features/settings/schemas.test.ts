@@ -12,6 +12,7 @@ describe("DashboardSettingsSchema", () => {
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       importWithoutOverwrite: true,
+      httpProxyUrl: "http://proxy.example:8080",
       totpRequiredOnLogin: true,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
@@ -20,6 +21,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.stickyThreadsEnabled).toBe(true);
     expect(parsed.routingStrategy).toBe("round_robin");
     expect(parsed.importWithoutOverwrite).toBe(true);
+    expect(parsed.httpProxyUrl).toBe("http://proxy.example:8080");
     expect(parsed.apiKeyAuthEnabled).toBe(true);
   });
 });
@@ -31,12 +33,14 @@ describe("SettingsUpdateRequestSchema", () => {
       preferEarlierResetAccounts: true,
       routingStrategy: "usage_weighted",
       importWithoutOverwrite: true,
+      httpProxyUrl: "https://proxy.example:8443",
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
     });
 
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("usage_weighted");
+    expect(parsed.httpProxyUrl).toBe("https://proxy.example:8443");
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
   });
@@ -48,6 +52,7 @@ describe("SettingsUpdateRequestSchema", () => {
     });
 
     expect(parsed.importWithoutOverwrite).toBeUndefined();
+    expect(parsed.httpProxyUrl).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
   });

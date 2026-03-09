@@ -172,7 +172,7 @@ class StubAccountsRepository:
 
 
 @pytest.mark.asyncio
-async def test_usage_updater_deactivates_on_account_invalid_4xx(monkeypatch) -> None:
+async def test_usage_updater_does_not_deactivate_on_account_invalid_4xx(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
     from app.core.config.settings import get_settings
@@ -192,12 +192,7 @@ async def test_usage_updater_deactivates_on_account_invalid_4xx(monkeypatch) -> 
 
     await updater.refresh_accounts([acc], latest_usage={})
 
-    assert len(accounts_repo.status_updates) == 1
-    update = accounts_repo.status_updates[0]
-    assert update["account_id"] == "acc_402"
-    assert update["status"] == AccountStatus.DEACTIVATED
-    assert "402" in update["deactivation_reason"]
-    assert "Payment Required" in update["deactivation_reason"]
+    assert len(accounts_repo.status_updates) == 0
 
 
 @pytest.mark.asyncio
@@ -467,6 +462,43 @@ async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure
     refreshed = await updater.refresh_accounts([acc], latest_usage={})
 
     assert refreshed is False
+    assert len(usage_repo.entries) == 0
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_deactivates_account_when_401_refresh_fails_permanently(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage_401(**_: Any) -> UsagePayload:
+        raise UsageFetchError(401, "Provided authentication token is expired. Please try signing in again.")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    assert updater._auth_manager is not None
+
+    async def stub_ensure_fresh(account: Account, *, force: bool = False) -> Account:
+        account.status = AccountStatus.DEACTIVATED
+        account.deactivation_reason = "Refresh token was reused - re-login required"
+        raise RefreshError(
+            code="refresh_token_reused",
+            message="Your refresh token has already been used to generate a new access token. Please try signing in again.",
+            is_permanent=True,
+        )
+
+    monkeypatch.setattr(updater._auth_manager, "ensure_fresh", stub_ensure_fresh)
+
+    acc = _make_account("acc_401_perm", "workspace_401_perm", email="auth-perm@example.com")
+    refreshed = await updater.refresh_accounts([acc], latest_usage={})
+
+    assert refreshed is False
+    assert acc.status == AccountStatus.DEACTIVATED
     assert len(usage_repo.entries) == 0
 
 

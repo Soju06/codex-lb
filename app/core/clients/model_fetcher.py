@@ -5,7 +5,7 @@ import logging
 import aiohttp
 
 from app.core.clients.codex_version import get_codex_version_cache
-from app.core.clients.http import get_http_client
+from app.core.clients.http import get_http_client, get_http_proxy_request_kwargs
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
@@ -98,8 +98,9 @@ async def fetch_models_for_plan(
 
     timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
     session = get_http_client().session
+    proxy_kwargs = await get_http_proxy_request_kwargs()
 
-    async with session.get(url, headers=headers, timeout=timeout) as resp:
+    async with session.get(url, headers=headers, timeout=timeout, **proxy_kwargs) as resp:
         if resp.status >= 400:
             text = await resp.text()
             raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")

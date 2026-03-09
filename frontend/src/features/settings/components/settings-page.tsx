@@ -68,6 +68,7 @@ export function SettingsPage() {
                   preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
                   routingStrategy: settings.routingStrategy,
                   importWithoutOverwrite: settings.importWithoutOverwrite,
+                  httpProxyUrl: settings.httpProxyUrl,
                   totpRequiredOnLogin: settings.totpRequiredOnLogin,
                   apiKeyAuthEnabled: enabled,
                 })

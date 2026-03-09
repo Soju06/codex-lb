@@ -79,6 +79,7 @@ async def get_settings(
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
         routing_strategy=settings.routing_strategy,
         import_without_overwrite=settings.import_without_overwrite,
+        http_proxy_url=settings.http_proxy_url,
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
@@ -107,6 +108,7 @@ async def update_settings(
                     if payload.import_without_overwrite is not None
                     else current.import_without_overwrite
                 ),
+                http_proxy_url=payload.http_proxy_url if "http_proxy_url" in payload.model_fields_set else current.http_proxy_url,
                 totp_required_on_login=(
                     payload.totp_required_on_login
                     if payload.totp_required_on_login is not None
@@ -128,6 +130,7 @@ async def update_settings(
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
         routing_strategy=updated.routing_strategy,
         import_without_overwrite=updated.import_without_overwrite,
+        http_proxy_url=updated.http_proxy_url,
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,
         api_key_auth_enabled=updated.api_key_auth_enabled,

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
+from app.core.auth.refresh import TokenRefreshResult
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -24,17 +27,27 @@ def _encode_jwt(payload: dict) -> str:
     return f"header.{body}.sig"
 
 
-def _make_auth_json(account_id: str | None, email: str, plan_type: str = "plus") -> dict:
+def _make_auth_json(
+    account_id: str | None,
+    email: str,
+    plan_type: str = "plus",
+    *,
+    access_exp: int | None = None,
+    refresh_token: str = "refresh",
+) -> dict:
     payload = {
         "email": email,
         "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
     }
     if account_id:
         payload["chatgpt_account_id"] = account_id
+    access_token = "access"
+    if access_exp is not None:
+        access_token = _encode_jwt({"exp": access_exp})
     tokens: dict[str, object] = {
         "idToken": _encode_jwt(payload),
-        "accessToken": "access",
-        "refreshToken": "refresh",
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
     }
     if account_id:
         tokens["accountId"] = account_id
@@ -95,6 +108,120 @@ async def test_import_falls_back_to_email_based_account_id(async_client):
     payload = response.json()
     assert payload["accountId"] == fallback_account_id(email)
     assert payload["email"] == email
+
+
+@pytest.mark.asyncio
+async def test_batch_import_reports_successes_and_failures(async_client):
+    valid = _make_auth_json("acc_batch", "batch@example.com")
+    files = [
+        ("auth_json", ("valid.json", json.dumps(valid), "application/json")),
+        ("auth_json", ("broken.json", "not-json", "application/json")),
+    ]
+
+    response = await async_client.post("/api/accounts/import/batch", files=files)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["imported"]) == 1
+    assert payload["imported"][0]["filename"] == "valid.json"
+    assert payload["imported"][0]["email"] == "batch@example.com"
+    assert payload["failed"] == [
+        {
+            "filename": "broken.json",
+            "code": "invalid_auth_json",
+            "message": "Invalid auth.json payload",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_import_refreshes_expired_access_token_when_refresh_is_valid(async_client, monkeypatch):
+    old_refresh_token = "refresh-old"
+    new_access_token = _encode_jwt({"exp": int((utcnow() + timedelta(hours=2)).timestamp())})
+    new_id_token = _encode_jwt(
+        {
+            "email": "refresh-import@example.com",
+            "chatgpt_account_id": "acc_refresh_import",
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"},
+        }
+    )
+
+    async def _fake_refresh(refresh_token: str) -> TokenRefreshResult:
+        assert refresh_token == old_refresh_token
+        return TokenRefreshResult(
+            access_token=new_access_token,
+            refresh_token="refresh-new",
+            id_token=new_id_token,
+            account_id="acc_refresh_import",
+            plan_type="pro",
+            email="refresh-import@example.com",
+        )
+
+    monkeypatch.setattr("app.modules.accounts.service.refresh_access_token", _fake_refresh)
+
+    expired_auth = _make_auth_json(
+        "acc_refresh_import",
+        "refresh-import@example.com",
+        "plus",
+        access_exp=int((utcnow() - timedelta(hours=1)).timestamp()),
+        refresh_token=old_refresh_token,
+    )
+
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("expired.json", json.dumps(expired_auth), "application/json")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["refreshedOnImport"] is True
+    assert payload["planType"] == "pro"
+
+    account_id = generate_unique_account_id("acc_refresh_import", "refresh-import@example.com")
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        saved = await repo.get_by_id(account_id)
+
+    assert saved is not None
+    encryptor = TokenEncryptor()
+    assert encryptor.decrypt(saved.access_token_encrypted) == new_access_token
+    assert encryptor.decrypt(saved.refresh_token_encrypted) == "refresh-new"
+    assert encryptor.decrypt(saved.id_token_encrypted) == new_id_token
+
+
+@pytest.mark.asyncio
+async def test_export_accounts_downloads_zip_with_current_auth_payloads(async_client):
+    alpha = _make_auth_json("acc_export_alpha", "alpha@example.com", "plus")
+    beta = _make_auth_json("acc_export_beta", "beta@example.com", "team")
+
+    first = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("alpha.json", json.dumps(alpha), "application/json")},
+    )
+    second = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("beta.json", json.dumps(beta), "application/json")},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    response = await async_client.get("/api/accounts/export")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert "attachment; filename=" in response.headers["content-disposition"]
+
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    names = sorted(archive.namelist())
+    assert any(name.endswith("/auth.json") for name in names)
+    assert any("alpha-example.com__" in name for name in names)
+    assert any("beta-example.com__" in name for name in names)
+
+    exported = [json.loads(archive.read(name).decode("utf-8")) for name in names if name.endswith("/auth.json")]
+    exported_by_account = {item["tokens"]["accountId"]: item for item in exported}
+    assert exported_by_account["acc_export_alpha"]["tokens"]["refreshToken"] == "refresh"
+    assert exported_by_account["acc_export_beta"]["tokens"]["idToken"]
+    assert exported_by_account["acc_export_alpha"]["lastRefreshAt"]
 
 
 @pytest.mark.asyncio

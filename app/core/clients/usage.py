@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app.core.clients.http import get_http_client
+from app.core.clients.http import get_http_client, get_http_proxy_request_kwargs
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.usage.models import UsagePayload
@@ -18,6 +19,7 @@ RETRY_START_TIMEOUT = 0.5
 RETRY_MAX_TIMEOUT = 2.0
 
 logger = logging.getLogger(__name__)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 class UsageErrorDetail(BaseModel):
@@ -59,6 +61,7 @@ async def fetch_usage(
     headers = _usage_headers(access_token, account_id)
     retry_client = client or get_http_client().retry_client
     retry_options = _retry_options(retries + 1)
+    proxy_kwargs = await get_http_proxy_request_kwargs()
 
     try:
         async with retry_client.request(
@@ -67,6 +70,7 @@ async def fetch_usage(
             headers=headers,
             timeout=timeout,
             retry_options=retry_options,
+            **proxy_kwargs,
         ) as resp:
             data = await _safe_json(resp)
             if resp.status >= 400:
@@ -117,7 +121,7 @@ async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
         data = await resp.json(content_type=None)
     except Exception:
         text = await resp.text()
-        return {"error": {"message": text.strip()}}
+        return {"error": {"message": _sanitize_error_text(text)}}
     return data if isinstance(data, dict) else {"error": {"message": str(data)}}
 
 
@@ -125,10 +129,32 @@ def _extract_error_message(payload: JsonObject) -> str | None:
     envelope = UsageErrorEnvelope.model_validate(payload)
     error = envelope.error
     if isinstance(error, UsageErrorDetail):
-        return error.message or error.error_description
+        message = error.message or error.error_description
+        return _sanitize_error_text(message)
     if isinstance(error, str):
-        return envelope.error_description or error
-    return envelope.message
+        return _sanitize_error_text(envelope.error_description or error)
+    return _sanitize_error_text(envelope.message)
+
+
+def _sanitize_error_text(message: str | None) -> str | None:
+    if message is None:
+        return None
+    normalized = " ".join(message.strip().split())
+    if not normalized:
+        return None
+    if _looks_like_html(normalized):
+        return "Upstream returned an HTML error response"
+    return normalized
+
+
+def _looks_like_html(value: str) -> bool:
+    lower = value.lower()
+    return (
+        "<html" in lower
+        or "<body" in lower
+        or "<!doctype html" in lower
+        or bool(_HTML_TAG_RE.search(value))
+    )
 
 
 def _retry_options(attempts: int) -> ExponentialRetry:

@@ -1,8 +1,8 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, getBlob, post } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
-  AccountImportResponseSchema,
+  AccountImportBatchResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -22,12 +22,18 @@ export function listAccounts() {
   return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
 }
 
-export function importAccount(file: File) {
+export function importAccounts(files: File[]) {
   const formData = new FormData();
-  formData.append("auth_json", file);
-  return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
+  for (const file of files) {
+    formData.append("auth_json", file);
+  }
+  return post(`${ACCOUNTS_BASE_PATH}/import/batch`, AccountImportBatchResponseSchema, {
     body: formData,
   });
+}
+
+export function downloadAccountsAuthArchive() {
+  return getBlob(`${ACCOUNTS_BASE_PATH}/export`);
 }
 
 export function pauseAccount(accountId: string) {

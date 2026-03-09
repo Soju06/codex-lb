@@ -7,6 +7,7 @@ export const DashboardSettingsSchema = z.object({
   preferEarlierResetAccounts: z.boolean(),
   routingStrategy: RoutingStrategySchema,
   importWithoutOverwrite: z.boolean(),
+  httpProxyUrl: z.string().url().nullable(),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   apiKeyAuthEnabled: z.boolean(),
@@ -17,6 +18,7 @@ export const SettingsUpdateRequestSchema = z.object({
   preferEarlierResetAccounts: z.boolean(),
   routingStrategy: RoutingStrategySchema.optional(),
   importWithoutOverwrite: z.boolean().optional(),
+  httpProxyUrl: z.string().url().nullable().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
 });

@@ -9,6 +9,7 @@ import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
+import type { AccountImportBatchResponse } from "@/features/accounts/schemas";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -21,6 +22,7 @@ export function AccountsPage() {
   const {
     accountsQuery,
     importMutation,
+    exportAuthArchiveMutation,
     pauseMutation,
     resumeMutation,
     deleteMutation,
@@ -28,6 +30,7 @@ export function AccountsPage() {
   const oauth = useOauth();
 
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [lastImportResult, setLastImportResult] = useState<AccountImportBatchResponse | null>(null);
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
@@ -55,12 +58,14 @@ export function AccountsPage() {
 
   const mutationBusy =
     importMutation.isPending ||
+    exportAuthArchiveMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     deleteMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
+    getErrorMessageOrNull(exportAuthArchiveMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error);
@@ -86,7 +91,12 @@ export function AccountsPage() {
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
               onSelect={setSelectedAccountId}
-              onOpenImport={() => importDialog.show()}
+              onOpenImport={() => {
+                setLastImportResult(null);
+                importDialog.show();
+              }}
+              onDownloadAuthExport={() => void exportAuthArchiveMutation.mutateAsync()}
+              downloadBusy={exportAuthArchiveMutation.isPending}
               onOpenOauth={() => oauthDialog.show()}
             />
           </div>
@@ -107,9 +117,20 @@ export function AccountsPage() {
         open={importDialog.open}
         busy={importMutation.isPending}
         error={getErrorMessageOrNull(importMutation.error)}
-        onOpenChange={importDialog.onOpenChange}
-        onImport={async (file) => {
-          await importMutation.mutateAsync(file);
+        result={lastImportResult}
+        onOpenChange={(open) => {
+          if (!open) {
+            setLastImportResult(null);
+          }
+          importDialog.onOpenChange(open);
+        }}
+        onImport={async (files) => {
+          const result = await importMutation.mutateAsync(files);
+          setLastImportResult(result);
+          if (result.imported.length > 0) {
+            await accountsQuery.refetch();
+          }
+          return result;
         }}
       />
 

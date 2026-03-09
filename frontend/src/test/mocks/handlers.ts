@@ -125,7 +125,7 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
   const until = parseDateValue(url.searchParams.get("until"));
 
   return state.requestLogs.filter((entry) => {
-    if (accountIds.size > 0 && !accountIds.has(entry.accountId)) {
+    if (accountIds.size > 0 && (!entry.accountId || !accountIds.has(entry.accountId))) {
       return false;
     }
 
@@ -184,7 +184,7 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
 }
 
 function requestLogOptionsFromEntries(entries: RequestLogEntry[]) {
-  const accountIds = [...new Set(entries.map((entry) => entry.accountId))].sort();
+  const accountIds = [...new Set(entries.map((entry) => entry.accountId).filter((id): id is string => id != null))].sort();
 
   const modelMap = new Map<string, { model: string; reasoningEffort: string | null }>();
   for (const entry of entries) {

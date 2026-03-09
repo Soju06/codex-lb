@@ -508,6 +508,7 @@ class ProxyService:
                         account,
                         _upstream_error_from_openai(error),
                         error_code,
+                        upstream_status=exc.status_code,
                     )
                     if propagate_http_errors:
                         raise
@@ -775,9 +776,21 @@ class ProxyService:
             error.code if error else None,
             error.type if error else None,
         )
-        await self._handle_stream_error(account, _upstream_error_from_openai(error), code)
+        await self._handle_stream_error(
+            account,
+            _upstream_error_from_openai(error),
+            code,
+            upstream_status=exc.status_code,
+        )
 
-    async def _handle_stream_error(self, account: Account, error: UpstreamError, code: str) -> None:
+    async def _handle_stream_error(
+        self,
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        *,
+        upstream_status: int | None = None,
+    ) -> None:
         if code in {"rate_limit_exceeded", "usage_limit_reached"}:
             await self._load_balancer.mark_rate_limit(account, error)
             return
@@ -786,6 +799,16 @@ class ProxyService:
             return
         if code in PERMANENT_FAILURE_CODES:
             await self._load_balancer.mark_permanent_failure(account, code)
+            return
+        # Transient upstream errors (5xx) are not the account's fault;
+        # skip record_error to prevent backoff from locking out all
+        # accounts.  Fixes #140.
+        if upstream_status is not None and upstream_status >= 500:
+            logger.debug(
+                "Skipping record_error for transient upstream %d account_id=%s",
+                upstream_status,
+                account.id,
+            )
             return
         await self._load_balancer.record_error(account)
 

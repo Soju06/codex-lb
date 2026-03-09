@@ -224,23 +224,6 @@ class LoadBalancer:
             async with self._repo_factory() as repos:
                 await self._sync_state(repos.accounts, account, state)
 
-    async def record_transient_error(self, account: Account) -> None:
-        """Record a transient error with a capped error_count.
-
-        Increments error_count up to a cap of 3 (30s backoff) without
-        escalating to the long backoffs (300s) that lock out all
-        accounts during a widespread upstream outage.  Never lowers
-        an existing higher error_count from non-transient failures.
-        """
-        _TRANSIENT_ERROR_CAP = 3
-        async with self._runtime_lock:
-            state = self._state_for(account)
-            if state.error_count < _TRANSIENT_ERROR_CAP:
-                state.error_count += 1
-            state.last_error_at = time.time()
-            async with self._repo_factory() as repos:
-                await self._sync_state(repos.accounts, account, state)
-
     def _state_for(self, account: Account) -> AccountState:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
         return AccountState(

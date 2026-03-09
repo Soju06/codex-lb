@@ -942,11 +942,7 @@ class ProxyService:
         if code in PERMANENT_FAILURE_CODES:
             await self._load_balancer.mark_permanent_failure(account, code)
             return
-        # Any error that isn't rate-limit, quota, or permanent is
-        # transient.  Use a capped error count so the account gets a
-        # short backoff (30s) but never escalates to the long backoffs
-        # (300s) that lock out all accounts.  Fixes #140.
-        await self._load_balancer.record_transient_error(account)
+        await self._load_balancer.record_error(account)
 
 
 class _RetryableStreamError(Exception):

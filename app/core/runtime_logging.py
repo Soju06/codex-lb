@@ -18,11 +18,11 @@ def _utc_converter(seconds: float | None) -> time.struct_time:
 
 
 class UtcDefaultFormatter(DefaultFormatter):
-    converter: Callable[[float | None], time.struct_time] = _utc_converter
+    converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
 
 
 class UtcAccessFormatter(AccessFormatter):
-    converter: Callable[[float | None], time.struct_time] = _utc_converter
+    converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
 
 
 def build_log_config() -> dict[str, Any]:

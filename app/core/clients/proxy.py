@@ -776,7 +776,6 @@ async def stream_responses(
     )
 
     seen_terminal = False
-    started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -788,6 +787,7 @@ async def stream_responses(
             _as_image_fetch_session(client_session),
             settings.upstream_connect_timeout_seconds,
         )
+    started_at = time.monotonic()
     _maybe_log_upstream_request_start(
         kind="responses",
         url=url,

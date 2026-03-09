@@ -92,7 +92,8 @@ def select_account(
         paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
         rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
         quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
-        has_hard_block = bool(deactivated or paused or rate_limited or quota_exceeded)
+        in_cooldown = [s for s in all_states if s.cooldown_until and s.cooldown_until > current]
+        has_hard_block = bool(deactivated or paused or rate_limited or quota_exceeded or in_cooldown)
 
         # If ALL unavailable accounts are only in error backoff (no hard
         # blocks like pause/deactivated/rate-limit/quota), select the one

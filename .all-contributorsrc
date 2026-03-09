@@ -171,6 +171,17 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "aaiyer",
+      "name": "Anand Aiyer",
+      "avatar_url": "https://avatars.githubusercontent.com/u/426027?v=4",
+      "profile": "https://github.com/aaiyer",
+      "contributions": [
+        "bug",
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

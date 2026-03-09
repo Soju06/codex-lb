@@ -639,12 +639,25 @@ class ProxyService:
                         )
                         yield format_sse_event(event)
                         return
+            retries_exhausted_msg = "No available accounts after retries"
             event = response_failed_event(
                 "no_accounts",
-                "No available accounts after retries",
+                retries_exhausted_msg,
                 response_id=request_id,
             )
             yield format_sse_event(event)
+            await self._write_request_log(
+                account_id=None,
+                api_key=api_key,
+                request_id=request_id,
+                model=payload.model,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                status="error",
+                error_code="no_accounts",
+                error_message=retries_exhausted_msg,
+                reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                service_tier=payload.service_tier,
+            )
         finally:
             if not settled and api_key is not None and api_key_reservation is not None:
                 with anyio.CancelScope(shield=True):

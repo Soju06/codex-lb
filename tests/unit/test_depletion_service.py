@@ -198,3 +198,52 @@ def test_reset_ewma_state_clears_state() -> None:
         "acc1", "codex_other", "primary", [_entry(10.0, BASE_TIME)], now=BASE_TIME + timedelta(minutes=3)
     )
     assert result is None
+
+
+def test_repeated_calls_with_same_history_are_idempotent() -> None:
+    """R5-F1: Replaying the same history must not cause EWMA drift."""
+    reset_ewma_state()
+    history = [
+        _entry(10.0, BASE_TIME),
+        _entry(15.0, BASE_TIME + timedelta(minutes=1)),
+        _entry(20.0, BASE_TIME + timedelta(minutes=2)),
+    ]
+    now = BASE_TIME + timedelta(minutes=3)
+
+    # First call computes initial metrics
+    result1 = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert result1 is not None
+
+    # Repeated calls with same history must return identical risk (no drift)
+    result2 = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert result2 is not None
+    assert result2.risk == pytest.approx(result1.risk)
+    assert result2.rate_per_second == pytest.approx(result1.rate_per_second)
+
+    result3 = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert result3 is not None
+    assert result3.risk == pytest.approx(result1.risk)
+    assert result3.rate_per_second == pytest.approx(result1.rate_per_second)
+
+
+def test_new_entries_still_update_ewma_state() -> None:
+    """R5-F1: New entries beyond the last timestamp must still be processed."""
+    reset_ewma_state()
+    history_batch1 = [
+        _entry(10.0, BASE_TIME),
+        _entry(15.0, BASE_TIME + timedelta(minutes=1)),
+    ]
+    now1 = BASE_TIME + timedelta(minutes=2)
+    result1 = compute_depletion_for_account("acc1", "codex_other", "primary", history_batch1, now=now1)
+    assert result1 is not None
+
+    # Second call with additional newer entries
+    history_batch2 = history_batch1 + [
+        _entry(25.0, BASE_TIME + timedelta(minutes=2)),
+        _entry(35.0, BASE_TIME + timedelta(minutes=3)),
+    ]
+    now2 = BASE_TIME + timedelta(minutes=4)
+    result2 = compute_depletion_for_account("acc1", "codex_other", "primary", history_batch2, now=now2)
+    assert result2 is not None
+    # Rate should be higher now (usage accelerated from 5%/min to 10%/min)
+    assert result2.rate_per_second > result1.rate_per_second

@@ -62,4 +62,17 @@ describe("AdditionalQuotas", () => {
     const usedLabels = screen.getAllByText(/% used/);
     expect(usedLabels).toHaveLength(1);
   });
+
+
+  it("treats resetAt=0 as valid (shows Resetting... not empty)", () => {
+    render(
+      <AdditionalQuotas
+        items={[item({ primaryResetAt: 0 })]}
+      />,
+    );
+
+    // resetAt=0 is a valid epoch (past) — should show "Resetting..." not be hidden
+    expect(screen.getByText("Resetting...")).toBeInTheDocument();
+  });
+
 });

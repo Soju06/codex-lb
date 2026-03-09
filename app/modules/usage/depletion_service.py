@@ -66,7 +66,15 @@ def compute_depletion_for_account(
         _ewma_states[key] = ewma_update(None, entry.used_percent, entry.recorded_at.timestamp())
         return None
 
-    for entry in history:
+    # Filter out entries already processed by persistent EWMA state to prevent
+    # replay drift on repeated dashboard polls.
+    if state is not None:
+        cutoff = state.last_timestamp
+        new_entries = [e for e in history if e.recorded_at.timestamp() > cutoff]
+    else:
+        new_entries = history
+
+    for entry in new_entries:
         ts = entry.recorded_at.timestamp()
         state = ewma_update(state, entry.used_percent, ts)
 

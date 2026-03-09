@@ -86,4 +86,31 @@ describe("UsageDonuts", () => {
 
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
+
+
+  it("routes safeLine to secondary donut for weekly-only plans (primary empty)", () => {
+    render(
+      <UsageDonuts
+        primaryItems={[]}
+        secondaryItems={[
+          {
+            accountId: "acc-1",
+            label: "weekly@example.com",
+            value: 80,
+            remainingPercent: 40,
+            color: "#d9a441",
+          },
+        ]}
+        primaryTotal={0}
+        secondaryTotal={200}
+        primaryWindowMinutes={null}
+        secondaryWindowMinutes={10080}
+        safeLine={{ safePercent: 60, riskLevel: "warning" }}
+      />,
+    );
+
+    // SafeLine tick should appear on secondary donut, not primary
+    expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
+  });
+
 });

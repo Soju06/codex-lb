@@ -1,0 +1,2 @@
+After reset: rate=None
+PASS: reset edge case

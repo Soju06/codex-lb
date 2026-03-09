@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
-from app.db.models import UsageHistory
+from app.db.models import AdditionalUsageHistory, UsageHistory
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
 
@@ -171,3 +171,89 @@ class UsageRepository:
         result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None
+
+
+class AdditionalUsageRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add_entry(
+        self,
+        account_id: str,
+        limit_name: str,
+        metered_feature: str,
+        window: str,
+        used_percent: float,
+        reset_at: int | None = None,
+        window_minutes: int | None = None,
+        recorded_at: datetime | None = None,
+    ) -> None:
+        entry = AdditionalUsageHistory(
+            account_id=account_id,
+            limit_name=limit_name,
+            metered_feature=metered_feature,
+            window=window,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            window_minutes=window_minutes,
+            recorded_at=recorded_at or utcnow(),
+        )
+        self._session.add(entry)
+        await self._session.commit()
+
+    async def latest_by_account(
+        self,
+        limit_name: str,
+        window: str,
+    ) -> dict[str, AdditionalUsageHistory]:
+        """Returns the most recent entry per account for a given limit_name + window."""
+        subq = (
+            select(
+                AdditionalUsageHistory.id.label("usage_id"),
+                func.row_number()
+                .over(
+                    partition_by=AdditionalUsageHistory.account_id,
+                    order_by=(AdditionalUsageHistory.recorded_at.desc(), AdditionalUsageHistory.id.desc()),
+                )
+                .label("row_number"),
+            )
+            .where(
+                AdditionalUsageHistory.limit_name == limit_name,
+                AdditionalUsageHistory.window == window,
+            )
+            .subquery()
+        )
+        stmt = (
+            select(AdditionalUsageHistory)
+            .join(subq, AdditionalUsageHistory.id == subq.c.usage_id)
+            .where(subq.c.row_number == 1)
+        )
+        result = await self._session.execute(stmt)
+        return {entry.account_id: entry for entry in result.scalars().all()}
+
+    async def list_limit_names(self) -> list[str]:
+        """Returns distinct limit_names in the DB."""
+        stmt = select(AdditionalUsageHistory.limit_name).distinct()
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def history_since(
+        self,
+        account_id: str,
+        limit_name: str,
+        window: str,
+        since: datetime,
+    ) -> list[AdditionalUsageHistory]:
+        """Returns time-series entries for EWMA computation."""
+        stmt = (
+            select(AdditionalUsageHistory)
+            .where(
+                AdditionalUsageHistory.account_id == account_id,
+                AdditionalUsageHistory.limit_name == limit_name,
+                AdditionalUsageHistory.window == window,
+                AdditionalUsageHistory.recorded_at >= since,
+            )
+            .order_by(AdditionalUsageHistory.recorded_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())

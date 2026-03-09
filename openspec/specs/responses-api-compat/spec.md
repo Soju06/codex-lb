@@ -213,3 +213,7 @@ When a backend Codex Responses or compact request includes a non-empty `session_
 #### Scenario: Compact request reuses pinned Codex session account
 - **WHEN** `/backend-api/codex/responses/compact` is called with the same non-empty `session_id` header after routing preferences change
 - **THEN** the service reuses the previously pinned upstream account for that thread instead of reallocating to a different account
+
+#### Scenario: Compact retry uses refreshed provider account identity
+- **WHEN** a pinned backend Codex compact request gets a `401` from upstream, refreshes the selected account, and retries
+- **THEN** the retry forwards the refreshed account's `chatgpt-account-id` header instead of reusing the pre-refresh account header

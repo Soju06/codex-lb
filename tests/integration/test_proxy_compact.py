@@ -9,6 +9,7 @@ import pytest
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import openai_error
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -179,3 +180,38 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
         account = await session.get(Account, expected_account_id)
         assert account is not None
         assert account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monkeypatch):
+    email = "compact-retry@example.com"
+    raw_account_id = "acc_compact_retry_old"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    captured_account_ids: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        captured_account_ids.append(account_id)
+        if len(captured_account_ids) == 1:
+            raise ProxyResponseError(
+                401,
+                openai_error("invalid_api_key", "token expired"),
+            )
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    async def fake_ensure_fresh(self, account, force: bool = False):
+        if force:
+            account.chatgpt_account_id = "acc_compact_retry_new"
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.json()["output"] == []
+    assert captured_account_ids == ["acc_compact_retry_old", "acc_compact_retry_new"]

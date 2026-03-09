@@ -125,11 +125,11 @@ class ProxyService:
                 openai_error("no_accounts", selection.error_message or "No active accounts available"),
             )
         account = await self._ensure_fresh(account)
-        account_id = _header_account_id(account.chatgpt_account_id)
         request_service_tier = _service_tier_from_compact_payload(payload)
 
         async def _call_compact(target: Account) -> OpenAIResponsePayload:
             access_token = self._encryptor.decrypt(target.access_token_encrypted)
+            account_id = _header_account_id(target.chatgpt_account_id)
             return await core_compact_responses(payload, filtered, access_token, account_id)
 
         try:

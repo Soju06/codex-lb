@@ -94,7 +94,7 @@ def select_account(
         # traffic regardless, so they shouldn't prevent trying recoverable
         # accounts.  This prevents #140: all accounts locked out during
         # a widespread upstream outage.
-        if in_error_backoff and allow_backoff_fallback:
+        if len(in_error_backoff) > 1 and allow_backoff_fallback:
 
             def _backoff_expires_at(s: AccountState) -> float:
                 backoff = min(300, 30 * (2 ** (s.error_count - 3)))

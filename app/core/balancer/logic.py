@@ -88,19 +88,13 @@ def select_account(
         available.append(state)
 
     if not available:
-        deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
-        paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
-        rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
-        quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
-        in_cooldown = [s for s in all_states if s.cooldown_until and s.cooldown_until > current]
-        has_hard_block = bool(deactivated or paused or rate_limited or quota_exceeded or in_cooldown)
-
-        # If ALL unavailable accounts are only in error backoff (no hard
-        # blocks like pause/deactivated/rate-limit/quota), select the one
-        # closest to backoff expiry. This keeps the sticky-path opt-out
-        # via allow_backoff_fallback=False while preventing full lockout
-        # during widespread transient upstream failures.
-        if in_error_backoff and allow_backoff_fallback and not has_hard_block:
+        # If any account is in error backoff, try the one closest to
+        # backoff expiry — it may have recovered.  Hard-blocked accounts
+        # (paused/deactivated/rate-limited/quota-exceeded) can't serve
+        # traffic regardless, so they shouldn't prevent trying recoverable
+        # accounts.  This prevents #140: all accounts locked out during
+        # a widespread upstream outage.
+        if in_error_backoff and allow_backoff_fallback:
 
             def _backoff_expires_at(s: AccountState) -> float:
                 backoff = min(300, 30 * (2 ** (s.error_count - 3)))
@@ -108,6 +102,11 @@ def select_account(
 
             available.append(min(in_error_backoff, key=_backoff_expires_at))
         else:
+            deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
+            paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
+            rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
+            quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
+
             if paused and deactivated and not rate_limited and not quota_exceeded:
                 return SelectionResult(None, "All accounts are paused or require re-authentication")
             if paused and not rate_limited and not quota_exceeded:

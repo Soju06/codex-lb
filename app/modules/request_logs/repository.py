@@ -77,7 +77,7 @@ class RequestLogsRepository:
 
     async def add_log(
         self,
-        account_id: str,
+        account_id: str | None,
         request_id: str,
         model: str,
         input_tokens: int | None,

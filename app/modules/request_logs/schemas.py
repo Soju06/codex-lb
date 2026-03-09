@@ -9,7 +9,7 @@ from app.modules.shared.schemas import DashboardModel
 
 class RequestLogEntry(DashboardModel):
     requested_at: datetime
-    account_id: str
+    account_id: str | None = None
     api_key_name: str | None = None
     request_id: str
     model: str

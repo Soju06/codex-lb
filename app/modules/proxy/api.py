@@ -539,6 +539,7 @@ async def _transcribe_request(
             content_type=file.content_type,
             prompt=prompt,
             headers=request.headers,
+            api_key=api_key,
         )
     except ProxyResponseError as exc:
         error = _parse_error_envelope(exc.payload)

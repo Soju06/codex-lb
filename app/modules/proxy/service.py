@@ -108,6 +108,7 @@ class ProxyService:
         log_error_code: str | None = None
         log_error_message: str | None = None
         response: OpenAIResponsePayload | None = None
+        request_service_tier: str | None = None
 
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
@@ -205,6 +206,7 @@ class ProxyService:
             raise
         finally:
             usage = response.usage if response else None
+            reasoning_effort = payload.reasoning.effort if payload.reasoning else None
             await self._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
@@ -222,6 +224,8 @@ class ProxyService:
                 reasoning_tokens=(
                     usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
                 ),
+                reasoning_effort=reasoning_effort,
+                service_tier=request_service_tier if account_id_value else None,
             )
 
     async def transcribe(
@@ -232,6 +236,7 @@ class ProxyService:
         content_type: str | None,
         prompt: str | None,
         headers: Mapping[str, str],
+        api_key: ApiKeyData | None = None,
     ) -> dict[str, JsonValue]:
         filtered = filter_inbound_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
@@ -318,7 +323,7 @@ class ProxyService:
         finally:
             await self._write_request_log(
                 account_id=account_id_value,
-                api_key=None,
+                api_key=api_key,
                 request_id=request_id,
                 model=transcribe_model,
                 latency_ms=int((time.monotonic() - start) * 1000),
@@ -816,7 +821,7 @@ class ProxyService:
             try:
                 async with self._repo_factory() as repos:
                     await repos.request_logs.add_log(
-                        account_id=account_id or "",
+                        account_id=account_id,
                         api_key_id=api_key.id if api_key else None,
                         request_id=request_id,
                         model=model or "",

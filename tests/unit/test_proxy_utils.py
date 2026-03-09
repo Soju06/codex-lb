@@ -440,7 +440,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
         session=cast(proxy_module.aiohttp.ClientSession, session),
     )
 
-    assert result.output == []
+    assert result.model_extra == {"output": []}
     assert recorded["started_at"] == 456.0
 
 

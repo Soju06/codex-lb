@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import { DonutChart } from "@/components/donut-chart";
 
+const BASE_ITEMS = [
+  { label: "Account A", value: 120, color: "#7bb661" },
+  { label: "Account B", value: 80, color: "#d9a441" },
+];
+
 describe("DonutChart", () => {
   it("renders chart title, subtitle, legend, and SVG", () => {
     const { container } = render(
@@ -10,10 +15,7 @@ describe("DonutChart", () => {
         title="Primary Remaining"
         subtitle="Window 5h"
         total={200}
-        items={[
-          { label: "Account A", value: 120, color: "#7bb661" },
-          { label: "Account B", value: 80, color: "#d9a441" },
-        ]}
+        items={BASE_ITEMS}
       />,
     );
 
@@ -49,5 +51,74 @@ describe("DonutChart", () => {
     const svg = container.querySelector("svg");
     expect(svg).not.toBeNull();
     expect(screen.getByText("Remaining")).toBeInTheDocument();
+  });
+
+  it("renders without safeLine (no regression)", () => {
+    render(<DonutChart title="No Line" total={200} items={BASE_ITEMS} />);
+
+    expect(screen.queryByTestId("safe-line-tick")).toBeNull();
+  });
+
+  it("renders no tick mark when safeLine is null", () => {
+    render(<DonutChart title="Null Line" total={200} items={BASE_ITEMS} safeLine={null} />);
+
+    expect(screen.queryByTestId("safe-line-tick")).toBeNull();
+  });
+
+  it("renders no tick mark when riskLevel is safe", () => {
+    render(
+      <DonutChart
+        title="Safe"
+        total={200}
+        items={BASE_ITEMS}
+        safeLine={{ safePercent: 60, riskLevel: "safe" }}
+      />,
+    );
+
+    expect(screen.queryByTestId("safe-line-tick")).toBeNull();
+  });
+
+  it("renders a <line> tick mark for warning riskLevel", () => {
+    render(
+      <DonutChart
+        title="Warning"
+        total={200}
+        items={BASE_ITEMS}
+        safeLine={{ safePercent: 60, riskLevel: "warning" }}
+      />,
+    );
+
+    const tick = screen.getByTestId("safe-line-tick");
+    expect(tick).toBeInTheDocument();
+    expect(tick.tagName.toLowerCase()).toBe("line");
+    expect(tick.getAttribute("stroke")).toBe("#F59E0B");
+  });
+
+  it("renders tick mark with danger color", () => {
+    render(
+      <DonutChart
+        title="Danger"
+        total={200}
+        items={BASE_ITEMS}
+        safeLine={{ safePercent: 80, riskLevel: "danger" }}
+      />,
+    );
+
+    const tick = screen.getByTestId("safe-line-tick");
+    expect(tick.getAttribute("stroke")).toBe("#F97316");
+  });
+
+  it("renders tick mark with critical color", () => {
+    render(
+      <DonutChart
+        title="Critical"
+        total={200}
+        items={BASE_ITEMS}
+        safeLine={{ safePercent: 90, riskLevel: "critical" }}
+      />,
+    );
+
+    const tick = screen.getByTestId("safe-line-tick");
+    expect(tick.getAttribute("stroke")).toBe("#EF4444");
   });
 });

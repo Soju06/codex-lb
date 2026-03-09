@@ -134,6 +134,7 @@ export function DashboardPage() {
             secondaryTotal={overview?.summary.secondaryWindow?.capacityCredits ?? 0}
             primaryWindowMinutes={overview?.windows.primary.windowMinutes ?? null}
             secondaryWindowMinutes={overview?.windows.secondary?.windowMinutes ?? null}
+            safeLine={view.safeLine}
           />
 
           <AdditionalQuotas items={view.additionalQuotaItems} />

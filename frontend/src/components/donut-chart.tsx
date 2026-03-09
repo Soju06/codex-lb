@@ -15,9 +15,58 @@ export type DonutChartProps = {
   total: number;
   title: string;
   subtitle?: string;
+  safeLine?: { safePercent: number; riskLevel: "safe" | "warning" | "danger" | "critical" } | null;
 };
 
-export function DonutChart({ items, total, title, subtitle }: DonutChartProps) {
+const RISK_COLORS: Record<string, string> = {
+  safe: "transparent",
+  warning: "#F59E0B",
+  danger: "#F97316",
+  critical: "#EF4444",
+};
+
+function SafeLineTick({
+  cx,
+  cy,
+  safePercent,
+  riskLevel,
+  innerRadius,
+  outerRadius,
+}: {
+  cx: number;
+  cy: number;
+  safePercent: number;
+  riskLevel: "safe" | "warning" | "danger" | "critical";
+  innerRadius: number;
+  outerRadius: number;
+}) {
+  if (riskLevel === "safe") return null;
+
+  // Recharts uses polarToCartesian: cos(-RADIAN * angle), sin(-RADIAN * angle)
+  // startAngle=90 (12 o'clock), endAngle=-270 (clockwise full circle)
+  const angleDeg = 90 - (safePercent / 100) * 360;
+  const angleRad = -(angleDeg * Math.PI) / 180;
+
+  const x1 = cx + innerRadius * Math.cos(angleRad);
+  const y1 = cy + innerRadius * Math.sin(angleRad);
+  const x2 = cx + outerRadius * Math.cos(angleRad);
+  const y2 = cy + outerRadius * Math.sin(angleRad);
+
+  return (
+    <line
+      x1={x1}
+      y1={y1}
+      x2={x2}
+      y2={y2}
+      stroke={RISK_COLORS[riskLevel]}
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      data-testid="safe-line-tick"
+    />
+  );
+}
+
+export function DonutChart({ items, total, title, subtitle, safeLine }: DonutChartProps) {
   const isDark = useThemeStore((s) => s.theme === "dark");
   const consumedColor = isDark ? "#404040" : "#d3d3d3";
   const palette = buildDonutPalette(items.length, isDark);
@@ -75,6 +124,16 @@ export function DonutChart({ items, total, title, subtitle }: DonutChartProps) {
                 <Cell key={index} fill={entry.fill} />
               ))}
             </Pie>
+            {safeLine && safeLine.riskLevel !== "safe" ? (
+              <SafeLineTick
+                cx={71}
+                cy={71}
+                safePercent={safeLine.safePercent}
+                riskLevel={safeLine.riskLevel}
+                innerRadius={53}
+                outerRadius={71}
+              />
+            ) : null}
           </PieChart>
           <div className="absolute inset-[18px] flex items-center justify-center rounded-full text-center pointer-events-none">
             <div>

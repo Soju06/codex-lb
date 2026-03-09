@@ -217,3 +217,10 @@ When a backend Codex Responses or compact request includes a non-empty `session_
 #### Scenario: Compact retry uses refreshed provider account identity
 - **WHEN** a pinned backend Codex compact request gets a `401` from upstream, refreshes the selected account, and retries
 - **THEN** the retry forwards the refreshed account's `chatgpt-account-id` header instead of reusing the pre-refresh account header
+
+### Requirement: Compact upstream timeout is configurable and longer-lived
+The service MUST use a dedicated compact upstream timeout setting for `/responses/compact` requests. The default compact upstream timeout MUST be 300 seconds, and upstream read timeouts on compact MUST surface as `502` OpenAI-format errors with code `upstream_unavailable`.
+
+#### Scenario: Compact request exceeds read timeout
+- **WHEN** an upstream compact request does not produce a complete JSON response before the configured compact timeout elapses
+- **THEN** the service returns `502` with error code `upstream_unavailable`

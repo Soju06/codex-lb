@@ -1,0 +1,4 @@
+- [x] Add a dedicated compact upstream timeout setting with a higher default
+- [x] Update compact upstream calls to use the configurable timeout
+- [x] Add regression coverage for configured timeout wiring and read-timeout mapping
+- [x] Update the responses compatibility spec with the compact timeout contract

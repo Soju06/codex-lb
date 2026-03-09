@@ -1,0 +1,4 @@
+- [x] 1.1 Add spec coverage for long-running backend Codex compact requests
+- [x] 1.2 Add unit regression coverage for compact upstream timeout policy
+- [x] 1.3 Make compact upstream requests honor a dedicated `compact_upstream_read_timeout_seconds` setting instead of a hard-coded 60 second timeout
+- [x] 1.4 Run targeted verification for compact proxy client tests

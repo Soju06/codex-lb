@@ -18,3 +18,9 @@ def test_settings_rejects_invalid_firewall_trusted_proxy_cidr(monkeypatch):
     monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", "not-a-cidr")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_settings_defaults_compact_upstream_read_timeout(monkeypatch):
+    monkeypatch.delenv("CODEX_LB_COMPACT_UPSTREAM_READ_TIMEOUT_SECONDS", raising=False)
+    settings = Settings()
+    assert settings.compact_upstream_read_timeout_seconds == 120.0

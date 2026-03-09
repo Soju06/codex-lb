@@ -703,9 +703,9 @@ async def compact_responses(
         accept="application/json",
     )
     timeout = aiohttp.ClientTimeout(
-        total=60,
+        total=None,
         sock_connect=settings.upstream_connect_timeout_seconds,
-        sock_read=60,
+        sock_read=settings.compact_upstream_read_timeout_seconds,
     )
 
     client_session = session or get_http_client().session

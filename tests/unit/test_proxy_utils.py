@@ -201,6 +201,39 @@ class _TimeoutTranscribeSession:
         raise asyncio.TimeoutError
 
 
+class _CompactResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.status = 200
+        self.reason = "OK"
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self, *, content_type=None):
+        return self._payload
+
+
+class _CompactSession:
+    def __init__(self, response: _CompactResponse) -> None:
+        self._response = response
+        self.calls: list[dict[str, object]] = []
+
+    def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return self._response
+
+
 @pytest.mark.asyncio
 async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big():
     large_data = "A" * (200 * 1024)
@@ -341,3 +374,35 @@ async def test_transcribe_audio_maps_body_read_transport_errors_to_upstream_unav
     assert exc.status_code == 502
     assert exc.payload["error"]["code"] == "upstream_unavailable"
     assert exc.payload["error"]["message"] == expected_message
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_uses_dedicated_socket_read_timeout(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://upstream.example/backend-api"
+        upstream_connect_timeout_seconds = 12.0
+        stream_idle_timeout_seconds = 321.0
+        compact_upstream_read_timeout_seconds = 95.0
+        image_inline_fetch_enabled = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    )
+    session = _CompactSession(_CompactResponse({"output": []}))
+
+    result = await proxy_module.compact_responses(
+        payload,
+        headers={"X-Request-Id": "req_compact_timeout_budget"},
+        access_token="token-1",
+        account_id="acc_compact_1",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    assert result.model_dump(mode="json", exclude_none=True) == {"output": []}
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total is None
+    assert timeout.sock_connect == 12.0
+    assert timeout.sock_read == 95.0

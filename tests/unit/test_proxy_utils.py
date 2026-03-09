@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import cast
+from typing import Protocol, cast
 
 import pytest
 from starlette.requests import Request
@@ -220,8 +220,14 @@ class _JsonCompactResponse:
 
 
 class _CompactSession:
-    def __init__(self, response: _JsonCompactResponse) -> None:
+    class _CompactResponseLike(Protocol):
+        async def __aenter__(self): ...
+        async def __aexit__(self, exc_type, exc, tb): ...
+        async def json(self, *, content_type=None): ...
+
+    def __init__(self, response: _CompactResponseLike) -> None:
         self._response = response
+        self.calls: list[dict[str, object]] = []
 
     def post(
         self,
@@ -231,6 +237,7 @@ class _CompactSession:
         headers: dict[str, str] | None = None,
         timeout=None,
     ):
+        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         return self._response
 
 
@@ -401,6 +408,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
+        upstream_compact_timeout_seconds = 60.0
         image_inline_fetch_enabled = True
         log_upstream_request_payload = False
 
@@ -413,8 +421,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
         return payload_dict
 
     def fake_monotonic():
-        assert inline_ran
-        return 456.0
+        return 456.0 if inline_ran else 111.0
 
     def fake_complete(**kwargs):
         recorded["started_at"] = kwargs["started_at"]
@@ -440,6 +447,55 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
 
     assert result.model_extra == {"output": []}
     assert recorded["started_at"] == 456.0
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        upstream_compact_timeout_seconds = 123.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+
+    class _TimeoutCompactResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, *, content_type=None):
+            raise proxy_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _CompactSession(_TimeoutCompactResponse())
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total == 123.0
+    assert timeout.sock_connect == 2.0
+    assert timeout.sock_read == 123.0
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert exc_info.value.payload["error"]["message"] == "Timeout on reading data from socket"
 
 
 def test_logged_error_json_response_emits_proxy_error_log(caplog):

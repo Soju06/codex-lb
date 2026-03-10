@@ -186,6 +186,56 @@ async def test_v1_responses_forwards_include_logprobs(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_preserves_prompt_cache_controls(async_client, monkeypatch):
+    await _import_account(async_client, "acc_prompt_cache_v1", "prompt-cache-v1@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_prompt_cache_v1")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "input": "cache me",
+        "prompt_cache_key": "thread_123",
+        "prompt_cache_retention": "4h",
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"]["prompt_cache_key"] == "thread_123"
+    assert "prompt_cache_retention" not in seen["payload"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_normalizes_prompt_cache_aliases(async_client, monkeypatch):
+    await _import_account(async_client, "acc_prompt_cache_alias", "prompt-cache-alias@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_prompt_cache_alias")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "input": "cache me",
+        "promptCacheKey": "thread_alias",
+        "promptCacheRetention": "12h",
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"]["prompt_cache_key"] == "thread_alias"
+    assert "prompt_cache_retention" not in seen["payload"]
+    assert "promptCacheKey" not in seen["payload"]
+    assert "promptCacheRetention" not in seen["payload"]
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_forwards_service_tier(async_client, monkeypatch):
     await _import_account(async_client, "acc_backend_service_tier", "backend-service-tier@example.com")
 
@@ -558,3 +608,27 @@ async def test_v1_chat_completions_forwards_service_tier(async_client, monkeypat
     resp = await async_client.post("/v1/chat/completions", json=payload)
     assert resp.status_code == 200
     assert seen["payload"].service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_preserves_prompt_cache_controls(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_prompt_cache", "chat-prompt-cache@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_chat_prompt_cache")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Cache this chat."}],
+        "prompt_cache_key": "chat_thread_123",
+        "prompt_cache_retention": "8h",
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"]["prompt_cache_key"] == "chat_thread_123"
+    assert "prompt_cache_retention" not in seen["payload"]

@@ -72,6 +72,7 @@ class ProxyService:
         *,
         codex_session_affinity: bool = False,
         propagate_http_errors: bool = False,
+        openai_cache_affinity: bool = False,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
@@ -84,6 +85,7 @@ class ProxyService:
             filtered,
             codex_session_affinity=codex_session_affinity,
             propagate_http_errors=propagate_http_errors,
+            openai_cache_affinity=openai_cache_affinity,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
@@ -95,6 +97,7 @@ class ProxyService:
         headers: Mapping[str, str],
         *,
         codex_session_affinity: bool = False,
+        openai_cache_affinity: bool = False,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> OpenAIResponsePayload:
@@ -118,6 +121,7 @@ class ProxyService:
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
             sticky_threads_enabled=sticky_threads_enabled,
         )
         try:
@@ -493,6 +497,7 @@ class ProxyService:
         *,
         codex_session_affinity: bool,
         propagate_http_errors: bool,
+        openai_cache_affinity: bool,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
@@ -507,6 +512,7 @@ class ProxyService:
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
             sticky_threads_enabled=sticky_threads_enabled,
         )
         max_attempts = 3
@@ -1011,11 +1017,7 @@ def _maybe_log_proxy_request_shape(
         return
 
     request_id = get_request_id()
-    prompt_cache_key = getattr(payload, "prompt_cache_key", None)
-    if prompt_cache_key is None and payload.model_extra:
-        extra_value = payload.model_extra.get("prompt_cache_key")
-        if isinstance(extra_value, str):
-            prompt_cache_key = extra_value
+    prompt_cache_key = _prompt_cache_key_from_request_model(payload)
     prompt_cache_key_hash = _hash_identifier(prompt_cache_key) if isinstance(prompt_cache_key, str) else None
     prompt_cache_key_raw = (
         _truncate_identifier(prompt_cache_key)
@@ -1115,8 +1117,23 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
     return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})
 
 
+def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    typed_value = getattr(payload, "prompt_cache_key", None)
+    if isinstance(typed_value, str) and typed_value:
+        return typed_value
+    if not payload.model_extra:
+        return None
+    extra_value = payload.model_extra.get("prompt_cache_key")
+    if isinstance(extra_value, str) and extra_value:
+        return extra_value
+    camel_value = payload.model_extra.get("promptCacheKey")
+    if isinstance(camel_value, str) and camel_value:
+        return camel_value
+    return None
+
+
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
-    value = payload.prompt_cache_key
+    value = _prompt_cache_key_from_request_model(payload)
     if not value:
         return None
     stripped = value.strip()
@@ -1137,21 +1154,20 @@ def _sticky_key_for_responses_request(
     headers: Mapping[str, str],
     *,
     codex_session_affinity: bool,
+    openai_cache_affinity: bool,
     sticky_threads_enabled: bool,
 ) -> str | None:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
             return session_key
-    if sticky_threads_enabled:
+    if openai_cache_affinity or sticky_threads_enabled:
         return _sticky_key_from_payload(payload)
     return None
 
 
 def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
-    if not payload.model_extra:
-        return None
-    value = payload.model_extra.get("prompt_cache_key")
+    value = _prompt_cache_key_from_request_model(payload)
     if not isinstance(value, str):
         return None
     stripped = value.strip()
@@ -1163,12 +1179,15 @@ def _sticky_key_for_compact_request(
     headers: Mapping[str, str],
     *,
     codex_session_affinity: bool,
+    openai_cache_affinity: bool,
     sticky_threads_enabled: bool,
 ) -> tuple[str | None, bool]:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
             return session_key, False
+    if openai_cache_affinity:
+        return _sticky_key_from_compact_payload(payload), False
     if sticky_threads_enabled:
         return _sticky_key_from_compact_payload(payload), True
     return None, False

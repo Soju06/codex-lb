@@ -90,6 +90,23 @@ def test_compact_known_unsupported_upstream_fields_are_stripped():
     assert "temperature" not in dumped
 
 
+def test_openai_prompt_cache_aliases_are_normalized():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "promptCacheKey": "thread_123",
+        "promptCacheRetention": "4h",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["prompt_cache_key"] == "thread_123"
+    assert "prompt_cache_retention" not in dumped
+    assert "promptCacheKey" not in dumped
+    assert "promptCacheRetention" not in dumped
+
+
 def test_openai_compatible_reasoning_aliases_are_normalized():
     payload = {
         "model": "gpt-5.1",

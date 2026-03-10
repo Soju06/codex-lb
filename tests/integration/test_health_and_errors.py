@@ -39,6 +39,7 @@ async def test_spa_route_path_returns_index_html(async_client, tmp_path):
     index = _STATIC_DIR / "index.html"
     created = not index.exists()
     if created:
+        index.parent.mkdir(parents=True, exist_ok=True)
         index.write_text("<!doctype html><html></html>")
     try:
         response = await async_client.get("/dashboard/settings")

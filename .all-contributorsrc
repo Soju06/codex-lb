@@ -182,6 +182,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "defin85",
+      "name": "defin85",
+      "avatar_url": "https://avatars.githubusercontent.com/u/31535407?v=4",
+      "profile": "https://github.com/defin85",
+      "contributions": [
+        "code",
+        "bug"
+      ]
     }
   ],
   "contributorsPerLine": 7,

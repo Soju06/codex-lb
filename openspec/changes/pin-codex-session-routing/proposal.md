@@ -3,6 +3,7 @@
 Codex CLI sends a stable thread `session_id` header on backend Responses and compact requests. `codex-lb` currently ignores that header for routing unless the dashboard-level sticky thread setting is enabled, which allows a compact request to hop to a different upstream account than the one already serving the thread.
 
 That breaks Codex remote compaction semantics for multi-account setups because thread-scoped history can contain upstream-owned encrypted items that must stay on the same account path. The compact retry path also has to keep the provider account header aligned with the refreshed account record, otherwise a correctly pinned thread can still fail upstream after token refresh.
+That breaks Codex remote compaction semantics for multi-account setups because thread-scoped history can contain upstream-owned encrypted items that must stay on the same account path. The compact retry path also has to keep the provider account header aligned with the refreshed account record, otherwise a correctly pinned thread can still fail upstream after token refresh.
 
 ## What Changes
 

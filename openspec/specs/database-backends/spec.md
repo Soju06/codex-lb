@@ -59,3 +59,10 @@ CI MUST keep SQLite-backed tests as the default path and MUST run an additional 
 #### Scenario: CI workflow execution
 - **WHEN** CI runs on push or pull request
 - **THEN** at least one pytest job runs with SQLite and another pytest job runs with PostgreSQL
+
+### Requirement: ORM enums persist schema string values
+ORM enum columns backed by named PostgreSQL enums MUST persist the lowercase string values defined by the schema and migrations, not Python enum member names.
+
+#### Scenario: SQLAlchemy binds account and API key enums
+- **WHEN** the ORM metadata is built for `Account.status`, `ApiKeyLimit.limit_type`, and `ApiKeyLimit.limit_window`
+- **THEN** each SQLAlchemy enum type exposes the same lowercase string values used by migrations and persisted rows

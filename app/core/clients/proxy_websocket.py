@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.parse import urlparse, urlunparse
 
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, InvalidStatus
+from websockets.typing import Origin
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
@@ -134,7 +135,7 @@ async def connect_responses_websocket(
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = _responses_websocket_url(upstream_base)
     upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
-    origin = _pop_header_case_insensitive(upstream_headers, "origin")
+    origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
     _ = session
 

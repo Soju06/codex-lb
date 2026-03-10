@@ -384,7 +384,7 @@ class ProxyService:
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        routing_strategy = getattr(settings, "routing_strategy", "usage_weighted")
+        routing_strategy = _routing_strategy(settings)
         sticky_key = _sticky_key_from_session_header(headers) if codex_session_affinity else None
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
@@ -432,9 +432,7 @@ class ProxyService:
                         except AppError as exc:
                             async with client_send_lock:
                                 await websocket.send_text(
-                                    _serialize_websocket_error_event(
-                                        _app_error_to_websocket_event(exc)
-                                    )
+                                    _serialize_websocket_error_event(_app_error_to_websocket_event(exc))
                                 )
                             continue
 
@@ -520,7 +518,7 @@ class ProxyService:
         *,
         sticky_key: str | None,
         prefer_earlier_reset: bool,
-        routing_strategy: str,
+        routing_strategy: RoutingStrategy,
         model: str | None,
         request_state: _WebSocketRequestState,
         client_send_lock: anyio.Lock,
@@ -564,9 +562,7 @@ class ProxyService:
             await self._handle_websocket_connect_error(account, exc)
             async with client_send_lock:
                 await websocket.send_text(
-                    _serialize_websocket_error_event(
-                        _wrapped_websocket_error_event(exc.status_code, exc.payload)
-                    )
+                    _serialize_websocket_error_event(_wrapped_websocket_error_event(exc.status_code, exc.payload))
                 )
             return None, None
         except RefreshError as exc:
@@ -739,39 +735,27 @@ class ProxyService:
         )
 
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
-        cached_input_tokens = (
-            usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
-        )
+        cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
         reasoning_tokens = (
             usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
         )
-        with anyio.CancelScope(shield=True):
-            try:
-                async with self._repo_factory() as repos:
-                    await repos.request_logs.add_log(
-                        account_id=account_id_value,
-                        api_key_id=api_key.id if api_key else None,
-                        request_id=response_id,
-                        model=request_state.model,
-                        input_tokens=usage.input_tokens if usage else None,
-                        output_tokens=usage.output_tokens if usage else None,
-                        cached_input_tokens=cached_input_tokens,
-                        reasoning_tokens=reasoning_tokens,
-                        reasoning_effort=request_state.reasoning_effort,
-                        transport=_REQUEST_TRANSPORT_WEBSOCKET,
-                        service_tier=response_service_tier,
-                        latency_ms=latency_ms,
-                        status=status,
-                        error_code=error_code,
-                        error_message=error_message,
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to persist websocket request log account_id=%s request_id=%s",
-                    account_id_value,
-                    response_id,
-                    exc_info=True,
-                )
+        await self._write_request_log(
+            account_id=account_id_value,
+            api_key=api_key,
+            request_id=response_id,
+            model=request_state.model or "",
+            latency_ms=latency_ms,
+            status=status,
+            error_code=error_code,
+            error_message=error_message,
+            input_tokens=usage.input_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
+            cached_input_tokens=cached_input_tokens,
+            reasoning_tokens=reasoning_tokens,
+            reasoning_effort=request_state.reasoning_effort,
+            transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            service_tier=response_service_tier,
+        )
 
     async def _fail_pending_websocket_requests(
         self,
@@ -791,32 +775,19 @@ class ProxyService:
             if account_id_value is None:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
-            with anyio.CancelScope(shield=True):
-                try:
-                    async with self._repo_factory() as repos:
-                        await repos.request_logs.add_log(
-                            account_id=account_id_value,
-                            api_key_id=None,
-                            request_id=request_state.request_id,
-                            model=request_state.model,
-                            input_tokens=None,
-                            output_tokens=None,
-                            cached_input_tokens=None,
-                            reasoning_tokens=None,
-                            reasoning_effort=request_state.reasoning_effort,
-                            transport=_REQUEST_TRANSPORT_WEBSOCKET,
-                            service_tier=request_state.service_tier,
-                            latency_ms=latency_ms,
-                            status="error",
-                            error_code=error_code,
-                            error_message=error_message,
-                        )
-                except Exception:
-                    logger.warning(
-                        "Failed to persist websocket failure log request_id=%s",
-                        request_state.request_id,
-                        exc_info=True,
-                    )
+            await self._write_request_log(
+                account_id=account_id_value,
+                api_key=None,
+                request_id=request_state.request_id,
+                model=request_state.model or "",
+                latency_ms=latency_ms,
+                status="error",
+                error_code=error_code,
+                error_message=error_message,
+                reasoning_effort=request_state.reasoning_effort,
+                transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                service_tier=request_state.service_tier,
+            )
 
     async def _reserve_websocket_api_key_usage(
         self,
@@ -1739,11 +1710,12 @@ def _wrapped_websocket_error_event(
     status_code: int,
     payload: OpenAIErrorEnvelope,
 ) -> dict[str, JsonValue]:
-    return {
+    event: dict[str, JsonValue] = {
         "type": "error",
         "status": status_code,
-        "error": payload["error"],
+        "error": dict(payload["error"]),
     }
+    return event
 
 
 def _serialize_websocket_error_event(payload: dict[str, JsonValue]) -> str:

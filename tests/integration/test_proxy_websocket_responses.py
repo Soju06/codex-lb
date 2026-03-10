@@ -3,15 +3,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
-from app.core.auth import generate_unique_account_id
-from app.db.models import RequestLog
-from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -77,20 +74,10 @@ class _FakeUpstreamWebSocket:
         self.closed = True
 
 
-@pytest.mark.asyncio
-async def test_backend_responses_websocket_proxies_upstream_and_persists_log(
-    app_instance,
-    async_client,
-    monkeypatch,
-):
+def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
     email = "ws-proxy@example.com"
     raw_account_id = "acc_ws_proxy"
     auth_json = _make_auth_json(raw_account_id, email)
-    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
-    response = await async_client.post("/api/accounts/import", files=files)
-    assert response.status_code == 200
-
-    expected_account_id = generate_unique_account_id(raw_account_id, email)
     upstream_messages = [
         _FakeUpstreamMessage(
             "text",
@@ -140,6 +127,12 @@ async def test_backend_responses_websocket_proxies_upstream_and_persists_log(
     }
 
     with TestClient(app_instance) as client:
+        response = client.post(
+            "/api/accounts/import",
+            files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+        )
+        assert response.status_code == 200
+
         with client.websocket_connect(
             "/backend-api/codex/responses",
             headers={
@@ -152,36 +145,30 @@ async def test_backend_responses_websocket_proxies_upstream_and_persists_log(
             websocket.send_text(json.dumps(request_payload))
             first = json.loads(websocket.receive_text())
             second = json.loads(websocket.receive_text())
+        logs_response = client.get("/api/request-logs")
+        assert logs_response.status_code == 200
+        logs_payload = logs_response.json()
 
     assert first["type"] == "response.created"
     assert second["type"] == "response.completed"
     assert seen["access_token"] == "access-token"
     assert seen["account_id"] == raw_account_id
-    assert isinstance(seen["headers"], dict)
-    assert seen["headers"]["session_id"] == "thread-ws-1"
-    assert seen["headers"]["openai-beta"] == "responses_websockets=2026-02-06"
-    assert "authorization" not in {key.lower() for key in seen["headers"].keys()}
+    seen_headers = cast(dict[str, str], seen["headers"])
+    assert seen_headers["session_id"] == "thread-ws-1"
+    assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
+    assert "authorization" not in {key.lower() for key in seen_headers}
     assert fake_upstream.sent_text == [json.dumps(request_payload, separators=(",", ":"))]
-
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(RequestLog)
-            .where(RequestLog.account_id == expected_account_id)
-            .order_by(RequestLog.requested_at.desc())
-        )
-        log = result.scalars().first()
-        assert log is not None
-        assert log.request_id == "resp_ws_1"
-        assert log.model == "gpt-5.4"
-        assert log.service_tier == "fast"
-        assert log.transport == "websocket"
-        assert log.status == "success"
-        assert log.input_tokens == 3
-        assert log.output_tokens == 5
+    assert logs_payload["requests"]
+    log = logs_payload["requests"][0]
+    assert log["requestId"] == "resp_ws_1"
+    assert log["model"] == "gpt-5.4"
+    assert log["serviceTier"] == "fast"
+    assert log["transport"] == "websocket"
+    assert log["status"] == "ok"
+    assert log["tokens"] == 8
 
 
-@pytest.mark.asyncio
-async def test_backend_responses_websocket_emits_no_accounts_error(app_instance):
+def test_backend_responses_websocket_emits_no_accounts_error(app_instance):
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from websockets.datastructures import Headers
@@ -73,12 +74,12 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
 
     assert fake_connection.sent == ["hello"]
     assert seen["url"] == "wss://chatgpt.com/backend-api/codex/responses"
-    assert isinstance(seen["kwargs"], dict)
-    assert seen["kwargs"]["origin"] == "https://chatgpt.com"
-    assert seen["kwargs"]["user_agent_header"] == "Codex CLI Test"
-    assert seen["kwargs"]["open_timeout"] == 7.0
-    assert seen["kwargs"]["max_size"] == 4321
-    additional_headers = seen["kwargs"]["additional_headers"]
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert kwargs["origin"] == "https://chatgpt.com"
+    assert kwargs["user_agent_header"] == "Codex CLI Test"
+    assert kwargs["open_timeout"] == 7.0
+    assert kwargs["max_size"] == 4321
+    additional_headers = cast(dict[str, str], kwargs["additional_headers"])
     assert additional_headers["Authorization"] == "Bearer access-token"
     assert additional_headers["chatgpt-account-id"] == "account-123"
     assert additional_headers["openai-beta"] == "responses_websockets=2026-02-06"

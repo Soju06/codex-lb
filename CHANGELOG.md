@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/Soju06/codex-lb/compare/v1.3.1...v1.3.2) (2026-03-10)
+
+
+### Bug Fixes
+
+* **db:** add migration to normalize postgresql enum value casing ([#170](https://github.com/Soju06/codex-lb/issues/170)) ([e597fd6](https://github.com/Soju06/codex-lb/commit/e597fd6af983481acfdbe489bbd73bb39a2d6b7c))
+
 ## [1.3.1](https://github.com/Soju06/codex-lb/compare/v1.3.0...v1.3.1) (2026-03-10)
 
 

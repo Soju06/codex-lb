@@ -41,6 +41,7 @@ describe("RecentRequestsTable", () => {
             requestId: "req-1",
             model: "gpt-5.1",
             serviceTier: "priority",
+            transport: "websocket",
             status: "rate_limit",
             errorCode: "rate_limit_exceeded",
             errorMessage: longError,
@@ -57,6 +58,7 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("Primary Account")).toBeInTheDocument();
     expect(screen.getByText("Key Alpha")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.1 (high, priority)")).toBeInTheDocument();
+    expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
 
     const viewButton = screen.getByRole("button", { name: "View" });
@@ -70,5 +72,35 @@ describe("RecentRequestsTable", () => {
   it("renders empty state", () => {
     render(<RecentRequestsTable {...PAGINATION_PROPS} total={0} accounts={[]} requests={[]} />);
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
+  });
+
+  it("renders placeholder transport for legacy rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-legacy",
+            apiKeyName: null,
+            requestId: "req-legacy",
+            model: "gpt-5.1",
+            serviceTier: null,
+            transport: null,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 1,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByText("--")[0]).toBeInTheDocument();
   });
 });

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 from fastapi import FastAPI, Request
@@ -26,8 +26,9 @@ def add_api_firewall_middleware(app: FastAPI) -> None:
         if not _is_protected_api_path(path):
             return await call_next(request)
 
-        client_ip = _resolve_client_ip(
-            request,
+        client_ip = resolve_connection_client_ip(
+            request.headers,
+            request.client.host if request.client else None,
             trust_proxy_headers=settings.firewall_trust_proxy_headers,
             trusted_proxy_networks=trusted_proxy_networks,
         )
@@ -56,9 +57,23 @@ def _resolve_client_ip(
     trust_proxy_headers: bool,
     trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
 ) -> str | None:
-    socket_ip = request.client.host if request.client else None
+    return resolve_connection_client_ip(
+        request.headers,
+        request.client.host if request.client else None,
+        trust_proxy_headers=trust_proxy_headers,
+        trusted_proxy_networks=trusted_proxy_networks,
+    )
+
+
+def resolve_connection_client_ip(
+    headers: Mapping[str, str],
+    socket_ip: str | None,
+    *,
+    trust_proxy_headers: bool,
+    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
+) -> str | None:
     if trust_proxy_headers and socket_ip and _is_trusted_proxy_source(socket_ip, trusted_proxy_networks):
-        forwarded_for = request.headers.get("x-forwarded-for")
+        forwarded_for = headers.get("x-forwarded-for")
         if forwarded_for:
             resolved_from_chain = _resolve_client_ip_from_xff_chain(
                 socket_ip,

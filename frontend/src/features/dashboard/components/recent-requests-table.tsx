@@ -37,6 +37,16 @@ const STATUS_CLASS_MAP: Record<string, string> = {
   error: "bg-zinc-500/15 text-zinc-700 border-zinc-500/20 hover:bg-zinc-500/20 dark:text-zinc-400",
 };
 
+const TRANSPORT_LABELS: Record<string, string> = {
+  http: "HTTP",
+  websocket: "WS",
+};
+
+const TRANSPORT_CLASS_MAP: Record<string, string> = {
+  http: "bg-slate-500/10 text-slate-700 border-slate-500/20 hover:bg-slate-500/15 dark:text-slate-300",
+  websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
+};
+
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
@@ -82,13 +92,14 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="min-w-[960px] table-fixed">
+        <Table className="min-w-[1040px] table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
+              <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
@@ -120,6 +131,18 @@ export function RecentRequestsTable({
                     <span className="font-mono text-xs">
                       {formatModelLabel(request.model, request.reasoningEffort, request.serviceTier)}
                     </span>
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {request.transport ? (
+                      <Badge
+                        variant="outline"
+                        className={TRANSPORT_CLASS_MAP[request.transport] ?? TRANSPORT_CLASS_MAP.http}
+                      >
+                        {TRANSPORT_LABELS[request.transport] ?? request.transport}
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">--</span>
+                    )}
                   </TableCell>
                   <TableCell className="align-top">
                     <Badge

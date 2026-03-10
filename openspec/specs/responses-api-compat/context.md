@@ -63,3 +63,4 @@ Non-streaming request/response:
 - Pre-release: run unit/integration tests and optional OpenAI client compatibility tests.
 - Smoke tests: stream a response, validate non-stream responses, and verify error envelopes.
 - Post-deploy: monitor `no_accounts`, `stream_incomplete`, and `upstream_unavailable`.
+- Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`

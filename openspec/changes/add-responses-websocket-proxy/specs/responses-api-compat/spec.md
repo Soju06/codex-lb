@@ -1,0 +1,12 @@
+## ADDED Requirements
+
+### Requirement: Support Responses websocket proxy transport
+The service MUST accept WebSocket connections on `/backend-api/codex/responses` and `/v1/responses` and proxy Responses JSON events to the upstream ChatGPT Codex websocket endpoint for the selected account. The service MUST preserve request order for a single websocket connection, MUST continue to honor API key auth and request-limit enforcement, and MUST record request logs from terminal websocket response events.
+
+#### Scenario: Backend Codex websocket request is proxied upstream
+- **WHEN** a client connects to `/backend-api/codex/responses` over WebSocket and sends a valid `response.create` request
+- **THEN** the service selects an upstream account, opens the upstream websocket for that account, forwards the request, and relays upstream response events back to the client
+
+#### Scenario: No accounts available for websocket request
+- **WHEN** a client sends a valid websocket `response.create` request and no active accounts are available
+- **THEN** the service emits a websocket error event with a stable 5xx error payload and does not forward the request upstream

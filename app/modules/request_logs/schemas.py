@@ -13,6 +13,7 @@ class RequestLogEntry(DashboardModel):
     api_key_name: str | None = None
     request_id: str
     model: str
+    transport: str | None = None
     service_tier: str | None = None
     status: str
     error_code: str | None = None

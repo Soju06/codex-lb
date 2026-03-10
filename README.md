@@ -85,7 +85,12 @@ model_provider = "codex-lb"
 name = "OpenAI"  # required — enables remote /responses/compact
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
+supports_websockets = true
 ```
+
+If upstream websocket handshakes must use environment proxies in your deployment, set
+`CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=true`. By default websocket handshakes connect directly to
+match Codex CLI's native transport.
 
 **With [API key auth](#api-key-authentication):**
 
@@ -95,12 +100,29 @@ name = "OpenAI"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
+supports_websockets = true
 ```
 
 ```bash
 export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
 codex
 ```
+
+**Verify WebSocket transport**
+
+Use a one-off debug run:
+
+```bash
+RUST_LOG=debug codex exec "Reply with OK only."
+```
+
+Healthy websocket signals:
+
+- CLI logs contain `connecting to websocket` and `successfully connected to websocket`
+- `codex-lb` logs show `WebSocket /backend-api/codex/responses`
+- `codex-lb` logs do **not** show fallback `POST /backend-api/codex/responses` for the same run
+
+If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket upgrades.
 
 **Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
 old sessions won't appear until you re-tag them:

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from fastapi import Depends, Request
+from fastapi import Depends, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
@@ -163,10 +163,21 @@ def get_dashboard_auth_context(
 
 
 def get_proxy_context(request: Request) -> ProxyContext:
-    service = getattr(request.app.state, "proxy_service", None)
+    service = get_proxy_service_for_app(request.app)
+    return ProxyContext(service=service)
+
+
+def get_proxy_service_for_app(app: object) -> ProxyService:
+    state = getattr(app, "state", None)
+    service = getattr(state, "proxy_service", None)
     if not isinstance(service, ProxyService):
         service = ProxyService(repo_factory=_proxy_repo_context)
-        request.app.state.proxy_service = service
+        setattr(state, "proxy_service", service)
+    return service
+
+
+def get_proxy_websocket_context(websocket: WebSocket) -> ProxyContext:
+    service = get_proxy_service_for_app(websocket.app)
     return ProxyContext(service=service)
 
 

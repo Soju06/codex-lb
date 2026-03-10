@@ -3,18 +3,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from typing import Protocol, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
+from app.core.crypto import TokenEncryptor
+from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
-from app.core.openai.requests import ResponsesRequest
-from app.core.utils.request_id import reset_request_id, set_request_id
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy.load_balancer import AccountSelection
 
 pytestmark = pytest.mark.unit
 
@@ -203,6 +210,69 @@ class _TimeoutTranscribeSession:
         raise asyncio.TimeoutError
 
 
+class _SettingsCache:
+    def __init__(self, settings: object) -> None:
+        self._settings = settings
+
+    async def get(self) -> object:
+        return self._settings
+
+
+class _RequestLogsRecorder:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def add_log(self, **kwargs: object) -> None:
+        self.calls.append(dict(kwargs))
+
+
+class _RepoContext:
+    def __init__(self, request_logs: _RequestLogsRecorder) -> None:
+        self._repos = SimpleNamespace(request_logs=request_logs)
+
+    async def __aenter__(self) -> object:
+        return self._repos
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+def _repo_factory(request_logs: _RequestLogsRecorder):
+    def factory() -> _RepoContext:
+        return _RepoContext(request_logs)
+
+    return factory
+
+
+def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
+    return SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        sticky_threads_enabled=False,
+        routing_strategy="usage_weighted",
+        log_proxy_request_payload=False,
+        log_proxy_request_shape=False,
+        log_proxy_request_shape_raw_cache_key=False,
+        log_proxy_service_tier_trace=log_proxy_service_tier_trace,
+    )
+
+
+def _make_account(account_id: str) -> Account:
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    return Account(
+        id=account_id,
+        chatgpt_account_id=account_id,
+        email=f"{account_id}@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-token"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-token"),
+        id_token_encrypted=encryptor.encrypt("id-token"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+
 class _JsonCompactResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self.status = 200
@@ -312,6 +382,67 @@ def test_log_proxy_request_payload(monkeypatch, caplog):
 
     assert "proxy_request_payload" in caplog.text
     assert '"model":"gpt-5.1"' in caplog.text
+
+
+def test_log_proxy_service_tier_trace(monkeypatch, caplog):
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "secret instructions",
+            "input": [{"role": "user", "content": "secret prompt"}],
+            "service_tier": "priority",
+        }
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    token = set_request_id("req_tier_trace_1")
+    try:
+        caplog.set_level(logging.WARNING)
+        proxy_service._maybe_log_proxy_service_tier_trace(
+            "stream",
+            requested_service_tier=payload.service_tier,
+            actual_service_tier="default",
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "proxy_service_tier_trace" in caplog.text
+    assert "request_id=req_tier_trace_1" in caplog.text
+    assert "kind=stream" in caplog.text
+    assert "requested_service_tier=priority" in caplog.text
+    assert "actual_service_tier=default" in caplog.text
+    assert "secret instructions" not in caplog.text
+    assert "secret prompt" not in caplog.text
+
+
+def test_log_proxy_service_tier_trace_disabled(monkeypatch, caplog):
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    token = set_request_id("req_tier_trace_2")
+    try:
+        caplog.set_level(logging.WARNING)
+        proxy_service._maybe_log_proxy_service_tier_trace(
+            "compact",
+            requested_service_tier="priority",
+            actual_service_tier=None,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "proxy_service_tier_trace" not in caplog.text
 
 
 def test_log_upstream_request_trace(monkeypatch, caplog):
@@ -562,6 +693,102 @@ def test_logged_error_json_response_emits_proxy_error_log(caplog):
     assert "proxy_error_response request_id=req_proxy_error_1" in caplog.text
     assert "code=upstream_error" in caplog.text
     assert "message=provider failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_logs_service_tier_trace_from_actual_path(monkeypatch, caplog):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=True)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_trace_stream")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_trace_stream","service_tier":"default"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "service_tier": "priority",
+        }
+    )
+
+    token = set_request_id(None)
+    try:
+        caplog.set_level(logging.WARNING)
+        chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+        request_id = get_request_id()
+    finally:
+        reset_request_id(token)
+
+    assert chunks
+    assert request_id
+    assert request_logs.calls[0]["service_tier"] == "default"
+    assert f"request_id={request_id}" in caplog.text
+    assert "kind=stream" in caplog.text
+    assert "requested_service_tier=priority" in caplog.text
+    assert "actual_service_tier=default" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_logs_service_tier_trace_and_generates_request_id(monkeypatch, caplog):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=True)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_trace_compact")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        return OpenAIResponsePayload.model_validate({"output": [], "service_tier": "default"})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "summarize",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+
+    token = set_request_id(None)
+    try:
+        caplog.set_level(logging.WARNING)
+        response = await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+        request_id = get_request_id()
+    finally:
+        reset_request_id(token)
+
+    assert proxy_service._service_tier_from_response(response) == "default"
+    assert request_id
+    assert f"request_id={request_id}" in caplog.text
+    assert "kind=compact" in caplog.text
+    assert "requested_service_tier=priority" in caplog.text
+    assert "actual_service_tier=default" in caplog.text
 
 
 def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):

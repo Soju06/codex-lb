@@ -170,8 +170,8 @@ async def test_dashboard_overview_omits_additional_quotas(async_client, db_setup
     assert "additionalQuotas" not in data
 
     # depletion may be null (not enough data points) -- that is fine, not an error
-    assert "depletion" in data
-    assert data["depletion"] is None or isinstance(data["depletion"], dict)
+    assert "depletionPrimary" in data
+    assert data["depletionPrimary"] is None or isinstance(data["depletionPrimary"], dict)
 
 
 @pytest.mark.asyncio

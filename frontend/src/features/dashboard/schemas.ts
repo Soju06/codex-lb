@@ -60,7 +60,6 @@ export const DepletionSchema = z.object({
   safeUsagePercent: z.number(),
   projectedExhaustionAt: z.string().datetime({ offset: true }).nullable().optional(),
   secondsUntilExhaustion: z.number().nullable().optional(),
-  window: z.enum(["primary", "secondary"]).default("primary"),
 });
 
 export const DashboardOverviewSchema = z.object({
@@ -78,7 +77,8 @@ export const DashboardOverviewSchema = z.object({
   }),
   trends: MetricsTrendsSchema,
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
-  depletion: DepletionSchema.nullable().optional(),
+  depletionPrimary: DepletionSchema.nullable().optional(),
+  depletionSecondary: DepletionSchema.nullable().optional(),
 });
 
 export const RequestLogSchema = z.object({

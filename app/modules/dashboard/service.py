@@ -187,7 +187,7 @@ class DashboardService:
                 if rows:
                     secondary_history[account_id] = rows
 
-        depletion_response = _build_depletion_by_window(primary_history, secondary_history, now)
+        pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
 
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage),
@@ -195,7 +195,8 @@ class DashboardService:
             summary=summary,
             windows=windows,
             trends=trends,
-            depletion=depletion_response,
+            depletion_primary=pri_depletion,
+            depletion_secondary=sec_depletion,
         )
 
 
@@ -203,10 +204,10 @@ def _build_depletion_by_window(
     primary_history: dict[str, list[UsageHistory]],
     secondary_history: dict[str, list[UsageHistory]],
     now,
-) -> DepletionResponse | None:
-    """Compute depletion per window and return the higher-risk result."""
+) -> tuple[DepletionResponse | None, DepletionResponse | None]:
+    """Compute depletion independently per window."""
 
-    def _aggregate(history: dict[str, list[UsageHistory]], window: str):
+    def _aggregate(history: dict[str, list[UsageHistory]], window: str) -> DepletionResponse | None:
         metrics = []
         for account_id, rows in history.items():
             m = compute_depletion_for_account(
@@ -217,30 +218,19 @@ def _build_depletion_by_window(
                 now=now,
             )
             metrics.append(m)
-        return compute_aggregate_depletion(metrics)
+        agg = compute_aggregate_depletion(metrics)
+        if agg is None:
+            return None
+        return DepletionResponse(
+            risk=agg.risk,
+            risk_level=agg.risk_level,
+            burn_rate=agg.burn_rate,
+            safe_usage_percent=agg.safe_usage_percent,
+            projected_exhaustion_at=agg.projected_exhaustion_at,
+            seconds_until_exhaustion=agg.seconds_until_exhaustion,
+        )
 
-    pri_agg = _aggregate(primary_history, "primary")
-    sec_agg = _aggregate(secondary_history, "secondary")
-
-    # Pick the higher-risk window; prefer primary on tie.
-    if pri_agg is not None and sec_agg is not None:
-        chosen, window = (sec_agg, "secondary") if sec_agg.risk > pri_agg.risk else (pri_agg, "primary")
-    elif pri_agg is not None:
-        chosen, window = pri_agg, "primary"
-    elif sec_agg is not None:
-        chosen, window = sec_agg, "secondary"
-    else:
-        return None
-
-    return DepletionResponse(
-        risk=chosen.risk,
-        risk_level=chosen.risk_level,
-        burn_rate=chosen.burn_rate,
-        safe_usage_percent=chosen.safe_usage_percent,
-        projected_exhaustion_at=chosen.projected_exhaustion_at,
-        seconds_until_exhaustion=chosen.seconds_until_exhaustion,
-        window=window,
-    )
+    return _aggregate(primary_history, "primary"), _aggregate(secondary_history, "secondary")
 
 
 def _rows_from_latest(latest: dict[str, UsageHistory]) -> list[UsageWindowRow]:

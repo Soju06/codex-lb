@@ -305,17 +305,24 @@ describe("DashboardOverviewSchema with additional quotas", () => {
           },
         },
       ],
-      depletion: {
+      depletionPrimary: {
         risk: 0.3,
         riskLevel: "warning",
         burnRate: 0.1,
         safeUsagePercent: 80,
       },
+      depletionSecondary: {
+        risk: 0.6,
+        riskLevel: "danger",
+        burnRate: 0.2,
+        safeUsagePercent: 50,
+      },
     });
 
     expect(parsed.additionalQuotas).toHaveLength(1);
     expect(parsed.additionalQuotas[0]?.limitName).toBe("requests_per_minute");
-    expect(parsed.depletion?.riskLevel).toBe("warning");
+    expect(parsed.depletionPrimary?.riskLevel).toBe("warning");
+    expect(parsed.depletionSecondary?.riskLevel).toBe("danger");
   });
 
   it("defaults additionalQuotas to empty array for backward compatibility", () => {

@@ -37,7 +37,6 @@ describe("buildDepletionView", () => {
       riskLevel: "safe",
       burnRate: 0.5,
       safeUsagePercent: 90,
-      window: "primary",
     };
     expect(buildDepletionView(depletion)).toBeNull();
   });
@@ -48,13 +47,11 @@ describe("buildDepletionView", () => {
       riskLevel: "warning",
       burnRate: 1.5,
       safeUsagePercent: 45,
-      window: "primary",
     };
     const view = buildDepletionView(depletion);
     expect(view).toEqual({
       safePercent: 45,
       riskLevel: "warning",
-      window: "primary",
     });
   });
 
@@ -64,13 +61,11 @@ describe("buildDepletionView", () => {
       riskLevel: "danger",
       burnRate: 2.5,
       safeUsagePercent: 30,
-      window: "primary",
     };
     const view = buildDepletionView(depletion);
     expect(view).toEqual({
       safePercent: 30,
       riskLevel: "danger",
-      window: "primary",
     });
   });
 
@@ -80,13 +75,11 @@ describe("buildDepletionView", () => {
       riskLevel: "critical",
       burnRate: 5.0,
       safeUsagePercent: 20,
-      window: "primary",
     };
     const view = buildDepletionView(depletion);
     expect(view).toEqual({
       safePercent: 20,
       riskLevel: "critical",
-      window: "primary",
     });
   });
 });

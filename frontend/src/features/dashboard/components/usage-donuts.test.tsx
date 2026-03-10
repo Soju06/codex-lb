@@ -80,15 +80,47 @@ describe("UsageDonuts", () => {
         secondaryTotal={200}
         primaryWindowMinutes={300}
         secondaryWindowMinutes={10080}
-		safeLine={{ safePercent: 60, riskLevel: "warning", window: "primary" }}
+        safeLinePrimary={{ safePercent: 60, riskLevel: "warning" }}
       />,
     );
 
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
 
+  it("renders safe line on both donuts when both have depletion", () => {
+    render(
+      <UsageDonuts
+        primaryItems={[
+          {
+            accountId: "acc-1",
+            label: "primary@example.com",
+            value: 120,
+            remainingPercent: 60,
+            color: "#7bb661",
+          },
+        ]}
+        secondaryItems={[
+          {
+            accountId: "acc-2",
+            label: "secondary@example.com",
+            value: 80,
+            remainingPercent: 40,
+            color: "#d9a441",
+          },
+        ]}
+        primaryTotal={200}
+        secondaryTotal={200}
+        primaryWindowMinutes={300}
+        secondaryWindowMinutes={10080}
+        safeLinePrimary={{ safePercent: 60, riskLevel: "warning" }}
+        safeLineSecondary={{ safePercent: 40, riskLevel: "danger" }}
+      />,
+    );
 
-  it("routes safeLine to secondary donut for weekly-only plans (primary empty)", () => {
+    expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(2);
+  });
+
+  it("renders safe line only on secondary donut for weekly-only plans", () => {
     render(
       <UsageDonuts
         primaryItems={[]}
@@ -105,11 +137,10 @@ describe("UsageDonuts", () => {
         secondaryTotal={200}
         primaryWindowMinutes={null}
         secondaryWindowMinutes={10080}
-        safeLine={{ safePercent: 60, riskLevel: "warning", window: "secondary" }}
+        safeLineSecondary={{ safePercent: 60, riskLevel: "warning" }}
       />,
     );
 
-    // SafeLine tick should appear on secondary donut, not primary
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
 

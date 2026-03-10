@@ -26,6 +26,7 @@ function SafeLineTick({
   riskLevel,
   innerRadius,
   outerRadius,
+  isDark,
 }: {
   cx: number;
   cy: number;
@@ -33,6 +34,7 @@ function SafeLineTick({
   riskLevel: "safe" | "warning" | "danger" | "critical";
   innerRadius: number;
   outerRadius: number;
+  isDark: boolean;
 }) {
   if (riskLevel === "safe") return null;
 
@@ -51,7 +53,7 @@ function SafeLineTick({
       y1={y1}
       x2={x2}
       y2={y2}
-      stroke="#ffffff"
+      stroke={isDark ? "#ffffff" : "#000000"}
       strokeWidth={2}
       strokeLinecap="round"
       data-testid="safe-line-tick"
@@ -135,6 +137,7 @@ export function DonutChart({ items, total, title, subtitle, safeLine }: DonutCha
                 riskLevel={safeLine.riskLevel}
                 innerRadius={INNER_R}
                 outerRadius={OUTER_R}
+                isDark={isDark}
               />
             </svg>
           ) : null}

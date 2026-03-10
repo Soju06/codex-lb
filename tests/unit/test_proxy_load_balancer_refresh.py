@@ -437,23 +437,9 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_select_account_does_not_hold_runtime_lock_during_refresh(monkeypatch) -> None:
-    refresh_started = asyncio.Event()
-    release_refresh = asyncio.Event()
-
-    async def blocking_refresh_accounts(
-        self,
-        accounts: list[Account],
-        latest_usage: dict[str, UsageHistory],
-    ) -> bool:
-        refresh_started.set()
-        await release_refresh.wait()
-        return False
-
-    monkeypatch.setattr(
-        "app.modules.proxy.load_balancer.UsageUpdater.refresh_accounts",
-        blocking_refresh_accounts,
-    )
+async def test_select_account_does_not_hold_runtime_lock_during_input_loading(monkeypatch) -> None:
+    accounts_started = asyncio.Event()
+    release_accounts = asyncio.Event()
 
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -481,6 +467,13 @@ async def test_select_account_does_not_hold_runtime_lock_during_refresh(monkeypa
     usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
     sticky_repo = StubStickySessionsRepository()
 
+    async def blocking_list_accounts() -> list[Account]:
+        accounts_started.set()
+        await release_accounts.wait()
+        return [account]
+
+    monkeypatch.setattr(accounts_repo, "list_accounts", blocking_list_accounts)
+
     @asynccontextmanager
     async def repo_factory() -> AsyncIterator[ProxyRepositories]:
         yield ProxyRepositories(
@@ -494,7 +487,7 @@ async def test_select_account_does_not_hold_runtime_lock_during_refresh(monkeypa
 
     balancer = LoadBalancer(repo_factory)
     select_task = asyncio.create_task(balancer.select_account())
-    await refresh_started.wait()
+    await accounts_started.wait()
 
     record_error_task = asyncio.create_task(balancer.record_error(account))
     await asyncio.sleep(0.01)
@@ -504,6 +497,6 @@ async def test_select_account_does_not_hold_runtime_lock_during_refresh(monkeypa
     assert runtime.error_count == 1
     assert runtime.last_error_at is not None
 
-    release_refresh.set()
+    release_accounts.set()
     selection = await select_task
     assert selection.account is not None

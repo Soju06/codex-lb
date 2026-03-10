@@ -237,31 +237,10 @@ async def test_load_balancer_treats_weekly_only_primary_as_quota_window(db_setup
 
 
 @pytest.mark.asyncio
-async def test_load_balancer_select_account_survives_refreshed_detached_accounts(db_setup, monkeypatch):
-    from app.core.config.settings import get_settings
-    from app.core.usage.models import UsagePayload
-
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    get_settings.cache_clear()
-
-    async def stub_fetch_usage(**_: object) -> UsagePayload:
-        return UsagePayload.model_validate(
-            {
-                "plan_type": "team",
-                "rate_limit": {
-                    "primary_window": {
-                        "used_percent": 10.0,
-                        "reset_at": 1735689600,
-                        "limit_window_seconds": 60,
-                    }
-                },
-            }
-        )
-
-    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
-
+async def test_load_balancer_select_account_uses_cached_rows_for_detached_accounts(db_setup):
     encryptor = TokenEncryptor()
     now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     account = Account(
         id="acc_detached_refresh",
         email="detached-refresh@example.com",
@@ -275,14 +254,23 @@ async def test_load_balancer_select_account_survives_refreshed_detached_accounts
     )
 
     async with SessionLocal() as session:
-        await AccountsRepository(session).upsert(account)
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            account_id=account.id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        )
 
     balancer = LoadBalancer(_repo_factory)
     selection = await balancer.select_account()
 
     assert selection.account is not None
     assert selection.account.id == account.id
-    assert selection.account.plan_type == "team"
+    assert selection.account.plan_type == "plus"
 
 
 @pytest.mark.asyncio

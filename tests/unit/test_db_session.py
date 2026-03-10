@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 

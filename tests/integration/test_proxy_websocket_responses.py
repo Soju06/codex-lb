@@ -119,8 +119,13 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     async def allow_firewall(_websocket):
         return None
 
+    async def allow_proxy_api_key(authorization: str | None):
+        assert authorization == "Bearer external-token"
+        return None
+
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect, raising=False)
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
 
     request_payload = {
         "type": "response.create",
@@ -184,7 +189,12 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
     async def allow_firewall(_websocket):
         return None
 
+    async def allow_proxy_api_key(authorization: str | None):
+        assert authorization is None
+        return None
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:

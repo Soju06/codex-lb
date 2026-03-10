@@ -11,12 +11,12 @@ from pydantic import ValidationError
 
 from app.core.auth.dependencies import (
     set_openai_error_format,
-    validate_proxy_api_key_authorization,
     validate_codex_usage_identity,
     validate_proxy_api_key,
+    validate_proxy_api_key_authorization,
 )
-from app.core.config.settings import get_settings
 from app.core.clients.proxy import ProxyResponseError
+from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyAuthError, ProxyModelNotAllowed, ProxyRateLimitError
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
@@ -41,8 +41,6 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
-from app.modules.firewall.repository import FirewallRepository
-from app.modules.firewall.service import FirewallService
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -51,6 +49,8 @@ from app.modules.api_keys.service import (
     ApiKeysService,
     ApiKeyUsageReservationData,
 )
+from app.modules.firewall.repository import FirewallRepository
+from app.modules.firewall.service import FirewallService
 from app.modules.proxy.schemas import (
     ModelListItem,
     ModelListResponse,

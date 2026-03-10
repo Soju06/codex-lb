@@ -236,6 +236,55 @@ async def test_load_balancer_treats_weekly_only_primary_as_quota_window(db_setup
 
 
 @pytest.mark.asyncio
+async def test_load_balancer_select_account_survives_refreshed_detached_accounts(db_setup, monkeypatch):
+    from app.core.config.settings import get_settings
+    from app.core.usage.models import UsagePayload
+
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: object) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "team",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    account = Account(
+        id="acc_detached_refresh",
+        email="detached-refresh@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-detached"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-detached"),
+        id_token_encrypted=encryptor.encrypt("id-detached"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.account.plan_type == "team"
+
+
+@pytest.mark.asyncio
 async def test_load_balancer_prefers_newer_weekly_primary_over_stale_secondary(db_setup):
     encryptor = TokenEncryptor()
     now = utcnow()

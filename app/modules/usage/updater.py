@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol
@@ -21,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 class UsageRepositoryPort(Protocol):
+    async def latest_entry_for_account(
+        self,
+        account_id: str,
+        *,
+        window: str | None = None,
+    ) -> UsageHistory | None: ...
+
     async def add_entry(
         self,
         account_id: str,
@@ -42,6 +51,35 @@ class AccountRefreshResult:
     usage_written: bool
 
 
+class _UsageRefreshSingleflight:
+    def __init__(self) -> None:
+        self._inflight: dict[str, asyncio.Task[AccountRefreshResult]] = {}
+        self._lock = asyncio.Lock()
+
+    async def run(
+        self,
+        account_id: str,
+        factory: Callable[[], Awaitable[AccountRefreshResult]],
+    ) -> AccountRefreshResult:
+        async with self._lock:
+            task = self._inflight.get(account_id)
+            if task is None or task.done():
+                task = asyncio.create_task(factory())
+                self._inflight[account_id] = task
+                task.add_done_callback(
+                    lambda done, *, key=account_id: self._clear_if_current(key, done),
+                )
+        return await asyncio.shield(task)
+
+    def _clear_if_current(self, account_id: str, task: asyncio.Task[AccountRefreshResult]) -> None:
+        current = self._inflight.get(account_id)
+        if current is task:
+            self._inflight.pop(account_id, None)
+
+
+_USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()
+
+
 class UsageUpdater:
     def __init__(
         self,
@@ -49,6 +87,7 @@ class UsageUpdater:
         accounts_repo: AccountsRepositoryPort | None = None,
     ) -> None:
         self._usage_repo = usage_repo
+        self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
         self._auth_manager = AuthManager(accounts_repo) if accounts_repo else None
 
@@ -69,16 +108,21 @@ class UsageUpdater:
             if account.status == AccountStatus.DEACTIVATED:
                 continue
             latest = latest_usage.get(account.id)
-            if latest and (now - latest.recorded_at).total_seconds() < interval:
+            if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
                 continue
             # NOTE: AsyncSession is not safe for concurrent use. Run sequentially
             # within the request-scoped session to avoid PK collisions and
             # flush-time warnings (SAWarning: Session.add during flush).
             try:
-                result = await self._refresh_account(
-                    account,
-                    usage_account_id=account.chatgpt_account_id,
+                result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
+                    account.id,
+                    lambda account=account: self._refresh_account_if_stale(
+                        account,
+                        usage_account_id=account.chatgpt_account_id,
+                        interval_seconds=interval,
+                    ),
                 )
+                await self._sync_account_from_repo(account)
                 refreshed = refreshed or result.usage_written
             except Exception as exc:
                 logger.warning(
@@ -91,6 +135,21 @@ class UsageUpdater:
                 # swallow per-account failures so the whole refresh loop keeps going
                 continue
         return refreshed
+
+    async def _refresh_account_if_stale(
+        self,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        interval_seconds: int,
+    ) -> AccountRefreshResult:
+        latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
+        if _latest_usage_is_fresh(latest, now=utcnow(), interval_seconds=interval_seconds):
+            return AccountRefreshResult(usage_written=False)
+        return await self._refresh_account(
+            account,
+            usage_account_id=usage_account_id,
+        )
 
     async def _refresh_account(
         self,
@@ -205,6 +264,23 @@ class UsageUpdater:
             chatgpt_account_id=account.chatgpt_account_id,
         )
 
+    async def _sync_account_from_repo(self, account: Account) -> None:
+        if not self._accounts_repo:
+            return
+        stored = await self._accounts_repo.get_by_id(account.id)
+        if stored is None:
+            return
+        account.chatgpt_account_id = stored.chatgpt_account_id
+        account.email = stored.email
+        account.plan_type = stored.plan_type
+        account.access_token_encrypted = stored.access_token_encrypted
+        account.refresh_token_encrypted = stored.refresh_token_encrypted
+        account.id_token_encrypted = stored.id_token_encrypted
+        account.last_refresh = stored.last_refresh
+        account.status = stored.status
+        account.deactivation_reason = stored.deactivation_reason
+        account.reset_at = stored.reset_at
+
 
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:
     credits = payload.credits
@@ -218,6 +294,15 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:
     return entry is not None
+
+
+def _latest_usage_is_fresh(
+    latest: UsageHistory | None,
+    *,
+    now: datetime,
+    interval_seconds: int,
+) -> bool:
+    return latest is not None and (now - latest.recorded_at).total_seconds() < interval_seconds
 
 
 def _parse_credits_balance(value: str | int | float | None) -> float | None:

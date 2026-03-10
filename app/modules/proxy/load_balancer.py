@@ -156,9 +156,11 @@ class LoadBalancer:
                 latest_primary = await repos.usage.latest_by_account()
             latest_secondary = await repos.usage.latest_by_account(window="secondary")
             return _SelectionInputs(
-                accounts=accounts,
-                latest_primary=latest_primary,
-                latest_secondary=latest_secondary,
+                accounts=[_clone_account(account) for account in accounts],
+                latest_primary={account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()},
+                latest_secondary={
+                    account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
+                },
             )
 
     def _prune_runtime(self, accounts: Iterable[Account]) -> None:
@@ -387,3 +389,8 @@ def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
 def _clone_account(account: Account) -> Account:
     data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
     return Account(**data)
+
+
+def _clone_usage_history(entry: UsageHistory) -> UsageHistory:
+    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
+    return UsageHistory(**data)

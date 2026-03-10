@@ -26,6 +26,22 @@ class UsageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def latest_entry_for_account(
+        self,
+        account_id: str,
+        *,
+        window: str | None = None,
+    ) -> UsageHistory | None:
+        stmt = (
+            select(UsageHistory)
+            .where(UsageHistory.account_id == account_id)
+            .where(_window_clause(window))
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def add_entry(
         self,
         account_id: str,

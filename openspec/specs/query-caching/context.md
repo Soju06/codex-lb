@@ -14,6 +14,7 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Latest usage selection should be backed by a composite latest-row index, not by Python-side deduplication.
 - Default request-log listing should sort by latest-first timestamp and tie-breaker ID.
 - Do not hold the load-balancer runtime lock across network-bound usage refresh calls; only protect the in-memory selection and runtime-state mutation step.
+- Stale usage refreshes should collapse into one in-flight refresh per account, with followers re-checking persisted primary-window data before calling the upstream usage API again.
 
 ## Example
 

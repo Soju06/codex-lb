@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -35,6 +36,32 @@ class StubUsageRepository:
         self.entries: list[UsageEntry] = []
         self._return_rows = return_rows
         self._next_id = 1
+
+    async def latest_entry_for_account(
+        self,
+        account_id: str,
+        *,
+        window: str | None = None,
+    ) -> UsageHistory | None:
+        for entry in reversed(self.entries):
+            normalized_window = entry.window or "primary"
+            expected_window = window or "primary"
+            if entry.account_id == account_id and normalized_window == expected_window:
+                return UsageHistory(
+                    id=self._next_id,
+                    account_id=entry.account_id,
+                    used_percent=entry.used_percent,
+                    input_tokens=entry.input_tokens,
+                    output_tokens=entry.output_tokens,
+                    recorded_at=entry.recorded_at or datetime.now(tz=timezone.utc),
+                    window=entry.window,
+                    reset_at=entry.reset_at,
+                    window_minutes=entry.window_minutes,
+                    credits_has=entry.credits_has,
+                    credits_unlimited=entry.credits_unlimited,
+                    credits_balance=entry.credits_balance,
+                )
+        return None
 
     async def add_entry(
         self,
@@ -148,6 +175,10 @@ class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []
         self.token_updates: list[dict[str, Any]] = []
+        self.accounts_by_id: dict[str, Account] = {}
+
+    async def get_by_id(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
 
     async def update_status(
         self,
@@ -156,6 +187,11 @@ class StubAccountsRepository:
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
     ) -> bool:
+        account = self.accounts_by_id.get(account_id)
+        if account is not None:
+            account.status = status
+            account.deactivation_reason = deactivation_reason
+            account.reset_at = reset_at
         self.status_updates.append(
             {
                 "account_id": account_id,
@@ -167,6 +203,15 @@ class StubAccountsRepository:
 
     async def update_tokens(self, *args: Any, **kwargs: Any) -> bool:
         account_id = args[0] if args else kwargs.get("account_id")
+        account = self.accounts_by_id.get(account_id)
+        if account is not None:
+            account.access_token_encrypted = kwargs["access_token_encrypted"]
+            account.refresh_token_encrypted = kwargs["refresh_token_encrypted"]
+            account.id_token_encrypted = kwargs["id_token_encrypted"]
+            account.last_refresh = kwargs["last_refresh"]
+            account.plan_type = kwargs.get("plan_type")
+            account.email = kwargs.get("email")
+            account.chatgpt_account_id = kwargs.get("chatgpt_account_id")
         self.token_updates.append({"account_id": account_id, **kwargs})
         return True
 
@@ -189,6 +234,7 @@ async def test_usage_updater_deactivates_on_account_invalid_4xx(monkeypatch) -> 
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
     acc = _make_account("acc_402", "workspace_402", email="payment@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
 
     await updater.refresh_accounts([acc], latest_usage={})
 
@@ -218,6 +264,7 @@ async def test_usage_updater_does_not_deactivate_on_403(monkeypatch) -> None:
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
     acc = _make_account("acc_403", "workspace_403", email="forbidden@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
 
     await updater.refresh_accounts([acc], latest_usage={})
 
@@ -242,6 +289,7 @@ async def test_usage_updater_does_not_deactivate_on_transient_4xx(monkeypatch) -
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
     acc = _make_account("acc_429", "workspace_429", email="rate@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
 
     await updater.refresh_accounts([acc], latest_usage={})
 
@@ -266,6 +314,7 @@ async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
     acc = _make_account("acc_401", "workspace_401", email="auth@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
 
     await updater.refresh_accounts([acc], latest_usage={})
 
@@ -290,6 +339,7 @@ async def test_usage_updater_does_not_deactivate_on_5xx(monkeypatch) -> None:
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
     acc = _make_account("acc_500", "workspace_500", email="server@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
 
     await updater.refresh_accounts([acc], latest_usage={})
 
@@ -370,6 +420,7 @@ async def test_usage_updater_syncs_plan_type_from_usage_payload(monkeypatch) -> 
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
     acc = _make_account("acc_plan_sync", "workspace_plan_sync", email="plan@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
     acc.plan_type = "free"
 
     await updater.refresh_accounts([acc], latest_usage={})
@@ -464,6 +515,7 @@ async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure
     monkeypatch.setattr(updater._auth_manager, "ensure_fresh", stub_ensure_fresh)
 
     acc = _make_account("acc_401_retry", "workspace_401_retry", email="auth-retry@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
     refreshed = await updater.refresh_accounts([acc], latest_usage={})
 
     assert refreshed is False
@@ -550,4 +602,57 @@ async def test_usage_updater_refresh_accounts_returns_true_when_partial_write(mo
     refreshed = await updater.refresh_accounts([acc_skip, acc_write], latest_usage={})
 
     assert refreshed is True
+    assert len(usage_repo.entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_singleflights_concurrent_refreshes(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    fetch_calls = 0
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def stub_fetch_usage(*, account_id: str | None, **_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert account_id == "workspace_shared_refresh"
+        fetch_started.set()
+        await release_fetch.wait()
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    updater_a = UsageUpdater(usage_repo, accounts_repo=None)
+    updater_b = UsageUpdater(usage_repo, accounts_repo=None)
+    acc_a = _make_account("acc_singleflight", "workspace_shared_refresh", email="a@example.com")
+    acc_b = _make_account("acc_singleflight", "workspace_shared_refresh", email="b@example.com")
+
+    first = asyncio.create_task(updater_a.refresh_accounts([acc_a], latest_usage={}))
+    await fetch_started.wait()
+    second = asyncio.create_task(updater_b.refresh_accounts([acc_b], latest_usage={}))
+    await asyncio.sleep(0.01)
+
+    assert not second.done()
+
+    release_fetch.set()
+    first_refreshed, second_refreshed = await asyncio.gather(first, second)
+
+    assert fetch_calls == 1
+    assert first_refreshed is True
+    assert second_refreshed is True
     assert len(usage_repo.entries) == 1

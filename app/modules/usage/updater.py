@@ -104,7 +104,18 @@ class UsageUpdater:
                 continue
             latest = latest_usage.get(account.id)
             if latest and (now - latest.recorded_at).total_seconds() < interval:
-                continue
+                # Primary is fresh.  Still refresh if additional data is
+                # missing (e.g. first run after feature rollout).
+                if self._additional_usage_repo is not None:
+                    additional_fresh_at = await self._additional_usage_repo.latest_recorded_at_for_account(
+                        account.id,
+                    )
+                    if additional_fresh_at is None:
+                        pass  # fall through to refresh
+                    else:
+                        continue
+                else:
+                    continue
             # Additional-only accounts have no main UsageHistory entry.
             # Check DB-backed freshness (works across workers/restarts)
             # with process-local cache as a fast path.

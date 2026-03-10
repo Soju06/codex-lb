@@ -35,6 +35,7 @@ class DepletionResponse(DashboardModel):
     safe_usage_percent: float
     projected_exhaustion_at: datetime | None = None
     seconds_until_exhaustion: float | None = None
+    window: str = "primary"  # which donut the depletion marker applies to
 
 
 class DashboardOverviewResponse(DashboardModel):

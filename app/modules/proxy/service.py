@@ -822,7 +822,7 @@ class ProxyService:
                 if used_percents:
                     avg_used_percent = sum(used_percents) / len(used_percents)
                     window_minutes_values = [e.window_minutes for e in filtered_entries.values() if e.window_minutes]
-                    reset_at_values = [e.reset_at for e in filtered_entries.values() if e.reset_at]
+                    reset_at_values = [e.reset_at for e in filtered_entries.values() if e.reset_at is not None]
 
                     if window_minutes_values or reset_at_values:
                         window_minutes = max(window_minutes_values) if window_minutes_values else 300
@@ -852,7 +852,7 @@ class ProxyService:
                 if sec_used_percents:
                     sec_avg = sum(sec_used_percents) / len(sec_used_percents)
                     sec_window_values = [e.window_minutes for e in filtered_secondary.values() if e.window_minutes]
-                    sec_reset_values = [e.reset_at for e in filtered_secondary.values() if e.reset_at]
+                    sec_reset_values = [e.reset_at for e in filtered_secondary.values() if e.reset_at is not None]
 
                     if sec_window_values or sec_reset_values:
                         sec_window_minutes = max(sec_window_values) if sec_window_values else 10080

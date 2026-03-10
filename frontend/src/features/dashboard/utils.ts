@@ -52,6 +52,7 @@ export interface AdditionalQuotaView {
 export interface SafeLineView {
   safePercent: number;
   riskLevel: "safe" | "warning" | "danger" | "critical";
+  window: "primary" | "secondary";
 }
 
 export type DashboardView = {
@@ -83,7 +84,7 @@ export function buildAdditionalQuotaItems(quotas: AdditionalQuota[]): Additional
 
 export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
   if (!depletion || depletion.riskLevel === "safe") return null;
-  return { safePercent: depletion.safeUsagePercent, riskLevel: depletion.riskLevel };
+  return { safePercent: depletion.safeUsagePercent, riskLevel: depletion.riskLevel, window: depletion.window };
 }
 
 function buildWindowIndex(window: UsageWindow | null): Map<string, number> {

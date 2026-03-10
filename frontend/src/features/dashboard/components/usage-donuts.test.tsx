@@ -80,7 +80,7 @@ describe("UsageDonuts", () => {
         secondaryTotal={200}
         primaryWindowMinutes={300}
         secondaryWindowMinutes={10080}
-        safeLine={{ safePercent: 60, riskLevel: "warning" }}
+		safeLine={{ safePercent: 60, riskLevel: "warning", window: "primary" }}
       />,
     );
 
@@ -105,7 +105,7 @@ describe("UsageDonuts", () => {
         secondaryTotal={200}
         primaryWindowMinutes={null}
         secondaryWindowMinutes={10080}
-        safeLine={{ safePercent: 60, riskLevel: "warning" }}
+        safeLine={{ safePercent: 60, riskLevel: "warning", window: "secondary" }}
       />,
     );
 

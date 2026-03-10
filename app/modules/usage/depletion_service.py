@@ -63,19 +63,19 @@ def compute_depletion_for_account(
 
     if len(history) < 2 and state is None:
         entry = history[0]
-        _ewma_states[key] = ewma_update(None, entry.used_percent, entry.recorded_at.timestamp())
+        _ewma_states[key] = ewma_update(None, entry.used_percent, naive_utc_to_epoch(entry.recorded_at))
         return None
 
     # Filter out entries already processed by persistent EWMA state to prevent
     # replay drift on repeated dashboard polls.
     if state is not None:
         cutoff = state.last_timestamp
-        new_entries = [e for e in history if e.recorded_at.timestamp() > cutoff]
+        new_entries = [e for e in history if naive_utc_to_epoch(e.recorded_at) > cutoff]
     else:
         new_entries = history
 
     for entry in new_entries:
-        ts = entry.recorded_at.timestamp()
+        ts = naive_utc_to_epoch(entry.recorded_at)
         state = ewma_update(state, entry.used_percent, ts)
 
     if state is not None:

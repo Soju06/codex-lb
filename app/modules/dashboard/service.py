@@ -91,37 +91,40 @@ class DashboardService:
         # Fetch additional usage data
         additional_quotas, additional_sync_ts = await self._build_additional_quotas()
 
-        # Compute depletion from usage history.
-        # Primary accounts use primary history; weekly-only accounts (remapped
-        # to secondary by normalization) use secondary history so they still
-        # contribute to the aggregate depletion indicator.
+        # Compute depletion separately for primary-window and secondary-window
+        # accounts so the aggregate is not skewed by mixing different window
+        # durations.  The response includes a "window" field that tells the
+        # frontend which donut to render the safe-line marker on.
         normalized_primary_ids = {row.account_id for row in primary_rows}
         all_account_ids = set(primary_usage.keys()) | set(secondary_usage.keys())
-        usage_history: dict[str, list[UsageHistory]] = {}
+        primary_history: dict[str, list[UsageHistory]] = {}
+        secondary_history: dict[str, list[UsageHistory]] = {}
         for account_id in all_account_ids:
             if account_id in normalized_primary_ids:
                 usage_entry = primary_usage[account_id]
                 acct_window = usage_entry.window_minutes if usage_entry.window_minutes else 300
                 acct_since = now - timedelta(minutes=acct_window)
                 rows = await self._repo.usage_history_since(account_id, "primary", acct_since)
+                if rows:
+                    primary_history[account_id] = rows
             elif account_id in primary_usage:
                 # Weekly-only: history is stored under window="primary" even
                 # though normalization remapped the latest row to secondary.
-                # Use the secondary entry's window for lookback duration.
                 sec_entry = secondary_usage.get(account_id)
                 acct_window = sec_entry.window_minutes if sec_entry and sec_entry.window_minutes else 10080
                 acct_since = now - timedelta(minutes=acct_window)
                 rows = await self._repo.usage_history_since(account_id, "primary", acct_since)
+                if rows:
+                    secondary_history[account_id] = rows
             else:
-                # Secondary-only: no primary data at all.
                 sec_entry = secondary_usage[account_id]
                 acct_window = sec_entry.window_minutes if sec_entry.window_minutes else 10080
                 acct_since = now - timedelta(minutes=acct_window)
                 rows = await self._repo.usage_history_since(account_id, "secondary", acct_since)
-            if rows:
-                usage_history[account_id] = rows
+                if rows:
+                    secondary_history[account_id] = rows
 
-        depletion_response = _build_depletion(usage_history, now)
+        depletion_response = _build_depletion_by_window(primary_history, secondary_history, now)
 
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, additional_sync_ts),
@@ -180,32 +183,47 @@ class DashboardService:
         return quotas, sync_timestamps
 
 
-def _build_depletion(
+def _build_depletion_by_window(
     primary_history: dict[str, list[UsageHistory]],
+    secondary_history: dict[str, list[UsageHistory]],
     now,
 ) -> DepletionResponse | None:
-    per_account_metrics = []
-    for account_id, history in primary_history.items():
-        metrics = compute_depletion_for_account(
-            account_id=account_id,
-            limit_name="standard",
-            window="primary",
-            history=history,
-            now=now,
-        )
-        per_account_metrics.append(metrics)
+    """Compute depletion per window and return the higher-risk result."""
 
-    aggregate = compute_aggregate_depletion(per_account_metrics)
-    if aggregate is None:
+    def _aggregate(history: dict[str, list[UsageHistory]], window: str):
+        metrics = []
+        for account_id, rows in history.items():
+            m = compute_depletion_for_account(
+                account_id=account_id,
+                limit_name="standard",
+                window=window,
+                history=rows,
+                now=now,
+            )
+            metrics.append(m)
+        return compute_aggregate_depletion(metrics)
+
+    pri_agg = _aggregate(primary_history, "primary")
+    sec_agg = _aggregate(secondary_history, "secondary")
+
+    # Pick the higher-risk window; prefer primary on tie.
+    if pri_agg is not None and sec_agg is not None:
+        chosen, window = (sec_agg, "secondary") if sec_agg.risk > pri_agg.risk else (pri_agg, "primary")
+    elif pri_agg is not None:
+        chosen, window = pri_agg, "primary"
+    elif sec_agg is not None:
+        chosen, window = sec_agg, "secondary"
+    else:
         return None
 
     return DepletionResponse(
-        risk=aggregate.risk,
-        risk_level=aggregate.risk_level,
-        burn_rate=aggregate.burn_rate,
-        safe_usage_percent=aggregate.safe_usage_percent,
-        projected_exhaustion_at=aggregate.projected_exhaustion_at,
-        seconds_until_exhaustion=aggregate.seconds_until_exhaustion,
+        risk=chosen.risk,
+        risk_level=chosen.risk_level,
+        burn_rate=chosen.burn_rate,
+        safe_usage_percent=chosen.safe_usage_percent,
+        projected_exhaustion_at=chosen.projected_exhaustion_at,
+        seconds_until_exhaustion=chosen.seconds_until_exhaustion,
+        window=window,
     )
 
 

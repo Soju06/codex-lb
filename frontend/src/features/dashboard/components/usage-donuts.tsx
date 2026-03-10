@@ -42,10 +42,10 @@ export function UsageDonuts({
 		[secondaryItems],
 	);
 
-	// Weekly-only plans remap usage to secondary — route safeLine to the active donut.
-	// TODO: In mixed-plan dashboards (Plus + Free), the aggregate depletion is always
-	// computed from primary usage; secondary-only depletion would require backend changes.
-	const isWeeklyOnly = primaryItems.length === 0 || primaryTotal === 0;
+	// The backend computes depletion per window and reports which window drives
+	// the highest risk via safeLine.window.  Route the marker to the matching donut.
+	// Fallback: if no window is specified, use primary unless the primary donut is empty.
+	const safeLineWindow = safeLine?.window ?? (primaryItems.length === 0 || primaryTotal === 0 ? "secondary" : "primary");
 
 	return (
 		<div className="grid gap-4 lg:grid-cols-2">
@@ -54,14 +54,14 @@ export function UsageDonuts({
 				subtitle={`Window ${formatWindowLabel("primary", primaryWindowMinutes)}`}
 				items={primaryChartItems}
 				total={primaryTotal}
-				safeLine={isWeeklyOnly ? undefined : safeLine}
+				safeLine={safeLineWindow === "primary" ? safeLine : undefined}
 			/>
 			<DonutChart
 				title="Secondary Remaining"
 				subtitle={`Window ${formatWindowLabel("secondary", secondaryWindowMinutes)}`}
 				items={secondaryChartItems}
 				total={secondaryTotal}
-				safeLine={isWeeklyOnly ? safeLine : undefined}
+				safeLine={safeLineWindow === "secondary" ? safeLine : undefined}
 			/>
 		</div>
 	);

@@ -26,6 +26,7 @@
 - Legacy `schema_migrations` rows are historical input only.
 - Production rollout assumes one migration executor at a time.
 - Unsupported `alembic_version` IDs fail fast to avoid silent divergence.
+- Startup also verifies post-upgrade schema drift before the app begins normal work.
 
 ## Failure Modes and Mitigations
 
@@ -37,11 +38,12 @@
   - Mitigation: explicit startup failure + manual operator intervention.
 - Drift between metadata and migrated schema:
   - Mitigation: CI unified migration check blocks merge.
+  - Runtime mitigation: startup drift check logs explicit diffs and fails startup when `database_migrations_fail_fast=true`.
 
 ## Operational Notes
 
 - Startup path:
-  - inspect state -> (optional SQLite backup) -> bootstrap legacy `schema_migrations` -> remap legacy Alembic IDs -> `upgrade head`
+  - inspect state -> (optional SQLite backup) -> bootstrap legacy `schema_migrations` -> remap legacy Alembic IDs -> `upgrade head` -> schema drift check
 - CLI checks:
   - `codex-lb-db check` validates head count, revision naming/filename policy, and schema drift.
 - Emergency toggle:

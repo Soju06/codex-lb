@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -126,8 +127,11 @@ async def test_init_db_fails_when_backup_module_is_missing_even_with_fail_fast_d
     async def _run_startup_migrations(_: str) -> _FakeMigrationRunResult:
         return _FakeMigrationRunResult()
 
-    def _load_entrypoints() -> tuple[object, object]:
-        return _inspect_migration_state, _run_startup_migrations
+    def _check_schema_drift(_: str) -> tuple[str, ...]:
+        return ()
+
+    def _load_entrypoints() -> tuple[object, object, object]:
+        return _inspect_migration_state, _run_startup_migrations, _check_schema_drift
 
     def _raise_missing_backup() -> object:
         raise ModuleNotFoundError("No module named 'app.db.backup'", name="app.db.backup")
@@ -146,6 +150,79 @@ async def test_init_db_fails_when_backup_module_is_missing_even_with_fail_fast_d
 
     with pytest.raises(RuntimeError, match="app\\.db\\.backup is unavailable"):
         await session_module.init_db()
+
+
+@pytest.mark.asyncio
+async def test_init_db_fails_fast_on_post_migration_schema_drift(monkeypatch) -> None:
+    async def _run_startup_migrations(_: str) -> _FakeMigrationRunResult:
+        return _FakeMigrationRunResult()
+
+    def _inspect_migration_state(_: str) -> _FakeMigrationState:
+        return _FakeMigrationState(
+            current_revision="head",
+            head_revision="head",
+            has_alembic_version_table=True,
+            has_legacy_migrations_table=False,
+            needs_upgrade=False,
+        )
+
+    def _check_schema_drift(_: str) -> tuple[str, ...]:
+        return ("('add_table', 'additional_usage_history')",)
+
+    def _load_entrypoints() -> tuple[object, object, object]:
+        return _inspect_migration_state, _run_startup_migrations, _check_schema_drift
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            database_migrations_fail_fast=True,
+        ),
+    )
+    monkeypatch.setattr(session_module, "_load_migration_entrypoints", _load_entrypoints)
+
+    with pytest.raises(RuntimeError, match="Schema drift detected after startup migrations"):
+        await session_module.init_db()
+
+
+@pytest.mark.asyncio
+async def test_init_db_logs_post_migration_schema_drift_when_fail_fast_disabled(monkeypatch, caplog) -> None:
+    async def _run_startup_migrations(_: str) -> _FakeMigrationRunResult:
+        return _FakeMigrationRunResult()
+
+    def _inspect_migration_state(_: str) -> _FakeMigrationState:
+        return _FakeMigrationState(
+            current_revision="head",
+            head_revision="head",
+            has_alembic_version_table=True,
+            has_legacy_migrations_table=False,
+            needs_upgrade=False,
+        )
+
+    def _check_schema_drift(_: str) -> tuple[str, ...]:
+        return ("('missing_index', 'request_logs', 'idx_logs_requested_at_id')",)
+
+    def _load_entrypoints() -> tuple[object, object, object]:
+        return _inspect_migration_state, _run_startup_migrations, _check_schema_drift
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            database_migrations_fail_fast=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "_load_migration_entrypoints", _load_entrypoints)
+
+    caplog.set_level(logging.ERROR)
+
+    await session_module.init_db()
+
+    assert "Failed to apply database migrations" in caplog.text
+    assert "Schema drift detected after startup migrations" in caplog.text
+    assert "idx_logs_requested_at_id" in caplog.text
 
 
 @pytest.mark.asyncio

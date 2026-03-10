@@ -791,6 +791,78 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
     assert "actual_service_tier=default" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_stream_responses_propagates_selection_error_code(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(
+            return_value=AccountSelection(
+                account=None,
+                error_message="No fresh additional quota data available for model 'gpt-5.3-codex-spark'",
+                error_code="additional_quota_data_unavailable",
+            )
+        ),
+    )
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.3-codex-spark",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "additional_quota_data_unavailable"
+    assert request_logs.calls[0]["error_code"] == "additional_quota_data_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_propagates_selection_error_code(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(
+            return_value=AccountSelection(
+                account=None,
+                error_message="No accounts with available additional quota for model 'gpt-5.3-codex-spark'",
+                error_code="no_additional_quota_eligible_accounts",
+            )
+        ),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.3-codex-spark",
+            "instructions": "summarize",
+            "input": [],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "no_additional_quota_eligible_accounts"
+    assert request_logs.calls[0]["error_code"] == "no_additional_quota_eligible_accounts"
+
+
 def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):
     monkeypatch.setenv("CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS", "a.example, b.example ,,C.Example")
     from app.core.config.settings import Settings

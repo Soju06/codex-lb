@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 from fastapi.testclient import TestClient
 
+import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 
 pytestmark = pytest.mark.integration
@@ -115,7 +116,11 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         seen["account_id"] = account_id
         return fake_upstream
 
+    async def allow_websocket(_websocket):
+        return None, None
+
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect, raising=False)
+    monkeypatch.setattr(proxy_api_module, "_validate_proxy_websocket_request", allow_websocket)
 
     request_payload = {
         "type": "response.create",
@@ -168,13 +173,18 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["tokens"] == 8
 
 
-def test_backend_responses_websocket_emits_no_accounts_error(app_instance):
+def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monkeypatch):
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "stream": True,
     }
+
+    async def allow_websocket(_websocket):
+        return None, None
+
+    monkeypatch.setattr(proxy_api_module, "_validate_proxy_websocket_request", allow_websocket)
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:

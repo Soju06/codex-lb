@@ -16,11 +16,10 @@ import aiohttp
 from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
-from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
+from app.core.openai.models import CompactResponsePayload
 from app.core.openai.parsing import (
     parse_compact_response_payload,
     parse_error_payload,
-    parse_response_payload,
     parse_sse_event,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
@@ -1064,7 +1063,8 @@ class _CompactCommandTransport:
             failure_phase = failure_phase or exc.failure_phase
             failure_detail = failure_detail or exc.failure_detail
             failure_exception_type = failure_exception_type or exc.failure_exception_type
-            retryable_same_contract = retryable_same_contract if retryable_same_contract is not None else exc.retryable_same_contract
+            if retryable_same_contract is None:
+                retryable_same_contract = exc.retryable_same_contract
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             message = str(exc) or "Request to upstream timed out"

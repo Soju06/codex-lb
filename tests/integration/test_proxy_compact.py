@@ -4,6 +4,7 @@ import base64
 import json
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -77,6 +78,14 @@ class _JsonSession:
         return self._response
 
 
+def _session_call_url(session: _JsonSession) -> str:
+    return cast(str, session.calls[0]["url"])
+
+
+def _session_call_json(session: _JsonSession) -> dict[str, object]:
+    return cast(dict[str, object], session.calls[0]["json"])
+
+
 @pytest.mark.asyncio
 async def test_proxy_compact_no_accounts(async_client):
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
@@ -141,7 +150,6 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    expected_account_id = generate_unique_account_id(raw_account_id, email)
     session = _JsonSession(
         _JsonResponse(
             {
@@ -166,9 +174,10 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
         "encrypted_content": "enc_compact_summary_1",
         "summary_text": "condensed thread state",
     }
-    assert session.calls[0]["url"].endswith("/codex/responses/compact")
-    assert "stream" not in session.calls[0]["json"]
-    assert "store" not in session.calls[0]["json"]
+    assert _session_call_url(session).endswith("/codex/responses/compact")
+    call_json = _session_call_json(session)
+    assert "stream" not in call_json
+    assert "store" not in call_json
 
 
 @pytest.mark.asyncio

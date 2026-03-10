@@ -13,7 +13,7 @@ from starlette.requests import Request
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.crypto import TokenEncryptor
-from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
+from app.core.openai.models import CompactResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
@@ -347,6 +347,18 @@ class _CompactSession:
         return self._response
 
 
+def _compact_call_url(session: _CompactSession) -> str:
+    return cast(str, session.calls[0]["url"])
+
+
+def _compact_call_json(session: _CompactSession) -> dict[str, object]:
+    return cast(dict[str, object], session.calls[0]["json"])
+
+
+def _compact_call_headers(session: _CompactSession) -> dict[str, str]:
+    return cast(dict[str, str], session.calls[0]["headers"])
+
+
 class _TimeoutSseSession:
     def post(
         self,
@@ -616,8 +628,8 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     assert dumped["object"] == "response.compaction"
     assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_1"
     assert recorded["started_at"] == 456.0
-    assert session.calls[0]["url"] == "https://chatgpt.com/backend-api/codex/responses/compact"
-    assert "stream" not in session.calls[0]["json"]
+    assert _compact_call_url(session) == "https://chatgpt.com/backend-api/codex/responses/compact"
+    assert "stream" not in _compact_call_json(session)
 
 
 @pytest.mark.asyncio
@@ -661,7 +673,7 @@ async def test_compact_responses_preserves_upstream_compaction_payload(monkeypat
         "encrypted_content": "enc_payload_1",
         "summary_text": "condensed summary",
     }
-    assert "store" not in session.calls[0]["json"]
+    assert "store" not in _compact_call_json(session)
 
 
 @pytest.mark.asyncio
@@ -739,10 +751,9 @@ async def test_compact_responses_uses_direct_compact_endpoint_without_read_timeo
     assert timeout.total is None
     assert timeout.sock_connect == 2.0
     assert timeout.sock_read is None
-    assert session.calls[0]["url"] == "https://chatgpt.com/backend-api/codex/responses/compact"
-    assert "stream" not in session.calls[0]["json"]
-    raw_headers = session.calls[0]["headers"]
-    assert isinstance(raw_headers, dict)
+    assert _compact_call_url(session) == "https://chatgpt.com/backend-api/codex/responses/compact"
+    assert "stream" not in _compact_call_json(session)
+    raw_headers = _compact_call_headers(session)
     assert raw_headers["Accept"] == "application/json"
     assert result.model_dump(mode="json", exclude_none=True)["object"] == "response.compaction"
 

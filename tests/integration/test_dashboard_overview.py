@@ -167,9 +167,9 @@ async def test_dashboard_overview_computes_depletion_from_recent_db_history(asyn
     assert response.status_code == 200
 
     payload = response.json()
-    assert payload["depletion"] is not None
-    assert 0.0 <= payload["depletion"]["risk"] <= 1.0
-    assert payload["depletion"]["riskLevel"] in {"safe", "warning", "danger", "critical"}
+    assert payload["depletionPrimary"] is not None
+    assert 0.0 <= payload["depletionPrimary"]["risk"] <= 1.0
+    assert payload["depletionPrimary"]["riskLevel"] in {"safe", "warning", "danger", "critical"}
 
 
 @pytest.mark.asyncio
@@ -220,6 +220,5 @@ async def test_dashboard_overview_weekly_only_depletion_uses_current_stream(asyn
     assert response.status_code == 200
 
     payload = response.json()
-    assert payload["depletion"] is not None
-    assert payload["depletion"]["window"] == "secondary"
-    assert payload["depletion"]["risk"] == pytest.approx(0.37, abs=0.02)
+    assert payload["depletionSecondary"] is not None
+    assert payload["depletionSecondary"]["risk"] == pytest.approx(0.37, abs=0.02)

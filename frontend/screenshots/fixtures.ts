@@ -450,6 +450,22 @@ export const overview = createDashboardOverview({
     cost: costTrend,
     errorRate: errorRateTrend,
   },
+  depletionPrimary: {
+    risk: 0.52,
+    riskLevel: "warning" as const,
+    burnRate: 0.9,
+    safeUsagePercent: 78.0,
+    projectedExhaustionAt: null,
+    secondsUntilExhaustion: null,
+  },
+  depletionSecondary: {
+    risk: 0.72,
+    riskLevel: "danger" as const,
+    burnRate: 1.3,
+    safeUsagePercent: 57.1,
+    projectedExhaustionAt: null,
+    secondsUntilExhaustion: null,
+  },
 });
 
 // ── Auth / settings ──

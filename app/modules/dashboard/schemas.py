@@ -15,19 +15,6 @@ class DashboardUsageWindows(DashboardModel):
     secondary: UsageWindowResponse | None = None
 
 
-class AdditionalWindowResponse(DashboardModel):
-    used_percent: float
-    reset_at: int | None = None
-    window_minutes: int | None = None
-
-
-class AdditionalQuotaResponse(DashboardModel):
-    limit_name: str
-    metered_feature: str
-    primary_window: AdditionalWindowResponse | None = None
-    secondary_window: AdditionalWindowResponse | None = None
-
-
 class DepletionResponse(DashboardModel):
     risk: float
     risk_level: str  # "safe" | "warning" | "danger" | "critical"
@@ -35,7 +22,6 @@ class DepletionResponse(DashboardModel):
     safe_usage_percent: float
     projected_exhaustion_at: datetime | None = None
     seconds_until_exhaustion: float | None = None
-    window: str = "primary"  # which donut the depletion marker applies to
 
 
 class DashboardOverviewResponse(DashboardModel):
@@ -44,5 +30,5 @@ class DashboardOverviewResponse(DashboardModel):
     summary: UsageSummaryResponse
     windows: DashboardUsageWindows
     trends: MetricsTrends
-    additional_quotas: list[AdditionalQuotaResponse] = Field(default_factory=list)
-    depletion: DepletionResponse | None = None
+    depletion_primary: DepletionResponse | None = None
+    depletion_secondary: DepletionResponse | None = None

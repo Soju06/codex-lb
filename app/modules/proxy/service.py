@@ -156,6 +156,7 @@ class ProxyService:
 
             try:
                 response = await _call_compact(account)
+                await self._load_balancer.record_success(account)
                 await self._settle_compact_api_key_usage(
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
@@ -188,6 +189,7 @@ class ProxyService:
                     raise exc
                 try:
                     response = await _call_compact(account)
+                    await self._load_balancer.record_success(account)
                     await self._settle_compact_api_key_usage(
                         api_key=api_key,
                         api_key_reservation=api_key_reservation,
@@ -291,6 +293,7 @@ class ProxyService:
             try:
                 account = await self._ensure_fresh(account)
                 result = await _call_transcribe(account)
+                await self._load_balancer.record_success(account)
                 log_status = "success"
                 return result
             except RefreshError as refresh_exc:
@@ -316,6 +319,7 @@ class ProxyService:
                     raise exc
                 try:
                     result = await _call_transcribe(account)
+                    await self._load_balancer.record_success(account)
                     log_status = "success"
                     return result
                 except ProxyResponseError as exc:
@@ -575,6 +579,7 @@ class ProxyService:
                         suppress_text_done_events=suppress_text_done_events,
                     ):
                         yield line
+                    await self._load_balancer.record_success(account)
                     settled = await self._settle_stream_api_key_usage(
                         api_key,
                         api_key_reservation,
@@ -605,6 +610,7 @@ class ProxyService:
                             suppress_text_done_events=suppress_text_done_events,
                         ):
                             yield line
+                        await self._load_balancer.record_success(account)
                         settled = await self._settle_stream_api_key_usage(
                             api_key,
                             api_key_reservation,

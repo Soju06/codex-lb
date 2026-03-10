@@ -2,6 +2,7 @@ import { Cell, Pie, PieChart } from "recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
 import { formatCompactNumber } from "@/utils/formatters";
+import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { useThemeStore } from "@/hooks/use-theme";
 
 export type DonutChartItem = {
@@ -16,13 +17,6 @@ export type DonutChartProps = {
   title: string;
   subtitle?: string;
   safeLine?: { safePercent: number; riskLevel: "safe" | "warning" | "danger" | "critical" } | null;
-};
-
-const RISK_COLORS: Record<string, string> = {
-  safe: "transparent",
-  warning: "#F59E0B",
-  danger: "#F97316",
-  critical: "#EF4444",
 };
 
 function SafeLineTick({
@@ -42,9 +36,6 @@ function SafeLineTick({
 }) {
   if (riskLevel === "safe") return null;
 
-  // The donut draws remaining slices first (clockwise from 12 o'clock),
-  // then consumed last. safePercent is the allowed *used* budget, so the
-  // boundary where remaining starts being insufficient is at (100 - safePercent).
   const remainingBudget = 100 - safePercent;
   const angleDeg = 90 - (remainingBudget / 100) * 360;
   const angleRad = -(angleDeg * Math.PI) / 180;
@@ -60,16 +51,24 @@ function SafeLineTick({
       y1={y1}
       x2={x2}
       y2={y2}
-      stroke={RISK_COLORS[riskLevel]}
-      strokeWidth={2.5}
+      stroke="#ffffff"
+      strokeWidth={2}
       strokeLinecap="round"
       data-testid="safe-line-tick"
     />
   );
 }
 
+const CHART_SIZE = 144;
+const CHART_MARGIN = 1;
+const PIE_CX = 71;
+const PIE_CY = 71;
+const INNER_R = 53;
+const OUTER_R = 71;
+
 export function DonutChart({ items, total, title, subtitle, safeLine }: DonutChartProps) {
   const isDark = useThemeStore((s) => s.theme === "dark");
+  const reducedMotion = useReducedMotion();
   const consumedColor = isDark ? "#404040" : "#d3d3d3";
   const palette = buildDonutPalette(items.length, isDark);
   const normalizedItems = items.map((item, index) => ({
@@ -107,18 +106,18 @@ export function DonutChart({ items, total, title, subtitle, safeLine }: DonutCha
 
       <div className="flex items-center gap-6">
         <div className="relative h-36 w-36 shrink-0 overflow-visible">
-          <PieChart width={144} height={144} margin={{ top: 1, right: 1, bottom: 1, left: 1 }}>
+            <PieChart width={CHART_SIZE} height={CHART_SIZE} margin={{ top: CHART_MARGIN, right: CHART_MARGIN, bottom: CHART_MARGIN, left: CHART_MARGIN }}>
             <Pie
               data={chartData}
-              cx={71}
-              cy={71}
-              innerRadius={53}
-              outerRadius={71}
+              cx={PIE_CX}
+              cy={PIE_CY}
+              innerRadius={INNER_R}
+              outerRadius={OUTER_R}
               startAngle={90}
               endAngle={-270}
               dataKey="value"
               stroke="none"
-              isAnimationActive={true}
+              isAnimationActive={!reducedMotion}
               animationDuration={600}
               animationEasing="ease-out"
             >
@@ -126,17 +125,19 @@ export function DonutChart({ items, total, title, subtitle, safeLine }: DonutCha
                 <Cell key={index} fill={entry.fill} />
               ))}
             </Pie>
-            {safeLine && safeLine.riskLevel !== "safe" ? (
+          </PieChart>
+          {safeLine && safeLine.riskLevel !== "safe" ? (
+            <svg className="pointer-events-none absolute inset-0" width={CHART_SIZE} height={CHART_SIZE} viewBox={`0 0 ${CHART_SIZE} ${CHART_SIZE}`}>
               <SafeLineTick
-                cx={71}
-                cy={71}
+                cx={PIE_CX + CHART_MARGIN}
+                cy={PIE_CY + CHART_MARGIN}
                 safePercent={safeLine.safePercent}
                 riskLevel={safeLine.riskLevel}
-                innerRadius={53}
-                outerRadius={71}
+                innerRadius={INNER_R}
+                outerRadius={OUTER_R}
               />
-            ) : null}
-          </PieChart>
+            </svg>
+          ) : null}
           <div className="absolute inset-[18px] flex items-center justify-center rounded-full text-center pointer-events-none">
             <div>
               <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Remaining</p>

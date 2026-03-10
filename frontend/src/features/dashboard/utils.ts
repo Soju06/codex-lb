@@ -13,7 +13,6 @@ import {
 
 import type {
   AccountSummary,
-  AdditionalQuota,
   DashboardOverview,
   Depletion,
   RequestLog,
@@ -38,17 +37,6 @@ export type DashboardStat = {
   trendColor: string;
 };
 
-export interface AdditionalQuotaView {
-  limitName: string;
-  displayName: string;
-  primaryUsedPercent: number | null;
-  primaryResetAt: number | null;
-  primaryWindowMinutes: number | null;
-  secondaryUsedPercent: number | null;
-  secondaryResetAt: number | null;
-  secondaryWindowMinutes: number | null;
-}
-
 export interface SafeLineView {
   safePercent: number;
   riskLevel: "safe" | "warning" | "danger" | "critical";
@@ -60,27 +48,8 @@ export type DashboardView = {
   primaryUsageItems: RemainingItem[];
   secondaryUsageItems: RemainingItem[];
   requestLogs: RequestLog[];
-  additionalQuotaItems: AdditionalQuotaView[];
   safeLine: SafeLineView | null;
 };
-
-export function formatLimitName(limitName: string): string {
-  const map: Record<string, string> = { codex_other: "Codex Spark" };
-  return map[limitName] ?? limitName;
-}
-
-export function buildAdditionalQuotaItems(quotas: AdditionalQuota[]): AdditionalQuotaView[] {
-  return quotas.map((q) => ({
-    limitName: q.limitName,
-    displayName: formatLimitName(q.limitName),
-    primaryUsedPercent: q.primaryWindow?.usedPercent ?? null,
-    primaryResetAt: q.primaryWindow?.resetAt ?? null,
-    primaryWindowMinutes: q.primaryWindow?.windowMinutes ?? null,
-    secondaryUsedPercent: q.secondaryWindow?.usedPercent ?? null,
-    secondaryResetAt: q.secondaryWindow?.resetAt ?? null,
-    secondaryWindowMinutes: q.secondaryWindow?.windowMinutes ?? null,
-  }));
-}
 
 export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
   if (!depletion || depletion.riskLevel === "safe") return null;
@@ -207,7 +176,6 @@ export function buildDashboardView(
     primaryUsageItems: buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark),
     secondaryUsageItems: buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark),
     requestLogs,
-    additionalQuotaItems: buildAdditionalQuotaItems(overview.additionalQuotas ?? []),
     safeLine: buildDepletionView(overview.depletion),
   };
 }

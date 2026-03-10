@@ -1,10 +1,11 @@
 import { z } from "zod";
 
-import { AccountSummarySchema, AccountUsageSchema } from "@/features/accounts/schemas";
+import { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema } from "@/features/accounts/schemas";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
-export { AccountSummarySchema, AccountUsageSchema };
+export { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema };
 export type { AccountSummary };
+export type { AccountAdditionalQuota as AdditionalQuota } from "@/features/accounts/schemas";
 
 export const UsageHistoryItemSchema = z.object({
   accountId: z.string(),
@@ -52,19 +53,6 @@ export const MetricsTrendsSchema = z.object({
   errorRate: z.array(TrendPointSchema),
 });
 
-export const AdditionalWindowSchema = z.object({
-  usedPercent: z.number(),
-  resetAt: z.number().nullable().optional(),
-  windowMinutes: z.number().nullable().optional(),
-});
-
-export const AdditionalQuotaSchema = z.object({
-  limitName: z.string(),
-  meteredFeature: z.string(),
-  primaryWindow: AdditionalWindowSchema.nullable().optional(),
-  secondaryWindow: AdditionalWindowSchema.nullable().optional(),
-});
-
 export const DepletionSchema = z.object({
   risk: z.number(),
   riskLevel: z.enum(["safe", "warning", "danger", "critical"]),
@@ -89,7 +77,7 @@ export const DashboardOverviewSchema = z.object({
     secondary: UsageWindowSchema.nullable(),
   }),
   trends: MetricsTrendsSchema,
-  additionalQuotas: z.array(AdditionalQuotaSchema).default([]),
+  additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   depletion: DepletionSchema.nullable().optional(),
 });
 
@@ -146,6 +134,4 @@ export type RequestLog = z.infer<typeof RequestLogSchema>;
 export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;
-export type AdditionalWindow = z.infer<typeof AdditionalWindowSchema>;
-export type AdditionalQuota = z.infer<typeof AdditionalQuotaSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;

@@ -246,17 +246,16 @@ class UsageUpdater:
                 await self._additional_usage_repo.delete_for_account(account.id)
 
         rate_limit = payload.rate_limit
-        # Treat both None and empty rate_limit (both windows absent) as
-        # additional-only to avoid falling through to window processing.
-        has_windows = rate_limit is not None and (
-            rate_limit.primary_window is not None or rate_limit.secondary_window is not None
-        )
-        if not has_windows:
+        if rate_limit is None:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
-
+        # Treat both None and empty rate_limit (both windows absent) as
+        # additional-only to avoid falling through to window processing.
         primary = rate_limit.primary_window
         secondary = rate_limit.secondary_window
+        if primary is None and secondary is None:
+            additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
+            return AccountRefreshResult(usage_written=additional_synced)
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         usage_written = False
 

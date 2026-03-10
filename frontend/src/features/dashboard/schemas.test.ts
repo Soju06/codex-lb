@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AccountSummarySchema,
-  AdditionalQuotaSchema,
+  AccountAdditionalQuotaSchema,
   DashboardOverviewSchema,
   DepletionSchema,
   RequestLogsResponseSchema,
@@ -201,9 +201,9 @@ describe("AccountSummarySchema light contract", () => {
   });
 });
 
-describe("AdditionalQuotaSchema", () => {
+describe("AccountAdditionalQuotaSchema", () => {
   it("parses valid additional quota data", () => {
-    const parsed = AdditionalQuotaSchema.parse({
+    const parsed = AccountAdditionalQuotaSchema.parse({
       limitName: "requests_per_minute",
       meteredFeature: "requests",
       primaryWindow: {
@@ -221,7 +221,7 @@ describe("AdditionalQuotaSchema", () => {
   });
 
   it("allows optional window fields", () => {
-    const parsed = AdditionalQuotaSchema.parse({
+    const parsed = AccountAdditionalQuotaSchema.parse({
       limitName: "tokens_per_day",
       meteredFeature: "tokens",
     });

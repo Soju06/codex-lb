@@ -97,13 +97,8 @@ async def test_additional_usage_persisted_to_db(db_setup):
         assert entry.window_minutes == 300
 
 
-# ---------------------------------------------------------------------------
-# Scenario 3: Dashboard API returns additionalQuotas
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_dashboard_overview_returns_additional_quotas(async_client, db_setup):
+async def test_accounts_list_returns_additional_quotas(async_client, db_setup):
     account_id = "acc_dash_additional"
     now = utcnow().replace(microsecond=0)
 
@@ -134,28 +129,24 @@ async def test_dashboard_overview_returns_additional_quotas(async_client, db_set
             recorded_at=now,
         )
 
-    response = await async_client.get("/api/dashboard/overview")
+    response = await async_client.get("/api/accounts")
     assert response.status_code == 200
 
     data = response.json()
-    assert "additionalQuotas" in data
-    assert isinstance(data["additionalQuotas"], list)
-    assert len(data["additionalQuotas"]) >= 1
+    assert "accounts" in data
+    account = next(item for item in data["accounts"] if item["accountId"] == account_id)
+    assert isinstance(account["additionalQuotas"], list)
+    assert len(account["additionalQuotas"]) >= 1
 
-    quota = data["additionalQuotas"][0]
+    quota = account["additionalQuotas"][0]
     assert quota["limitName"] == "codex_other"
     assert quota["meteredFeature"] == "codex_other"
     assert quota["primaryWindow"] is not None
     assert quota["primaryWindow"]["usedPercent"] == pytest.approx(55.0)
 
 
-# ---------------------------------------------------------------------------
-# Scenario 4: Graceful handling when no additional data exists
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_dashboard_overview_empty_additional_quotas(async_client, db_setup):
+async def test_dashboard_overview_omits_additional_quotas(async_client, db_setup):
     account_id = "acc_dash_no_additional"
     now = utcnow().replace(microsecond=0)
 
@@ -176,9 +167,43 @@ async def test_dashboard_overview_empty_additional_quotas(async_client, db_setup
     assert response.status_code == 200
 
     data = response.json()
-    assert "additionalQuotas" in data
-    assert data["additionalQuotas"] == []
+    assert "additionalQuotas" not in data
 
     # depletion may be null (not enough data points) -- that is fine, not an error
     assert "depletion" in data
     assert data["depletion"] is None or isinstance(data["depletion"], dict)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_omits_aggregated_additional_quotas_even_when_present(async_client, db_setup):
+    account_id = "acc_dash_additional"
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        additional_repo = AdditionalUsageRepository(session)
+
+        await accounts_repo.upsert(_make_account(account_id, "dash_additional@example.com"))
+        await usage_repo.add_entry(
+            account_id,
+            25.0,
+            window="primary",
+            recorded_at=now - timedelta(minutes=1),
+        )
+        await additional_repo.add_entry(
+            account_id=account_id,
+            limit_name="codex_other",
+            metered_feature="codex_other",
+            window="primary",
+            used_percent=55.0,
+            reset_at=1741500000,
+            window_minutes=300,
+            recorded_at=now,
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert "additionalQuotas" not in data

@@ -393,3 +393,75 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
     runtime = balancer._runtime[account.id]
     assert runtime.error_count == 1
     assert runtime.last_error_at is not None
+
+
+@pytest.mark.asyncio
+async def test_select_account_does_not_hold_runtime_lock_during_refresh(monkeypatch) -> None:
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def blocking_refresh_accounts(
+        self,
+        accounts: list[Account],
+        latest_usage: dict[str, UsageHistory],
+    ) -> bool:
+        refresh_started.set()
+        await release_refresh.wait()
+        return False
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.UsageUpdater.refresh_accounts",
+        blocking_refresh_accounts,
+    )
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-refresh-unblocks-runtime", "runtime@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=10.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        yield ProxyRepositories(
+            accounts=accounts_repo,  # type: ignore[arg-type]
+            usage=usage_repo,  # type: ignore[arg-type]
+            request_logs=object(),  # type: ignore[arg-type]
+            sticky_sessions=sticky_repo,  # type: ignore[arg-type]
+            api_keys=object(),  # type: ignore[arg-type]
+        )
+
+    balancer = LoadBalancer(repo_factory)
+    select_task = asyncio.create_task(balancer.select_account())
+    await refresh_started.wait()
+
+    record_error_task = asyncio.create_task(balancer.record_error(account))
+    await asyncio.sleep(0.01)
+
+    assert record_error_task.done()
+    runtime = balancer._runtime[account.id]
+    assert runtime.error_count == 1
+    assert runtime.last_error_at is not None
+
+    release_refresh.set()
+    selection = await select_task
+    assert selection.account is not None

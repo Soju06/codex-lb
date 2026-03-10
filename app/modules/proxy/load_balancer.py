@@ -45,6 +45,13 @@ class AccountSelection:
     error_message: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _SelectionInputs:
+    accounts: list[Account]
+    latest_primary: dict[str, UsageHistory]
+    latest_secondary: dict[str, UsageHistory]
+
+
 class LoadBalancer:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
@@ -60,30 +67,23 @@ class LoadBalancer:
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
     ) -> AccountSelection:
+        selection_inputs = await self._load_selection_inputs(model=model)
+        if model and not selection_inputs.accounts:
+            return AccountSelection(
+                account=None,
+                error_message=f"No accounts with a plan supporting model '{model}'",
+            )
+
         selected_snapshot: Account | None = None
         error_message: str | None = None
         async with self._runtime_lock:
             async with self._repo_factory() as repos:
-                accounts = await repos.accounts.list_accounts()
-                self._prune_runtime(accounts)
-                if model:
-                    accounts = _filter_accounts_for_model(accounts, model)
-                    if not accounts:
-                        return AccountSelection(
-                            account=None,
-                            error_message=f"No accounts with a plan supporting model '{model}'",
-                        )
-                latest_primary = await repos.usage.latest_by_account()
-                updater = UsageUpdater(repos.usage, repos.accounts)
-                refreshed = await updater.refresh_accounts(accounts, latest_primary)
-                if refreshed:
-                    latest_primary = await repos.usage.latest_by_account()
-                latest_secondary = await repos.usage.latest_by_account(window="secondary")
+                self._prune_runtime(selection_inputs.accounts)
 
                 states, account_map = _build_states(
-                    accounts=accounts,
-                    latest_primary=latest_primary,
-                    latest_secondary=latest_secondary,
+                    accounts=selection_inputs.accounts,
+                    latest_primary=selection_inputs.latest_primary,
+                    latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
                 )
 
@@ -136,6 +136,30 @@ class LoadBalancer:
             model,
         )
         return AccountSelection(account=selected_snapshot, error_message=None)
+
+    async def _load_selection_inputs(self, *, model: str | None) -> _SelectionInputs:
+        async with self._repo_factory() as repos:
+            accounts = await repos.accounts.list_accounts()
+            if model:
+                accounts = _filter_accounts_for_model(accounts, model)
+            if not accounts:
+                return _SelectionInputs(
+                    accounts=[],
+                    latest_primary={},
+                    latest_secondary={},
+                )
+
+            latest_primary = await repos.usage.latest_by_account()
+            updater = UsageUpdater(repos.usage, repos.accounts)
+            refreshed = await updater.refresh_accounts(accounts, latest_primary)
+            if refreshed:
+                latest_primary = await repos.usage.latest_by_account()
+            latest_secondary = await repos.usage.latest_by_account(window="secondary")
+            return _SelectionInputs(
+                accounts=accounts,
+                latest_primary=latest_primary,
+                latest_secondary=latest_secondary,
+            )
 
     def _prune_runtime(self, accounts: Iterable[Account]) -> None:
         account_ids = {account.id for account in accounts}

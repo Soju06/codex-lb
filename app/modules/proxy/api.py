@@ -22,6 +22,7 @@ from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_co
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
 from app.core.openai.models import (
+    CompactResponseResult,
     OpenAIError,
     OpenAIResponsePayload,
     OpenAIResponseResult,
@@ -451,7 +452,7 @@ async def _collect_responses(
     )
 
 
-@router.post("/responses/compact", response_model=OpenAIResponseResult)
+@router.post("/responses/compact", response_model=CompactResponseResult)
 async def responses_compact(
     request: Request,
     payload: ResponsesCompactRequest = Body(...),
@@ -461,7 +462,7 @@ async def responses_compact(
     return await _compact_responses(request, payload, context, api_key, codex_session_affinity=True)
 
 
-@v1_router.post("/responses/compact", response_model=OpenAIResponseResult)
+@v1_router.post("/responses/compact", response_model=CompactResponseResult)
 async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),

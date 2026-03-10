@@ -124,4 +124,35 @@ class OpenAIResponsePayload(BaseModel):
             return None
 
 
+class CompactResponsePayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    object: StrictStr | None = None
+    id: StrictStr | None = None
+    status: StrictStr | None = None
+    error: OpenAIError | None = None
+    usage: ResponseUsage | None = None
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def _normalize_error(cls, value: object) -> OpenAIError | None:
+        if value is None:
+            return None
+        try:
+            return OpenAIError.model_validate(value)
+        except ValidationError:
+            return None
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _normalize_usage(cls, value: object) -> ResponseUsage | None:
+        if value is None:
+            return None
+        try:
+            return ResponseUsage.model_validate(value)
+        except ValidationError:
+            return None
+
+
 OpenAIResponseResult: TypeAlias = OpenAIResponsePayload | OpenAIErrorEnvelope
+CompactResponseResult: TypeAlias = CompactResponsePayload | OpenAIErrorEnvelope

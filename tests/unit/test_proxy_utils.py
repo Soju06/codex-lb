@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +13,7 @@ from starlette.requests import Request
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.crypto import TokenEncryptor
-from app.core.openai.models import OpenAIResponsePayload
+from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
@@ -244,7 +244,7 @@ def _repo_factory(request_logs: _RequestLogsRecorder):
     return factory
 
 
-def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
+def _make_proxy_settings(*, log_proxy_service_tier_trace: bool, log_upstream_request_summary: bool = False) -> object:
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
@@ -253,6 +253,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
         log_proxy_service_tier_trace=log_proxy_service_tier_trace,
+        log_upstream_request_summary=log_upstream_request_summary,
     )
 
 
@@ -273,11 +274,11 @@ def _make_account(account_id: str) -> Account:
     )
 
 
-class _JsonCompactResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
+class _SsePostResponse:
+    def __init__(self, chunks: list[bytes]) -> None:
         self.status = 200
         self.reason = "OK"
-        self._payload = payload
+        self.content = _DummyContent(chunks)
 
     async def __aenter__(self):
         return self
@@ -285,17 +286,9 @@ class _JsonCompactResponse:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def json(self, *, content_type=None):
-        return self._payload
 
-
-class _CompactSession:
-    class _CompactResponseLike(Protocol):
-        async def __aenter__(self): ...
-        async def __aexit__(self, exc_type, exc, tb): ...
-        async def json(self, *, content_type=None): ...
-
-    def __init__(self, response: _CompactResponseLike) -> None:
+class _SseSession:
+    def __init__(self, response: _SsePostResponse) -> None:
         self._response = response
         self.calls: list[dict[str, object]] = []
 
@@ -311,10 +304,19 @@ class _CompactSession:
         return self._response
 
 
-class _SsePostResponse:
-    def __init__(self, chunks: list[bytes]) -> None:
-        self.status = 200
-        self.content = _DummyContent(chunks)
+class _JsonCompactResponse:
+    def __init__(
+        self,
+        payload: object,
+        *,
+        status: int = 200,
+        reason: str = "OK",
+        json_error: Exception | None = None,
+    ) -> None:
+        self.status = status
+        self.reason = reason
+        self._payload = payload
+        self._json_error = json_error
 
     async def __aenter__(self):
         return self
@@ -322,10 +324,16 @@ class _SsePostResponse:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
+    async def json(self, *, content_type=None):
+        if self._json_error is not None:
+            raise self._json_error
+        return self._payload
 
-class _SseSession:
-    def __init__(self, response: _SsePostResponse) -> None:
+
+class _CompactSession:
+    def __init__(self, response: _JsonCompactResponse) -> None:
         self._response = response
+        self.calls: list[dict[str, object]] = []
 
     def post(
         self,
@@ -335,7 +343,32 @@ class _SseSession:
         headers: dict[str, str] | None = None,
         timeout=None,
     ):
+        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         return self._response
+
+
+class _TimeoutSseSession:
+    def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        raise asyncio.TimeoutError
+
+
+class _TimeoutCompactSession:
+    def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        raise asyncio.TimeoutError
 
 
 @pytest.mark.asyncio
@@ -539,7 +572,6 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
-        upstream_compact_timeout_seconds = None
         image_inline_fetch_enabled = True
         log_upstream_request_payload = False
 
@@ -566,7 +598,11 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(_JsonCompactResponse({"output": []}))
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_1"}}
+        )
+    )
 
     result = await proxy_module.compact_responses(
         payload,
@@ -576,30 +612,21 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
         session=cast(proxy_module.aiohttp.ClientSession, session),
     )
 
-    assert result.model_extra == {"output": []}
+    dumped = result.model_dump(mode="json", exclude_none=True)
+    assert dumped["object"] == "response.compaction"
+    assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_1"
     assert recorded["started_at"] == 456.0
+    assert session.calls[0]["url"] == "https://chatgpt.com/backend-api/codex/responses/compact"
+    assert "stream" not in session.calls[0]["json"]
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(monkeypatch):
+async def test_compact_responses_preserves_upstream_compaction_payload(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
-        upstream_compact_timeout_seconds = 123.0
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
-
-    class _TimeoutCompactResponse:
-        status = 200
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def json(self, *, content_type=None):
-            raise proxy_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -608,33 +635,83 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(_TimeoutCompactResponse())
-
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await proxy_module.compact_responses(
-            payload,
-            headers={},
-            access_token="token",
-            account_id="acc_1",
-            session=cast(proxy_module.aiohttp.ClientSession, session),
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {
+                "object": "response.compaction",
+                "compaction_summary": {
+                    "encrypted_content": "enc_payload_1",
+                    "summary_text": "condensed summary",
+                },
+            }
         )
+    )
 
-    timeout = session.calls[0]["timeout"]
-    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == 123.0
-    assert timeout.sock_connect == 2.0
-    assert timeout.sock_read == 123.0
-    assert exc_info.value.status_code == 502
-    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
-    assert exc_info.value.payload["error"]["message"] == "Timeout on reading data from socket"
+    result = await proxy_module.compact_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    dumped = result.model_dump(mode="json", exclude_none=True)
+    assert dumped["object"] == "response.compaction"
+    assert dumped["compaction_summary"] == {
+        "encrypted_content": "enc_payload_1",
+        "summary_text": "condensed summary",
+    }
+    assert "store" not in session.calls[0]["json"]
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
+async def test_compact_responses_preserves_retained_items_without_rewriting(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
-        upstream_compact_timeout_seconds = None
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    compact_window = {
+        "object": "response.compaction",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_retained_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "keep this context"}],
+            },
+            {"type": "reasoning", "encrypted_content": "enc_reasoning_state_1"},
+        ],
+        "retained_items": [{"type": "item_reference", "id": "msg_original_1"}],
+    }
+    session = _CompactSession(_JsonCompactResponse(compact_window))
+
+    result = await proxy_module.compact_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    assert isinstance(result, CompactResponsePayload)
+    assert result.model_dump(mode="json", exclude_none=True) == compact_window
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_uses_direct_compact_endpoint_without_read_timeout_by_default(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
 
@@ -645,7 +722,9 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(_JsonCompactResponse({"output": []}))
+    session = _CompactSession(
+        _JsonCompactResponse({"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_1"}})
+    )
 
     result = await proxy_module.compact_responses(
         payload,
@@ -660,7 +739,150 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     assert timeout.total is None
     assert timeout.sock_connect == 2.0
     assert timeout.sock_read is None
-    assert result.model_extra == {"output": []}
+    assert session.calls[0]["url"] == "https://chatgpt.com/backend-api/codex/responses/compact"
+    assert "stream" not in session.calls[0]["json"]
+    raw_headers = session.calls[0]["headers"]
+    assert isinstance(raw_headers, dict)
+    assert raw_headers["Accept"] == "application/json"
+    assert result.model_dump(mode="json", exclude_none=True)["object"] == "response.compaction"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_marks_upstream_502_as_retryable_same_contract(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"error": {"code": "upstream_error", "message": "boom"}},
+            status=502,
+            reason="Bad Gateway",
+        )
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.failure_phase == "status"
+    assert exc.retryable_same_contract is True
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_invalid_payload_is_fail_closed(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _CompactSession(_JsonCompactResponse(["not", "a", "compact", "object"]))
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.failure_phase == "parse"
+    assert exc.retryable_same_contract is False
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_maps_transport_timeout_to_upstream_unavailable(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _TimeoutCompactSession()
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert exc_info.value.payload["error"]["message"] == "Request to upstream timed out"
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_logs_upstream_timeout_cause(monkeypatch, caplog):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = True
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _TimeoutCompactSession()
+
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    assert "upstream_request_complete" in caplog.text
+    assert "failure_phase=connect" in caplog.text
+    assert "failure_exception_type=TimeoutError" in caplog.text
+    assert "retryable_same_contract=True" in caplog.text
 
 
 def test_logged_error_json_response_emits_proxy_error_log(caplog):
@@ -760,9 +982,12 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
     )
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock())
 
     async def fake_compact(payload, headers, access_token, account_id):
-        return OpenAIResponsePayload.model_validate({"output": [], "service_tier": "default"})
+        return CompactResponsePayload.model_validate(
+            {"object": "response.compaction", "output": [], "service_tier": "default"}
+        )
 
     monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
 
@@ -789,6 +1014,133 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
     assert "kind=compact" in caplog.text
     assert "requested_service_tier=priority" in caplog.text
     assert "actual_service_tier=default" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_retries_same_contract_without_surrogate_and_logs_trace(monkeypatch, caplog):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=True, log_upstream_request_summary=True)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_trace_compact_retry")
+    compact_calls: list[str | None] = []
+    stream_calls: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        compact_calls.append(account_id)
+        if len(compact_calls) == 1:
+            raise proxy_module.ProxyResponseError(
+                502,
+                proxy_module.openai_error("upstream_error", "temporary compact gateway failure"),
+                failure_phase="status",
+                retryable_same_contract=True,
+                failure_detail="temporary compact gateway failure",
+                failure_exception_type="ClientResponseError",
+            )
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "output": [{"type": "reasoning", "encrypted_content": "enc_retry_success"}],
+                "service_tier": "default",
+            }
+        )
+
+    async def fake_stream(*args, **kwargs):
+        stream_calls.append("called")
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "summarize",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+
+    token = set_request_id(None)
+    try:
+        caplog.set_level(logging.WARNING)
+        response = await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+        request_id = get_request_id()
+    finally:
+        reset_request_id(token)
+
+    assert request_id
+    assert compact_calls == ["acc_trace_compact_retry", "acc_trace_compact_retry"]
+    assert stream_calls == []
+    assert response.model_dump(mode="json", exclude_none=True)["object"] == "response.compaction"
+    assert request_logs.calls[0]["service_tier"] == "default"
+    assert f"request_id={request_id}" in caplog.text
+    assert "endpoint=/codex/responses/compact" in caplog.text
+    assert "retry_attempt=1" in caplog.text
+    assert "failure_phase=status" in caplog.text
+    assert "affinity_source=session_id" in caplog.text
+    assert "fallback_suppressed=true" in caplog.text
+    assert "payload_object=response.compaction" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_logs_terminal_502_diagnostics(monkeypatch, caplog):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False, log_upstream_request_summary=True)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_trace_compact_fail")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        raise proxy_module.ProxyResponseError(
+            502,
+            proxy_module.openai_error("upstream_unavailable", "Request to upstream timed out"),
+            failure_phase="connect",
+            retryable_same_contract=False,
+            failure_detail="Request to upstream timed out",
+            failure_exception_type="TimeoutError",
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "summarize",
+            "input": [],
+        }
+    )
+
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+
+    assert "proxy_compact_failure" in caplog.text
+    assert "failure_phase=connect" in caplog.text
+    assert "failure_detail=Request to upstream timed out" in caplog.text
+    assert "failure_exception_type=TimeoutError" in caplog.text
+    assert "retry_attempt=0" in caplog.text
+    assert "affinity_source=session_id" in caplog.text
 
 
 def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):

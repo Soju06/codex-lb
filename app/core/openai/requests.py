@@ -372,6 +372,7 @@ class ResponsesCompactRequest(BaseModel):
     instructions: str
     input: JsonValue
     reasoning: ResponsesReasoning | None = None
+    store: bool = False
 
     @field_validator("input")
     @classmethod
@@ -387,9 +388,16 @@ class ResponsesCompactRequest(BaseModel):
             return _sanitize_input_items(value)
         raise ValueError("input must be a string or array")
 
+    @field_validator("store")
+    @classmethod
+    def _ensure_store_false(cls, value: bool) -> bool:
+        if value is True:
+            raise ValueError("store must be false")
+        return value
+
     def to_payload(self) -> JsonObject:
         payload = self.model_dump(mode="json", exclude_none=True)
-        return _strip_unsupported_fields(payload)
+        return _strip_compact_unsupported_fields(payload)
 
 
 _UNSUPPORTED_UPSTREAM_FIELDS = {
@@ -405,6 +413,12 @@ def _strip_unsupported_fields(payload: dict[str, JsonValue]) -> dict[str, JsonVa
     _sanitize_interleaved_reasoning_input(payload)
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
+    return payload
+
+
+def _strip_compact_unsupported_fields(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    payload = _strip_unsupported_fields(payload)
+    payload.pop("store", None)
     return payload
 
 

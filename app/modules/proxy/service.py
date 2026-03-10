@@ -22,7 +22,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error, response_failed_event
-from app.core.openai.models import OpenAIEvent, OpenAIResponsePayload
+from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
@@ -62,6 +62,16 @@ logger = logging.getLogger(__name__)
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
+
+_COMPACT_UPSTREAM_ENDPOINT = "/codex/responses/compact"
+_COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
+
+
+@dataclass(frozen=True, slots=True)
+class _CompactAffinityDecision:
+    sticky_key: str | None
+    reallocate_sticky: bool
+    source: str
 
 
 class ProxyService:
@@ -105,7 +115,7 @@ class ProxyService:
         openai_cache_affinity: bool = False,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
-    ) -> OpenAIResponsePayload:
+    ) -> CompactResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
@@ -115,7 +125,7 @@ class ProxyService:
         log_status = "error"
         log_error_code: str | None = None
         log_error_message: str | None = None
-        response: OpenAIResponsePayload | None = None
+        response: CompactResponsePayload | None = None
         request_service_tier: str | None = None
         actual_service_tier: str | None = None
 
@@ -123,7 +133,7 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         routing_strategy = _routing_strategy(settings)
-        sticky_key, reallocate_sticky = _sticky_key_for_compact_request(
+        affinity = _sticky_key_for_compact_request(
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
@@ -132,8 +142,8 @@ class ProxyService:
         )
         try:
             selection = await self._load_balancer.select_account(
-                sticky_key=sticky_key,
-                reallocate_sticky=reallocate_sticky,
+                sticky_key=affinity.sticky_key,
+                reallocate_sticky=affinity.reallocate_sticky,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=payload.model,
@@ -150,45 +160,23 @@ class ProxyService:
             account = await self._ensure_fresh(account)
             request_service_tier = _service_tier_from_compact_payload(payload)
 
-            async def _call_compact(target: Account) -> OpenAIResponsePayload:
+            async def _call_compact(target: Account) -> CompactResponsePayload:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
                 return await core_compact_responses(payload, filtered, access_token, account_id)
 
-            try:
-                response = await _call_compact(account)
-                actual_service_tier = _service_tier_from_response(response)
-                await self._load_balancer.record_success(account)
-                await self._settle_compact_api_key_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    response=response,
-                    request_service_tier=request_service_tier,
+            safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
+            refresh_retry_used = False
+            retry_attempt = 0
+            while True:
+                _maybe_log_compact_contract_trace(
+                    event="attempt",
+                    endpoint=_COMPACT_UPSTREAM_ENDPOINT,
+                    retry_attempt=retry_attempt,
+                    failure_phase=None,
+                    payload_object=None,
+                    affinity_source=affinity.source,
                 )
-                log_status = "success"
-                return response
-            except ProxyResponseError as exc:
-                if exc.status_code != 401:
-                    await self._settle_compact_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=request_service_tier,
-                    )
-                    await self._handle_proxy_error(account, exc)
-                    raise
-                try:
-                    account = await self._ensure_fresh(account, force=True)
-                except RefreshError as refresh_exc:
-                    if refresh_exc.is_permanent:
-                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                    await self._settle_compact_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=request_service_tier,
-                    )
-                    raise exc
                 try:
                     response = await _call_compact(account)
                     actual_service_tier = _service_tier_from_response(response)
@@ -200,13 +188,74 @@ class ProxyService:
                         request_service_tier=request_service_tier,
                     )
                     log_status = "success"
+                    _maybe_log_compact_contract_trace(
+                        event="success",
+                        endpoint=_COMPACT_UPSTREAM_ENDPOINT,
+                        retry_attempt=retry_attempt,
+                        failure_phase=None,
+                        payload_object=_compact_payload_object(response),
+                        affinity_source=affinity.source,
+                    )
                     return response
                 except ProxyResponseError as exc:
+                    _maybe_log_compact_contract_trace(
+                        event="failure",
+                        endpoint=_COMPACT_UPSTREAM_ENDPOINT,
+                        retry_attempt=retry_attempt,
+                        failure_phase=exc.failure_phase,
+                        payload_object=None,
+                        affinity_source=affinity.source,
+                    )
+                    if exc.status_code == 401:
+                        if refresh_retry_used:
+                            await self._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            await self._handle_proxy_error(account, exc)
+                            raise
+                        try:
+                            account = await self._ensure_fresh(account, force=True)
+                        except RefreshError as refresh_exc:
+                            if refresh_exc.is_permanent:
+                                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            await self._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            raise exc
+                        refresh_retry_used = True
+                        retry_attempt += 1
+                        continue
+                    if exc.retryable_same_contract and safe_retry_budget > 0:
+                        safe_retry_budget -= 1
+                        retry_attempt += 1
+                        continue
                     await self._settle_compact_api_key_usage(
                         api_key=api_key,
                         api_key_reservation=api_key_reservation,
                         response=None,
                         request_service_tier=request_service_tier,
+                    )
+                    error = _parse_openai_error(exc.payload)
+                    _log_terminal_compact_failure(
+                        status_code=exc.status_code,
+                        error_code=_normalize_error_code(
+                            error.code if error else None,
+                            error.type if error else None,
+                        ),
+                        error_message=error.message if error else None,
+                        failure_phase=exc.failure_phase,
+                        failure_detail=exc.failure_detail,
+                        failure_exception_type=exc.failure_exception_type,
+                        retryable_same_contract=exc.retryable_same_contract,
+                        retry_attempt=retry_attempt,
+                        affinity_source=affinity.source,
+                        account_id=account_id_value,
                     )
                     await self._handle_proxy_error(account, exc)
                     raise
@@ -358,7 +407,7 @@ class ProxyService:
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
-        response: OpenAIResponsePayload | None,
+        response: CompactResponsePayload | OpenAIResponsePayload | None,
         request_service_tier: str | None,
     ) -> None:
         if api_key is None or api_key_reservation is None:
@@ -1252,6 +1301,70 @@ def _maybe_log_proxy_service_tier_trace(
     )
 
 
+def _maybe_log_compact_contract_trace(
+    *,
+    event: str,
+    endpoint: str,
+    retry_attempt: int,
+    failure_phase: str | None,
+    payload_object: str | None,
+    affinity_source: str,
+) -> None:
+    settings = get_settings()
+    if not settings.log_upstream_request_summary and not settings.log_proxy_service_tier_trace:
+        return
+
+    logger.warning(
+        (
+            "proxy_compact_contract_trace request_id=%s event=%s endpoint=%s retry_attempt=%s "
+            "failure_phase=%s payload_object=%s affinity_source=%s fallback_suppressed=true"
+        ),
+        get_request_id(),
+        event,
+        endpoint,
+        retry_attempt,
+        failure_phase,
+        payload_object,
+        affinity_source,
+    )
+
+
+def _log_terminal_compact_failure(
+    *,
+    status_code: int,
+    error_code: str | None,
+    error_message: str | None,
+    failure_phase: str | None,
+    failure_detail: str | None,
+    failure_exception_type: str | None,
+    retryable_same_contract: bool,
+    retry_attempt: int,
+    affinity_source: str,
+    account_id: str | None,
+) -> None:
+    if status_code < 500:
+        return
+    logger.warning(
+        (
+            "proxy_compact_failure request_id=%s endpoint=%s status=%s error_code=%s error_message=%s "
+            "failure_phase=%s failure_detail=%s failure_exception_type=%s retryable_same_contract=%s "
+            "retry_attempt=%s affinity_source=%s account_id=%s"
+        ),
+        get_request_id(),
+        _COMPACT_UPSTREAM_ENDPOINT,
+        status_code,
+        error_code,
+        error_message,
+        failure_phase,
+        failure_detail,
+        failure_exception_type,
+        retryable_same_contract,
+        retry_attempt,
+        affinity_source,
+        account_id,
+    )
+
+
 def _hash_identifier(value: str) -> str:
     digest = sha256(value.encode("utf-8")).hexdigest()
     return f"sha256:{digest[:12]}"
@@ -1361,16 +1474,16 @@ def _sticky_key_for_compact_request(
     codex_session_affinity: bool,
     openai_cache_affinity: bool,
     sticky_threads_enabled: bool,
-) -> tuple[str | None, bool]:
+) -> _CompactAffinityDecision:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
-            return session_key, False
+            return _CompactAffinityDecision(session_key, False, "session_id")
     if openai_cache_affinity:
-        return _sticky_key_from_compact_payload(payload), False
+        return _CompactAffinityDecision(_sticky_key_from_compact_payload(payload), False, "prompt_cache_key")
     if sticky_threads_enabled:
-        return _sticky_key_from_compact_payload(payload), True
-    return None, False
+        return _CompactAffinityDecision(_sticky_key_from_compact_payload(payload), True, "prompt_cache_key")
+    return _CompactAffinityDecision(None, False, "none")
 
 
 def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
@@ -1379,13 +1492,28 @@ def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str 
     return _normalize_service_tier_value(payload.model_extra.get("service_tier"))
 
 
-def _service_tier_from_response(response: OpenAIResponsePayload | None) -> str | None:
+def _service_tier_from_response(response: OpenAIResponsePayload | CompactResponsePayload | None) -> str | None:
     if response is None:
         return None
     extra = response.model_extra
     if not isinstance(extra, Mapping):
         return None
     return _normalize_service_tier_value(extra.get("service_tier"))
+
+
+def _compact_payload_object(response: CompactResponsePayload | OpenAIResponsePayload | None) -> str | None:
+    if response is None:
+        return None
+    object_value = getattr(response, "object", None)
+    if isinstance(object_value, str) and object_value:
+        return object_value
+    extra = response.model_extra
+    if not isinstance(extra, Mapping):
+        return None
+    extra_object = extra.get("object")
+    if isinstance(extra_object, str) and extra_object:
+        return extra_object
+    return None
 
 
 def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> str | None:

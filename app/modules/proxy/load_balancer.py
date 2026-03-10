@@ -25,7 +25,6 @@ from app.db.models import Account, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.sticky_repository import StickySessionsRepository
-from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +73,6 @@ class LoadBalancer:
                             error_message=f"No accounts with a plan supporting model '{model}'",
                         )
                 latest_primary = await repos.usage.latest_by_account()
-                updater = UsageUpdater(repos.usage, repos.accounts, repos.additional_usage)
-                refreshed = await updater.refresh_accounts(accounts, latest_primary)
-                if refreshed:
-                    latest_primary = await repos.usage.latest_by_account()
                 latest_secondary = await repos.usage.latest_by_account(window="secondary")
 
                 states, account_map = _build_states(

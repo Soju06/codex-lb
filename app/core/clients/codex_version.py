@@ -59,7 +59,7 @@ class CodexVersionCache:
     async def _fetch_latest_version(self) -> str | None:
         try:
             timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 headers = {"Accept": "application/vnd.github+json"}
                 async with session.get(_GITHUB_RELEASES_URL, headers=headers) as resp:
                     if resp.status != 200:

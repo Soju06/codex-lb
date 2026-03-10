@@ -19,7 +19,7 @@ async def init_http_client() -> HttpClient:
     global _http_client
     if _http_client is not None:
         return _http_client
-    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
+    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), trust_env=True)
     retry_client = RetryClient(client_session=session, raise_for_status=False)
     _http_client = HttpClient(session=session, retry_client=retry_client)
     return _http_client

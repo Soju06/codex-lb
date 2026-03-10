@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildAdditionalQuotaItems,
   buildDepletionView,
   buildRemainingItems,
-  formatLimitName,
 } from "@/features/dashboard/utils";
-import type { AccountSummary, AdditionalQuota, Depletion } from "@/features/dashboard/schemas";
+import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
@@ -20,107 +18,9 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     resetAtPrimary: overrides.resetAtPrimary ?? null,
     resetAtSecondary: overrides.resetAtSecondary ?? null,
     auth: overrides.auth ?? null,
+    additionalQuotas: overrides.additionalQuotas ?? [],
   };
 }
-
-describe("formatLimitName", () => {
-  it("maps codex_other to Codex Spark", () => {
-    expect(formatLimitName("codex_other")).toBe("Codex Spark");
-  });
-
-  it("passes through unknown limit names", () => {
-    expect(formatLimitName("unknown_limit")).toBe("unknown_limit");
-  });
-});
-
-describe("buildAdditionalQuotaItems", () => {
-  it("returns empty array for empty quotas", () => {
-    const items = buildAdditionalQuotaItems([]);
-    expect(items).toEqual([]);
-  });
-
-  it("maps quota with primaryWindow correctly", () => {
-    const quotas: AdditionalQuota[] = [
-      {
-        limitName: "codex_other",
-        meteredFeature: "spark_requests",
-        primaryWindow: {
-          usedPercent: 45,
-          resetAt: 1234567890,
-          windowMinutes: 60,
-        },
-        secondaryWindow: null,
-      },
-    ];
-
-    const items = buildAdditionalQuotaItems(quotas);
-    expect(items).toHaveLength(1);
-    expect(items[0]).toEqual({
-      limitName: "codex_other",
-      displayName: "Codex Spark",
-      primaryUsedPercent: 45,
-      primaryResetAt: 1234567890,
-      primaryWindowMinutes: 60,
-      secondaryUsedPercent: null,
-      secondaryResetAt: null,
-      secondaryWindowMinutes: null,
-    });
-  });
-
-  it("handles null windows correctly", () => {
-    const quotas: AdditionalQuota[] = [
-      {
-        limitName: "codex_other",
-        meteredFeature: "spark_requests",
-        primaryWindow: null,
-        secondaryWindow: null,
-      },
-    ];
-
-    const items = buildAdditionalQuotaItems(quotas);
-    expect(items[0]).toEqual({
-      limitName: "codex_other",
-      displayName: "Codex Spark",
-      primaryUsedPercent: null,
-      primaryResetAt: null,
-      primaryWindowMinutes: null,
-      secondaryUsedPercent: null,
-      secondaryResetAt: null,
-      secondaryWindowMinutes: null,
-    });
-  });
-
-  it("maps both primary and secondary windows", () => {
-    const quotas: AdditionalQuota[] = [
-      {
-        limitName: "codex_other",
-        meteredFeature: "spark_requests",
-        primaryWindow: {
-          usedPercent: 30,
-          resetAt: 1000,
-          windowMinutes: 60,
-        },
-        secondaryWindow: {
-          usedPercent: 70,
-          resetAt: 2000,
-          windowMinutes: 1440,
-        },
-      },
-    ];
-
-    const items = buildAdditionalQuotaItems(quotas);
-    expect(items[0]).toEqual({
-      limitName: "codex_other",
-      displayName: "Codex Spark",
-      primaryUsedPercent: 30,
-      primaryResetAt: 1000,
-      primaryWindowMinutes: 60,
-      secondaryUsedPercent: 70,
-      secondaryResetAt: 2000,
-      secondaryWindowMinutes: 1440,
-    });
-  });
-});
 
 describe("buildDepletionView", () => {
   it("returns null for null depletion", () => {
@@ -137,7 +37,6 @@ describe("buildDepletionView", () => {
       riskLevel: "safe",
       burnRate: 0.5,
       safeUsagePercent: 90,
-      window: "primary",
     };
     expect(buildDepletionView(depletion)).toBeNull();
   });
@@ -148,13 +47,11 @@ describe("buildDepletionView", () => {
       riskLevel: "warning",
       burnRate: 1.5,
       safeUsagePercent: 45,
-      window: "primary",
     };
     const view = buildDepletionView(depletion);
     expect(view).toEqual({
       safePercent: 45,
       riskLevel: "warning",
-      window: "primary",
     });
   });
 
@@ -164,13 +61,11 @@ describe("buildDepletionView", () => {
       riskLevel: "danger",
       burnRate: 2.5,
       safeUsagePercent: 30,
-      window: "primary",
     };
     const view = buildDepletionView(depletion);
     expect(view).toEqual({
       safePercent: 30,
       riskLevel: "danger",
-      window: "primary",
     });
   });
 
@@ -180,13 +75,11 @@ describe("buildDepletionView", () => {
       riskLevel: "critical",
       burnRate: 5.0,
       safeUsagePercent: 20,
-      window: "primary",
     };
     const view = buildDepletionView(depletion);
     expect(view).toEqual({
       safePercent: 20,
       riskLevel: "critical",
-      window: "primary",
     });
   });
 });

@@ -11,7 +11,8 @@ export type UsageDonutsProps = {
 	secondaryTotal: number;
 	primaryWindowMinutes: number | null;
 	secondaryWindowMinutes: number | null;
-	safeLine?: SafeLineView | null;
+	safeLinePrimary?: SafeLineView | null;
+	safeLineSecondary?: SafeLineView | null;
 };
 
 export function UsageDonuts({
@@ -21,7 +22,8 @@ export function UsageDonuts({
 	secondaryTotal,
 	primaryWindowMinutes,
 	secondaryWindowMinutes,
-	safeLine,
+	safeLinePrimary,
+	safeLineSecondary,
 }: UsageDonutsProps) {
 	const primaryChartItems = useMemo(
 		() =>
@@ -42,11 +44,6 @@ export function UsageDonuts({
 		[secondaryItems],
 	);
 
-	// The backend computes depletion per window and reports which window drives
-	// the highest risk via safeLine.window.  Route the marker to the matching donut.
-	// Fallback: if no window is specified, use primary unless the primary donut is empty.
-	const safeLineWindow = safeLine?.window ?? (primaryItems.length === 0 || primaryTotal === 0 ? "secondary" : "primary");
-
 	return (
 		<div className="grid gap-4 lg:grid-cols-2">
 			<DonutChart
@@ -54,14 +51,14 @@ export function UsageDonuts({
 				subtitle={`Window ${formatWindowLabel("primary", primaryWindowMinutes)}`}
 				items={primaryChartItems}
 				total={primaryTotal}
-				safeLine={safeLineWindow === "primary" ? safeLine : undefined}
+				safeLine={safeLinePrimary}
 			/>
 			<DonutChart
 				title="Secondary Remaining"
 				subtitle={`Window ${formatWindowLabel("secondary", secondaryWindowMinutes)}`}
 				items={secondaryChartItems}
 				total={secondaryTotal}
-				safeLine={safeLineWindow === "secondary" ? safeLine : undefined}
+				safeLine={safeLineSecondary}
 			/>
 		</div>
 	);

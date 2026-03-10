@@ -23,15 +23,16 @@ describe("RecentRequestsTable", () => {
     render(
       <RecentRequestsTable
         {...PAGINATION_PROPS}
-        accounts={[
-          {
-            accountId: "acc-primary",
-            email: "primary@example.com",
-            displayName: "Primary Account",
-            planType: "plus",
-            status: "active",
-          },
-        ]}
+         accounts={[
+           {
+             accountId: "acc-primary",
+             email: "primary@example.com",
+             displayName: "Primary Account",
+             planType: "plus",
+             status: "active",
+             additionalQuotas: [],
+           },
+         ]}
         requests={[
           {
             requestedAt: ISO,

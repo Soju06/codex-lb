@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.3.0](https://github.com/Soju06/codex-lb/compare/v1.2.0...v1.3.0) (2026-03-10)
+
+
+### Features
+
+* additional rate limits (Spark quotas), EWMA depletion indicator, and quotas UI ([#151](https://github.com/Soju06/codex-lb/issues/151)) ([13cc1ce](https://github.com/Soju06/codex-lb/commit/13cc1cee7ac19c032e9ffbdef820d02b4e400573))
+* **db:** optimize SQLite startup and query paths ([#145](https://github.com/Soju06/codex-lb/issues/145)) ([316e9b6](https://github.com/Soju06/codex-lb/commit/316e9b69ee250d4b1af84eb360d297f7e99b932d))
+* **proxy:** add upstream request tracing ([#144](https://github.com/Soju06/codex-lb/issues/144)) ([c530d24](https://github.com/Soju06/codex-lb/commit/c530d248dd268abb0466ddba55abbc8176c99dbb))
+
+
+### Bug Fixes
+
+* **proxy:** add request logging to compact and transcribe paths ([#153](https://github.com/Soju06/codex-lb/issues/153)) ([368853a](https://github.com/Soju06/codex-lb/commit/368853a87efaede5cd8ae826fb67f6dd7c5fc8f6))
+* **proxy:** align compact retry account header after refresh ([#150](https://github.com/Soju06/codex-lb/issues/150)) ([b7aaef0](https://github.com/Soju06/codex-lb/commit/b7aaef03901fcf618a1dcded2aa6b19ef4c863bd))
+* **proxy:** match Codex CLI compact timeout defaults ([#160](https://github.com/Soju06/codex-lb/issues/160)) ([799791c](https://github.com/Soju06/codex-lb/commit/799791cd4bb52211bfd442aa9334a845a4d65014))
+* **proxy:** preserve v1 prompt cache affinity ([#161](https://github.com/Soju06/codex-lb/issues/161)) ([855c92e](https://github.com/Soju06/codex-lb/commit/855c92e03810c5adf9cf476325e41df22991a37a))
+* **proxy:** scope codex session routing affinity ([#143](https://github.com/Soju06/codex-lb/issues/143)) ([28411b2](https://github.com/Soju06/codex-lb/commit/28411b2ef8a913eb92f13146cb7882921904045d))
+* **proxy:** skip error backoff for transient upstream 5xx errors ([#152](https://github.com/Soju06/codex-lb/issues/152)) ([9819c0b](https://github.com/Soju06/codex-lb/commit/9819c0babb3796659ed86b62d673a8172cf185d7))
+
+
+### Documentation
+
+* add aaiyer as a contributor for bug, code, and test ([#149](https://github.com/Soju06/codex-lb/issues/149)) ([270d152](https://github.com/Soju06/codex-lb/commit/270d152fb017b1d8df1a732c19afca29b128c57b))
+* **agents:** remove invalid deployment topology ([165d221](https://github.com/Soju06/codex-lb/commit/165d2216ddcacda237180c3c8dd81bff80225d14))
+* **readme:** update opencode provider setup ([064efd9](https://github.com/Soju06/codex-lb/commit/064efd905b118e69b23a59eea2214c0c716f5083))
+
 ## [1.2.0](https://github.com/Soju06/codex-lb/compare/v1.1.1...v1.2.0) (2026-03-08)
 
 

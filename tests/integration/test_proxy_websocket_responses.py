@@ -116,11 +116,11 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         seen["account_id"] = account_id
         return fake_upstream
 
-    async def allow_websocket(_websocket):
-        return None, None
+    async def allow_firewall(_websocket):
+        return None
 
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect, raising=False)
-    monkeypatch.setattr(proxy_api_module, "_validate_proxy_websocket_request", allow_websocket)
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
 
     request_payload = {
         "type": "response.create",
@@ -181,10 +181,10 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         "stream": True,
     }
 
-    async def allow_websocket(_websocket):
-        return None, None
+    async def allow_firewall(_websocket):
+        return None
 
-    monkeypatch.setattr(proxy_api_module, "_validate_proxy_websocket_request", allow_websocket)
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:

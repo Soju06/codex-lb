@@ -30,6 +30,7 @@ async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
+            additional_usage=object(),  # type: ignore[arg-type]
         )
 
 

@@ -1,0 +1,44 @@
+{
+  "_fixture_notes": {
+    "captured_at": "2026-03-09",
+    "is_synthetic": true,
+    "reason": "Upstream API endpoint /backend-api/wham/usage returned 404. Endpoint may not be available or may require different authentication. Fixture created from Rust source model structure.",
+    "plan_type": "plus",
+    "additional_rate_limits_present": true,
+    "additional_rate_limits_count": 1,
+    "limit_names": ["codex_other"],
+    "has_primary_window": true,
+    "has_secondary_window": true,
+    "notes": "This fixture represents the expected response structure based on the Rust openai/codex source. The additional_rate_limits field contains one limit with name 'codex_other' and includes both primary and secondary windows."
+  },
+  "plan_type": "plus",
+  "rate_limit": {
+    "primary_window": {
+      "used_percent": 45,
+      "reset_at": 1741500000,
+      "limit_window_seconds": 18000,
+      "reset_after_seconds": null
+    },
+    "secondary_window": {
+      "used_percent": 30,
+      "reset_at": 1741900000,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": null
+    }
+  },
+  "additional_rate_limits": [
+    {
+      "limit_name": "codex_other",
+      "metered_feature": "codex_other",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": 70,
+          "reset_at": 1741500000,
+          "limit_window_seconds": 18000,
+          "reset_after_seconds": null
+        },
+        "secondary_window": null
+      }
+    }
+  ]
+}

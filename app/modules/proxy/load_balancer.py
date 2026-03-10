@@ -150,14 +150,16 @@ class LoadBalancer:
                 )
 
             latest_primary = await repos.usage.latest_by_account()
-            updater = UsageUpdater(repos.usage, repos.accounts)
+            updater = UsageUpdater(repos.usage, repos.accounts, repos.additional_usage)
             refreshed = await updater.refresh_accounts(accounts, latest_primary)
             if refreshed:
                 latest_primary = await repos.usage.latest_by_account()
             latest_secondary = await repos.usage.latest_by_account(window="secondary")
             return _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
-                latest_primary={account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()},
+                latest_primary={
+                    account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
+                },
                 latest_secondary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
@@ -249,6 +251,14 @@ class LoadBalancer:
             state.last_error_at = time.time()
             async with self._repo_factory() as repos:
                 await self._sync_state(repos.accounts, account, state)
+
+    async def record_success(self, account: Account) -> None:
+        """Clear transient error state after a successful upstream request."""
+        async with self._runtime_lock:
+            runtime = self._runtime.get(account.id)
+            if runtime and runtime.error_count > 0:
+                runtime.error_count = 0
+                runtime.last_error_at = None
 
     def _state_for(self, account: Account) -> AccountState:
         runtime = self._runtime.setdefault(account.id, RuntimeState())

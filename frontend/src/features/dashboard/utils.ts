@@ -14,6 +14,7 @@ import {
 import type {
   AccountSummary,
   DashboardOverview,
+  Depletion,
   RequestLog,
   TrendPoint,
   UsageWindow,
@@ -36,12 +37,24 @@ export type DashboardStat = {
   trendColor: string;
 };
 
+export interface SafeLineView {
+  safePercent: number;
+  riskLevel: "safe" | "warning" | "danger" | "critical";
+}
+
 export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
   secondaryUsageItems: RemainingItem[];
   requestLogs: RequestLog[];
+  safeLinePrimary: SafeLineView | null;
+  safeLineSecondary: SafeLineView | null;
 };
+
+export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
+  if (!depletion || depletion.riskLevel === "safe") return null;
+  return { safePercent: depletion.safeUsagePercent, riskLevel: depletion.riskLevel };
+}
 
 function buildWindowIndex(window: UsageWindow | null): Map<string, number> {
   const index = new Map<string, number>();
@@ -163,5 +176,7 @@ export function buildDashboardView(
     primaryUsageItems: buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark),
     secondaryUsageItems: buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark),
     requestLogs,
+    safeLinePrimary: buildDepletionView(overview.depletionPrimary),
+    safeLineSecondary: buildDepletionView(overview.depletionSecondary),
   };
 }

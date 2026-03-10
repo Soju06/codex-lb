@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import cast
 
 import pytest
 
@@ -9,7 +10,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts import auth_manager as auth_manager_module
-from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 
 pytestmark = pytest.mark.unit
 
@@ -77,7 +78,7 @@ async def test_refresh_account_preserves_plan_type_when_missing(monkeypatch):
         deactivation_reason=None,
     )
     repo = _DummyRepo()
-    manager = AuthManager(repo)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
     updated = await manager.refresh_account(account)
 

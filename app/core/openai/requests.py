@@ -420,6 +420,13 @@ def _normalize_openai_compatible_aliases(payload: dict[str, JsonValue]) -> None:
     reasoning_summary = payload.pop("reasoningSummary", None)
     text_verbosity = payload.pop("textVerbosity", None)
     top_level_verbosity = payload.pop("verbosity", None)
+    prompt_cache_key = payload.pop("promptCacheKey", None)
+    prompt_cache_retention = payload.pop("promptCacheRetention", None)
+
+    if isinstance(prompt_cache_key, str) and "prompt_cache_key" not in payload:
+        payload["prompt_cache_key"] = prompt_cache_key
+    if isinstance(prompt_cache_retention, str) and "prompt_cache_retention" not in payload:
+        payload["prompt_cache_retention"] = prompt_cache_retention
 
     reasoning_payload = payload.get("reasoning")
     if is_json_mapping(reasoning_payload):

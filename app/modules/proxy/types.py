@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.types import JsonValue
 
@@ -8,9 +8,9 @@ from app.core.types import JsonValue
 @dataclass(frozen=True)
 class RateLimitWindowSnapshotData:
     used_percent: int
-    limit_window_seconds: int
-    reset_after_seconds: int
-    reset_at: int
+    limit_window_seconds: int | None = None
+    reset_after_seconds: int | None = None
+    reset_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,15 @@ class CreditStatusDetailsData:
 
 
 @dataclass(frozen=True)
+class AdditionalRateLimitData:
+    limit_name: str
+    metered_feature: str
+    rate_limit: RateLimitStatusDetailsData | None = None
+
+
+@dataclass(frozen=True)
 class RateLimitStatusPayloadData:
     plan_type: str
     rate_limit: RateLimitStatusDetailsData | None = None
     credits: CreditStatusDetailsData | None = None
+    additional_rate_limits: list[AdditionalRateLimitData] = field(default_factory=list)

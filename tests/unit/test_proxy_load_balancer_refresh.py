@@ -140,6 +140,7 @@ async def test_select_account_skips_latest_primary_requery_when_not_refreshed(mo
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
+            additional_usage=object(),  # type: ignore[arg-type]
         )
 
     balancer = LoadBalancer(repo_factory)
@@ -188,6 +189,7 @@ async def test_select_account_prunes_stale_runtime_for_removed_accounts() -> Non
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
+            additional_usage=object(),  # type: ignore[arg-type]
         )
 
     balancer = LoadBalancer(repo_factory)
@@ -276,6 +278,7 @@ async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
+            additional_usage=object(),  # type: ignore[arg-type]
         )
 
     original_sync = LoadBalancer._sync_state
@@ -356,6 +359,7 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
+            additional_usage=object(),  # type: ignore[arg-type]
         )
 
     original_sync = LoadBalancer._sync_state
@@ -445,6 +449,7 @@ async def test_select_account_does_not_hold_runtime_lock_during_refresh(monkeypa
         yield ProxyRepositories(
             accounts=accounts_repo,  # type: ignore[arg-type]
             usage=usage_repo,  # type: ignore[arg-type]
+            additional_usage=object(),  # type: ignore[arg-type]
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]

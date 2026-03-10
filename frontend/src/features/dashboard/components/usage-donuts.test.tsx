@@ -54,4 +54,94 @@ describe("UsageDonuts", () => {
     expect(screen.getByText("Secondary Remaining")).toBeInTheDocument();
     expect(screen.getAllByText("Remaining").length).toBeGreaterThanOrEqual(2);
   });
+
+  it("renders safe line only for the primary donut", () => {
+    render(
+      <UsageDonuts
+        primaryItems={[
+          {
+            accountId: "acc-1",
+            label: "primary@example.com",
+            value: 120,
+            remainingPercent: 60,
+            color: "#7bb661",
+          },
+        ]}
+        secondaryItems={[
+          {
+            accountId: "acc-2",
+            label: "secondary@example.com",
+            value: 80,
+            remainingPercent: 40,
+            color: "#d9a441",
+          },
+        ]}
+        primaryTotal={200}
+        secondaryTotal={200}
+        primaryWindowMinutes={300}
+        secondaryWindowMinutes={10080}
+        safeLinePrimary={{ safePercent: 60, riskLevel: "warning" }}
+      />,
+    );
+
+    expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
+  });
+
+  it("renders safe line on both donuts when both have depletion", () => {
+    render(
+      <UsageDonuts
+        primaryItems={[
+          {
+            accountId: "acc-1",
+            label: "primary@example.com",
+            value: 120,
+            remainingPercent: 60,
+            color: "#7bb661",
+          },
+        ]}
+        secondaryItems={[
+          {
+            accountId: "acc-2",
+            label: "secondary@example.com",
+            value: 80,
+            remainingPercent: 40,
+            color: "#d9a441",
+          },
+        ]}
+        primaryTotal={200}
+        secondaryTotal={200}
+        primaryWindowMinutes={300}
+        secondaryWindowMinutes={10080}
+        safeLinePrimary={{ safePercent: 60, riskLevel: "warning" }}
+        safeLineSecondary={{ safePercent: 40, riskLevel: "danger" }}
+      />,
+    );
+
+    expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(2);
+  });
+
+  it("renders safe line only on secondary donut for weekly-only plans", () => {
+    render(
+      <UsageDonuts
+        primaryItems={[]}
+        secondaryItems={[
+          {
+            accountId: "acc-1",
+            label: "weekly@example.com",
+            value: 80,
+            remainingPercent: 40,
+            color: "#d9a441",
+          },
+        ]}
+        primaryTotal={0}
+        secondaryTotal={200}
+        primaryWindowMinutes={null}
+        secondaryWindowMinutes={10080}
+        safeLineSecondary={{ safePercent: 60, riskLevel: "warning" }}
+      />,
+    );
+
+    expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
+  });
+
 });

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRemainingItems } from "@/features/dashboard/utils";
-import type { AccountSummary } from "@/features/dashboard/schemas";
+import {
+  buildDepletionView,
+  buildRemainingItems,
+} from "@/features/dashboard/utils";
+import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
@@ -15,8 +18,71 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     resetAtPrimary: overrides.resetAtPrimary ?? null,
     resetAtSecondary: overrides.resetAtSecondary ?? null,
     auth: overrides.auth ?? null,
+    additionalQuotas: overrides.additionalQuotas ?? [],
   };
 }
+
+describe("buildDepletionView", () => {
+  it("returns null for null depletion", () => {
+    expect(buildDepletionView(null)).toBeNull();
+  });
+
+  it("returns null for undefined depletion", () => {
+    expect(buildDepletionView(undefined)).toBeNull();
+  });
+
+  it("returns null for safe risk level", () => {
+    const depletion: Depletion = {
+      risk: 0.1,
+      riskLevel: "safe",
+      burnRate: 0.5,
+      safeUsagePercent: 90,
+    };
+    expect(buildDepletionView(depletion)).toBeNull();
+  });
+
+  it("returns view for warning risk level", () => {
+    const depletion: Depletion = {
+      risk: 0.5,
+      riskLevel: "warning",
+      burnRate: 1.5,
+      safeUsagePercent: 45,
+    };
+    const view = buildDepletionView(depletion);
+    expect(view).toEqual({
+      safePercent: 45,
+      riskLevel: "warning",
+    });
+  });
+
+  it("returns view for danger risk level", () => {
+    const depletion: Depletion = {
+      risk: 0.75,
+      riskLevel: "danger",
+      burnRate: 2.5,
+      safeUsagePercent: 30,
+    };
+    const view = buildDepletionView(depletion);
+    expect(view).toEqual({
+      safePercent: 30,
+      riskLevel: "danger",
+    });
+  });
+
+  it("returns view for critical risk level", () => {
+    const depletion: Depletion = {
+      risk: 0.95,
+      riskLevel: "critical",
+      burnRate: 5.0,
+      safeUsagePercent: 20,
+    };
+    const view = buildDepletionView(depletion);
+    expect(view).toEqual({
+      safePercent: 20,
+      riskLevel: "critical",
+    });
+  });
+});
 
 describe("buildRemainingItems", () => {
   it("keeps default labels for non-duplicate accounts", () => {

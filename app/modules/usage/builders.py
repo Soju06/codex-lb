@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
@@ -19,7 +20,7 @@ from app.core.usage.types import (
     UsageWindowSnapshot,
 )
 from app.core.utils.time import from_epoch_seconds
-from app.db.models import Account, RequestLog
+from app.db.models import Account, AdditionalUsageHistory, RequestLog
 from app.modules.usage.schemas import (
     MetricsTrends,
     TrendPoint,
@@ -332,3 +333,105 @@ def _metrics_summary_to_model(metrics: UsageMetricsSummary) -> UsageMetrics:
         error_rate_7d=metrics.error_rate_7d,
         top_error=metrics.top_error,
     )
+
+
+# ---------------------------------------------------------------------------
+# Additional usage aggregation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AdditionalWindowSummary:
+    """Summary for one window (primary or secondary) of an additional rate limit."""
+
+    used_percent: float  # average across accounts
+    reset_at: int | None  # max reset_at across accounts
+    window_minutes: int | None  # max window_minutes
+
+
+@dataclass(frozen=True)
+class AdditionalQuotaSummary:
+    """Aggregated summary for one additional rate limit (e.g., codex_other)."""
+
+    limit_name: str
+    metered_feature: str
+    primary_window: AdditionalWindowSummary | None
+    secondary_window: AdditionalWindowSummary | None
+
+
+def build_additional_usage_summary(
+    additional_usage_data: dict[str, dict[str, dict[str, AdditionalUsageHistory]]],
+) -> list[AdditionalQuotaSummary]:
+    """Build aggregated additional quota summaries from per-account data.
+
+    Args:
+        additional_usage_data: Nested mapping of
+            ``limit_name -> window_key -> account_id -> AdditionalUsageHistory``.
+
+    Returns:
+        One :class:`AdditionalQuotaSummary` per *limit_name* present in the input.
+    """
+    results: list[AdditionalQuotaSummary] = []
+
+    for limit_name, windows in additional_usage_data.items():
+        primary_entries = windows.get("primary", {})
+        secondary_entries = windows.get("secondary", {})
+
+        # Derive metered_feature from any available entry
+        metered_feature = _metered_feature_from_entries(primary_entries, secondary_entries)
+
+        primary_window = _aggregate_additional_window(primary_entries)
+        secondary_window = _aggregate_additional_window(secondary_entries)
+
+        results.append(
+            AdditionalQuotaSummary(
+                limit_name=limit_name,
+                metered_feature=metered_feature,
+                primary_window=primary_window,
+                secondary_window=secondary_window,
+            )
+        )
+
+    return results
+
+
+def _aggregate_additional_window(
+    entries: dict[str, AdditionalUsageHistory],
+) -> AdditionalWindowSummary | None:
+    """Aggregate per-account entries into a single window summary.
+
+    Averaging ``used_percent``, using the earliest ``reset_at`` (min) and the
+    largest ``window_minutes`` (max) for consistent pool behavior.
+    """
+    if not entries:
+        return None
+
+    total_percent = 0.0
+    count = 0
+    reset_candidates: list[int] = []
+    wm_candidates: list[int] = []
+
+    for entry in entries.values():
+        total_percent += entry.used_percent
+        count += 1
+        if entry.reset_at is not None:
+            reset_candidates.append(entry.reset_at)
+        if entry.window_minutes is not None:
+            wm_candidates.append(entry.window_minutes)
+
+    return AdditionalWindowSummary(
+        used_percent=total_percent / count,
+        reset_at=min(reset_candidates) if reset_candidates else None,
+        window_minutes=max(wm_candidates) if wm_candidates else None,
+    )
+
+
+def _metered_feature_from_entries(
+    primary: dict[str, AdditionalUsageHistory],
+    secondary: dict[str, AdditionalUsageHistory],
+) -> str:
+    """Extract ``metered_feature`` from the first available entry."""
+    for entries in (primary, secondary):
+        for entry in entries.values():
+            return entry.metered_feature
+    return ""

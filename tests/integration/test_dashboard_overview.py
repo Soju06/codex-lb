@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from app.core.crypto import TokenEncryptor
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
@@ -135,3 +135,90 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
     assert accounts["acc_free"]["windowMinutesPrimary"] is None
     assert accounts["acc_free"]["windowMinutesSecondary"] == 10080
     assert accounts["acc_free"]["usage"]["secondaryRemainingPercent"] == pytest.approx(80.0)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_computes_depletion_from_recent_db_history(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_depletion", "depletion@example.com"))
+        await usage_repo.add_entry(
+            "acc_depletion",
+            10.0,
+            window="primary",
+            window_minutes=60,
+            reset_at=int(naive_utc_to_epoch(now + timedelta(minutes=45))),
+            recorded_at=now - timedelta(minutes=20),
+        )
+        await usage_repo.add_entry(
+            "acc_depletion",
+            35.0,
+            window="primary",
+            window_minutes=60,
+            reset_at=int(naive_utc_to_epoch(now + timedelta(minutes=45))),
+            recorded_at=now - timedelta(minutes=5),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["depletionPrimary"] is not None
+    assert 0.0 <= payload["depletionPrimary"]["risk"] <= 1.0
+    assert payload["depletionPrimary"]["riskLevel"] in {"safe", "warning", "danger", "critical"}
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_weekly_only_depletion_uses_current_stream(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+    reset_at = int(naive_utc_to_epoch(now + timedelta(minutes=30)))
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_weekly_depletion", "weekly@example.com", plan_type="free"))
+
+        await usage_repo.add_entry(
+            "acc_weekly_depletion",
+            0.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=now - timedelta(days=6, minutes=2),
+        )
+        await usage_repo.add_entry(
+            "acc_weekly_depletion",
+            5.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=now - timedelta(days=6, minutes=1),
+        )
+        await usage_repo.add_entry(
+            "acc_weekly_depletion",
+            6.0,
+            window="primary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=now - timedelta(minutes=2),
+        )
+        await usage_repo.add_entry(
+            "acc_weekly_depletion",
+            7.0,
+            window="primary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["depletionSecondary"] is not None
+    assert payload["depletionSecondary"]["risk"] == pytest.approx(0.37, abs=0.02)

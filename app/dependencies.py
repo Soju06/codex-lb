@@ -26,7 +26,7 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
 
 
@@ -101,7 +101,8 @@ def get_accounts_context(
 ) -> AccountsContext:
     repository = AccountsRepository(session)
     usage_repository = UsageRepository(session)
-    service = AccountsService(repository, usage_repository)
+    additional_usage_repository = AdditionalUsageRepository(session)
+    service = AccountsService(repository, usage_repository, additional_usage_repository)
     return AccountsContext(
         session=session,
         repository=repository,
@@ -142,6 +143,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
+            additional_usage=AdditionalUsageRepository(session),
         )
 
 

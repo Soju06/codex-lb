@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import Integer, cast, func, literal_column, select
+from sqlalchemy import Integer, cast, delete, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
-from app.db.models import UsageHistory
+from app.db.models import AdditionalUsageHistory, UsageHistory
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
 
@@ -131,6 +132,48 @@ class UsageRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
+    async def history_since(
+        self,
+        account_id: str,
+        window: str,
+        since: datetime,
+    ) -> list[UsageHistory]:
+        stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id == account_id,
+                _window_clause(window),
+                UsageHistory.recorded_at >= since,
+            )
+            .order_by(UsageHistory.recorded_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def bulk_history_since(
+        self,
+        account_ids: list[str],
+        window: str,
+        since: datetime,
+    ) -> dict[str, list[UsageHistory]]:
+        """Fetch usage history for multiple accounts in a single query."""
+        if not account_ids:
+            return {}
+        stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id.in_(account_ids),
+                _window_clause(window),
+                UsageHistory.recorded_at >= since,
+            )
+            .order_by(UsageHistory.account_id, UsageHistory.recorded_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        grouped: dict[str, list[UsageHistory]] = {}
+        for row in result.scalars().all():
+            grouped.setdefault(row.account_id, []).append(row)
+        return grouped
+
     async def trends_by_bucket(
         self,
         since: datetime,
@@ -187,3 +230,138 @@ class UsageRepository:
         result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None
+
+
+class AdditionalUsageRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add_entry(
+        self,
+        account_id: str,
+        limit_name: str,
+        metered_feature: str,
+        window: str,
+        used_percent: float,
+        reset_at: int | None = None,
+        window_minutes: int | None = None,
+        recorded_at: datetime | None = None,
+    ) -> None:
+        entry = AdditionalUsageHistory(
+            account_id=account_id,
+            limit_name=limit_name,
+            metered_feature=metered_feature,
+            window=window,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            window_minutes=window_minutes,
+            recorded_at=recorded_at or utcnow(),
+        )
+        self._session.add(entry)
+        await self._session.commit()
+
+    async def delete_for_account(self, account_id: str) -> None:
+        stmt = delete(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == account_id)
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
+        stmt = delete(AdditionalUsageHistory).where(
+            AdditionalUsageHistory.account_id == account_id,
+            AdditionalUsageHistory.limit_name == limit_name,
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def delete_for_account_limit_window(
+        self,
+        account_id: str,
+        limit_name: str,
+        window: str,
+    ) -> None:
+        stmt = delete(AdditionalUsageHistory).where(
+            AdditionalUsageHistory.account_id == account_id,
+            AdditionalUsageHistory.limit_name == limit_name,
+            AdditionalUsageHistory.window == window,
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def latest_by_account(
+        self,
+        limit_name: str,
+        window: str,
+    ) -> dict[str, AdditionalUsageHistory]:
+        """Returns the most recent entry per account for a given limit_name + window."""
+        subq = (
+            select(
+                AdditionalUsageHistory.id.label("usage_id"),
+                func.row_number()
+                .over(
+                    partition_by=AdditionalUsageHistory.account_id,
+                    order_by=(AdditionalUsageHistory.recorded_at.desc(), AdditionalUsageHistory.id.desc()),
+                )
+                .label("row_number"),
+            )
+            .where(
+                AdditionalUsageHistory.limit_name == limit_name,
+                AdditionalUsageHistory.window == window,
+            )
+            .subquery()
+        )
+        stmt = (
+            select(AdditionalUsageHistory)
+            .join(subq, AdditionalUsageHistory.id == subq.c.usage_id)
+            .where(subq.c.row_number == 1)
+        )
+        result = await self._session.execute(stmt)
+        return {entry.account_id: entry for entry in result.scalars().all()}
+
+    async def list_limit_names(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
+        stmt = select(AdditionalUsageHistory.limit_name).distinct()
+        if account_ids is not None:
+            stmt = stmt.where(AdditionalUsageHistory.account_id.in_(account_ids))
+        if since is not None:
+            stmt = stmt.where(AdditionalUsageHistory.recorded_at >= since)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def history_since(
+        self,
+        account_id: str,
+        limit_name: str,
+        window: str,
+        since: datetime,
+    ) -> list[AdditionalUsageHistory]:
+        """Returns time-series entries for EWMA computation."""
+        stmt = (
+            select(AdditionalUsageHistory)
+            .where(
+                AdditionalUsageHistory.account_id == account_id,
+                AdditionalUsageHistory.limit_name == limit_name,
+                AdditionalUsageHistory.window == window,
+                AdditionalUsageHistory.recorded_at >= since,
+            )
+            .order_by(AdditionalUsageHistory.recorded_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def latest_recorded_at_for_account(self, account_id: str) -> datetime | None:
+        """Return the most recent recorded_at for any additional usage entry of this account."""
+        stmt = select(func.max(AdditionalUsageHistory.recorded_at)).where(
+            AdditionalUsageHistory.account_id == account_id
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def latest_recorded_at(self) -> datetime | None:
+        """Return the most recent recorded_at across all additional usage entries."""
+        stmt = select(func.max(AdditionalUsageHistory.recorded_at))
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()

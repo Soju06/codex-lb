@@ -128,8 +128,20 @@ async def v1_responses(
         error = _openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
     if responses_payload.stream:
-        return await _stream_responses(request, responses_payload, context, api_key)
-    return await _collect_responses(request, responses_payload, context, api_key)
+        return await _stream_responses(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            openai_cache_affinity=True,
+        )
+    return await _collect_responses(
+        request,
+        responses_payload,
+        context,
+        api_key,
+        openai_cache_affinity=True,
+    )
 
 
 @router.get("/models", response_model=ModelListResponse)
@@ -287,6 +299,7 @@ async def v1_chat_completions(
         responses_payload,
         request.headers,
         propagate_http_errors=True,
+        openai_cache_affinity=True,
         api_key=api_key,
         api_key_reservation=reservation,
         suppress_text_done_events=True,
@@ -333,6 +346,7 @@ async def _stream_responses(
     api_key: ApiKeyData | None,
     *,
     codex_session_affinity: bool = False,
+    openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
 ) -> Response:
     _apply_api_key_enforcement(payload, api_key)
@@ -350,6 +364,7 @@ async def _stream_responses(
         request.headers,
         codex_session_affinity=codex_session_affinity,
         propagate_http_errors=True,
+        openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
         api_key_reservation=reservation,
         suppress_text_done_events=suppress_text_done_events,
@@ -379,6 +394,7 @@ async def _collect_responses(
     api_key: ApiKeyData | None,
     *,
     codex_session_affinity: bool = False,
+    openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
 ) -> Response:
     _apply_api_key_enforcement(payload, api_key)
@@ -396,6 +412,7 @@ async def _collect_responses(
         request.headers,
         codex_session_affinity=codex_session_affinity,
         propagate_http_errors=True,
+        openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
         api_key_reservation=reservation,
         suppress_text_done_events=suppress_text_done_events,
@@ -459,7 +476,13 @@ async def v1_responses_compact(
     except ValidationError as exc:
         error = _openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
-    return await _compact_responses(request, compact_payload, context, api_key)
+    return await _compact_responses(
+        request,
+        compact_payload,
+        context,
+        api_key,
+        openai_cache_affinity=True,
+    )
 
 
 async def _compact_responses(
@@ -468,6 +491,7 @@ async def _compact_responses(
     context: ProxyContext,
     api_key: ApiKeyData | None,
     codex_session_affinity: bool = False,
+    openai_cache_affinity: bool = False,
 ) -> JSONResponse:
     _apply_api_key_enforcement(payload, api_key)
     _validate_model_access(api_key, payload.model)
@@ -483,6 +507,7 @@ async def _compact_responses(
             payload,
             request.headers,
             codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
             api_key=api_key,
             api_key_reservation=reservation,
         )

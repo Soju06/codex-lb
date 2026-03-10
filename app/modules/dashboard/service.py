@@ -189,8 +189,9 @@ class DashboardService:
 
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
 
+        additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(
-            last_sync_at=_latest_recorded_at(primary_usage, secondary_usage),
+            last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, additional_ts),
             accounts=account_summaries,
             summary=summary,
             windows=windows,
@@ -269,10 +270,13 @@ def _usage_history_to_window_row(entry: UsageHistory) -> UsageWindowRow:
 def _latest_recorded_at(
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
+    additional_ts: datetime | None = None,
 ):
     timestamps = [
         entry.recorded_at
         for entry in list(primary_usage.values()) + list(secondary_usage.values())
         if entry.recorded_at is not None
     ]
+    if additional_ts is not None:
+        timestamps.append(additional_ts)
     return max(timestamps) if timestamps else None

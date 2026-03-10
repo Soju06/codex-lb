@@ -66,3 +66,6 @@ class DashboardRepository:
         self, limit_name: str, window: str
     ) -> dict[str, AdditionalUsageHistory]:
         return await self._additional_usage_repo.latest_by_account(limit_name, window)
+
+    async def latest_additional_recorded_at(self) -> datetime | None:
+        return await self._additional_usage_repo.latest_recorded_at()

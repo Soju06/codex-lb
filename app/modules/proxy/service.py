@@ -921,9 +921,18 @@ class ProxyService:
             error.code if error else None,
             error.type if error else None,
         )
-        await self._handle_stream_error(account, _upstream_error_from_openai(error), code)
+        await self._handle_stream_error(
+            account,
+            _upstream_error_from_openai(error),
+            code,
+        )
 
-    async def _handle_stream_error(self, account: Account, error: UpstreamError, code: str) -> None:
+    async def _handle_stream_error(
+        self,
+        account: Account,
+        error: UpstreamError,
+        code: str,
+    ) -> None:
         if code in {"rate_limit_exceeded", "usage_limit_reached"}:
             await self._load_balancer.mark_rate_limit(account, error)
             return

@@ -995,11 +995,15 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_no_retry")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
@@ -1016,6 +1020,8 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert select_account.await_count == 1
+    record_error.assert_awaited_once_with(account)
+    record_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1145,6 +1151,43 @@ async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_records_transient_error_for_generic_upstream_failure(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_error")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    async def failing_compact(payload, headers, access_token, account_id):
+        raise proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "late"))
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", failing_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    record_error.assert_awaited_once_with(account)
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -1256,6 +1299,58 @@ async def test_transcribe_selection_budget_exhaustion_returns_upstream_unavailab
     assert exc.status_code == 502
     assert exc.payload["error"]["code"] == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_records_transient_error_for_generic_upstream_failure(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_transcribe_error")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    async def failing_transcribe(
+        audio_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str | None,
+        prompt: str | None,
+        headers,
+        access_token: str,
+        account_id: str | None,
+        base_url=None,
+        session=None,
+    ):
+        raise proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "late"))
+
+    monkeypatch.setattr(proxy_service, "core_transcribe_audio", failing_transcribe)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.transcribe(
+            audio_bytes=b"\x01\x02",
+            filename="sample.wav",
+            content_type="audio/wav",
+            prompt=None,
+            headers={"session_id": "sid-transcribe"},
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    record_error.assert_awaited_once_with(account)
+    record_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio

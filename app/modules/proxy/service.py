@@ -801,6 +801,9 @@ class ProxyService:
                 except _RetryableStreamError as exc:
                     await self._handle_stream_error(account, exc.error, exc.code)
                     continue
+                except _TerminalStreamError as exc:
+                    await self._handle_stream_error(account, exc.error, exc.code)
+                    return
                 except ProxyResponseError as exc:
                     if exc.status_code == 401:
                         remaining_budget = _remaining_budget_seconds(deadline)
@@ -987,6 +990,7 @@ class ProxyService:
             if event_service_tier is not None:
                 actual_service_tier = event_service_tier
                 service_tier = event_service_tier
+            terminal_stream_error: _TerminalStreamError | None = None
             if event and event.type in ("response.failed", "error"):
                 if event.type == "response.failed":
                     response = event.response
@@ -1003,6 +1007,10 @@ class ProxyService:
                 if allow_retry and _should_retry_stream_error(code):
                     error_payload = _upstream_error_from_openai(error)
                     raise _RetryableStreamError(code, error_payload)
+                terminal_stream_error = _TerminalStreamError(
+                    code,
+                    _upstream_error_from_openai(error),
+                )
                 if allow_retry:
                     logger.info(
                         "Not retrying non-recoverable stream failure request_id=%s account_id=%s code=%s",
@@ -1025,6 +1033,8 @@ class ProxyService:
                 saw_text_delta=saw_text_delta,
             ):
                 yield first
+            if terminal_stream_error is not None:
+                raise terminal_stream_error
 
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
@@ -1399,8 +1409,9 @@ class ProxyService:
         if code in PERMANENT_FAILURE_CODES:
             await self._load_balancer.mark_permanent_failure(account, code)
             return
+        await self._load_balancer.record_error(account)
         logger.info(
-            "Skipping account penalty for transient stream error account_id=%s request_id=%s code=%s",
+            "Recorded transient account error account_id=%s request_id=%s code=%s",
             account.id,
             get_request_id(),
             code,
@@ -1408,6 +1419,13 @@ class ProxyService:
 
 
 class _RetryableStreamError(Exception):
+    def __init__(self, code: str, error: UpstreamError) -> None:
+        super().__init__(code)
+        self.code = code
+        self.error = error
+
+
+class _TerminalStreamError(Exception):
     def __init__(self, code: str, error: UpstreamError) -> None:
         super().__init__(code)
         self.code = code

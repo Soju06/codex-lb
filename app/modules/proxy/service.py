@@ -682,6 +682,7 @@ class ProxyService:
         max_attempts = 3
         settled = False
         any_attempt_logged = False
+        last_preflight_error_message: str | None = None
         settlement = _StreamSettlement()
         try:
             for attempt in range(max_attempts):
@@ -768,6 +769,7 @@ class ProxyService:
                             exc_info=True,
                         )
                         message = str(exc) or "Request to upstream timed out"
+                        await self._handle_stream_error(account, {"message": message}, "upstream_unavailable")
                         await self._write_stream_preflight_error(
                             account_id=account.id,
                             api_key=api_key,
@@ -779,13 +781,8 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                         )
-                        event = response_failed_event(
-                            "upstream_unavailable",
-                            message,
-                            response_id=request_id,
-                        )
-                        yield format_sse_event(event)
-                        return
+                        last_preflight_error_message = message
+                        continue
                     any_attempt_logged = True
                     settlement = _StreamSettlement()
                     effective_attempt_timeout = _remaining_budget_seconds(deadline)
@@ -818,7 +815,14 @@ class ProxyService:
                             yield line
                     finally:
                         pop_stream_timeout_overrides(stream_timeout_tokens)
-                    await self._load_balancer.record_success(account)
+                    if settlement.status == "success":
+                        await self._load_balancer.record_success(account)
+                    else:
+                        await self._handle_stream_error(
+                            account,
+                            _stream_settlement_error_payload(settlement),
+                            settlement.error_code or "upstream_error",
+                        )
                     settled = await self._settle_stream_api_key_usage(
                         api_key,
                         api_key_reservation,
@@ -864,6 +868,7 @@ class ProxyService:
                                 exc_info=True,
                             )
                             message = str(exc) or "Request to upstream timed out"
+                            await self._handle_stream_error(account, {"message": message}, "upstream_unavailable")
                             await self._write_stream_preflight_error(
                                 account_id=account.id,
                                 api_key=api_key,
@@ -875,13 +880,8 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                             )
-                            event = response_failed_event(
-                                "upstream_unavailable",
-                                message,
-                                response_id=request_id,
-                            )
-                            yield format_sse_event(event)
-                            return
+                            last_preflight_error_message = message
+                            continue
                         settlement = _StreamSettlement()
                         effective_attempt_timeout = _remaining_budget_seconds(deadline)
                         if effective_attempt_timeout <= 0:
@@ -913,7 +913,14 @@ class ProxyService:
                                 yield line
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)
-                        await self._load_balancer.record_success(account)
+                        if settlement.status == "success":
+                            await self._load_balancer.record_success(account)
+                        else:
+                            await self._handle_stream_error(
+                                account,
+                                _stream_settlement_error_payload(settlement),
+                                settlement.error_code or "upstream_error",
+                            )
                         settled = await self._settle_stream_api_key_usage(
                             api_key,
                             api_key_reservation,
@@ -961,6 +968,14 @@ class ProxyService:
                     )
                     yield format_sse_event(event)
                     return
+            if last_preflight_error_message is not None:
+                event = response_failed_event(
+                    "upstream_unavailable",
+                    last_preflight_error_message,
+                    response_id=request_id,
+                )
+                yield format_sse_event(event)
+                return
             retries_exhausted_msg = "No available accounts after retries"
             event = response_failed_event(
                 "no_accounts",
@@ -1059,12 +1074,12 @@ class ProxyService:
                 status = "error"
                 error_code = code
                 error_message = error.message if error else None
+                settlement.error = _upstream_error_from_openai(error)
                 if allow_retry and _should_retry_stream_error(code):
-                    error_payload = _upstream_error_from_openai(error)
-                    raise _RetryableStreamError(code, error_payload)
+                    raise _RetryableStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
                     code,
-                    _upstream_error_from_openai(error),
+                    settlement.error,
                 )
                 if allow_retry:
                     logger.info(
@@ -1121,6 +1136,7 @@ class ProxyService:
                             error.type if error else None,
                         )
                         error_message = error.message if error else None
+                        settlement.error = _upstream_error_from_openai(error)
                     if event_type in ("response.completed", "response.incomplete"):
                         usage = event.response.usage if event.response else None
                         if event_type == "response.incomplete":
@@ -1150,6 +1166,8 @@ class ProxyService:
             settlement.input_tokens = input_tokens
             settlement.output_tokens = output_tokens
             settlement.cached_input_tokens = cached_input_tokens
+            settlement.error_code = error_code
+            settlement.error_message = error_message
             await self._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
@@ -1523,6 +1541,20 @@ class _StreamSettlement:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    error: UpstreamError | None = None
+
+
+def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
+    if settlement.error is not None:
+        return settlement.error
+    payload: UpstreamError = {}
+    if settlement.error_message:
+        payload["message"] = settlement.error_message
+    else:
+        payload["message"] = "Upstream error"
+    return payload
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

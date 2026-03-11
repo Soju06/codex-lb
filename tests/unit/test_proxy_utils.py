@@ -1080,6 +1080,7 @@ async def test_stream_refresh_timeout_emits_upstream_unavailable_and_logs(monkey
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_stream_refresh_timeout")
+    record_error = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -1088,6 +1089,7 @@ async def test_stream_refresh_timeout_emits_upstream_unavailable_and_logs(monkey
         "select_account",
         AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
     )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
 
     async def failing_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
         raise asyncio.TimeoutError
@@ -1105,6 +1107,7 @@ async def test_stream_refresh_timeout_emits_upstream_unavailable_and_logs(monkey
     assert request_logs.calls[-1]["status"] == "error"
     assert request_logs.calls[-1]["error_code"] == "upstream_unavailable"
     assert request_logs.calls[-1]["error_message"] == "Request to upstream timed out"
+    assert record_error.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -1113,6 +1116,7 @@ async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_stream_forced_refresh_timeout")
+    record_error = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -1121,6 +1125,7 @@ async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs
         "select_account",
         AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
     )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
 
     async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
         if force:
@@ -1146,6 +1151,115 @@ async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs
     assert request_logs.calls[-1]["status"] == "error"
     assert request_logs.calls[-1]["error_code"] == "upstream_unavailable"
     assert request_logs.calls[-1]["error_message"] == "Request to upstream timed out"
+    assert record_error.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_refresh_timeout_retries_next_account(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    timeout_account = _make_account("acc_stream_refresh_retry_timeout")
+    healthy_account = _make_account("acc_stream_refresh_retry_healthy")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=timeout_account, error_message=None),
+            AccountSelection(account=healthy_account, error_message=None),
+        ]
+    )
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
+        if account.id == timeout_account.id:
+            raise asyncio.TimeoutError
+        return account
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_retry_refresh",'
+            '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert select_account.await_count == 2
+    record_error.assert_awaited_once_with(timeout_account)
+    record_success.assert_awaited_once_with(healthy_account)
+    assert request_logs.calls[0]["account_id"] == timeout_account.id
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[-1]["account_id"] == healthy_account.id
+    assert request_logs.calls[-1]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_stream_forced_refresh_timeout_retries_next_account(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    timeout_account = _make_account("acc_stream_forced_refresh_retry_timeout")
+    healthy_account = _make_account("acc_stream_forced_refresh_retry_healthy")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=timeout_account, error_message=None),
+            AccountSelection(account=healthy_account, error_message=None),
+        ]
+    )
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
+        if force and account.id == timeout_account.id:
+            raise asyncio.TimeoutError
+        return account
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        if account_id == timeout_account.id:
+            raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_retry_forced_refresh",'
+            '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert select_account.await_count == 2
+    record_error.assert_awaited_once_with(timeout_account)
+    record_success.assert_awaited_once_with(healthy_account)
+    assert request_logs.calls[0]["account_id"] == timeout_account.id
+    assert request_logs.calls[0]["error_code"] == "invalid_api_key"
+    assert request_logs.calls[1]["account_id"] == timeout_account.id
+    assert request_logs.calls[1]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[-1]["account_id"] == healthy_account.id
+    assert request_logs.calls[-1]["status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -1191,6 +1305,50 @@ async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
     assert captured["timeout_seconds"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_stream_midstream_failure_records_error_without_success(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_midstream_failure")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield (
+            'data: {"type":"response.failed","response":{"error":{"code":"upstream_request_timeout",'
+            '"message":"Proxy request budget exhausted"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    last_event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert last_event["type"] == "response.failed"
+    assert last_event["response"]["error"]["code"] == "upstream_request_timeout"
+    record_error.assert_awaited_once_with(account)
+    record_success.assert_not_awaited()
+    assert request_logs.calls[0]["account_id"] == account.id
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
 
 
 @pytest.mark.asyncio

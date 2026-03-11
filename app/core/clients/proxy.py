@@ -1020,28 +1020,32 @@ def push_stream_timeout_overrides(
     idle_timeout_seconds: float | None = None,
     total_timeout_seconds: float | None = None,
 ) -> tuple[
-    contextvars.Token[float | None],
-    contextvars.Token[float | None],
-    contextvars.Token[float | None],
+    float | None,
+    float | None,
+    float | None,
 ]:
-    return (
-        _STREAM_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds),
-        _STREAM_IDLE_TIMEOUT_OVERRIDE.set(idle_timeout_seconds),
-        _STREAM_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds),
+    previous = (
+        _STREAM_CONNECT_TIMEOUT_OVERRIDE.get(),
+        _STREAM_IDLE_TIMEOUT_OVERRIDE.get(),
+        _STREAM_TOTAL_TIMEOUT_OVERRIDE.get(),
     )
+    _STREAM_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds)
+    _STREAM_IDLE_TIMEOUT_OVERRIDE.set(idle_timeout_seconds)
+    _STREAM_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds)
+    return previous
 
 
 def pop_stream_timeout_overrides(
     tokens: tuple[
-        contextvars.Token[float | None],
-        contextvars.Token[float | None],
-        contextvars.Token[float | None],
+        float | None,
+        float | None,
+        float | None,
     ],
 ) -> None:
-    connect_token, idle_token, total_token = tokens
-    _STREAM_CONNECT_TIMEOUT_OVERRIDE.reset(connect_token)
-    _STREAM_IDLE_TIMEOUT_OVERRIDE.reset(idle_token)
-    _STREAM_TOTAL_TIMEOUT_OVERRIDE.reset(total_token)
+    connect_timeout, idle_timeout, total_timeout = tokens
+    _STREAM_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout)
+    _STREAM_IDLE_TIMEOUT_OVERRIDE.set(idle_timeout)
+    _STREAM_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout)
 
 
 @contextlib.contextmanager

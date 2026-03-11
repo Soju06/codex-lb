@@ -414,6 +414,15 @@ async def _iter_sse_events(
     async def _next_chunk() -> bytes:
         return await iterator.__anext__()
 
+    async def _cancel_pending_chunk(task: asyncio.Task[bytes]) -> None:
+        if task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     buffer = bytearray()
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
@@ -423,15 +432,14 @@ async def _iter_sse_events(
         try:
             done, _ = await asyncio.wait({next_chunk}, timeout=idle_timeout_seconds)
             if not done:
-                next_chunk.cancel()
-                try:
-                    await next_chunk
-                except asyncio.CancelledError:
-                    pass
+                await _cancel_pending_chunk(next_chunk)
                 raise StreamIdleTimeoutError()
             chunk = await next_chunk
         except StopAsyncIteration:
             break
+        except asyncio.CancelledError:
+            await _cancel_pending_chunk(next_chunk)
+            raise
 
         if not chunk:
             continue
@@ -948,7 +956,14 @@ async def stream_responses(
         return
     except asyncio.CancelledError:
         raise
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
+        if isinstance(exc, aiohttp.ClientError):
+            error_code = "upstream_unavailable"
+            error_message = str(exc) or "Request to upstream timed out"
+            yield format_sse_event(
+                response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+            )
+            return
         error_code = "upstream_request_timeout"
         error_message = "Proxy request budget exhausted"
         yield format_sse_event(

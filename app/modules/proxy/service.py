@@ -1,27 +1,47 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import AsyncIterator, Mapping
+from typing import AsyncIterator, Mapping, NoReturn
 
+import aiohttp
 import anyio
 
 from app.core import usage as usage_core
-from app.core.auth.refresh import RefreshError
+from app.core.auth.refresh import (
+    RefreshError,
+    pop_token_refresh_timeout_override,
+    push_token_refresh_timeout_override,
+)
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy
 from app.core.balancer.types import UpstreamError
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.proxy import (
+    ProxyResponseError,
+    filter_inbound_headers,
+    pop_compact_timeout_overrides,
+    pop_stream_timeout_overrides,
+    pop_transcribe_timeout_overrides,
+    push_compact_timeout_overrides,
+    push_stream_timeout_overrides,
+    push_transcribe_timeout_overrides,
+)
 from app.core.clients.proxy import compact_responses as core_compact_responses
-from app.core.clients.proxy import stream_responses as core_stream_responses
-from app.core.clients.proxy import transcribe_audio as core_transcribe_audio
+from app.core.clients.proxy import (
+    stream_responses as core_stream_responses,
+)
+from app.core.clients.proxy import (
+    transcribe_audio as core_transcribe_audio,
+)
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.errors import openai_error, response_failed_event
+from app.core.errors import ResponseFailedEvent, openai_error, response_failed_event
 from app.core.openai.models import OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
@@ -47,7 +67,7 @@ from app.modules.proxy.helpers import (
     _upstream_error_from_openai,
     _window_snapshot,
 )
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.types import (
@@ -62,6 +82,16 @@ logger = logging.getLogger(__name__)
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
+_ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
+    {
+        "rate_limit_exceeded",
+        "usage_limit_reached",
+        "insufficient_quota",
+        "usage_not_included",
+        "quota_exceeded",
+        *PERMANENT_FAILURE_CODES.keys(),
+    }
+)
 
 
 class ProxyService:
@@ -111,6 +141,8 @@ class ProxyService:
         filtered = filter_inbound_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
+        base_settings = get_settings()
+        deadline = start + base_settings.compact_request_budget_seconds
         account_id_value: str | None = None
         log_status = "error"
         log_error_code: str | None = None
@@ -131,7 +163,10 @@ class ProxyService:
             sticky_threads_enabled=sticky_threads_enabled,
         )
         try:
-            selection = await self._load_balancer.select_account(
+            selection = await self._select_account_with_budget(
+                deadline,
+                request_id=request_id,
+                kind="compact",
                 sticky_key=sticky_key,
                 reallocate_sticky=reallocate_sticky,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
@@ -147,13 +182,41 @@ class ProxyService:
                     openai_error(log_error_code, log_error_message),
                 )
             account_id_value = account.id
-            account = await self._ensure_fresh(account)
+            remaining_budget = _remaining_budget_seconds(deadline)
+            if remaining_budget <= 0:
+                logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
+                _raise_proxy_budget_exhausted()
+            try:
+                account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Compact refresh/connect failed request_id=%s account_id=%s",
+                    request_id,
+                    account.id,
+                    exc_info=True,
+                )
+                _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
             request_service_tier = _service_tier_from_compact_payload(payload)
 
             async def _call_compact(target: Account) -> OpenAIResponsePayload:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
-                return await core_compact_responses(payload, filtered, access_token, account_id)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Compact request budget exhausted before upstream call request_id=%s account_id=%s",
+                        request_id,
+                        target.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                timeout_tokens = push_compact_timeout_overrides(
+                    connect_timeout_seconds=remaining_budget,
+                    total_timeout_seconds=remaining_budget,
+                )
+                try:
+                    return await core_compact_responses(payload, filtered, access_token, account_id)
+                finally:
+                    pop_compact_timeout_overrides(timeout_tokens)
 
             try:
                 response = await _call_compact(account)
@@ -178,7 +241,17 @@ class ProxyService:
                     await self._handle_proxy_error(account, exc)
                     raise
                 try:
-                    account = await self._ensure_fresh(account, force=True)
+                    remaining_budget = _remaining_budget_seconds(deadline)
+                    if remaining_budget <= 0:
+                        logger.warning(
+                            "Compact request budget exhausted before forced refresh retry request_id=%s account_id=%s",
+                            request_id,
+                            account.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    account = await self._ensure_fresh_with_budget(
+                        account, force=True, timeout_seconds=remaining_budget
+                    )
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
                         await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
@@ -189,6 +262,20 @@ class ProxyService:
                         request_service_tier=request_service_tier,
                     )
                     raise exc
+                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                    await self._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
+                    logger.warning(
+                        "Compact forced refresh/connect failed request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
                 try:
                     response = await _call_compact(account)
                     actual_service_tier = _service_tier_from_response(response)
@@ -260,6 +347,8 @@ class ProxyService:
         filtered = filter_inbound_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
+        base_settings = get_settings()
+        deadline = start + base_settings.transcription_request_budget_seconds
         account_id_value: str | None = None
         log_status = "error"
         log_error_code: str | None = None
@@ -270,7 +359,10 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         try:
-            selection = await self._load_balancer.select_account(
+            selection = await self._select_account_with_budget(
+                deadline,
+                request_id=request_id,
+                kind="transcribe",
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=None,
@@ -288,18 +380,48 @@ class ProxyService:
             async def _call_transcribe(target: Account) -> dict[str, JsonValue]:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
-                return await core_transcribe_audio(
-                    audio_bytes,
-                    filename=filename,
-                    content_type=content_type,
-                    prompt=prompt,
-                    headers=filtered,
-                    access_token=access_token,
-                    account_id=account_id,
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Transcription request budget exhausted before upstream call request_id=%s account_id=%s",
+                        request_id,
+                        target.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                timeout_tokens = push_transcribe_timeout_overrides(
+                    connect_timeout_seconds=remaining_budget,
+                    total_timeout_seconds=remaining_budget,
                 )
+                try:
+                    return await core_transcribe_audio(
+                        audio_bytes,
+                        filename=filename,
+                        content_type=content_type,
+                        prompt=prompt,
+                        headers=filtered,
+                        access_token=access_token,
+                        account_id=account_id,
+                    )
+                finally:
+                    pop_transcribe_timeout_overrides(timeout_tokens)
 
             try:
-                account = await self._ensure_fresh(account)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Transcription request budget exhausted before freshness check request_id=%s", request_id
+                    )
+                    _raise_proxy_budget_exhausted()
+                try:
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "Transcription refresh/connect failed request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
                 result = await _call_transcribe(account)
                 await self._load_balancer.record_success(account)
                 log_status = "success"
@@ -320,11 +442,30 @@ class ProxyService:
                     await self._handle_proxy_error(account, exc)
                     raise
                 try:
-                    account = await self._ensure_fresh(account, force=True)
+                    remaining_budget = _remaining_budget_seconds(deadline)
+                    if remaining_budget <= 0:
+                        logger.warning(
+                            "Transcription request budget exhausted before forced refresh retry "
+                            "request_id=%s account_id=%s",
+                            request_id,
+                            account.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    account = await self._ensure_fresh_with_budget(
+                        account, force=True, timeout_seconds=remaining_budget
+                    )
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
                         await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                     raise exc
+                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                    logger.warning(
+                        "Transcription forced refresh/connect failed request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
                 try:
                     result = await _call_transcribe(account)
                     await self._load_balancer.record_success(account)
@@ -525,7 +666,9 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         start = time.monotonic()
+        base_settings = get_settings()
         settings = await get_settings_cache().get()
+        deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         routing_strategy = _routing_strategy(settings)
@@ -542,6 +685,15 @@ class ProxyService:
         settlement = _StreamSettlement()
         try:
             for attempt in range(max_attempts):
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Proxy request budget exhausted before retry request_id=%s attempt=%s",
+                        request_id,
+                        attempt + 1,
+                    )
+                    yield format_sse_event(_proxy_request_timeout_event(request_id))
+                    return
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
@@ -574,20 +726,39 @@ class ProxyService:
 
                 account_id_value = account.id
                 try:
-                    account = await self._ensure_fresh(account)
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
                     any_attempt_logged = True
                     settlement = _StreamSettlement()
-                    async for line in self._stream_once(
-                        account,
-                        payload,
-                        headers,
-                        request_id,
-                        attempt < max_attempts - 1,
-                        api_key=api_key,
-                        settlement=settlement,
-                        suppress_text_done_events=suppress_text_done_events,
-                    ):
-                        yield line
+                    effective_attempt_timeout = _remaining_budget_seconds(deadline)
+                    if effective_attempt_timeout <= 0:
+                        logger.warning(
+                            "Proxy request budget exhausted before stream attempt "
+                            "request_id=%s attempt=%s account_id=%s",
+                            request_id,
+                            attempt + 1,
+                            account.id,
+                        )
+                        yield format_sse_event(_proxy_request_timeout_event(request_id))
+                        return
+                    stream_timeout_tokens = push_stream_timeout_overrides(
+                        connect_timeout_seconds=effective_attempt_timeout,
+                        idle_timeout_seconds=effective_attempt_timeout,
+                        total_timeout_seconds=effective_attempt_timeout,
+                    )
+                    try:
+                        async for line in self._stream_once(
+                            account,
+                            payload,
+                            headers,
+                            request_id,
+                            attempt < max_attempts - 1,
+                            api_key=api_key,
+                            settlement=settlement,
+                            suppress_text_done_events=suppress_text_done_events,
+                        ):
+                            yield line
+                    finally:
+                        pop_stream_timeout_overrides(stream_timeout_tokens)
                     await self._load_balancer.record_success(account)
                     settled = await self._settle_stream_api_key_usage(
                         api_key,
@@ -601,24 +772,58 @@ class ProxyService:
                     continue
                 except ProxyResponseError as exc:
                     if exc.status_code == 401:
+                        remaining_budget = _remaining_budget_seconds(deadline)
+                        if remaining_budget <= 0:
+                            logger.warning(
+                                "Proxy request budget exhausted before forced refresh retry "
+                                "request_id=%s attempt=%s account_id=%s",
+                                request_id,
+                                attempt + 1,
+                                account.id,
+                            )
+                            yield format_sse_event(_proxy_request_timeout_event(request_id))
+                            return
                         try:
-                            account = await self._ensure_fresh(account, force=True)
+                            account = await self._ensure_fresh_with_budget(
+                                account,
+                                force=True,
+                                timeout_seconds=remaining_budget,
+                            )
                         except RefreshError as refresh_exc:
                             if refresh_exc.is_permanent:
                                 await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                             continue
                         settlement = _StreamSettlement()
-                        async for line in self._stream_once(
-                            account,
-                            payload,
-                            headers,
-                            request_id,
-                            False,
-                            api_key=api_key,
-                            settlement=settlement,
-                            suppress_text_done_events=suppress_text_done_events,
-                        ):
-                            yield line
+                        effective_attempt_timeout = _remaining_budget_seconds(deadline)
+                        if effective_attempt_timeout <= 0:
+                            logger.warning(
+                                "Proxy request budget exhausted before post-refresh stream attempt "
+                                "request_id=%s attempt=%s account_id=%s",
+                                request_id,
+                                attempt + 1,
+                                account.id,
+                            )
+                            yield format_sse_event(_proxy_request_timeout_event(request_id))
+                            return
+                        stream_timeout_tokens = push_stream_timeout_overrides(
+                            connect_timeout_seconds=effective_attempt_timeout,
+                            idle_timeout_seconds=effective_attempt_timeout,
+                            total_timeout_seconds=effective_attempt_timeout,
+                        )
+                        try:
+                            async for line in self._stream_once(
+                                account,
+                                payload,
+                                headers,
+                                request_id,
+                                False,
+                                api_key=api_key,
+                                settlement=settlement,
+                                suppress_text_done_events=suppress_text_done_events,
+                            ):
+                                yield line
+                        finally:
+                            pop_stream_timeout_overrides(stream_timeout_tokens)
                         await self._load_balancer.record_success(account)
                         settled = await self._settle_stream_api_key_usage(
                             api_key,
@@ -654,23 +859,19 @@ class ProxyService:
                         await self._load_balancer.mark_permanent_failure(account, exc.code)
                     continue
                 except Exception:
-                    try:
-                        await self._load_balancer.record_error(account)
-                    except Exception:
-                        logger.warning(
-                            "Failed to record proxy error account_id=%s request_id=%s",
-                            account_id_value,
-                            request_id,
-                            exc_info=True,
-                        )
-                    if attempt == max_attempts - 1:
-                        event = response_failed_event(
-                            "upstream_error",
-                            "Proxy streaming failed",
-                            response_id=request_id,
-                        )
-                        yield format_sse_event(event)
-                        return
+                    logger.warning(
+                        "Proxy streaming failed without retry account_id=%s request_id=%s",
+                        account_id_value,
+                        request_id,
+                        exc_info=True,
+                    )
+                    event = response_failed_event(
+                        "upstream_error",
+                        "Proxy streaming failed",
+                        response_id=request_id,
+                    )
+                    yield format_sse_event(event)
+                    return
             retries_exhausted_msg = "No available accounts after retries"
             event = response_failed_event(
                 "no_accounts",
@@ -768,9 +969,16 @@ class ProxyService:
                 status = "error"
                 error_code = code
                 error_message = error.message if error else None
-                if allow_retry:
+                if allow_retry and _should_retry_stream_error(code):
                     error_payload = _upstream_error_from_openai(error)
                     raise _RetryableStreamError(code, error_payload)
+                if allow_retry:
+                    logger.info(
+                        "Not retrying non-recoverable stream failure request_id=%s account_id=%s code=%s",
+                        request_id,
+                        account_id_value,
+                        code,
+                    )
 
             if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
@@ -1073,10 +1281,65 @@ class ProxyService:
 
         return additional_limits
 
-    async def _ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+    async def _ensure_fresh(
+        self,
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> Account:
         async with self._repo_factory() as repos:
             auth_manager = AuthManager(repos.accounts)
-            return await auth_manager.ensure_fresh(account, force=force)
+            token = push_token_refresh_timeout_override(timeout_seconds)
+            try:
+                return await auth_manager.ensure_fresh(account, force=force)
+            finally:
+                pop_token_refresh_timeout_override(token)
+
+    async def _ensure_fresh_with_budget(
+        self,
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> Account:
+        parameters = inspect.signature(self._ensure_fresh).parameters
+        if "timeout_seconds" in parameters:
+            return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
+        return await self._ensure_fresh(account, force=force)
+
+    async def _select_account_with_budget(
+        self,
+        deadline: float,
+        *,
+        request_id: str,
+        kind: str,
+        sticky_key: str | None = None,
+        reallocate_sticky: bool = False,
+        prefer_earlier_reset_accounts: bool = False,
+        routing_strategy: RoutingStrategy = "usage_weighted",
+        model: str | None = None,
+        additional_limit_name: str | None = None,
+    ) -> AccountSelection:
+        remaining_budget = _remaining_budget_seconds(deadline)
+        if remaining_budget <= 0:
+            logger.warning(
+                "%s request budget exhausted before account selection request_id=%s", kind.title(), request_id
+            )
+            _raise_proxy_budget_exhausted()
+        try:
+            with anyio.fail_after(remaining_budget):
+                return await self._load_balancer.select_account(
+                    sticky_key=sticky_key,
+                    reallocate_sticky=reallocate_sticky,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                    routing_strategy=routing_strategy,
+                    model=model,
+                    additional_limit_name=additional_limit_name,
+                )
+        except TimeoutError:
+            logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
+            _raise_proxy_budget_exhausted()
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:
         error = _parse_openai_error(exc.payload)
@@ -1105,7 +1368,12 @@ class ProxyService:
         if code in PERMANENT_FAILURE_CODES:
             await self._load_balancer.mark_permanent_failure(account, code)
             return
-        await self._load_balancer.record_error(account)
+        logger.info(
+            "Skipping account penalty for transient stream error account_id=%s request_id=%s code=%s",
+            account.id,
+            get_request_id(),
+            code,
+        )
 
 
 class _RetryableStreamError(Exception):
@@ -1141,6 +1409,36 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
 def _routing_strategy(settings: object) -> RoutingStrategy:
     value = getattr(settings, "routing_strategy", "usage_weighted")
     return "round_robin" if value == "round_robin" else "usage_weighted"
+
+
+def _remaining_budget_seconds(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:
+    return response_failed_event(
+        "upstream_request_timeout",
+        "Proxy request budget exhausted",
+        response_id=request_id,
+    )
+
+
+def _should_retry_stream_error(code: str) -> bool:
+    return code in _ACCOUNT_RECOVERY_RETRY_CODES
+
+
+def _raise_proxy_budget_exhausted() -> NoReturn:
+    raise ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+    )
+
+
+def _raise_proxy_unavailable(message: str) -> NoReturn:
+    raise ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", message),
+    )
 
 
 def _should_suppress_text_done_event(

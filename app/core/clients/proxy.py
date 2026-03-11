@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import contextvars
 import ipaddress
 import json
 import logging
@@ -71,6 +73,34 @@ _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+_STREAM_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "stream_connect_timeout_override",
+    default=None,
+)
+_STREAM_IDLE_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "stream_idle_timeout_override",
+    default=None,
+)
+_STREAM_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "stream_total_timeout_override",
+    default=None,
+)
+_COMPACT_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "compact_connect_timeout_override",
+    default=None,
+)
+_COMPACT_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "compact_total_timeout_override",
+    default=None,
+)
+_TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "transcribe_connect_timeout_override",
+    default=None,
+)
+_TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "transcribe_total_timeout_override",
+    default=None,
+)
 
 
 class StreamIdleTimeoutError(Exception):
@@ -312,6 +342,48 @@ def _normalize_error_code(code: str | None, error_type: str | None) -> str:
         mapped = _ERROR_TYPE_CODE_MAP.get(normalized_type)
         return mapped or normalized_type
     return "upstream_error"
+
+
+def _effective_stream_timeout(configured_timeout_seconds: float, timeout_kind: str) -> float:
+    if timeout_kind == "connect":
+        override = _STREAM_CONNECT_TIMEOUT_OVERRIDE.get()
+    elif timeout_kind == "idle":
+        override = _STREAM_IDLE_TIMEOUT_OVERRIDE.get()
+    else:
+        override = _STREAM_TOTAL_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_compact_connect_timeout(configured_timeout_seconds: float) -> float:
+    override = _COMPACT_CONNECT_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_compact_total_timeout(configured_timeout_seconds: float | None) -> float | None:
+    if configured_timeout_seconds is None:
+        return None
+    override = _COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_transcribe_connect_timeout(configured_timeout_seconds: float) -> float:
+    override = _TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_transcribe_total_timeout(configured_timeout_seconds: float) -> float:
+    override = _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
 
 
 def _find_sse_separator(buffer: bytes | bytearray) -> tuple[int, int] | None:
@@ -769,9 +841,15 @@ async def stream_responses(
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/responses"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+    effective_total_timeout = _effective_stream_timeout(
+        getattr(settings, "proxy_request_budget_seconds", 75.0),
+        "total",
+    )
+    effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
+    effective_idle_timeout = _effective_stream_timeout(settings.stream_idle_timeout_seconds, "idle")
     timeout = aiohttp.ClientTimeout(
-        total=None,
-        sock_connect=settings.upstream_connect_timeout_seconds,
+        total=effective_total_timeout,
+        sock_connect=effective_connect_timeout,
         sock_read=None,
     )
 
@@ -785,7 +863,7 @@ async def stream_responses(
         payload_dict = await _inline_input_image_urls(
             payload_dict,
             _as_image_fetch_session(client_session),
-            settings.upstream_connect_timeout_seconds,
+            effective_connect_timeout,
         )
     started_at = time.monotonic()
     _maybe_log_upstream_request_start(
@@ -817,7 +895,7 @@ async def stream_responses(
 
             async for event_block in _iter_sse_events(
                 resp,
-                settings.stream_idle_timeout_seconds,
+                effective_idle_timeout,
                 settings.max_sse_event_bytes,
             ):
                 event_block = _normalize_sse_event_block(event_block)
@@ -888,6 +966,92 @@ async def stream_responses(
         )
 
 
+def push_stream_timeout_overrides(
+    *,
+    connect_timeout_seconds: float | None = None,
+    idle_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+) -> tuple[
+    contextvars.Token[float | None],
+    contextvars.Token[float | None],
+    contextvars.Token[float | None],
+]:
+    return (
+        _STREAM_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds),
+        _STREAM_IDLE_TIMEOUT_OVERRIDE.set(idle_timeout_seconds),
+        _STREAM_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds),
+    )
+
+
+def pop_stream_timeout_overrides(
+    tokens: tuple[
+        contextvars.Token[float | None],
+        contextvars.Token[float | None],
+        contextvars.Token[float | None],
+    ],
+) -> None:
+    connect_token, idle_token, total_token = tokens
+    _STREAM_CONNECT_TIMEOUT_OVERRIDE.reset(connect_token)
+    _STREAM_IDLE_TIMEOUT_OVERRIDE.reset(idle_token)
+    _STREAM_TOTAL_TIMEOUT_OVERRIDE.reset(total_token)
+
+
+@contextlib.contextmanager
+def override_stream_timeouts(
+    *,
+    connect_timeout_seconds: float | None = None,
+    idle_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+):
+    tokens = push_stream_timeout_overrides(
+        connect_timeout_seconds=connect_timeout_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+    try:
+        yield
+    finally:
+        pop_stream_timeout_overrides(tokens)
+
+
+def push_compact_timeout_overrides(
+    *,
+    connect_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+) -> tuple[contextvars.Token[float | None], contextvars.Token[float | None]]:
+    return (
+        _COMPACT_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds),
+        _COMPACT_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds),
+    )
+
+
+def pop_compact_timeout_overrides(
+    tokens: tuple[contextvars.Token[float | None], contextvars.Token[float | None]],
+) -> None:
+    connect_token, total_token = tokens
+    _COMPACT_CONNECT_TIMEOUT_OVERRIDE.reset(connect_token)
+    _COMPACT_TOTAL_TIMEOUT_OVERRIDE.reset(total_token)
+
+
+def push_transcribe_timeout_overrides(
+    *,
+    connect_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+) -> tuple[contextvars.Token[float | None], contextvars.Token[float | None]]:
+    return (
+        _TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds),
+        _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds),
+    )
+
+
+def pop_transcribe_timeout_overrides(
+    tokens: tuple[contextvars.Token[float | None], contextvars.Token[float | None]],
+) -> None:
+    connect_token, total_token = tokens
+    _TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE.reset(connect_token)
+    _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE.reset(total_token)
+
+
 async def compact_responses(
     payload: ResponsesCompactRequest,
     headers: Mapping[str, str],
@@ -904,10 +1068,11 @@ async def compact_responses(
         account_id,
         accept="application/json",
     )
-    compact_timeout_seconds = settings.upstream_compact_timeout_seconds
+    compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
+    effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
     timeout = aiohttp.ClientTimeout(
         total=compact_timeout_seconds,
-        sock_connect=settings.upstream_connect_timeout_seconds,
+        sock_connect=effective_connect_timeout,
         sock_read=compact_timeout_seconds,
     )
 
@@ -917,7 +1082,7 @@ async def compact_responses(
         payload_dict = await _inline_input_image_urls(
             payload_dict,
             _as_image_fetch_session(client_session),
-            settings.upstream_connect_timeout_seconds,
+            effective_connect_timeout,
         )
     started_at = time.monotonic()
     status_code: int | None = None
@@ -1013,10 +1178,14 @@ async def transcribe_audio(
         if header_name.lower() == "content-type":
             upstream_headers.pop(header_name, None)
 
+    effective_total_timeout = _effective_transcribe_total_timeout(
+        getattr(settings, "transcription_request_budget_seconds", 120.0),
+    )
+    effective_connect_timeout = _effective_transcribe_connect_timeout(settings.upstream_connect_timeout_seconds)
     timeout = aiohttp.ClientTimeout(
-        total=120,
-        sock_connect=settings.upstream_connect_timeout_seconds,
-        sock_read=120,
+        total=effective_total_timeout,
+        sock_connect=effective_connect_timeout,
+        sock_read=effective_total_timeout,
     )
 
     normalized_filename = filename.strip() if filename else ""

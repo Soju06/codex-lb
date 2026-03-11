@@ -583,17 +583,20 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = True
         log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
 
     inline_ran = False
-    recorded: dict[str, float] = {}
+    recorded: dict[str, float | None] = {}
 
     async def fake_inline(payload_dict, session, connect_timeout):
         nonlocal inline_ran
         inline_ran = True
         return payload_dict
 
+    monotonic_values = iter([100.0, 104.0, 104.0, 104.0])
+
     def fake_monotonic():
-        return 123.0 if inline_ran else 111.0
+        return next(monotonic_values, 104.0)
 
     def fake_complete(**kwargs):
         recorded["started_at"] = kwargs["started_at"]
@@ -620,8 +623,11 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
         )
     ]
 
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total == pytest.approx(11.0)
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
-    assert recorded["started_at"] == 123.0
+    assert recorded["started_at"] == 104.0
 
 
 @pytest.mark.asyncio
@@ -758,20 +764,22 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
-        upstream_compact_timeout_seconds = None
+        upstream_compact_timeout_seconds = 12.0
         image_inline_fetch_enabled = True
         log_upstream_request_payload = False
 
     inline_ran = False
-    recorded: dict[str, float] = {}
+    recorded: dict[str, float | None] = {}
 
     async def fake_inline(payload_dict, session, connect_timeout):
         nonlocal inline_ran
         inline_ran = True
         return payload_dict
 
+    monotonic_values = iter([200.0, 205.5, 205.5, 205.5])
+
     def fake_monotonic():
-        return 456.0 if inline_ran else 111.0
+        return next(monotonic_values, 205.5)
 
     def fake_complete(**kwargs):
         recorded["started_at"] = kwargs["started_at"]
@@ -795,8 +803,12 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
         session=cast(proxy_module.aiohttp.ClientSession, session),
     )
 
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total == pytest.approx(6.5)
+    assert timeout.sock_read == pytest.approx(6.5)
     assert result.model_extra == {"output": []}
-    assert recorded["started_at"] == 456.0
+    assert recorded["started_at"] == 205.5
 
 
 @pytest.mark.asyncio
@@ -840,9 +852,9 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
 
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == 123.0
+    assert timeout.total == pytest.approx(123.0, abs=0.05)
     assert timeout.sock_connect == 2.0
-    assert timeout.sock_read == 123.0
+    assert timeout.sock_read == pytest.approx(123.0, abs=0.05)
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert exc.payload["error"]["code"] == "upstream_unavailable"
@@ -884,7 +896,7 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_preserves_default_no_read_timeout_under_budget_override(monkeypatch):
+async def test_compact_responses_uses_budget_override_when_default_timeout_is_unbounded(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
@@ -915,9 +927,9 @@ async def test_compact_responses_preserves_default_no_read_timeout_under_budget_
 
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total is None
+    assert timeout.total == pytest.approx(3.0, abs=0.05)
     assert timeout.sock_connect == pytest.approx(1.5)
-    assert timeout.sock_read is None
+    assert timeout.sock_read == pytest.approx(3.0, abs=0.05)
     assert result.model_extra == {"output": []}
 
 

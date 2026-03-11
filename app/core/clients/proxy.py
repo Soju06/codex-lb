@@ -364,9 +364,9 @@ def _effective_compact_connect_timeout(configured_timeout_seconds: float) -> flo
 
 
 def _effective_compact_total_timeout(configured_timeout_seconds: float | None) -> float | None:
-    if configured_timeout_seconds is None:
-        return None
     override = _COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
+    if configured_timeout_seconds is None:
+        return None if override is None else max(0.001, override)
     if override is None:
         return configured_timeout_seconds
     return max(0.001, min(configured_timeout_seconds, override))
@@ -384,6 +384,12 @@ def _effective_transcribe_total_timeout(configured_timeout_seconds: float) -> fl
     if override is None:
         return configured_timeout_seconds
     return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, now: float) -> float | None:
+    if timeout_seconds is None:
+        return None
+    return max(0.001, timeout_seconds - max(0.0, now - started_at))
 
 
 def _find_sse_separator(buffer: bytes | bytearray) -> tuple[int, int] | None:
@@ -859,17 +865,13 @@ async def stream_responses(
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/responses"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+    pre_request_started_at = time.monotonic()
     effective_total_timeout = _effective_stream_timeout(
         getattr(settings, "proxy_request_budget_seconds", 75.0),
         "total",
     )
     effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
     effective_idle_timeout = _effective_stream_timeout(settings.stream_idle_timeout_seconds, "idle")
-    timeout = aiohttp.ClientTimeout(
-        total=effective_total_timeout,
-        sock_connect=effective_connect_timeout,
-        sock_read=None,
-    )
 
     seen_terminal = False
     status_code: int | None = None
@@ -883,6 +885,16 @@ async def stream_responses(
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
+    effective_total_timeout = _remaining_total_timeout(
+        effective_total_timeout,
+        pre_request_started_at,
+        time.monotonic(),
+    )
+    timeout = aiohttp.ClientTimeout(
+        total=effective_total_timeout,
+        sock_connect=effective_connect_timeout,
+        sock_read=None,
+    )
     started_at = time.monotonic()
     _maybe_log_upstream_request_start(
         kind="responses",
@@ -1104,13 +1116,9 @@ async def compact_responses(
         account_id,
         accept="application/json",
     )
+    pre_request_started_at = time.monotonic()
     compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
     effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-    timeout = aiohttp.ClientTimeout(
-        total=compact_timeout_seconds,
-        sock_connect=effective_connect_timeout,
-        sock_read=compact_timeout_seconds,
-    )
 
     client_session = session or get_http_client().session
     payload_dict = payload.to_payload()
@@ -1120,6 +1128,16 @@ async def compact_responses(
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
+    compact_timeout_seconds = _remaining_total_timeout(
+        compact_timeout_seconds,
+        pre_request_started_at,
+        time.monotonic(),
+    )
+    timeout = aiohttp.ClientTimeout(
+        total=compact_timeout_seconds,
+        sock_connect=effective_connect_timeout,
+        sock_read=compact_timeout_seconds,
+    )
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None

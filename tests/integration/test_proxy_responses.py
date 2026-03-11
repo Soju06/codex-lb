@@ -66,6 +66,25 @@ async def test_proxy_responses_no_accounts(async_client):
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_stream_surfaces_additional_quota_data_unavailable(async_client):
+    email = "gated-unavailable@example.com"
+    raw_account_id = "acc_gated_unavailable"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    payload = {"model": "gpt-5.3-codex-spark", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "additional_quota_data_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_requires_instructions(async_client):
     payload = {"model": "gpt-5.1", "input": []}
     resp = await async_client.post("/backend-api/codex/responses", json=payload)

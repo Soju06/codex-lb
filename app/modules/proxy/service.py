@@ -170,11 +170,11 @@ class ProxyService:
             )
             account = selection.account
             if not account:
-                log_error_code = "no_accounts"
+                log_error_code = selection.error_code or "no_accounts"
                 log_error_message = selection.error_message or "No active accounts available"
                 raise ProxyResponseError(
                     503,
-                    openai_error("no_accounts", log_error_message),
+                    openai_error(log_error_code, log_error_message),
                 )
             account_id_value = account.id
             account = await self._ensure_fresh(account)
@@ -346,11 +346,11 @@ class ProxyService:
             )
             account = selection.account
             if not account:
-                log_error_code = "no_accounts"
+                log_error_code = selection.error_code or "no_accounts"
                 log_error_message = selection.error_message or "No active accounts available"
                 raise ProxyResponseError(
                     503,
-                    openai_error("no_accounts", log_error_message),
+                    openai_error(log_error_code, log_error_message),
                 )
             account_id_value = account.id
 
@@ -1073,8 +1073,9 @@ class ProxyService:
                 account = selection.account
                 if not account:
                     no_accounts_msg = selection.error_message or "No active accounts available"
+                    error_code = selection.error_code or "no_accounts"
                     event = response_failed_event(
-                        "no_accounts",
+                        error_code,
                         no_accounts_msg,
                         response_id=request_id,
                     )
@@ -1086,7 +1087,7 @@ class ProxyService:
                         model=payload.model,
                         latency_ms=int((time.monotonic() - start) * 1000),
                         status="error",
-                        error_code="no_accounts",
+                        error_code=error_code,
                         error_message=no_accounts_msg,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,

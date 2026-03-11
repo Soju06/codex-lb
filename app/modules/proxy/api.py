@@ -91,6 +91,12 @@ transcribe_router = APIRouter(
 )
 
 _TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
+_UNAVAILABLE_SELECTION_ERROR_CODES = {
+    "no_accounts",
+    "no_plan_support_for_model",
+    "additional_quota_data_unavailable",
+    "no_additional_quota_eligible_accounts",
+}
 
 
 @router.post(
@@ -375,7 +381,7 @@ async def v1_chat_completions(
     if isinstance(result, OpenAIErrorEnvelopeModel):
         error = result.error
         code = error.code if error else None
-        status_code = 503 if code == "no_accounts" else 502
+        status_code = 503 if code in _UNAVAILABLE_SELECTION_ERROR_CODES else 502
         return _logged_error_json_response(
             request,
             status_code,
@@ -952,6 +958,6 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
 
 
 def _status_for_error(error_value: OpenAIError | None) -> int:
-    if error_value and error_value.code == "no_accounts":
+    if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
     return 502

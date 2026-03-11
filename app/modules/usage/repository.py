@@ -291,8 +291,19 @@ class AdditionalUsageRepository:
         self,
         limit_name: str,
         window: str,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
         """Returns the most recent entry per account for a given limit_name + window."""
+        conditions = [
+            AdditionalUsageHistory.limit_name == limit_name,
+            AdditionalUsageHistory.window == window,
+        ]
+        if account_ids is not None:
+            conditions.append(AdditionalUsageHistory.account_id.in_(account_ids))
+        if since is not None:
+            conditions.append(AdditionalUsageHistory.recorded_at >= since)
         subq = (
             select(
                 AdditionalUsageHistory.id.label("usage_id"),
@@ -303,10 +314,7 @@ class AdditionalUsageRepository:
                 )
                 .label("row_number"),
             )
-            .where(
-                AdditionalUsageHistory.limit_name == limit_name,
-                AdditionalUsageHistory.window == window,
-            )
+            .where(*conditions)
             .subquery()
         )
         stmt = (

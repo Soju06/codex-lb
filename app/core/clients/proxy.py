@@ -938,6 +938,17 @@ async def stream_responses(
         return
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError:
+        error_code = "upstream_request_timeout"
+        error_message = "Proxy request budget exhausted"
+        yield format_sse_event(
+            response_failed_event(
+                "upstream_request_timeout",
+                "Proxy request budget exhausted",
+                response_id=get_request_id(),
+            ),
+        )
+        return
     except Exception as exc:
         error_code = "upstream_error"
         error_message = str(exc)

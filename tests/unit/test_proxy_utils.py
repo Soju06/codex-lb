@@ -349,6 +349,18 @@ class _SseSession:
         return self._response
 
 
+class _TimeoutSseSession:
+    def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        raise asyncio.TimeoutError
+
+
 @pytest.mark.asyncio
 async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big():
     large_data = "A" * (200 * 1024)
@@ -609,6 +621,40 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
     assert timeout.sock_connect == pytest.approx(2.5)
     assert seen["idle_timeout_seconds"] == pytest.approx(3.5)
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 5.0
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
+        )
+    ]
+
+    event = json.loads(events[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_request_timeout"
 
 
 @pytest.mark.asyncio
@@ -995,6 +1041,79 @@ async def test_stream_responses_budget_exhaustion_emits_timeout_event(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(
+            side_effect=proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+            )
+        ),
+    )
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_request_timeout"
+    assert request_logs.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_refresh_budget")
+    captured: dict[str, float | None] = {}
+
+    runtime_values = dict(settings.__dict__)
+    runtime_values["proxy_request_budget_seconds"] = 10.0
+    runtime_settings = SimpleNamespace(**runtime_values)
+    monotonic_calls = {"count": 0}
+
+    def fake_monotonic():
+        monotonic_calls["count"] += 1
+        return 100.0 if monotonic_calls["count"] < 4 else 107.0
+
+    async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
+        captured["timeout_seconds"] = timeout_seconds
+        return account
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_budget"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert captured["timeout_seconds"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -1031,17 +1150,13 @@ async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
 
-    runtime_values = dict(settings.__dict__)
-    runtime_values["compact_request_budget_seconds"] = 0.01
-    runtime_settings = SimpleNamespace(**runtime_values)
-
-    async def slow_select_account(**kwargs):
-        await asyncio.sleep(0.05)
-        return AccountSelection(account=None, error_message="late")
-
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(service._load_balancer, "select_account", slow_select_account)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(side_effect=proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "late"))),
+    )
 
     payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
 
@@ -1120,17 +1235,13 @@ async def test_transcribe_selection_budget_exhaustion_returns_upstream_unavailab
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
 
-    runtime_values = dict(settings.__dict__)
-    runtime_values["transcription_request_budget_seconds"] = 0.01
-    runtime_settings = SimpleNamespace(**runtime_values)
-
-    async def slow_select_account(**kwargs):
-        await asyncio.sleep(0.05)
-        return AccountSelection(account=None, error_message="late")
-
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(service._load_balancer, "select_account", slow_select_account)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(side_effect=proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "late"))),
+    )
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service.transcribe(

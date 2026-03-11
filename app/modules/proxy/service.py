@@ -694,12 +694,32 @@ class ProxyService:
                     )
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
                     return
-                selection = await self._load_balancer.select_account(
-                    sticky_key=sticky_key,
-                    prefer_earlier_reset_accounts=prefer_earlier_reset,
-                    routing_strategy=routing_strategy,
-                    model=payload.model,
-                )
+                try:
+                    selection = await self._select_account_with_budget(
+                        deadline,
+                        request_id=request_id,
+                        kind="stream",
+                        sticky_key=sticky_key,
+                        prefer_earlier_reset_accounts=prefer_earlier_reset,
+                        routing_strategy=routing_strategy,
+                        model=payload.model,
+                    )
+                except ProxyResponseError as exc:
+                    error = _parse_openai_error(exc.payload)
+                    error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                    error_message = error.message if error else None
+                    if error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted":
+                        yield format_sse_event(_proxy_request_timeout_event(request_id))
+                        return
+                    event = response_failed_event(
+                        error_code,
+                        error_message or "Upstream unavailable",
+                        error_type=(error.type or "server_error") if error else "server_error",
+                        response_id=request_id,
+                    )
+                    _apply_error_metadata(event["response"]["error"], error)
+                    yield format_sse_event(event)
+                    return
                 account = selection.account
                 if not account:
                     no_accounts_msg = selection.error_message or "No active accounts available"
@@ -726,6 +746,17 @@ class ProxyService:
 
                 account_id_value = account.id
                 try:
+                    remaining_budget = _remaining_budget_seconds(deadline)
+                    if remaining_budget <= 0:
+                        logger.warning(
+                            "Proxy request budget exhausted before freshness check "
+                            "request_id=%s attempt=%s account_id=%s",
+                            request_id,
+                            attempt + 1,
+                            account.id,
+                        )
+                        yield format_sse_event(_proxy_request_timeout_event(request_id))
+                        return
                     account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
                     any_attempt_logged = True
                     settlement = _StreamSettlement()

@@ -873,7 +873,7 @@ class ProxyService:
                             _stream_settlement_error_payload(settlement),
                             settlement.error_code or "upstream_error",
                         )
-                    else:
+                    elif settlement.record_success:
                         await self._load_balancer.record_success(account)
                     settled = await self._settle_stream_api_key_usage(
                         api_key,
@@ -886,7 +886,8 @@ class ProxyService:
                     await self._handle_stream_error(account, exc.error, exc.code)
                     continue
                 except _TerminalStreamError as exc:
-                    await self._handle_stream_error(account, exc.error, exc.code)
+                    if _should_penalize_stream_error(exc.code):
+                        await self._handle_stream_error(account, exc.error, exc.code)
                     return
                 except ProxyResponseError as exc:
                     if exc.status_code == 401:
@@ -997,7 +998,7 @@ class ProxyService:
                                 _stream_settlement_error_payload(settlement),
                                 settlement.error_code or "upstream_error",
                             )
-                        else:
+                        elif settlement.record_success:
                             await self._load_balancer.record_success(account)
                         settled = await self._settle_stream_api_key_usage(
                             api_key,
@@ -1011,11 +1012,12 @@ class ProxyService:
                     error_message = error.message if error else None
                     error_type = error.type if error else None
                     error_param = error.param if error else None
-                    await self._handle_stream_error(
-                        account,
-                        _upstream_error_from_openai(error),
-                        error_code,
-                    )
+                    if _should_penalize_stream_error(error_code):
+                        await self._handle_stream_error(
+                            account,
+                            _upstream_error_from_openai(error),
+                            error_code,
+                        )
                     if propagate_http_errors:
                         raise
                     event = response_failed_event(
@@ -1145,7 +1147,8 @@ class ProxyService:
                 error_code = code
                 error_message = error.message if error else None
                 settlement.error = _upstream_error_from_openai(error)
-                settlement.account_health_error = True
+                settlement.record_success = False
+                settlement.account_health_error = _should_penalize_stream_error(code)
                 if allow_retry and _should_retry_stream_error(code):
                     raise _RetryableStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
@@ -1208,7 +1211,8 @@ class ProxyService:
                         )
                         error_message = error.message if error else None
                         settlement.error = _upstream_error_from_openai(error)
-                        settlement.account_health_error = True
+                        settlement.record_success = False
+                        settlement.account_health_error = _should_penalize_stream_error(error_code)
                     if event_type in ("response.completed", "response.incomplete"):
                         usage = event.response.usage if event.response else None
                         if event_type == "response.incomplete":
@@ -1222,7 +1226,8 @@ class ProxyService:
                 error.type if error else None,
             )
             error_message = error.message if error else None
-            settlement.account_health_error = True
+            settlement.record_success = False
+            settlement.account_health_error = _should_penalize_stream_error(error_code)
             raise
         finally:
             input_tokens = usage.input_tokens if usage else None
@@ -1618,6 +1623,7 @@ class _StreamSettlement:
     error_message: str | None = None
     error: UpstreamError | None = None
     account_health_error: bool = False
+    record_success: bool = True
 
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
@@ -1629,6 +1635,12 @@ def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamE
     else:
         payload["message"] = "Upstream error"
     return payload
+
+
+def _should_penalize_stream_error(code: str | None) -> bool:
+    if code is None:
+        return False
+    return code in _ACCOUNT_RECOVERY_RETRY_CODES
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

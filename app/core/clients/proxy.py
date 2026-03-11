@@ -1128,10 +1128,15 @@ async def compact_responses(
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
+    now = time.monotonic()
     compact_timeout_seconds = _remaining_total_timeout(
         compact_timeout_seconds,
         pre_request_started_at,
-        time.monotonic(),
+        now,
+    )
+    effective_connect_timeout = max(
+        0.001,
+        _remaining_total_timeout(effective_connect_timeout, pre_request_started_at, now) or effective_connect_timeout,
     )
     timeout = aiohttp.ClientTimeout(
         total=compact_timeout_seconds,

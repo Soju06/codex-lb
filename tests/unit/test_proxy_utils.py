@@ -807,6 +807,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
     assert timeout.total == pytest.approx(6.5)
+    assert timeout.sock_connect == pytest.approx(0.001)
     assert timeout.sock_read == pytest.approx(6.5)
     assert result.model_extra == {"output": []}
     assert recorded["started_at"] == 205.5
@@ -854,7 +855,7 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
     assert timeout.total == pytest.approx(123.0, abs=0.05)
-    assert timeout.sock_connect == 2.0
+    assert timeout.sock_connect == pytest.approx(2.0, abs=0.05)
     assert timeout.sock_read == pytest.approx(123.0, abs=0.05)
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
@@ -891,7 +892,7 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
     assert timeout.total is None
-    assert timeout.sock_connect == 2.0
+    assert timeout.sock_connect == pytest.approx(2.0, abs=0.05)
     assert timeout.sock_read is None
     assert result.model_extra == {"output": []}
 
@@ -1129,7 +1130,7 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert select_account.await_count == 1
-    record_error.assert_awaited_once_with(account)
+    record_error.assert_not_awaited()
     record_success.assert_not_awaited()
 
 
@@ -1309,7 +1310,7 @@ async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stream_midstream_failure_records_error_without_success(monkeypatch):
+async def test_stream_midstream_generic_failure_is_neutral_to_account_health(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -1345,7 +1346,7 @@ async def test_stream_midstream_failure_records_error_without_success(monkeypatc
     last_event = json.loads(chunks[-1].split("data: ", 1)[1])
     assert last_event["type"] == "response.failed"
     assert last_event["response"]["error"]["code"] == "upstream_request_timeout"
-    record_error.assert_awaited_once_with(account)
+    record_error.assert_not_awaited()
     record_success.assert_not_awaited()
     assert request_logs.calls[0]["account_id"] == account.id
     assert request_logs.calls[0]["status"] == "error"

@@ -13,7 +13,7 @@ class AdditionalModelLimit:
 _ADDITIONAL_MODEL_LIMITS: dict[str, AdditionalModelLimit] = {
     "gpt-5.3-codex-spark": AdditionalModelLimit(
         model="gpt-5.3-codex-spark",
-        limit_name="GPT-5.3-Codex-Spark",
+        limit_name="codex_other",
         display_label="GPT-5.3-Codex-Spark",
     ),
 }

@@ -16,7 +16,7 @@ def test_get_additional_model_limit_returns_seeded_mapping() -> None:
 
     assert resolved is not None
     assert resolved.model == "gpt-5.3-codex-spark"
-    assert resolved.limit_name == "GPT-5.3-Codex-Spark"
+    assert resolved.limit_name == "codex_other"
     assert resolved.display_label == "GPT-5.3-Codex-Spark"
 
 
@@ -24,7 +24,7 @@ def test_get_additional_model_limit_normalizes_case_and_whitespace() -> None:
     resolved = get_additional_model_limit("  GPT-5.3-CODEX-SPARK  ")
 
     assert resolved is not None
-    assert resolved.limit_name == "GPT-5.3-Codex-Spark"
+    assert resolved.limit_name == "codex_other"
     assert resolved.display_label == "GPT-5.3-Codex-Spark"
 
 

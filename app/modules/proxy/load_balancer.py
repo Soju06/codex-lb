@@ -165,18 +165,12 @@ class LoadBalancer:
                 accounts = _filter_accounts_for_model(accounts, model)
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             if model and not accounts:
-                if effective_limit_name and all_accounts:
-                    return _SelectionInputs(
-                        accounts=[],
-                        latest_primary={},
-                        latest_secondary={},
-                        error_message=f"No accounts with a plan supporting model '{model}'",
-                        error_code=NO_PLAN_SUPPORT_FOR_MODEL,
-                    )
                 return _SelectionInputs(
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    error_message=f"No accounts with a plan supporting model '{model}'",
+                    error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
 
             if effective_limit_name:

@@ -48,7 +48,7 @@ async def test_proxy_compact_no_accounts(async_client):
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 503
     error = response.json()["error"]
-    assert error["code"] == "no_accounts"
+    assert error["code"] == "no_plan_support_for_model"
 
 
 @pytest.mark.asyncio
@@ -77,7 +77,7 @@ async def test_proxy_compact_surfaces_no_additional_quota_eligible_accounts(asyn
         )
         await additional_repo.add_entry(
             account_id=expected_account_id,
-            limit_name="GPT-5.3-Codex-Spark",
+            limit_name="codex_other",
             metered_feature="codex_bengalfox",
             window="primary",
             used_percent=100.0,

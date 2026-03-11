@@ -156,7 +156,7 @@ def _additional_entry(
     window: str,
     used_percent: float,
     recorded_at: datetime | None = None,
-    limit_name: str = "GPT-5.3-Codex-Spark",
+    limit_name: str = "codex_other",
     reset_at: int = 1741500000,
 ) -> AdditionalUsageHistory:
     now = recorded_at or utcnow()
@@ -362,7 +362,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(additional_limit_name="GPT-5.3-Codex-Spark")
+    selection = await balancer.select_account(additional_limit_name="codex_other")
 
     assert selection.account is not None
     assert selection.account.id == account_eligible.id
@@ -429,7 +429,7 @@ async def test_select_account_requires_fresh_additional_usage_data(monkeypatch) 
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(additional_limit_name="GPT-5.3-Codex-Spark")
+    selection = await balancer.select_account(additional_limit_name="codex_other")
 
     assert selection.account is not None
     assert selection.account.id == account_fresh.id
@@ -718,6 +718,37 @@ async def test_select_account_returns_plan_support_error_for_mapped_model(monkey
 
     assert selection.account is None
     assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+
+@pytest.mark.asyncio
+async def test_select_account_returns_plan_support_error_for_ungated_model(monkeypatch) -> None:
+    account = _make_account("acc-ungated-plan-filtered", "ungated-plan-filtered@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex")
+
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex'"
 
 
 @pytest.mark.asyncio

@@ -403,7 +403,7 @@ async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_s
 
         await additional_repo.add_entry(
             account_id=exhausted_account.id,
-            limit_name="GPT-5.3-Codex-Spark",
+            limit_name="codex_other",
             metered_feature="codex_bengalfox",
             window="primary",
             used_percent=100.0,
@@ -413,7 +413,7 @@ async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_s
         )
         await additional_repo.add_entry(
             account_id=eligible_account.id,
-            limit_name="GPT-5.3-Codex-Spark",
+            limit_name="codex_other",
             metered_feature="codex_bengalfox",
             window="primary",
             used_percent=25.0,
@@ -423,7 +423,7 @@ async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_s
         )
 
     balancer = LoadBalancer(_repo_factory)
-    selection = await balancer.select_account(additional_limit_name="GPT-5.3-Codex-Spark")
+    selection = await balancer.select_account(additional_limit_name="codex_other")
 
     assert selection.account is not None
     assert selection.account.id == eligible_account.id

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.openai.model_registry import ModelRegistrySnapshot
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySession, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
@@ -722,7 +723,10 @@ async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkey
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset()),
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(model_plans={}),
+            plan_types_for_model=lambda _model: frozenset(),
+        ),
     )
 
     balancer = LoadBalancer(
@@ -738,6 +742,63 @@ async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkey
     assert selection.account is not None
     assert selection.account.id == account.id
     assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_respects_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
+    account = _make_account("acc-gated-plan-filtered", "gated-plan-filtered@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: ModelRegistrySnapshot(
+                models={},
+                model_plans={"gpt-5.3-codex-spark": frozenset({"pro"})},
+                plan_models={"pro": frozenset({"gpt-5.3-codex-spark"})},
+                fetched_at=0.0,
+            ),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
 
 
 @pytest.mark.asyncio

@@ -162,7 +162,7 @@ class LoadBalancer:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = all_accounts
-            if model and effective_limit_name is None:
+            if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
                 accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:
                 if not all_accounts:
@@ -524,6 +524,19 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
 
 def _gated_limit_name_for_model(model: str | None) -> str | None:
     return get_additional_limit_name_for_model(model)
+
+
+def _mapped_model_has_registry_entry(model: str | None) -> bool:
+    if model is None:
+        return False
+    registry = get_model_registry()
+    get_snapshot = getattr(registry, "get_snapshot", None)
+    if not callable(get_snapshot):
+        return False
+    snapshot = get_snapshot()
+    if snapshot is None:
+        return False
+    return model.strip().lower() in snapshot.model_plans
 
 
 def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:

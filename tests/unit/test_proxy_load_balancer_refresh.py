@@ -691,8 +691,8 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
 
 
 @pytest.mark.asyncio
-async def test_select_account_returns_plan_support_error_for_mapped_model(monkeypatch) -> None:
-    account = _make_account("acc-plan-filtered", "plan-filtered@example.com")
+async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
+    account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -707,17 +707,37 @@ async def test_select_account_returns_plan_support_error_for_mapped_model(monkey
     accounts_repo = StubAccountsRepository([account])
     usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
     sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        }
+    )
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset()),
     )
 
-    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
-    assert selection.account is None
-    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
 
 
 @pytest.mark.asyncio

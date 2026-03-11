@@ -42,7 +42,7 @@ describe("AccountUsagePanel", () => {
     const account = createAccountSummary({
       additionalQuotas: [
         {
-          limitName: "GPT-5.3-Codex-Spark",
+          limitName: "codex_other",
           meteredFeature: "codex_bengalfox",
           primaryWindow: {
             usedPercent: 35,

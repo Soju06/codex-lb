@@ -160,10 +160,10 @@ class LoadBalancer:
     ) -> _SelectionInputs:
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
-            accounts = all_accounts
-            if model:
-                accounts = _filter_accounts_for_model(accounts, model)
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
+            accounts = all_accounts
+            if model and effective_limit_name is None:
+                accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:
                 return _SelectionInputs(
                     accounts=[],

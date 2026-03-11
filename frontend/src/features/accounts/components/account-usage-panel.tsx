@@ -62,7 +62,7 @@ function QuotaRow({
 }
 
 const ADDITIONAL_LIMIT_LABELS: Record<string, string> = {
-  codex_other: "Codex Spark",
+  codex_other: "GPT-5.3-Codex-Spark",
   "gpt-5.3-codex-spark": "GPT-5.3-Codex-Spark",
 };
 

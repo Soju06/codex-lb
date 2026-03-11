@@ -48,7 +48,7 @@ async def test_proxy_compact_no_accounts(async_client):
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 503
     error = response.json()["error"]
-    assert error["code"] == "no_plan_support_for_model"
+    assert error["code"] == "no_accounts"
 
 
 @pytest.mark.asyncio

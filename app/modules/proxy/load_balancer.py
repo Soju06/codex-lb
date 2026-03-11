@@ -165,6 +165,12 @@ class LoadBalancer:
             if model and effective_limit_name is None:
                 accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:
+                if not all_accounts:
+                    return _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                    )
                 return _SelectionInputs(
                     accounts=[],
                     latest_primary={},

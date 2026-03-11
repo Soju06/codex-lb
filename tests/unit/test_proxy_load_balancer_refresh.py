@@ -772,6 +772,25 @@ async def test_select_account_returns_plan_support_error_for_ungated_model(monke
 
 
 @pytest.mark.asyncio
+async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_request(monkeypatch) -> None:
+    accounts_repo = StubAccountsRepository([])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex")
+
+    assert selection.account is None
+    assert selection.error_code is None
+    assert selection.error_message == "No available accounts"
+
+
+@pytest.mark.asyncio
 async def test_select_account_returns_data_unavailable_error_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-stale", "gated-stale@example.com")
     now = utcnow()

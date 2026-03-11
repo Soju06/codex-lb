@@ -1,7 +1,7 @@
 """add sticky session kinds and prompt-cache affinity ttl
 
 Revision ID: 20260310_120000_add_sticky_session_kinds_and_affinity_ttl
-Revises: 20260309_000000_add_additional_usage_history
+Revises: 20260310_000000_fix_postgresql_enum_value_casing
 Create Date: 2026-03-10
 """
 
@@ -15,7 +15,7 @@ from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
 revision = "20260310_120000_add_sticky_session_kinds_and_affinity_ttl"
-down_revision = "20260309_000000_add_additional_usage_history"
+down_revision = "20260310_000000_fix_postgresql_enum_value_casing"
 branch_labels = None
 depends_on = None
 
@@ -48,6 +48,15 @@ def _prompt_cache_ttl_default() -> int:
     return value if value > 0 else 300
 
 
+def _sticky_session_kind_enum() -> sa.Enum:
+    return sa.Enum(
+        "codex_session",
+        "sticky_thread",
+        "prompt_cache",
+        name="sticky_session_kind",
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     ttl_default = _prompt_cache_ttl_default()
@@ -55,28 +64,28 @@ def upgrade() -> None:
     if _table_exists(bind, "sticky_sessions"):
         sticky_columns = _columns(bind, "sticky_sessions")
         if "kind" not in sticky_columns:
+            if bind.dialect.name == "postgresql":
+                _sticky_session_kind_enum().create(bind, checkfirst=True)
             with op.batch_alter_table("sticky_sessions") as batch_op:
                 batch_op.add_column(
                     sa.Column(
                         "kind",
-                        sa.Enum(
-                            "codex_session",
-                            "sticky_thread",
-                            "prompt_cache",
-                            name="sticky_session_kind",
-                        ),
+                        _sticky_session_kind_enum(),
                         nullable=False,
                         server_default=sa.text("'sticky_thread'"),
-                    )
+                        )
                 )
-        op.execute(sa.text("UPDATE sticky_sessions SET kind = 'sticky_thread' WHERE kind IS NULL OR kind = ''"))
+        if bind.dialect.name == "postgresql":
+            op.execute(sa.text("UPDATE sticky_sessions SET kind = 'sticky_thread' WHERE kind IS NULL"))
+        else:
+            op.execute(sa.text("UPDATE sticky_sessions SET kind = 'sticky_thread' WHERE kind IS NULL OR kind = ''"))
         sticky_indexes = _indexes(bind, "sticky_sessions")
         if "idx_sticky_kind_updated_at" not in sticky_indexes:
-            op.create_index(
-                "idx_sticky_kind_updated_at",
-                "sticky_sessions",
-                ["kind", "updated_at"],
-                unique=False,
+            op.execute(
+                sa.text(
+                    "CREATE INDEX idx_sticky_kind_updated_at "
+                    "ON sticky_sessions (kind, updated_at DESC)"
+                )
             )
 
     if _table_exists(bind, "dashboard_settings"):

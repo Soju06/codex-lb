@@ -176,9 +176,17 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
-    totp_required_on_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    totp_required_on_login: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    api_key_auth_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    api_key_auth_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

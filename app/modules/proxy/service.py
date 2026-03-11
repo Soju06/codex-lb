@@ -757,7 +757,35 @@ class ProxyService:
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
-                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                    try:
+                        account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        logger.warning(
+                            "Stream refresh/connect failed request_id=%s attempt=%s account_id=%s",
+                            request_id,
+                            attempt + 1,
+                            account.id,
+                            exc_info=True,
+                        )
+                        message = str(exc) or "Request to upstream timed out"
+                        await self._write_stream_preflight_error(
+                            account_id=account.id,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            start=start,
+                            error_code="upstream_unavailable",
+                            error_message=message,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            service_tier=payload.service_tier,
+                        )
+                        event = response_failed_event(
+                            "upstream_unavailable",
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
+                        return
                     any_attempt_logged = True
                     settlement = _StreamSettlement()
                     effective_attempt_timeout = _remaining_budget_seconds(deadline)
@@ -827,6 +855,33 @@ class ProxyService:
                             if refresh_exc.is_permanent:
                                 await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                             continue
+                        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                            logger.warning(
+                                "Stream forced refresh/connect failed request_id=%s attempt=%s account_id=%s",
+                                request_id,
+                                attempt + 1,
+                                account.id,
+                                exc_info=True,
+                            )
+                            message = str(exc) or "Request to upstream timed out"
+                            await self._write_stream_preflight_error(
+                                account_id=account.id,
+                                api_key=api_key,
+                                request_id=request_id,
+                                model=payload.model,
+                                start=start,
+                                error_code="upstream_unavailable",
+                                error_message=message,
+                                reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                service_tier=payload.service_tier,
+                            )
+                            event = response_failed_event(
+                                "upstream_unavailable",
+                                message,
+                                response_id=request_id,
+                            )
+                            yield format_sse_event(event)
+                            return
                         settlement = _StreamSettlement()
                         effective_attempt_timeout = _remaining_budget_seconds(deadline)
                         if effective_attempt_timeout <= 0:
@@ -1161,6 +1216,32 @@ class ProxyService:
                     request_id,
                     exc_info=True,
                 )
+
+    async def _write_stream_preflight_error(
+        self,
+        *,
+        account_id: str,
+        api_key: ApiKeyData | None,
+        request_id: str,
+        model: str | None,
+        start: float,
+        error_code: str,
+        error_message: str,
+        reasoning_effort: str | None,
+        service_tier: str | None,
+    ) -> None:
+        await self._write_request_log(
+            account_id=account_id,
+            api_key=api_key,
+            request_id=request_id,
+            model=model,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            status="error",
+            error_code=error_code,
+            error_message=error_message,
+            reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
+        )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
         latest_usage = await repos.usage.latest_by_account(window="primary")

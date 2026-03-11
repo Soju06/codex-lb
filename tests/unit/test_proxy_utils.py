@@ -1075,6 +1075,80 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stream_refresh_timeout_emits_upstream_unavailable_and_logs(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_refresh_timeout")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+
+    async def failing_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(service, "_ensure_fresh", failing_ensure_fresh)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_unavailable"
+    assert event["response"]["error"]["message"] == "Request to upstream timed out"
+    assert request_logs.calls[-1]["account_id"] == account.id
+    assert request_logs.calls[-1]["status"] == "error"
+    assert request_logs.calls[-1]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[-1]["error_message"] == "Request to upstream timed out"
+
+
+@pytest.mark.asyncio
+async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_forced_refresh_timeout")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+
+    async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
+        if force:
+            raise asyncio.TimeoutError
+        return account
+
+    async def failing_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
+        if False:
+            yield ""
+
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", failing_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_unavailable"
+    assert event["response"]["error"]["message"] == "Request to upstream timed out"
+    assert request_logs.calls[-1]["account_id"] == account.id
+    assert request_logs.calls[-1]["status"] == "error"
+    assert request_logs.calls[-1]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[-1]["error_message"] == "Request to upstream timed out"
+
+
+@pytest.mark.asyncio
 async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

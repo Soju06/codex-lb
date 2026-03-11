@@ -23,6 +23,10 @@ import type {
 export type RemainingItem = {
   accountId: string;
   label: string;
+  /** Suffix appended after the label (e.g. compact account ID for duplicates). Not blurred. */
+  labelSuffix: string;
+  /** True when the displayed label is the account email (should be blurred in privacy mode). */
+  isEmail: boolean;
   value: number;
   remainingPercent: number | null;
   color: string;
@@ -94,13 +98,16 @@ export function buildRemainingItems(
         return null;
       }
       const remaining = usageIndex.get(account.accountId) ?? 0;
-      const baseLabel = account.displayName || account.email || account.accountId;
-      const label = duplicateAccountIds.has(account.accountId)
-        ? `${baseLabel} (${formatCompactAccountId(account.accountId, 5, 4)})`
-        : baseLabel;
+      const rawLabel = account.displayName || account.email || account.accountId;
+      const labelIsEmail = !!account.email && rawLabel === account.email;
+      const labelSuffix = duplicateAccountIds.has(account.accountId)
+        ? ` (${formatCompactAccountId(account.accountId, 5, 4)})`
+        : "";
       return {
         accountId: account.accountId,
-        label,
+        label: rawLabel,
+        labelSuffix,
+        isEmail: labelIsEmail,
         value: remaining,
         remainingPercent: accountRemainingPercent(account, windowKey),
         color: palette[index % palette.length],

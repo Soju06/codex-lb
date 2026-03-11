@@ -1,6 +1,8 @@
 import { Inbox } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { isEmailLabel } from "@/components/blur-email";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -59,6 +61,7 @@ export function RecentRequestsTable({
   onOffsetChange,
 }: RecentRequestsTableProps) {
   const [viewingError, setViewingError] = useState<string | null>(null);
+  const blurred = usePrivacyStore((s) => s.blurred);
 
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
@@ -66,6 +69,18 @@ export function RecentRequestsTable({
       index.set(account.accountId, account.displayName || account.email || account.accountId);
     }
     return index;
+  }, [accounts]);
+
+  /** Account IDs whose label is an email. */
+  const emailLabelIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const account of accounts) {
+      const label = account.displayName || account.email;
+      if (isEmailLabel(label, account.email)) {
+        ids.add(account.accountId);
+      }
+    }
+    return ids;
   }, [accounts]);
 
   if (requests.length === 0) {
@@ -99,6 +114,7 @@ export function RecentRequestsTable({
             {requests.map((request) => {
               const time = formatTimeLong(request.requestedAt);
               const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
+              const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorMessage = request.errorMessage || request.errorCode || "-";
               const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
 
@@ -110,7 +126,7 @@ export function RecentRequestsTable({
                       <div className="text-xs text-muted-foreground">{time.date}</div>
                     </div>
                   </TableCell>
-                  <TableCell className="truncate align-top text-sm">
+                  <TableCell className={`align-top text-sm${isEmailLabel && blurred ? " privacy-blur" : " truncate"}`}>
                     {accountLabel}
                   </TableCell>
                   <TableCell className="truncate align-top text-xs text-muted-foreground">

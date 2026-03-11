@@ -1,5 +1,7 @@
 import { Clock, ExternalLink, Play, RotateCcw } from "lucide-react";
 
+import { isEmailLabel } from "@/components/blur-email";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { cn } from "@/lib/utils";
@@ -65,6 +67,7 @@ function QuotaBar({
 }
 
 export function AccountCard({ account, showAccountId = false, onAction }: AccountCardProps) {
+  const blurred = usePrivacyStore((s) => s.blurred);
   const status = normalizeStatus(account.status);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
   const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
@@ -74,23 +77,27 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
 
   const title = account.displayName || account.email;
+  const titleIsEmail = isEmailLabel(title, account.email);
   const compactId = formatCompactAccountId(account.accountId);
   const emailSubtitle =
     account.displayName && account.displayName !== account.email
       ? account.email
       : null;
-  const heading = showAccountId && !emailSubtitle ? `${title} (${compactId})` : title;
-  const subtitle = showAccountId && emailSubtitle ? `${emailSubtitle} | ID ${compactId}` : emailSubtitle;
+  const idSuffix = showAccountId ? ` (${compactId})` : "";
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold leading-tight">{heading}</p>
-          {subtitle ? (
+          <p className="truncate text-sm font-semibold leading-tight">
+            {titleIsEmail && blurred
+              ? <><span className="privacy-blur">{title}</span>{!emailSubtitle ? idSuffix : ""}</>
+              : <>{title}{!emailSubtitle ? idSuffix : ""}</>}
+          </p>
+          {emailSubtitle ? (
             <p className="mt-0.5 truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-              {subtitle}
+              <span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{showAccountId ? ` | ID ${compactId}` : ""}
             </p>
           ) : null}
         </div>

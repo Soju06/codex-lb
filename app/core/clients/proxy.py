@@ -411,17 +411,27 @@ async def _iter_sse_events(
     idle_timeout_seconds: float,
     max_event_bytes: int,
 ) -> AsyncIterator[str]:
+    async def _next_chunk() -> bytes:
+        return await iterator.__anext__()
+
     buffer = bytearray()
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
 
     while True:
+        next_chunk = asyncio.create_task(_next_chunk())
         try:
-            chunk = await asyncio.wait_for(iterator.__anext__(), timeout=idle_timeout_seconds)
+            done, _ = await asyncio.wait({next_chunk}, timeout=idle_timeout_seconds)
+            if not done:
+                next_chunk.cancel()
+                try:
+                    await next_chunk
+                except asyncio.CancelledError:
+                    pass
+                raise StreamIdleTimeoutError()
+            chunk = await next_chunk
         except StopAsyncIteration:
             break
-        except asyncio.TimeoutError as exc:
-            raise StreamIdleTimeoutError() from exc
 
         if not chunk:
             continue

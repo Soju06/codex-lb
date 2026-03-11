@@ -682,7 +682,6 @@ class ProxyService:
         max_attempts = 3
         settled = False
         any_attempt_logged = False
-        last_preflight_error_message: str | None = None
         settlement = _StreamSettlement()
         try:
             for attempt in range(max_attempts):
@@ -769,7 +768,6 @@ class ProxyService:
                             exc_info=True,
                         )
                         message = str(exc) or "Request to upstream timed out"
-                        await self._handle_stream_error(account, {"message": message}, "upstream_unavailable")
                         await self._write_stream_preflight_error(
                             account_id=account.id,
                             api_key=api_key,
@@ -781,8 +779,13 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                         )
-                        last_preflight_error_message = message
-                        continue
+                        event = response_failed_event(
+                            "upstream_unavailable",
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
+                        return
                     any_attempt_logged = True
                     settlement = _StreamSettlement()
                     effective_attempt_timeout = _remaining_budget_seconds(deadline)
@@ -868,7 +871,6 @@ class ProxyService:
                                 exc_info=True,
                             )
                             message = str(exc) or "Request to upstream timed out"
-                            await self._handle_stream_error(account, {"message": message}, "upstream_unavailable")
                             await self._write_stream_preflight_error(
                                 account_id=account.id,
                                 api_key=api_key,
@@ -880,8 +882,13 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                             )
-                            last_preflight_error_message = message
-                            continue
+                            event = response_failed_event(
+                                "upstream_unavailable",
+                                message,
+                                response_id=request_id,
+                            )
+                            yield format_sse_event(event)
+                            return
                         settlement = _StreamSettlement()
                         effective_attempt_timeout = _remaining_budget_seconds(deadline)
                         if effective_attempt_timeout <= 0:
@@ -968,14 +975,6 @@ class ProxyService:
                     )
                     yield format_sse_event(event)
                     return
-            if last_preflight_error_message is not None:
-                event = response_failed_event(
-                    "upstream_unavailable",
-                    last_preflight_error_message,
-                    response_id=request_id,
-                )
-                yield format_sse_event(event)
-                return
             retries_exhausted_msg = "No available accounts after retries"
             event = response_failed_event(
                 "no_accounts",

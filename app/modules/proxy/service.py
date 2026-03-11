@@ -209,10 +209,15 @@ class ProxyService:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
-                timeout_tokens = push_compact_timeout_overrides(
-                    connect_timeout_seconds=remaining_budget,
-                    total_timeout_seconds=remaining_budget,
-                )
+                if base_settings.upstream_compact_timeout_seconds is None:
+                    timeout_tokens = push_compact_timeout_overrides(
+                        connect_timeout_seconds=remaining_budget,
+                    )
+                else:
+                    timeout_tokens = push_compact_timeout_overrides(
+                        connect_timeout_seconds=remaining_budget,
+                        total_timeout_seconds=remaining_budget,
+                    )
                 try:
                     return await core_compact_responses(payload, filtered, access_token, account_id)
                 finally:
@@ -692,6 +697,17 @@ class ProxyService:
                         request_id,
                         attempt + 1,
                     )
+                    await self._write_stream_preflight_error(
+                        account_id=None,
+                        api_key=api_key,
+                        request_id=request_id,
+                        model=payload.model,
+                        start=start,
+                        error_code="upstream_request_timeout",
+                        error_message="Proxy request budget exhausted",
+                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                        service_tier=payload.service_tier,
+                    )
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
                     return
                 try:
@@ -709,6 +725,17 @@ class ProxyService:
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                     error_message = error.message if error else None
                     if error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted":
+                        await self._write_stream_preflight_error(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            start=start,
+                            error_code="upstream_request_timeout",
+                            error_message="Proxy request budget exhausted",
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            service_tier=payload.service_tier,
+                        )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
                     event = response_failed_event(
@@ -755,6 +782,17 @@ class ProxyService:
                             attempt + 1,
                             account.id,
                         )
+                        await self._write_stream_preflight_error(
+                            account_id=account.id,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            start=start,
+                            error_code="upstream_request_timeout",
+                            error_message="Proxy request budget exhausted",
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            service_tier=payload.service_tier,
+                        )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
                     try:
@@ -796,6 +834,17 @@ class ProxyService:
                             request_id,
                             attempt + 1,
                             account.id,
+                        )
+                        await self._write_stream_preflight_error(
+                            account_id=account.id,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            start=start,
+                            error_code="upstream_request_timeout",
+                            error_message="Proxy request budget exhausted",
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            service_tier=payload.service_tier,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -850,6 +899,17 @@ class ProxyService:
                                 attempt + 1,
                                 account.id,
                             )
+                            await self._write_stream_preflight_error(
+                                account_id=account.id,
+                                api_key=api_key,
+                                request_id=request_id,
+                                model=payload.model,
+                                start=start,
+                                error_code="upstream_request_timeout",
+                                error_message="Proxy request budget exhausted",
+                                reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                service_tier=payload.service_tier,
+                            )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
                         try:
@@ -898,6 +958,17 @@ class ProxyService:
                                 request_id,
                                 attempt + 1,
                                 account.id,
+                            )
+                            await self._write_stream_preflight_error(
+                                account_id=account.id,
+                                api_key=api_key,
+                                request_id=request_id,
+                                model=payload.model,
+                                start=start,
+                                error_code="upstream_request_timeout",
+                                error_message="Proxy request budget exhausted",
+                                reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                service_tier=payload.service_tier,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -1240,7 +1311,7 @@ class ProxyService:
     async def _write_stream_preflight_error(
         self,
         *,
-        account_id: str,
+        account_id: str | None,
         api_key: ApiKeyData | None,
         request_id: str,
         model: str | None,

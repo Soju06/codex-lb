@@ -258,6 +258,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
+        upstream_compact_timeout_seconds=None,
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
@@ -896,40 +897,40 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_uses_budget_override_when_default_timeout_is_unbounded(monkeypatch):
-    class Settings:
-        upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_connect_timeout_seconds = 2.0
-        upstream_compact_timeout_seconds = None
-        image_inline_fetch_enabled = False
-        log_upstream_request_payload = False
+async def test_service_compact_budget_does_not_override_unbounded_read_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_unbounded_read")
+    runtime_values = dict(settings.__dict__)
+    runtime_values["compact_request_budget_seconds"] = 3.0
+    runtime_settings = SimpleNamespace(**runtime_values)
+    captured: dict[str, float | None] = {}
 
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
-    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
-    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
-
-    payload = proxy_module.ResponsesCompactRequest.model_validate(
-        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(runtime_settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
     )
-    session = _CompactSession(_JsonCompactResponse({"output": []}))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
-    tokens = proxy_module.push_compact_timeout_overrides(connect_timeout_seconds=1.5, total_timeout_seconds=3.0)
-    try:
-        result = await proxy_module.compact_responses(
-            payload,
-            headers={},
-            access_token="token",
-            account_id="acc_1",
-            session=cast(proxy_module.aiohttp.ClientSession, session),
-        )
-    finally:
-        proxy_module.pop_compact_timeout_overrides(tokens)
+    async def fake_compact(payload, headers, access_token, account_id):
+        captured["connect_timeout"] = proxy_module._COMPACT_CONNECT_TIMEOUT_OVERRIDE.get()
+        captured["total_timeout"] = proxy_module._COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
+        return OpenAIResponsePayload.model_validate({"output": []})
 
-    timeout = session.calls[0]["timeout"]
-    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == pytest.approx(3.0, abs=0.05)
-    assert timeout.sock_connect == pytest.approx(1.5)
-    assert timeout.sock_read == pytest.approx(3.0, abs=0.05)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    result = await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert captured["connect_timeout"] == pytest.approx(3.0)
+    assert captured["total_timeout"] is None
     assert result.model_extra == {"output": []}
 
 
@@ -1151,7 +1152,10 @@ async def test_stream_responses_budget_exhaustion_emits_timeout_event(monkeypatc
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_request_timeout"
-    assert request_logs.calls == []
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+    assert request_logs.calls[0]["error_message"] == "Proxy request budget exhausted"
+    assert request_logs.calls[0]["account_id"] is None
 
 
 @pytest.mark.asyncio
@@ -1179,7 +1183,10 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_request_timeout"
-    assert request_logs.calls == []
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+    assert request_logs.calls[0]["error_message"] == "Proxy request budget exhausted"
+    assert request_logs.calls[0]["account_id"] is None
 
 
 @pytest.mark.asyncio

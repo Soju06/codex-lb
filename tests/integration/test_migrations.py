@@ -457,6 +457,9 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.execute(text("PRAGMA foreign_keys=ON"))
             dashboard_columns_rows = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).fetchall()
             dashboard_columns = {str(row[1]) for row in dashboard_columns_rows if len(row) > 1}
+            request_log_columns_rows = (await session.execute(text("PRAGMA table_info(request_logs)"))).fetchall()
+            request_log_columns = {str(row[1]) for row in request_log_columns_rows if len(row) > 1}
+            assert "transport" in request_log_columns
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))

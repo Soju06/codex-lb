@@ -68,3 +68,5 @@ Non-streaming request/response:
 - Smoke tests: stream a response, validate non-stream responses, and verify error envelopes.
 - Post-deploy: monitor `no_accounts`, `upstream_unavailable`, compact retry attempts, and compact failure phases, especially on direct compact requests.
 - When tracing compact incidents, confirm that request logs and upstream logs show direct `/codex/responses/compact` usage without surrogate `/codex/responses` fallback.
+- Post-deploy: monitor `no_accounts`, `stream_incomplete`, and `upstream_unavailable`.
+- Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`

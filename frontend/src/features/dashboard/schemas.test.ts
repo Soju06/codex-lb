@@ -122,6 +122,7 @@ describe("RequestLogsResponseSchema", () => {
           apiKeyName: "Key A",
           requestId: "req-1",
           model: "gpt-5.1",
+          transport: "websocket",
           status: "ok",
           errorCode: null,
           errorMessage: null,
@@ -137,6 +138,7 @@ describe("RequestLogsResponseSchema", () => {
     });
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
+    expect(parsed.requests[0]?.transport).toBe("websocket");
   });
 });
 

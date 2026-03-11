@@ -230,17 +230,29 @@ class LoadBalancer:
             limit_name,
             "primary",
             account_ids=account_ids,
-            since=fresh_since,
         )
         latest_secondary = await repos.additional_usage.latest_by_account(
+            limit_name,
+            "secondary",
+            account_ids=account_ids,
+        )
+        fresh_primary = await repos.additional_usage.latest_by_account(
+            limit_name,
+            "primary",
+            account_ids=account_ids,
+            since=fresh_since,
+        )
+        fresh_secondary = await repos.additional_usage.latest_by_account(
             limit_name,
             "secondary",
             account_ids=account_ids,
             since=fresh_since,
         )
 
-        fresh_account_ids = set(latest_primary) | set(latest_secondary)
-        if not fresh_account_ids:
+        requires_primary = bool(latest_primary)
+        requires_secondary = bool(latest_secondary)
+        fresh_account_ids = set(fresh_primary) | set(fresh_secondary)
+        if (requires_primary and not fresh_primary) or (requires_secondary and not fresh_secondary):
             logger.warning(
                 "Blocked gated model routing model=%s limit_name=%s reason=%s freshness_since=%s candidate_accounts=%s",
                 model,
@@ -256,14 +268,28 @@ class LoadBalancer:
             )
 
         eligible_accounts: list[Account] = []
+        blocked_by_data = False
         for account in accounts:
-            if _account_has_fresh_remaining_additional_quota(
+            eligibility = _additional_quota_eligibility(
                 account_id=account.id,
-                latest_primary=latest_primary,
-                latest_secondary=latest_secondary,
-            ):
+                requires_primary=requires_primary,
+                requires_secondary=requires_secondary,
+                fresh_primary=fresh_primary,
+                fresh_secondary=fresh_secondary,
+            )
+            if eligibility == "eligible":
                 eligible_accounts.append(account)
+                continue
+            if eligibility == "data_unavailable":
+                blocked_by_data = True
+
         if not eligible_accounts:
+            error_code = ADDITIONAL_QUOTA_DATA_UNAVAILABLE if blocked_by_data else NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
+            error_message = (
+                f"No fresh additional quota data available for model '{model}'"
+                if blocked_by_data
+                else f"No accounts with available additional quota for model '{model}'"
+            )
             logger.warning(
                 (
                     "Blocked gated model routing model=%s limit_name=%s reason=%s "
@@ -271,16 +297,12 @@ class LoadBalancer:
                 ),
                 model,
                 limit_name,
-                NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS,
+                error_code,
                 fresh_since.isoformat(),
                 len(accounts),
                 len(fresh_account_ids),
             )
-            return (
-                [],
-                NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS,
-                f"No accounts with available additional quota for model '{model}'",
-            )
+            return ([], error_code, error_message)
 
         logger.info(
             (
@@ -546,22 +568,29 @@ def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
     return current_time - timedelta(seconds=interval_seconds)
 
 
-def _account_has_fresh_remaining_additional_quota(
+def _additional_quota_eligibility(
     *,
     account_id: str,
-    latest_primary: dict[str, AdditionalUsageHistory],
-    latest_secondary: dict[str, AdditionalUsageHistory],
-) -> bool:
-    primary_entry = latest_primary.get(account_id)
-    secondary_entry = latest_secondary.get(account_id)
-    if primary_entry is None and secondary_entry is None:
-        return False
+    requires_primary: bool,
+    requires_secondary: bool,
+    fresh_primary: dict[str, AdditionalUsageHistory],
+    fresh_secondary: dict[str, AdditionalUsageHistory],
+) -> str:
+    primary_entry = fresh_primary.get(account_id)
+    secondary_entry = fresh_secondary.get(account_id)
+
+    if requires_primary and primary_entry is None:
+        return "data_unavailable"
+    if requires_secondary and secondary_entry is None:
+        return "data_unavailable"
 
     if primary_entry is not None and _additional_usage_is_exhausted(primary_entry):
-        return False
+        return "quota_exhausted"
     if secondary_entry is not None and _additional_usage_is_exhausted(secondary_entry):
-        return False
-    return True
+        return "quota_exhausted"
+    if primary_entry is None and secondary_entry is None:
+        return "data_unavailable"
+    return "eligible"
 
 
 def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:

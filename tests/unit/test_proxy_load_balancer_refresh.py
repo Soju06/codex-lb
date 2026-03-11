@@ -769,6 +769,65 @@ async def test_select_account_returns_data_unavailable_error_for_mapped_model(mo
 
 
 @pytest.mark.asyncio
+async def test_select_account_returns_data_unavailable_when_secondary_window_is_stale(monkeypatch) -> None:
+    account = _make_account("acc-gated-stale-secondary", "gated-stale-secondary@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+        secondary={
+            account.id: _additional_entry(
+                3,
+                account_id=account.id,
+                window="secondary",
+                used_percent=20.0,
+                reset_at=now_epoch + 3600,
+                recorded_at=now - timedelta(seconds=181),
+            )
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == ADDITIONAL_QUOTA_DATA_UNAVAILABLE
+
+
+@pytest.mark.asyncio
 async def test_select_account_returns_no_eligible_error_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-exhausted", "gated-exhausted@example.com")
     now = utcnow()
@@ -795,7 +854,17 @@ async def test_select_account_returns_no_eligible_error_for_mapped_model(monkeyp
                 reset_at=now_epoch + 300,
                 recorded_at=now,
             )
-        }
+        },
+        secondary={
+            account.id: _additional_entry(
+                3,
+                account_id=account.id,
+                window="secondary",
+                used_percent=10.0,
+                reset_at=now_epoch + 3600,
+                recorded_at=now,
+            )
+        },
     )
 
     monkeypatch.setattr(

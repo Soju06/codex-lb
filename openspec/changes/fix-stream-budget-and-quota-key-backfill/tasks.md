@@ -6,8 +6,9 @@
 
 ## 2. Registry-backed migration backfill
 
-- [x] 2.1 Backfill `additional_usage_history.quota_key` through the configured registry canonicalization helper
-- [x] 2.2 Add migration coverage for a deployment-specific registry override
+- [x] 2.1 Normalize configured additional quota keys before storing runtime definitions
+- [x] 2.2 Backfill `additional_usage_history.quota_key` through a migration-local, versioned alias mapping
+- [x] 2.3 Add regression coverage for normalized runtime keys and deterministic migration backfill
 
 ## 3. Validation
 

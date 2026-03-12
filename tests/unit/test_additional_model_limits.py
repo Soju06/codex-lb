@@ -57,6 +57,33 @@ def test_canonicalize_additional_quota_key_normalizes_unknown_aliases() -> None:
     assert canonicalize_additional_quota_key(metered_feature="Deep Research") == "deep_research"
 
 
+def test_registry_normalizes_configured_quota_key(monkeypatch, tmp_path: Path) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    registry.write_text(
+        json.dumps(
+            [
+                {
+                    "quota_key": " Spark-Enterprise ",
+                    "display_label": "Spark Enterprise",
+                    "model_ids": ["gpt-5.3-codex-spark"],
+                    "limit_name_aliases": ["codex_other"],
+                    "metered_feature_aliases": ["codex_bengalfox"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    resolved = get_additional_model_limit("gpt-5.3-codex-spark")
+
+    assert resolved is not None
+    assert resolved.quota_key == "spark_enterprise"
+    assert canonicalize_additional_quota_key(limit_name="codex_other") == "spark_enterprise"
+    assert get_additional_display_label_for_model("gpt-5.3-codex-spark") == "Spark Enterprise"
+
+
 def test_registry_reloads_when_config_file_changes(monkeypatch, tmp_path: Path) -> None:
     registry = tmp_path / "additional_quota_registry.json"
     registry.write_text(

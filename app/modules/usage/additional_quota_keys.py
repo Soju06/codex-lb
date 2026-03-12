@@ -53,7 +53,10 @@ def _registry_path() -> Path:
 
 
 def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuotaDefinition:
-    quota_key = str(item["quota_key"]).strip()
+    raw_quota_key = str(item["quota_key"]).strip()
+    quota_key = _normalize_identifier(raw_quota_key)
+    if quota_key is None:
+        raise ValueError(f"invalid additional quota_key in registry: {raw_quota_key!r}")
     display_label = str(item["display_label"]).strip()
     model_ids = frozenset(
         normalized
@@ -104,16 +107,13 @@ def _definition_maps_for_path(
     alias_to_quota_key: dict[str, str] = {}
 
     for definition in definitions:
-        normalized_quota_key = _normalize_identifier(definition.quota_key)
-        if normalized_quota_key is None:
-            raise ValueError(f"invalid additional quota_key in registry: {definition.quota_key!r}")
-        previous_quota = by_quota_key.get(normalized_quota_key)
+        previous_quota = by_quota_key.get(definition.quota_key)
         if previous_quota is not None:
             raise ValueError(
                 "duplicate additional quota_key in registry: "
                 f"{definition.quota_key!r} conflicts with {previous_quota.quota_key!r}"
             )
-        by_quota_key[normalized_quota_key] = definition
+        by_quota_key[definition.quota_key] = definition
 
         for model_id in definition.model_ids:
             previous_model = model_to_quota_key.get(model_id)

@@ -7,17 +7,25 @@ Create Date: 2026-03-12
 
 from __future__ import annotations
 
+import re
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
-
-from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 # revision identifiers, used by Alembic.
 revision = "20260312_000000_add_additional_usage_quota_key"
 down_revision = "20260310_000000_fix_postgresql_enum_value_casing"
 branch_labels = None
 depends_on = None
+
+_NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
+_VERSIONED_ADDITIONAL_QUOTA_KEY_ALIASES = {
+    "codex_spark": "codex_spark",
+    "codex_other": "codex_spark",
+    "gpt_5_3_codex_spark": "codex_spark",
+    "codex_bengalfox": "codex_spark",
+}
 
 
 def _table_exists(connection: Connection, table_name: str) -> bool:
@@ -39,14 +47,23 @@ def _indexes(connection: Connection, table_name: str) -> set[str]:
     return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
 
 
+def _normalize_identifier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = _NORMALIZE_PATTERN.sub("_", value.strip().lower()).strip("_")
+    return normalized or None
+
+
 def _canonical_quota_key(limit_name: str | None, metered_feature: str | None) -> str:
-    return (
-        canonicalize_additional_quota_key(
-            limit_name=limit_name,
-            metered_feature=metered_feature,
-        )
-        or "unknown"
-    )
+    # Keep the backfill deterministic across environments and future registry edits.
+    for candidate in (limit_name, metered_feature):
+        normalized = _normalize_identifier(candidate)
+        if normalized is None:
+            continue
+        resolved = _VERSIONED_ADDITIONAL_QUOTA_KEY_ALIASES.get(normalized)
+        if resolved is not None:
+            return resolved
+    return _normalize_identifier(limit_name) or _normalize_identifier(metered_feature) or "unknown"
 
 
 def upgrade() -> None:

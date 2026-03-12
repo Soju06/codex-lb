@@ -39,6 +39,7 @@ from app.core.clients.proxy import stream_responses as core_stream_responses
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio
 from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
+    UpstreamWebSocketMessage,
     connect_responses_websocket,
     filter_inbound_websocket_headers,
 )
@@ -357,6 +358,7 @@ class ProxyService:
                     usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
                 ),
                 reasoning_effort=reasoning_effort,
+                transport=_REQUEST_TRANSPORT_HTTP,
                 service_tier=_service_tier_from_response(response) or _service_tier_from_compact_payload(payload),
             )
             _maybe_log_proxy_service_tier_trace(
@@ -523,6 +525,7 @@ class ProxyService:
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,
+                transport=_REQUEST_TRANSPORT_HTTP,
             )
 
     async def proxy_responses_websocket(
@@ -666,6 +669,7 @@ class ProxyService:
                 pending_lock=pending_lock,
                 error_code="stream_incomplete",
                 error_message="Upstream websocket closed before response.completed",
+                api_key=api_key,
             )
 
     async def _connect_proxy_websocket(
@@ -844,6 +848,16 @@ class ProxyService:
                     async with client_send_lock:
                         await websocket.send_bytes(message.data)
                     continue
+                await self._fail_pending_websocket_requests(
+                    account_id_value=account_id_value,
+                    pending_requests=pending_requests,
+                    pending_lock=pending_lock,
+                    error_code="stream_incomplete",
+                    error_message=_upstream_websocket_disconnect_message(message),
+                    api_key=api_key,
+                    websocket=websocket,
+                    client_send_lock=client_send_lock,
+                )
                 break
         finally:
             try:
@@ -865,9 +879,16 @@ class ProxyService:
         payload = parse_sse_data_json(event_block)
         event = parse_sse_event(event_block)
         event_type = _event_type_from_payload(event, payload)
+        response_id = _websocket_response_id(event, payload)
 
         async with pending_lock:
-            request_state = pending_requests[0] if pending_requests else None
+            request_state = None
+            if event_type == "response.created":
+                request_state = _assign_websocket_response_id(pending_requests, response_id)
+            elif response_id is not None:
+                request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
+            elif len(pending_requests) == 1:
+                request_state = pending_requests[0]
             if request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
@@ -876,7 +897,11 @@ class ProxyService:
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
             ):
-                request_state = pending_requests.popleft()
+                request_state = _pop_terminal_websocket_request_state(
+                    pending_requests,
+                    response_id=response_id,
+                    fallback_request_state=request_state,
+                )
             else:
                 request_state = None
 
@@ -909,7 +934,7 @@ class ProxyService:
         error_message = None
         usage = None
         error_payload: UpstreamError | None = None
-        response_id = request_state.request_id
+        response_id = request_state.response_id or request_state.request_id
         response_service_tier = request_state.service_tier
 
         if event_type == "error":
@@ -1022,20 +1047,31 @@ class ProxyService:
         pending_lock: anyio.Lock,
         error_code: str,
         error_message: str,
+        api_key: ApiKeyData | None,
+        websocket: WebSocket | None = None,
+        client_send_lock: anyio.Lock | None = None,
     ) -> None:
         async with pending_lock:
             remaining = list(pending_requests)
             pending_requests.clear()
 
         for request_state in remaining:
+            if websocket is not None and client_send_lock is not None:
+                await self._emit_websocket_terminal_error(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    request_state=request_state,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
             await self._release_websocket_reservation(request_state.api_key_reservation)
             if account_id_value is None:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
             await self._write_request_log(
                 account_id=account_id_value,
-                api_key=None,
-                request_id=request_state.request_id,
+                api_key=api_key,
+                request_id=request_state.response_id or request_state.request_id,
                 model=request_state.model or "",
                 latency_ms=latency_ms,
                 status="error",
@@ -1045,6 +1081,26 @@ class ProxyService:
                 transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 service_tier=request_state.service_tier,
             )
+
+    async def _emit_websocket_terminal_error(
+        self,
+        websocket: WebSocket,
+        *,
+        client_send_lock: anyio.Lock,
+        request_state: _WebSocketRequestState,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        event = response_failed_event(
+            error_code,
+            error_message,
+            response_id=request_state.response_id or request_state.request_id,
+        )
+        try:
+            async with client_send_lock:
+                await websocket.send_text(json.dumps(event, ensure_ascii=True, separators=(",", ":")))
+        except Exception:
+            logger.debug("Failed to emit websocket terminal error", exc_info=True)
 
     async def _reserve_websocket_api_key_usage(
         self,
@@ -1291,6 +1347,7 @@ class ProxyService:
                         error_message="Proxy request budget exhausted",
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
+                        transport=request_transport,
                     )
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
                     return
@@ -1322,6 +1379,7 @@ class ProxyService:
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
+                            transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -1380,6 +1438,7 @@ class ProxyService:
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
+                            transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -1404,6 +1463,7 @@ class ProxyService:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
+                            transport=request_transport,
                         )
                         event = response_failed_event(
                             "upstream_unavailable",
@@ -1433,6 +1493,7 @@ class ProxyService:
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
+                            transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -1495,6 +1556,7 @@ class ProxyService:
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
+                                transport=request_transport,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -1527,6 +1589,7 @@ class ProxyService:
                                 error_message=message,
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
+                                transport=request_transport,
                             )
                             event = response_failed_event(
                                 "upstream_unavailable",
@@ -1555,6 +1618,7 @@ class ProxyService:
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
+                                transport=request_transport,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -1912,6 +1976,7 @@ class ProxyService:
         error_message: str,
         reasoning_effort: str | None,
         service_tier: str | None,
+        transport: str = _REQUEST_TRANSPORT_HTTP,
     ) -> None:
         await self._write_request_log(
             account_id=account_id,
@@ -1923,6 +1988,7 @@ class ProxyService:
             error_code=error_code,
             error_message=error_message,
             reasoning_effort=reasoning_effort,
+            transport=transport,
             service_tier=service_tier,
         )
 
@@ -2244,6 +2310,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    response_id: str | None = None
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -2255,6 +2322,79 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     if isinstance(payload_type, str):
         return payload_type
     return None
+
+
+def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
+    if event is not None and event.response is not None and event.response.id:
+        return event.response.id
+    if not isinstance(payload, dict):
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    response_id = response.get("id")
+    if not isinstance(response_id, str):
+        return None
+    stripped = response_id.strip()
+    return stripped or None
+
+
+def _find_websocket_request_state_by_response_id(
+    pending_requests: deque[_WebSocketRequestState],
+    response_id: str,
+) -> _WebSocketRequestState | None:
+    for request_state in pending_requests:
+        if request_state.response_id == response_id:
+            return request_state
+    return None
+
+
+def _assign_websocket_response_id(
+    pending_requests: deque[_WebSocketRequestState],
+    response_id: str | None,
+) -> _WebSocketRequestState | None:
+    if response_id is None:
+        return None
+    existing = _find_websocket_request_state_by_response_id(pending_requests, response_id)
+    if existing is not None:
+        return existing
+    for request_state in pending_requests:
+        if request_state.response_id is None:
+            request_state.response_id = response_id
+            return request_state
+    return None
+
+
+def _pop_terminal_websocket_request_state(
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    response_id: str | None,
+    fallback_request_state: _WebSocketRequestState | None,
+) -> _WebSocketRequestState | None:
+    if response_id is not None:
+        request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
+        if request_state is not None:
+            pending_requests.remove(request_state)
+            return request_state
+    if fallback_request_state is not None and fallback_request_state in pending_requests:
+        pending_requests.remove(fallback_request_state)
+        return fallback_request_state
+    unresolved_requests = [request_state for request_state in pending_requests if request_state.response_id is None]
+    if len(unresolved_requests) == 1:
+        request_state = unresolved_requests[0]
+        pending_requests.remove(request_state)
+        return request_state
+    if len(pending_requests) == 1:
+        return pending_requests.popleft()
+    return None
+
+
+def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) -> str:
+    if message.kind == "error" and message.error:
+        return f"Upstream websocket closed before response.completed: {message.error}"
+    if message.close_code is not None:
+        return f"Upstream websocket closed before response.completed (close_code={message.close_code})"
+    return "Upstream websocket closed before response.completed"
 
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:

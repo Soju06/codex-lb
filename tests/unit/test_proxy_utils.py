@@ -1132,6 +1132,7 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
     assert "kind=compact" in caplog.text
     assert "requested_service_tier=priority" in caplog.text
     assert "actual_service_tier=default" in caplog.text
+    assert request_logs.calls[0]["transport"] == "http"
 
 
 @pytest.mark.asyncio
@@ -1447,6 +1448,7 @@ async def test_stream_responses_budget_exhaustion_emits_timeout_event(monkeypatc
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["error_message"] == "Proxy request budget exhausted"
     assert request_logs.calls[0]["account_id"] is None
+    assert request_logs.calls[0]["transport"] == "http"
 
 
 @pytest.mark.asyncio
@@ -1839,6 +1841,7 @@ async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(
     assert exc.status_code == 502
     assert exc.payload["error"]["code"] == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["transport"] == "http"
 
 
 @pytest.mark.asyncio
@@ -1961,6 +1964,7 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
     assert exc.payload["error"]["code"] == "upstream_unavailable"
     assert transcribe_calls == 1
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["transport"] == "http"
 
 
 @pytest.mark.asyncio

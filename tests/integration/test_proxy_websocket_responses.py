@@ -53,6 +53,7 @@ class _FakeUpstreamWebSocket:
     async def close(self) -> None:
         self.closed = True
 
+
 class _SequencedUpstreamWebSocket(_FakeUpstreamWebSocket):
     def __init__(
         self,

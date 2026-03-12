@@ -913,6 +913,118 @@ async def test_additional_rate_limits_normalize_known_alias_to_canonical_quota_k
 
 
 @pytest.mark.asyncio
+async def test_additional_rate_limits_merge_aliases_before_pruning_quota(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "GPT-5.3-Codex-Spark",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12.0,
+                                "reset_at": 1735689600,
+                                "limit_window_seconds": 300,
+                            }
+                        },
+                    },
+                    {
+                        "limit_name": "codex_other",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": None,
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    additional_repo = StubAdditionalUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+
+    await updater.refresh_accounts([_make_account("acc_alias_merge", "workspace_alias_merge")], latest_usage={})
+
+    assert len(additional_repo.entries) == 1
+    entry = additional_repo.entries[0]
+    assert entry.quota_key == "codex_spark"
+    assert entry.limit_name == "GPT-5.3-Codex-Spark"
+    assert additional_repo.deleted_account_limit_pairs == []
+
+
+@pytest.mark.asyncio
+async def test_additional_rate_limits_merge_windows_across_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "GPT-5.3-Codex-Spark",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12.0,
+                                "reset_at": 1735689600,
+                                "limit_window_seconds": 300,
+                            }
+                        },
+                    },
+                    {
+                        "limit_name": "codex_other",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": {
+                            "secondary_window": {
+                                "used_percent": 33.0,
+                                "reset_at": 1735689700,
+                                "limit_window_seconds": 1800,
+                            }
+                        },
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    additional_repo = StubAdditionalUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+
+    await updater.refresh_accounts([_make_account("acc_alias_windows", "workspace_alias_windows")], latest_usage={})
+
+    assert len(additional_repo.entries) == 2
+    by_window = {entry.window: entry for entry in additional_repo.entries}
+    assert by_window["primary"].quota_key == "codex_spark"
+    assert by_window["secondary"].quota_key == "codex_spark"
+    assert additional_repo.deleted_account_limit_pairs == []
+
+
+@pytest.mark.asyncio
 async def test_additional_rate_limits_null_writes_nothing(monkeypatch) -> None:
     """When additional_rate_limits is null, no additional entries are written."""
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")

@@ -10,8 +10,13 @@
 - [x] 2.2 Backfill `additional_usage_history.quota_key` through a migration-local, versioned alias mapping
 - [x] 2.3 Add regression coverage for normalized runtime keys and deterministic migration backfill
 
-## 3. Validation
+## 3. Canonical alias refresh coalescing
 
-- [x] 3.1 Validate OpenSpec artifacts
-- [x] 3.2 Run targeted unit test coverage for proxy timeout and migration regressions
-- [x] 3.3 Review diffs, commit, and push branch updates
+- [x] 3.1 Merge additional-usage aliases by canonical `quota_key` before pruning persisted rows
+- [x] 3.2 Add regression coverage for mixed-alias null/data payloads and split-window alias payloads
+
+## 4. Validation
+
+- [x] 4.1 Validate OpenSpec artifacts
+- [x] 4.2 Run targeted unit test coverage for proxy timeout, migration, and usage refresh regressions
+- [x] 4.3 Review diffs, commit, and push branch updates

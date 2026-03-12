@@ -42,7 +42,7 @@ describe("AccountUsagePanel", () => {
     const account = createAccountSummary({
       additionalQuotas: [
         {
-          limitName: "codex_other",
+          limitName: "codex_spark",
           meteredFeature: "codex_bengalfox",
           primaryWindow: {
             usedPercent: 35,

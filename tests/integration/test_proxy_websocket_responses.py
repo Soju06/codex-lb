@@ -105,6 +105,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         headers,
         *,
         sticky_key,
+        sticky_kind=None,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -113,9 +114,10 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         websocket,
         api_key=None,
         deadline=None,
+        sticky_max_age_seconds=None,
         exclude_account_ids=None,
     ):
-        del api_key, deadline, exclude_account_ids
+        del api_key, deadline, sticky_kind, sticky_max_age_seconds, exclude_account_ids
         seen["headers"] = dict(headers)
         seen["sticky_key"] = sticky_key
         seen["prefer_earlier_reset"] = prefer_earlier_reset
@@ -240,6 +242,7 @@ def test_backend_responses_websocket_preserves_request_order_for_overlapping_cre
         headers,
         *,
         sticky_key,
+        sticky_kind=None,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -248,9 +251,10 @@ def test_backend_responses_websocket_preserves_request_order_for_overlapping_cre
         websocket,
         api_key=None,
         deadline=None,
+        sticky_max_age_seconds=None,
         exclude_account_ids=None,
     ):
-        del self, headers, sticky_key, prefer_earlier_reset, routing_strategy, request_state, client_send_lock, websocket, api_key, deadline
+        del self, headers, sticky_key, sticky_kind, prefer_earlier_reset, routing_strategy, request_state, client_send_lock, websocket, api_key, deadline, sticky_max_age_seconds
         seen_models.append(model)
         if exclude_account_ids:
             assert exclude_account_ids == {"acct_ws_one"}
@@ -345,6 +349,7 @@ def test_backend_responses_websocket_forwards_non_create_events_to_active_upstre
         headers,
         *,
         sticky_key,
+        sticky_kind=None,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -353,9 +358,10 @@ def test_backend_responses_websocket_forwards_non_create_events_to_active_upstre
         websocket,
         api_key=None,
         deadline=None,
+        sticky_max_age_seconds=None,
         exclude_account_ids=None,
     ):
-        del self, headers, sticky_key, prefer_earlier_reset, routing_strategy, model, request_state, client_send_lock, websocket, api_key, deadline, exclude_account_ids
+        del self, headers, sticky_key, sticky_kind, prefer_earlier_reset, routing_strategy, model, request_state, client_send_lock, websocket, api_key, deadline, sticky_max_age_seconds, exclude_account_ids
         return SimpleNamespace(id="acct_ws_control"), fake_upstream
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
@@ -405,6 +411,7 @@ def test_backend_responses_websocket_surfaces_upstream_disconnect(app_instance, 
         headers,
         *,
         sticky_key,
+        sticky_kind=None,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -413,9 +420,10 @@ def test_backend_responses_websocket_surfaces_upstream_disconnect(app_instance, 
         websocket,
         api_key=None,
         deadline=None,
+        sticky_max_age_seconds=None,
         exclude_account_ids=None,
     ):
-        del self, headers, sticky_key, prefer_earlier_reset, routing_strategy, model, request_state, client_send_lock, websocket, api_key, deadline, exclude_account_ids
+        del self, headers, sticky_key, sticky_kind, prefer_earlier_reset, routing_strategy, model, request_state, client_send_lock, websocket, api_key, deadline, sticky_max_age_seconds, exclude_account_ids
         return SimpleNamespace(id="acct_ws_disconnect"), fake_upstream
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
@@ -488,6 +496,7 @@ def test_v1_responses_websocket_uses_prompt_cache_affinity_and_http_normalizatio
         headers,
         *,
         sticky_key,
+        sticky_kind=None,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -496,16 +505,21 @@ def test_v1_responses_websocket_uses_prompt_cache_affinity_and_http_normalizatio
         websocket,
         api_key=None,
         deadline=None,
+        sticky_max_age_seconds=None,
         exclude_account_ids=None,
     ):
-        del self, headers, prefer_earlier_reset, routing_strategy, model, request_state, client_send_lock, websocket, api_key, deadline, exclude_account_ids
+        del self, headers, prefer_earlier_reset, routing_strategy, model, request_state, client_send_lock, websocket, api_key, deadline, sticky_kind, sticky_max_age_seconds, exclude_account_ids
         seen["sticky_key"] = sticky_key
         return SimpleNamespace(id="acct_ws_v1"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
     request_payload = {
         "type": "response.create",
@@ -554,6 +568,7 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         headers,
         *,
         sticky_key,
+        sticky_kind=None,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -562,9 +577,10 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         websocket,
         api_key=None,
         deadline=None,
+        sticky_max_age_seconds=None,
         exclude_account_ids=None,
     ):
-        del headers, sticky_key, prefer_earlier_reset, routing_strategy, model, request_state, self, api_key, deadline, exclude_account_ids
+        del headers, sticky_key, sticky_kind, prefer_earlier_reset, routing_strategy, model, request_state, self, api_key, deadline, sticky_max_age_seconds, exclude_account_ids
         async with client_send_lock:
             await websocket.send_text(json.dumps({"type": "error", "status": 503, "error": {"code": "no_accounts"}}))
         return None, None

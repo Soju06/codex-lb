@@ -57,7 +57,7 @@ from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import Account, UsageHistory
+from app.db.models import Account, DashboardSettings, StickySessionKind, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -90,6 +90,7 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
@@ -103,13 +104,6 @@ _COMPACT_UPSTREAM_ENDPOINT = "/codex/responses/compact"
 _COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
 
 
-@dataclass(frozen=True, slots=True)
-class _CompactAffinityDecision:
-    sticky_key: str | None
-    reallocate_sticky: bool
-    source: str
-
-
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
         "rate_limit_exceeded",
@@ -120,6 +114,15 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
         *PERMANENT_FAILURE_CODES.keys(),
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _AffinityPolicy:
+    key: str | None = None
+    kind: StickySessionKind | None = None
+    reallocate_sticky: bool = False
+    max_age_seconds: int | None = None
+    source: str = "none"
 
 
 class ProxyService:
@@ -183,22 +186,24 @@ class ProxyService:
 
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_threads_enabled = settings.sticky_threads_enabled
-        routing_strategy = _routing_strategy(settings)
         affinity = _sticky_key_for_compact_request(
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
             openai_cache_affinity=openai_cache_affinity,
-            sticky_threads_enabled=sticky_threads_enabled,
+            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=settings.sticky_threads_enabled,
         )
+        routing_strategy = _routing_strategy(settings)
         try:
             selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_id,
                 kind="compact",
-                sticky_key=affinity.sticky_key,
+                sticky_key=affinity.key,
+                sticky_kind=affinity.kind,
                 reallocate_sticky=affinity.reallocate_sticky,
+                sticky_max_age_seconds=affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=payload.model,
@@ -730,11 +735,12 @@ class ProxyService:
                 started_at=time.monotonic(),
             )
             serialized_payload = _serialize_websocket_request_create_event(request_payload)
-            sticky_key = _sticky_key_for_responses_request(
+            affinity = _sticky_key_for_responses_request(
                 request_payload,
                 headers,
                 codex_session_affinity=codex_session_affinity,
                 openai_cache_affinity=not codex_session_affinity,
+                openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
                 sticky_threads_enabled=sticky_threads_enabled,
             )
         except AppError as exc:
@@ -751,7 +757,8 @@ class ProxyService:
         try:
             account, upstream = await self._connect_proxy_websocket(
                 filtered_headers,
-                sticky_key=sticky_key,
+                sticky_key=affinity.key,
+                sticky_kind=affinity.kind,
                 prefer_earlier_reset=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=request_state.model,
@@ -760,6 +767,7 @@ class ProxyService:
                 websocket=websocket,
                 api_key=api_key,
                 deadline=deadline,
+                sticky_max_age_seconds=affinity.max_age_seconds,
             )
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -860,6 +868,7 @@ class ProxyService:
         headers: dict[str, str],
         *,
         sticky_key: str | None,
+        sticky_kind: StickySessionKind | None = None,
         prefer_earlier_reset: bool,
         routing_strategy: RoutingStrategy,
         model: str | None,
@@ -868,6 +877,7 @@ class ProxyService:
         websocket: WebSocket,
         api_key: ApiKeyData | None,
         deadline: float,
+        sticky_max_age_seconds: int | None = None,
         exclude_account_ids: set[str] | None = None,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         attempted_account_ids = set(exclude_account_ids or ())
@@ -880,6 +890,8 @@ class ProxyService:
                 request_id=request_state.request_id,
                 kind="websocket",
                 sticky_key=sticky_key,
+                sticky_kind=sticky_kind,
+                sticky_max_age_seconds=sticky_max_age_seconds,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=model,
@@ -1535,15 +1547,15 @@ class ProxyService:
         settings = await get_settings_cache().get()
         deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_threads_enabled = settings.sticky_threads_enabled
-        routing_strategy = _routing_strategy(settings)
-        sticky_key = _sticky_key_for_responses_request(
+        affinity = _sticky_key_for_responses_request(
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
             openai_cache_affinity=openai_cache_affinity,
-            sticky_threads_enabled=sticky_threads_enabled,
+            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=settings.sticky_threads_enabled,
         )
+        routing_strategy = _routing_strategy(settings)
         max_attempts = 3
         settled = False
         any_attempt_logged = False
@@ -1576,7 +1588,10 @@ class ProxyService:
                         deadline,
                         request_id=request_id,
                         kind="stream",
-                        sticky_key=sticky_key,
+                        sticky_key=affinity.key,
+                        sticky_kind=affinity.kind,
+                        reallocate_sticky=affinity.reallocate_sticky,
+                        sticky_max_age_seconds=affinity.max_age_seconds,
                         prefer_earlier_reset_accounts=prefer_earlier_reset,
                         routing_strategy=routing_strategy,
                         model=payload.model,
@@ -1714,11 +1729,7 @@ class ProxyService:
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
-                    stream_timeout_tokens = push_stream_timeout_overrides(
-                        connect_timeout_seconds=effective_attempt_timeout,
-                        idle_timeout_seconds=effective_attempt_timeout,
-                        total_timeout_seconds=effective_attempt_timeout,
-                    )
+                    stream_timeout_tokens = _push_stream_attempt_timeout_overrides(effective_attempt_timeout)
                     try:
                         async for line in self._stream_once(
                             account,
@@ -1843,11 +1854,7 @@ class ProxyService:
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
-                        stream_timeout_tokens = push_stream_timeout_overrides(
-                            connect_timeout_seconds=effective_attempt_timeout,
-                            idle_timeout_seconds=effective_attempt_timeout,
-                            total_timeout_seconds=effective_attempt_timeout,
-                        )
+                        stream_timeout_tokens = _push_stream_attempt_timeout_overrides(effective_attempt_timeout)
                         try:
                             async for line in self._stream_once(
                                 account,
@@ -2369,7 +2376,9 @@ class ProxyService:
 
             additional_limits.append(
                 AdditionalRateLimitData(
-                    limit_name=limit_name,
+                    quota_key=limit_name,
+                    limit_name=first_entry.limit_name,
+                    display_label=get_additional_display_label_for_quota_key(limit_name) or first_entry.limit_name,
                     metered_feature=metered_feature,
                     rate_limit=rate_limit_details,
                 )
@@ -2411,7 +2420,9 @@ class ProxyService:
         request_id: str,
         kind: str,
         sticky_key: str | None = None,
+        sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
+        sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
@@ -2428,7 +2439,9 @@ class ProxyService:
             with anyio.fail_after(remaining_budget):
                 return await self._load_balancer.select_account(
                     sticky_key=sticky_key,
+                    sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
+                    sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
                     model=model,
@@ -2554,8 +2567,8 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     return None
 
 
-def _routing_strategy(settings: object) -> RoutingStrategy:
-    value = getattr(settings, "routing_strategy", "usage_weighted")
+def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
+    value = settings.routing_strategy or "usage_weighted"
     return "round_robin" if value == "round_robin" else "usage_weighted"
 
 
@@ -2692,6 +2705,16 @@ def _serialize_websocket_error_event(payload: dict[str, JsonValue]) -> str:
 
 def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
+
+
+def _push_stream_attempt_timeout_overrides(
+    timeout_seconds: float,
+) -> tuple[float | None, float | None, float | None]:
+    return push_stream_timeout_overrides(
+        connect_timeout_seconds=timeout_seconds,
+        idle_timeout_seconds=timeout_seconds,
+        total_timeout_seconds=timeout_seconds,
+    )
 
 
 def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:
@@ -2981,15 +3004,32 @@ def _sticky_key_for_responses_request(
     *,
     codex_session_affinity: bool,
     openai_cache_affinity: bool,
+    openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
-) -> str | None:
+) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
-            return session_key
-    if openai_cache_affinity or sticky_threads_enabled:
-        return _sticky_key_from_payload(payload)
-    return None
+            return _AffinityPolicy(
+                key=session_key,
+                kind=StickySessionKind.CODEX_SESSION,
+                source="session_id",
+            )
+    if openai_cache_affinity:
+        return _AffinityPolicy(
+            key=_sticky_key_from_payload(payload),
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=openai_cache_affinity_max_age_seconds,
+            source="prompt_cache_key",
+        )
+    if sticky_threads_enabled:
+        return _AffinityPolicy(
+            key=_sticky_key_from_payload(payload),
+            kind=StickySessionKind.STICKY_THREAD,
+            reallocate_sticky=True,
+            source="prompt_cache_key",
+        )
+    return _AffinityPolicy()
 
 
 def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
@@ -3006,17 +3046,32 @@ def _sticky_key_for_compact_request(
     *,
     codex_session_affinity: bool,
     openai_cache_affinity: bool,
+    openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
-) -> _CompactAffinityDecision:
+) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
-            return _CompactAffinityDecision(session_key, False, "session_id")
+            return _AffinityPolicy(
+                key=session_key,
+                kind=StickySessionKind.CODEX_SESSION,
+                source="session_id",
+            )
     if openai_cache_affinity:
-        return _CompactAffinityDecision(_sticky_key_from_compact_payload(payload), False, "prompt_cache_key")
+        return _AffinityPolicy(
+            key=_sticky_key_from_compact_payload(payload),
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=openai_cache_affinity_max_age_seconds,
+            source="prompt_cache_key",
+        )
     if sticky_threads_enabled:
-        return _CompactAffinityDecision(_sticky_key_from_compact_payload(payload), True, "prompt_cache_key")
-    return _CompactAffinityDecision(None, False, "none")
+        return _AffinityPolicy(
+            key=_sticky_key_from_compact_payload(payload),
+            kind=StickySessionKind.STICKY_THREAD,
+            reallocate_sticky=True,
+            source="prompt_cache_key",
+        )
+    return _AffinityPolicy()
 
 
 def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:

@@ -44,6 +44,7 @@ COPY --from=python-build /usr/local /usr/local
 COPY --from=python-build /opt/venv /opt/venv
 COPY --from=python-build --chown=nonroot:nonroot /var/lib/codex-lb /var/lib/codex-lb
 COPY --chown=nonroot:nonroot app app
+COPY --chown=nonroot:nonroot config config
 COPY --chown=nonroot:nonroot scripts scripts
 COPY --from=frontend-build --chown=nonroot:nonroot /app/app/static app/static
 

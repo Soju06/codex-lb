@@ -190,7 +190,17 @@
       "profile": "https://github.com/defin85",
       "contributions": [
         "code",
-        "bug"
+        "bug",
+        "test"
+      ]
+    },
+    {
+      "login": "huzky-v",
+      "name": "Jacky Fong",
+      "avatar_url": "https://avatars.githubusercontent.com/u/194083329?v=4",
+      "profile": "https://linktree.huzky.dev/",
+      "contributions": [
+        "code"
       ]
     }
   ],

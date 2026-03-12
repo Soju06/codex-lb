@@ -1,4 +1,6 @@
 import { cn } from "@/lib/utils";
+import { isEmailLabel } from "@/components/blur-email";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { StatusBadge } from "@/components/status-badge";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
@@ -29,14 +31,15 @@ function MiniQuotaBar({ percent }: { percent: number | null }) {
 }
 
 export function AccountListItem({ account, selected, showAccountId = false, onSelect }: AccountListItemProps) {
+  const blurred = usePrivacyStore((s) => s.blurred);
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
-  const baseSubtitle = account.displayName && account.displayName !== account.email
+  const titleIsEmail = isEmailLabel(title, account.email);
+  const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
-    : formatSlug(account.planType);
-  const subtitle = showAccountId
-    ? `${baseSubtitle} | ID ${formatCompactAccountId(account.accountId)}`
-    : baseSubtitle;
+    : null;
+  const baseSubtitle = emailSubtitle ?? formatSlug(account.planType);
+  const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
 
   return (
@@ -52,9 +55,11 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
     >
       <div className="flex items-center gap-2.5">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{title}</p>
+          <p className="truncate text-sm font-medium">
+            {titleIsEmail && blurred ? <span className="privacy-blur">{title}</span> : title}
+          </p>
           <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            {subtitle}
+            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
           </p>
         </div>
         <StatusBadge status={status} />

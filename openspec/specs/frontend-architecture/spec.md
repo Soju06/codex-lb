@@ -141,12 +141,22 @@ The Accounts page SHALL display a two-column layout: left panel with searchable 
 
 ### Requirement: Settings page
 
-The Settings page SHALL include sections for: routing settings (sticky threads, reset priority), password management (setup/change/remove), TOTP management (setup/disable), API key auth toggle, and API key management (table, create, edit, delete, regenerate).
+The Settings page SHALL include sections for: routing settings (sticky threads, reset priority, prompt-cache affinity TTL), password management (setup/change/remove), TOTP management (setup/disable), API key auth toggle, API key management (table, create, edit, delete, regenerate), and sticky-session administration.
 
 #### Scenario: Save routing settings
 
-- **WHEN** a user toggles sticky threads or reset priority
+- **WHEN** a user toggles sticky threads, reset priority, or updates the prompt-cache affinity TTL
 - **THEN** the app calls `PUT /api/settings` with the updated values
+
+#### Scenario: View sticky-session mappings
+
+- **WHEN** a user opens the sticky-session section on the Settings page
+- **THEN** the app fetches sticky-session entries and displays each mapping's kind, account, timestamps, and stale/expiry state
+
+#### Scenario: Purge stale prompt-cache mappings
+
+- **WHEN** a user requests a stale purge from the sticky-session section
+- **THEN** the app calls the sticky-session purge API and refreshes the list afterward
 
 #### Scenario: Password setup
 
@@ -285,3 +295,12 @@ The React dashboard MUST provide a Firewall page that displays current mode (`al
 #### Scenario: User removes IP entry
 - **WHEN** user confirms deletion for an existing firewall entry
 - **THEN** frontend calls `DELETE /api/firewall/ips/{ip}` and refreshes rendered list
+
+### Requirement: Accounts page renders mapped additional quota labels
+The Accounts page MUST render known additional quotas with their mapped user-facing label from canonical quota metadata instead of depending on raw upstream `limitName` strings.
+
+#### Scenario: Codex Spark quota uses mapped label after alias drift
+- **WHEN** an account summary contains an additional quota whose canonical key corresponds to `gpt-5.3-codex-spark`
+- **AND** the raw upstream `limitName` has changed from an earlier alias
+- **THEN** the Accounts page renders the quota label as `GPT-5.3-Codex-Spark`
+

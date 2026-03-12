@@ -266,6 +266,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool, log_upstream_req
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
         routing_strategy="usage_weighted",
         stream_idle_timeout_seconds=30.0,
         proxy_request_budget_seconds=75.0,
@@ -676,6 +677,59 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_defaults_total_timeout_to_proxy_request_budget(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 5.0
+
+    class _RecordingTimeoutSseSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(
+            self,
+            url: str,
+            *,
+            json=None,
+            headers: dict[str, str] | None = None,
+            timeout=None,
+        ):
+            self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+            raise asyncio.TimeoutError
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _RecordingTimeoutSseSession()
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total == pytest.approx(5.0, abs=0.01)
+    event = json.loads(events[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -704,7 +758,11 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
 
     token = set_request_id("req_timeout_override")
     try:
-        with proxy_module.override_stream_timeouts(connect_timeout_seconds=2.5, idle_timeout_seconds=3.5):
+        with proxy_module.override_stream_timeouts(
+            connect_timeout_seconds=2.5,
+            idle_timeout_seconds=3.5,
+            total_timeout_seconds=4.5,
+        ):
             events = [
                 event
                 async for event in proxy_module.stream_responses(
@@ -721,6 +779,7 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total == pytest.approx(4.5, abs=0.01)
     assert timeout.sock_connect == pytest.approx(2.5)
     assert seen["idle_timeout_seconds"] == pytest.approx(3.5)
 
@@ -734,7 +793,6 @@ async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatc
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
-        proxy_request_budget_seconds = 5.0
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -744,16 +802,21 @@ async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatc
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
 
-    events = [
-        event
-        async for event in proxy_module.stream_responses(
-            payload,
-            headers={},
-            access_token="token",
-            account_id="acc_1",
-            session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
-        )
-    ]
+    token = set_request_id("req_total_override")
+    try:
+        with proxy_module.override_stream_timeouts(total_timeout_seconds=0.5):
+            events = [
+                event
+                async for event in proxy_module.stream_responses(
+                    payload,
+                    headers={},
+                    access_token="token",
+                    account_id="acc_1",
+                    session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
+                )
+            ]
+    finally:
+        reset_request_id(token)
 
     event = json.loads(events[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_request_timeout"
@@ -947,6 +1010,69 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     assert timeout.sock_connect == pytest.approx(2.0, abs=0.05)
     assert timeout.sock_read is None
     assert result.model_extra == {"output": []}
+
+
+def test_sticky_key_for_responses_request_uses_bounded_cache_affinity():
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    payload.prompt_cache_key = "thread_123"
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.key == "thread_123"
+    assert policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
+    assert policy.reallocate_sticky is False
+    assert policy.max_age_seconds == 300
+
+
+def test_sticky_key_for_responses_request_keeps_sticky_threads_durable():
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    payload.prompt_cache_key = "thread_123"
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    assert policy.key == "thread_123"
+    assert policy.kind == proxy_service.StickySessionKind.STICKY_THREAD
+    assert policy.reallocate_sticky is True
+    assert policy.max_age_seconds is None
+
+
+def test_sticky_key_for_compact_request_prefers_codex_session_affinity():
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "prompt_cache_key": "thread_123",
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_compact_request(
+        payload,
+        headers={"session_id": "codex-session-1"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    assert policy.key == "codex-session-1"
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert policy.reallocate_sticky is False
+    assert policy.max_age_seconds is None
 
 
 @pytest.mark.asyncio
@@ -2489,6 +2615,134 @@ async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
     assert captured["timeout_seconds"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_stream_attempt_timeout_overrides_follow_remaining_budget(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_attempt_budget")
+    overrides: list[dict[str, float | None]] = []
+
+    remaining_budget_values = iter((10.0, 10.0, 3.0))
+
+    def fake_remaining_budget(deadline: float) -> float:
+        del deadline
+        try:
+            return next(remaining_budget_values)
+        except StopIteration:
+            return 3.0
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_budget"}}\n\n'
+
+    def fake_push_stream_timeout_overrides(
+        *,
+        connect_timeout_seconds: float | None = None,
+        idle_timeout_seconds: float | None = None,
+        total_timeout_seconds: float | None = None,
+    ) -> tuple[float | None, float | None, float | None]:
+        overrides.append(
+            {
+                "connect": connect_timeout_seconds,
+                "idle": idle_timeout_seconds,
+                "total": total_timeout_seconds,
+            }
+        )
+        return (None, None, None)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_service, "push_stream_timeout_overrides", fake_push_stream_timeout_overrides)
+    monkeypatch.setattr(proxy_service, "pop_stream_timeout_overrides", lambda tokens: None)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert overrides == [{"connect": 3.0, "idle": 3.0, "total": 3.0}]
+
+
+@pytest.mark.asyncio
+async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_forced_refresh_budget")
+    overrides: list[dict[str, float | None]] = []
+    stream_call_count = {"count": 0}
+
+    remaining_budget_values = iter((10.0, 10.0, 10.0, 6.0, 2.0))
+
+    def fake_remaining_budget(deadline: float) -> float:
+        del deadline
+        try:
+            return next(remaining_budget_values)
+        except StopIteration:
+            return 2.0
+
+    async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
+        del timeout_seconds
+        return account
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        stream_call_count["count"] += 1
+        if stream_call_count["count"] == 1:
+            raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_retry"}}\n\n'
+
+    def fake_push_stream_timeout_overrides(
+        *,
+        connect_timeout_seconds: float | None = None,
+        idle_timeout_seconds: float | None = None,
+        total_timeout_seconds: float | None = None,
+    ) -> tuple[float | None, float | None, float | None]:
+        overrides.append(
+            {
+                "connect": connect_timeout_seconds,
+                "idle": idle_timeout_seconds,
+                "total": total_timeout_seconds,
+            }
+        )
+        return (None, None, None)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_service, "push_stream_timeout_overrides", fake_push_stream_timeout_overrides)
+    monkeypatch.setattr(proxy_service, "pop_stream_timeout_overrides", lambda tokens: None)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert len(overrides) == 2
+    assert overrides == [
+        {"connect": 6.0, "idle": 6.0, "total": 6.0},
+        {"connect": 2.0, "idle": 2.0, "total": 2.0},
+    ]
 
 
 @pytest.mark.asyncio

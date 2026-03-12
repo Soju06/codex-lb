@@ -24,6 +24,7 @@ def _make_entry(
 ) -> AdditionalUsageHistory:
     return AdditionalUsageHistory(
         account_id=account_id,
+        quota_key=limit_name,
         limit_name=limit_name,
         metered_feature=metered_feature,
         window=window,

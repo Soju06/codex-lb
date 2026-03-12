@@ -22,6 +22,8 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - `/v1/responses/compact` keeps a final-JSON contract and preserves the raw upstream `/codex/responses/compact` payload shape as the canonical next context window instead of rewriting it through buffered `/codex/responses` streaming.
 - Compact transport failures fail closed with respect to semantics: no surrogate `/codex/responses` fallback and no local compact-window reconstruction.
 - Compact transport may use bounded same-contract retries only for safe pre-body transport failures and `401 -> refresh -> retry`.
+- `/v1/responses/compact` is supported only when the upstream implements it.
+- `prompt_cache_key` affinity on OpenAI-style routes is intentionally bounded by a dashboard-managed freshness window, unlike durable backend `session_id` or dashboard sticky-thread routing.
 
 ## Include Allowlist (Reference)
 

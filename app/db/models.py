@@ -40,6 +40,12 @@ class AccountStatus(str, Enum):
     DEACTIVATED = "deactivated"
 
 
+class StickySessionKind(str, Enum):
+    CODEX_SESSION = "codex_session"
+    STICKY_THREAD = "sticky_thread"
+    PROMPT_CACHE = "prompt_cache"
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -91,6 +97,7 @@ class AdditionalUsageHistory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    quota_key: Mapped[str] = mapped_column(String, nullable=False)
     limit_name: Mapped[str] = mapped_column(String, nullable=False)
     metered_feature: Mapped[str] = mapped_column(String, nullable=False)
     window: Mapped[str] = mapped_column(String, nullable=False)
@@ -126,6 +133,18 @@ class StickySession(Base):
     __tablename__ = "sticky_sessions"
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[StickySessionKind] = mapped_column(
+        SqlEnum(
+            StickySessionKind,
+            name="sticky_session_kind",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        primary_key=True,
+        default=StickySessionKind.STICKY_THREAD,
+        server_default=text("'sticky_thread'"),
+        nullable=False,
+    )
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -148,15 +167,29 @@ class DashboardSettings(Base):
         server_default=text("'usage_weighted'"),
         nullable=False,
     )
+    openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=300,
+        server_default=text("300"),
+        nullable=False,
+    )
     import_without_overwrite: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         server_default=false(),
         nullable=False,
     )
-    totp_required_on_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    totp_required_on_login: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    api_key_auth_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    api_key_auth_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -327,6 +360,7 @@ Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_sticky_account", StickySession.account_id)
+Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
@@ -337,13 +371,13 @@ Index("ix_additional_usage_history_recorded_at", AdditionalUsageHistory.recorded
 Index(
     "ix_additional_usage_history_composite",
     AdditionalUsageHistory.account_id,
-    AdditionalUsageHistory.limit_name,
+    AdditionalUsageHistory.quota_key,
     AdditionalUsageHistory.window,
     AdditionalUsageHistory.recorded_at,
 )
 Index(
-    "ix_additional_usage_limit_window",
-    AdditionalUsageHistory.limit_name,
+    "ix_additional_usage_quota_window",
+    AdditionalUsageHistory.quota_key,
     AdditionalUsageHistory.window,
     AdditionalUsageHistory.account_id,
     AdditionalUsageHistory.recorded_at,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import aiohttp
 
@@ -43,7 +44,7 @@ def _opt_str(data: dict[str, JsonValue], key: str) -> str | None:
 def _list_raw(data: dict[str, JsonValue], key: str) -> list[JsonValue]:
     v = data.get(key)
     if isinstance(v, list):
-        return v  # type: ignore[return-value]
+        return cast(list[JsonValue], v)
     return []
 
 

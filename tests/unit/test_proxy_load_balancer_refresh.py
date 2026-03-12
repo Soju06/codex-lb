@@ -13,7 +13,14 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import ModelRegistrySnapshot
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySession, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    AdditionalUsageHistory,
+    StickySession,
+    StickySessionKind,
+    UsageHistory,
+)
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import (
@@ -96,18 +103,24 @@ class StubStickySessionsRepository(StickySessionsRepository):
     def __init__(self) -> None:
         pass
 
-    async def get_account_id(self, key: str) -> str | None:
+    async def get_account_id(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> str | None:
         return None
 
-    async def upsert(self, key: str, account_id: str) -> StickySession:
-        return self._build_row(key, account_id)
+    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+        return self._build_row(key, account_id, kind)
 
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, *, kind: StickySessionKind | None = None) -> bool:
         return False
 
     @staticmethod
-    def _build_row(key: str, account_id: str) -> StickySession:
-        return StickySession(key=key, account_id=account_id)
+    def _build_row(key: str, account_id: str, kind: StickySessionKind) -> StickySession:
+        return StickySession(key=key, account_id=account_id, kind=kind)
 
 
 class StubRequestLogsRepository(RequestLogsRepository):
@@ -131,23 +144,46 @@ class StubAdditionalUsageRepository(AdditionalUsageRepository):
 
     async def latest_by_account(
         self,
-        limit_name: str,
-        window: str,
+        quota_key: str | None = None,
+        window: str | None = None,
         *,
+        limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
+        effective_key = quota_key or limit_name
+        assert effective_key is not None
+        assert window is not None
         if window == "secondary":
             source = self._secondary
         else:
             source = self._primary
-        rows = source
+        rows = {
+            account_id: entry
+            for account_id, entry in source.items()
+            if getattr(entry, "quota_key", entry.limit_name) == effective_key
+        }
         if account_ids is not None:
             account_id_set = set(account_ids)
             rows = {account_id: entry for account_id, entry in rows.items() if account_id in account_id_set}
         if since is not None:
             rows = {account_id: entry for account_id, entry in rows.items() if entry.recorded_at >= since}
         return dict(rows)
+
+    async def latest_by_quota_key(
+        self,
+        quota_key: str,
+        window: str,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
+        return await self.latest_by_account(
+            quota_key=quota_key,
+            window=window,
+            account_ids=account_ids,
+            since=since,
+        )
 
 
 def _additional_entry(
@@ -157,13 +193,15 @@ def _additional_entry(
     window: str,
     used_percent: float,
     recorded_at: datetime | None = None,
-    limit_name: str = "codex_other",
+    limit_name: str = "GPT-5.3-Codex-Spark",
+    quota_key: str = "codex_spark",
     reset_at: int = 1741500000,
 ) -> AdditionalUsageHistory:
     now = recorded_at or utcnow()
     return AdditionalUsageHistory(
         id=entry_id,
         account_id=account_id,
+        quota_key=quota_key,
         limit_name=limit_name,
         metered_feature="codex_bengalfox",
         window=window,
@@ -363,7 +401,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(additional_limit_name="codex_other")
+    selection = await balancer.select_account(additional_limit_name="codex_spark")
 
     assert selection.account is not None
     assert selection.account.id == account_eligible.id
@@ -430,10 +468,110 @@ async def test_select_account_requires_fresh_additional_usage_data(monkeypatch) 
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(additional_limit_name="codex_other")
+    selection = await balancer.select_account(additional_limit_name="codex_spark")
 
     assert selection.account is not None
     assert selection.account.id == account_fresh.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_uses_canonical_quota_key_for_upstream_limit_alias(monkeypatch) -> None:
+    account = _make_account("acc-additional-alias", email="alias@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=41,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                42,
+                account_id=account.id,
+                window="primary",
+                limit_name="GPT-5.3-Codex-Spark",
+                quota_key="codex_spark",
+                used_percent=5.0,
+                recorded_at=now,
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([account]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("additional_limit_name", ["codex_other", "GPT-5.3-Codex-Spark"])
+async def test_select_account_accepts_legacy_additional_limit_aliases(additional_limit_name: str) -> None:
+    account = _make_account(f"acc-additional-{additional_limit_name}")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=51,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                52,
+                account_id=account.id,
+                window="primary",
+                limit_name="GPT-5.3-Codex-Spark",
+                quota_key="codex_spark",
+                used_percent=5.0,
+                recorded_at=now,
+            )
+        }
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([account]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(additional_limit_name=additional_limit_name)
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
 
 
 @pytest.mark.asyncio

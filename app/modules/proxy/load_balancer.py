@@ -25,11 +25,12 @@ from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
-from app.db.models import Account, AdditionalUsageHistory, UsageHistory
+from app.db.models import Account, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.proxy.additional_model_limits import get_additional_limit_name_for_model
+from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,9 @@ class LoadBalancer:
         self,
         sticky_key: str | None = None,
         *,
+        sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
+        sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
@@ -117,7 +120,9 @@ class LoadBalancer:
                     states=states,
                     account_map=account_map,
                     sticky_key=sticky_key,
+                    sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
+                    sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
                     sticky_repo=repos.sticky_sessions,
@@ -237,23 +242,27 @@ class LoadBalancer:
 
         fresh_since = _additional_usage_fresh_since()
         account_ids = [account.id for account in accounts]
-        latest_primary = await repos.additional_usage.latest_by_account(
+        latest_primary = await _latest_additional_by_key(
+            repos.additional_usage,
             limit_name,
             "primary",
             account_ids=account_ids,
         )
-        latest_secondary = await repos.additional_usage.latest_by_account(
+        latest_secondary = await _latest_additional_by_key(
+            repos.additional_usage,
             limit_name,
             "secondary",
             account_ids=account_ids,
         )
-        fresh_primary = await repos.additional_usage.latest_by_account(
+        fresh_primary = await _latest_additional_by_key(
+            repos.additional_usage,
             limit_name,
             "primary",
             account_ids=account_ids,
             since=fresh_since,
         )
-        fresh_secondary = await repos.additional_usage.latest_by_account(
+        fresh_secondary = await _latest_additional_by_key(
+            repos.additional_usage,
             limit_name,
             "secondary",
             account_ids=account_ids,
@@ -324,7 +333,9 @@ class LoadBalancer:
         states: list[AccountState],
         account_map: dict[str, Account],
         sticky_key: str | None,
+        sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
+        sticky_max_age_seconds: int | None,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
@@ -335,6 +346,8 @@ class LoadBalancer:
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
             )
+        if sticky_kind is None:
+            raise ValueError("sticky_kind is required when sticky_key is provided")
 
         if reallocate_sticky:
             chosen = select_account(
@@ -343,14 +356,18 @@ class LoadBalancer:
                 routing_strategy=routing_strategy,
             )
             if chosen.account is not None and chosen.account.account_id in account_map:
-                await sticky_repo.upsert(sticky_key, chosen.account.account_id)
+                await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
             return chosen
 
-        existing = await sticky_repo.get_account_id(sticky_key)
+        existing = await sticky_repo.get_account_id(
+            sticky_key,
+            kind=sticky_kind,
+            max_age_seconds=sticky_max_age_seconds,
+        )
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is None:
-                await sticky_repo.delete(sticky_key)
+                await sticky_repo.delete(sticky_key, kind=sticky_kind)
             else:
                 pinned_result = select_account(
                     [pinned],
@@ -359,6 +376,8 @@ class LoadBalancer:
                     allow_backoff_fallback=False,
                 )
                 if pinned_result.account is not None:
+                    if sticky_max_age_seconds is not None:
+                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                     return pinned_result
 
         chosen = select_account(
@@ -367,7 +386,7 @@ class LoadBalancer:
             routing_strategy=routing_strategy,
         )
         if chosen.account is not None and chosen.account.account_id in account_map:
-            await sticky_repo.upsert(sticky_key, chosen.account.account_id)
+            await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
         return chosen
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
@@ -534,7 +553,7 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
 
 
 def _gated_limit_name_for_model(model: str | None) -> str | None:
-    return get_additional_limit_name_for_model(model)
+    return get_additional_quota_key_for_model_id(model)
 
 
 def _mapped_model_has_registry_entry(model: str | None) -> bool:
@@ -568,6 +587,35 @@ def _clone_account(account: Account) -> Account:
 def _clone_usage_history(entry: UsageHistory) -> UsageHistory:
     data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
     return UsageHistory(**data)
+
+
+async def _latest_additional_by_key(
+    additional_usage_repo,
+    quota_key: str,
+    window: str,
+    *,
+    account_ids: list[str] | None = None,
+    since: datetime | None = None,
+) -> dict[str, AdditionalUsageHistory]:
+    resolved_quota_key = canonicalize_additional_quota_key(
+        quota_key=quota_key,
+        limit_name=quota_key,
+    )
+    if resolved_quota_key is None:
+        return {}
+    if hasattr(additional_usage_repo, "latest_by_quota_key"):
+        return await additional_usage_repo.latest_by_quota_key(
+            resolved_quota_key,
+            window,
+            account_ids=account_ids,
+            since=since,
+        )
+    return await additional_usage_repo.latest_by_account(
+        resolved_quota_key,
+        window,
+        account_ids=account_ids,
+        since=since,
+    )
 
 
 def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:

@@ -28,7 +28,10 @@ export function UsageDonuts({
 	const primaryChartItems = useMemo(
 		() =>
 			primaryItems.map((item) => ({
+				id: item.accountId,
 				label: item.label,
+				labelSuffix: item.labelSuffix,
+				isEmail: item.isEmail,
 				value: item.value,
 				color: item.color,
 			})),
@@ -37,7 +40,10 @@ export function UsageDonuts({
 	const secondaryChartItems = useMemo(
 		() =>
 			secondaryItems.map((item) => ({
+				id: item.accountId,
 				label: item.label,
+				labelSuffix: item.labelSuffix,
+				isEmail: item.isEmail,
 				value: item.value,
 				color: item.color,
 			})),

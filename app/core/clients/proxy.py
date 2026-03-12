@@ -897,6 +897,9 @@ async def stream_responses(
     url = f"{upstream_base}/codex/responses"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id)
     pre_request_started_at = time.monotonic()
+    # Keep a default total timeout so direct callers cannot hang forever before
+    # response headers or the first SSE event. ProxyService stream attempts clamp
+    # this further by installing per-attempt overrides from the remaining budget.
     effective_total_timeout = _effective_stream_timeout(
         getattr(settings, "proxy_request_budget_seconds", 75.0),
         "total",

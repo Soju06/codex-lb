@@ -51,7 +51,7 @@ def main() -> None:
 
     session_id = input_data.get("session_id", "unknown")
     tool_input = input_data.get("tool_input", {})
-    skill_name = tool_input.get("skill", "")
+    skill_name = tool_input.get("name", "") or tool_input.get("skill", "")
 
     if not skill_name:
         sys.exit(0)

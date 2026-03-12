@@ -1,0 +1,9 @@
+[
+  {
+    "quota_key": "codex_spark",
+    "display_label": "GPT-5.3-Codex-Spark",
+    "model_ids": ["gpt-5.3-codex-spark"],
+    "limit_name_aliases": ["codex_other", "GPT-5.3-Codex-Spark", "gpt-5.3-codex-spark"],
+    "metered_feature_aliases": ["codex_bengalfox"]
+  }
+]

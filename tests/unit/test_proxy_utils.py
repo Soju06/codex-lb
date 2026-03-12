@@ -1212,6 +1212,7 @@ async def test_connect_proxy_websocket_propagates_retry_handshake_error(monkeypa
         request_state=request_state,
         client_send_lock=client_send_lock,
         websocket=websocket,
+        api_key=None,
     )
 
     assert result_account is None
@@ -1290,6 +1291,7 @@ async def test_connect_proxy_websocket_retries_another_account_after_connect_fai
         request_state=request_state,
         client_send_lock=client_send_lock,
         websocket=websocket,
+        api_key=None,
     )
 
     assert result_account is second_account
@@ -1334,6 +1336,7 @@ async def test_connect_proxy_websocket_preserves_selection_error_code(monkeypatc
         request_state=request_state,
         client_send_lock=client_send_lock,
         websocket=websocket,
+        api_key=None,
     )
 
     assert result_account is None
@@ -1344,6 +1347,8 @@ async def test_connect_proxy_websocket_preserves_selection_error_code(monkeypatc
     assert sent_event["status"] == 503
     assert sent_event["error"]["code"] == "no_plan_support_for_model"
     assert sent_event["error"]["message"] == "No accounts with a plan supporting model 'gpt-5.4'"
+    assert request_logs.calls[0]["transport"] == "websocket"
+    assert request_logs.calls[0]["error_code"] == "no_plan_support_for_model"
 
 
 @pytest.mark.asyncio
@@ -1407,6 +1412,7 @@ async def test_connect_proxy_websocket_releases_reservation_on_refresh_timeout(m
         request_state=request_state,
         client_send_lock=client_send_lock,
         websocket=websocket,
+        api_key=None,
     )
 
     assert result_account is None
@@ -1419,6 +1425,48 @@ async def test_connect_proxy_websocket_releases_reservation_on_refresh_timeout(m
     sent_event = json.loads(websocket.send_text.await_args.args[0])
     assert sent_event["status"] == 502
     assert sent_event["error"]["code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["transport"] == "websocket"
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_start_websocket_request_maps_startup_send_failure_to_error_event(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_startup_failure")
+    upstream = SimpleNamespace(send_text=AsyncMock(side_effect=RuntimeError("broken pipe")), close=AsyncMock())
+    websocket = SimpleNamespace(send_text=AsyncMock())
+    fail_mock = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(
+        service,
+        "_connect_proxy_websocket",
+        AsyncMock(return_value=(account, upstream)),
+    )
+    monkeypatch.setattr(service, "_fail_websocket_request_state", fail_mock)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+
+    handle = await service._start_websocket_request(
+        json.dumps({"type": "response.create", "model": "gpt-5.1", "input": "hi"}),
+        websocket=websocket,
+        headers={"session_id": "sid"},
+        filtered_headers={"session_id": "sid"},
+        codex_session_affinity=True,
+        sticky_threads_enabled=False,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        client_send_lock=proxy_service.anyio.Lock(),
+        api_key=None,
+    )
+
+    assert handle is None
+    fail_mock.assert_awaited_once()
+    websocket.send_text.assert_awaited_once()
+    sent_event = json.loads(websocket.send_text.await_args.args[0])
+    assert sent_event["error"]["code"] == "upstream_unavailable"
+    upstream.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1911,6 +1959,7 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
 
     assert proxy_service._service_tier_from_response(response) == "default"
     assert request_id
+    assert request_logs.calls[0]["transport"] == "http"
     assert f"request_id={request_id}" in caplog.text
     assert "kind=compact" in caplog.text
     assert "requested_service_tier=priority" in caplog.text

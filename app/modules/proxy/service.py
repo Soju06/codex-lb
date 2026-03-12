@@ -403,6 +403,7 @@ class ProxyService:
                     usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
                 ),
                 reasoning_effort=reasoning_effort,
+                transport=_REQUEST_TRANSPORT_HTTP,
                 service_tier=_service_tier_from_response(response) or _service_tier_from_compact_payload(payload),
             )
             _maybe_log_proxy_service_tier_trace(
@@ -747,6 +748,7 @@ class ProxyService:
             request_state=request_state,
             client_send_lock=client_send_lock,
             websocket=websocket,
+            api_key=api_key,
         )
         if upstream is None or account is None:
             return None
@@ -755,12 +757,34 @@ class ProxyService:
         try:
             await upstream.send_text(serialized_payload)
         except Exception:
-            await self._release_websocket_reservation(request_state.api_key_reservation)
+            message = "Upstream websocket failed before request start"
+            await self._fail_websocket_request_state(
+                request_state,
+                error_code="upstream_unavailable",
+                error_message=message,
+                api_key=api_key,
+            )
+            try:
+                async with client_send_lock:
+                    await websocket.send_text(
+                        _serialize_websocket_error_event(
+                            _wrapped_websocket_error_event(
+                                502,
+                                openai_error(
+                                    "upstream_unavailable",
+                                    message,
+                                    error_type="server_error",
+                                ),
+                            )
+                        )
+                    )
+            except Exception:
+                logger.debug("Failed to send websocket startup error event", exc_info=True)
             try:
                 await upstream.close()
             except Exception:
                 logger.debug("Failed to close upstream websocket after send failure", exc_info=True)
-            raise
+            return None
 
         reader_task = asyncio.create_task(
             self._relay_upstream_websocket_messages(
@@ -788,10 +812,12 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        api_key: ApiKeyData | None,
         exclude_account_ids: set[str] | None = None,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         attempted_account_ids = set(exclude_account_ids or ())
         last_connect_error: ProxyResponseError | None = None
+        last_connect_account: Account | None = None
 
         while True:
             selection = await self._load_balancer.select_account(
@@ -803,8 +829,29 @@ class ProxyService:
             )
             account = selection.account
             if not account:
+                error_code = selection.error_code or "no_accounts"
+                error_message = selection.error_message or "No active accounts available"
                 await self._release_websocket_reservation(request_state.api_key_reservation)
                 if last_connect_error is not None:
+                    last_error = _parse_openai_error(last_connect_error.payload)
+                    error_code = _normalize_error_code(
+                        last_error.code if last_error else None,
+                        last_error.type if last_error else None,
+                    ) or "upstream_unavailable"
+                    error_message = last_error.message if last_error and last_error.message else "Upstream unavailable"
+                    await self._write_request_log(
+                        account_id=last_connect_account.id if last_connect_account else None,
+                        api_key=api_key,
+                        request_id=request_state.request_id,
+                        model=request_state.model,
+                        latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
+                        status="error",
+                        error_code=error_code,
+                        error_message=error_message,
+                        reasoning_effort=request_state.reasoning_effort,
+                        transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                        service_tier=request_state.service_tier,
+                    )
                     async with client_send_lock:
                         await websocket.send_text(
                             _serialize_websocket_error_event(
@@ -816,8 +863,19 @@ class ProxyService:
                         )
                     return None, None
 
-                error_code = selection.error_code or "no_accounts"
-                error_message = selection.error_message or "No active accounts available"
+                await self._write_request_log(
+                    account_id=None,
+                    api_key=api_key,
+                    request_id=request_state.request_id,
+                    model=request_state.model,
+                    latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
+                    status="error",
+                    error_code=error_code,
+                    error_message=error_message,
+                    reasoning_effort=request_state.reasoning_effort,
+                    transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                    service_tier=request_state.service_tier,
+                )
                 async with client_send_lock:
                     await websocket.send_text(
                         _serialize_websocket_error_event(
@@ -834,6 +892,7 @@ class ProxyService:
                 return None, None
 
             connect_error: ProxyResponseError | None = None
+            last_connect_account = account
             try:
                 account = await self._ensure_fresh(account)
                 return account, await self._open_upstream_websocket(account, headers)

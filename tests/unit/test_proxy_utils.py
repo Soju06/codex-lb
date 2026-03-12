@@ -1775,6 +1775,48 @@ async def test_relay_upstream_websocket_messages_enforces_idle_timeout(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_relay_upstream_websocket_messages_treats_downstream_send_failure_as_disconnect(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    upstream = SimpleNamespace(
+        receive=AsyncMock(return_value=SimpleNamespace(kind="text", text='{"type":"response.output_text.delta"}', data=None, error=None)),
+        close=AsyncMock(),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_downstream_disconnect",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=SimpleNamespace(reservation_id="resv_ws_downstream_disconnect"),
+        started_at=100.0,
+        account_id="acct_ws",
+    )
+    fail_mock = AsyncMock()
+
+    async def failing_send_text(*args, **kwargs):
+        del args, kwargs
+        raise proxy_service.anyio.ClosedResourceError
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_fail_websocket_request_state", fail_mock)
+
+    websocket = SimpleNamespace(send_text=failing_send_text, send_bytes=AsyncMock())
+
+    await service._relay_upstream_websocket_messages(
+        websocket,
+        upstream,
+        request_state=request_state,
+        client_send_lock=proxy_service.anyio.Lock(),
+        api_key=None,
+    )
+
+    fail_mock.assert_awaited_once()
+    assert fail_mock.await_args.kwargs["error_code"] == "client_disconnect"
+    upstream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_forward_websocket_client_event_sends_text_to_active_upstream():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -1822,6 +1864,38 @@ async def test_write_stream_preflight_error_records_transport(monkeypatch):
     )
 
     assert request_logs.calls[0]["transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_finalize_websocket_request_state_releases_failed_usage_like_sse(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_failed",
+        model="gpt-5.1",
+        service_tier="priority",
+        reasoning_effort=None,
+        api_key_reservation=SimpleNamespace(reservation_id="resv_ws_failed"),
+        started_at=100.0,
+        account_id="acct_ws",
+        response_id="resp_ws_failed",
+    )
+    settle_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_mock)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 101.0)
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account_id_value="acct_ws",
+        event=proxy_service.parse_sse_event(
+            'data: {"type":"response.incomplete","response":{"id":"resp_ws_failed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        ),
+        event_type="response.incomplete",
+        payload={"type": "response.incomplete", "response": {"id": "resp_ws_failed", "usage": {"input_tokens": 1, "output_tokens": 1}}},
+        api_key=None,
+    )
+
+    assert settle_mock.await_args.kwargs["count_failure"] is False
 
 
 def test_prepare_websocket_request_payload_preserves_supported_service_tier():

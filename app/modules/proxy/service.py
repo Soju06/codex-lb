@@ -965,6 +965,7 @@ class ProxyService:
     ) -> None:
         disconnect_error_message = "Upstream websocket closed before response.completed"
         idle_timeout_seconds = getattr(get_settings(), "stream_idle_timeout_seconds", None)
+        downstream_disconnected = False
         try:
             while True:
                 if isinstance(idle_timeout_seconds, (int, float)) and idle_timeout_seconds > 0:
@@ -981,14 +982,34 @@ class ProxyService:
                         request_state=request_state,
                         api_key=api_key,
                     )
-                    async with client_send_lock:
-                        await websocket.send_text(message.text)
+                    try:
+                        async with client_send_lock:
+                            await websocket.send_text(message.text)
+                    except Exception:
+                        downstream_disconnected = True
+                        await self._fail_websocket_request_state(
+                            request_state,
+                            error_code="client_disconnect",
+                            error_message="Downstream websocket disconnected",
+                            api_key=api_key,
+                        )
+                        break
                     if terminal:
                         break
                     continue
                 if message.kind == "binary" and message.data is not None:
-                    async with client_send_lock:
-                        await websocket.send_bytes(message.data)
+                    try:
+                        async with client_send_lock:
+                            await websocket.send_bytes(message.data)
+                    except Exception:
+                        downstream_disconnected = True
+                        await self._fail_websocket_request_state(
+                            request_state,
+                            error_code="client_disconnect",
+                            error_message="Downstream websocket disconnected",
+                            api_key=api_key,
+                        )
+                        break
                     continue
                 if message.kind == "error":
                     disconnect_error_message = message.error or disconnect_error_message
@@ -998,7 +1019,7 @@ class ProxyService:
                 await upstream.close()
             except Exception:
                 logger.debug("Failed to close upstream websocket", exc_info=True)
-            if not request_state.terminal_event_seen:
+            if not request_state.terminal_event_seen and not downstream_disconnected:
                 await self._fail_websocket_request_state(
                     request_state,
                     error_code="stream_incomplete",
@@ -1106,7 +1127,7 @@ class ProxyService:
             request_state.api_key_reservation,
             settlement,
             response_id,
-            count_failure=True,
+            count_failure=False,
         )
 
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)

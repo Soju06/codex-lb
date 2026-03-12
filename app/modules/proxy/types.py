@@ -34,6 +34,8 @@ class CreditStatusDetailsData:
 class AdditionalRateLimitData:
     limit_name: str
     metered_feature: str
+    quota_key: str | None = None
+    display_label: str | None = None
     rate_limit: RateLimitStatusDetailsData | None = None
 
 

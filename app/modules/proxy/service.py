@@ -76,6 +76,7 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
@@ -850,8 +851,6 @@ class ProxyService:
                         return
                     stream_timeout_tokens = push_stream_timeout_overrides(
                         connect_timeout_seconds=effective_attempt_timeout,
-                        idle_timeout_seconds=effective_attempt_timeout,
-                        total_timeout_seconds=effective_attempt_timeout,
                     )
                     try:
                         async for line in self._stream_once(
@@ -975,8 +974,6 @@ class ProxyService:
                             return
                         stream_timeout_tokens = push_stream_timeout_overrides(
                             connect_timeout_seconds=effective_attempt_timeout,
-                            idle_timeout_seconds=effective_attempt_timeout,
-                            total_timeout_seconds=effective_attempt_timeout,
                         )
                         try:
                             async for line in self._stream_once(
@@ -1491,7 +1488,9 @@ class ProxyService:
 
             additional_limits.append(
                 AdditionalRateLimitData(
-                    limit_name=limit_name,
+                    quota_key=limit_name,
+                    limit_name=first_entry.limit_name,
+                    display_label=get_additional_display_label_for_quota_key(limit_name) or first_entry.limit_name,
                     metered_feature=metered_feature,
                     rate_limit=rate_limit_details,
                 )

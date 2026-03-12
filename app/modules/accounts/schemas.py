@@ -48,8 +48,10 @@ class AccountAdditionalWindow(DashboardModel):
 
 
 class AccountAdditionalQuota(DashboardModel):
+    quota_key: str | None = None
     limit_name: str
     metered_feature: str
+    display_label: str | None = None
     primary_window: AccountAdditionalWindow | None = None
     secondary_window: AccountAdditionalWindow | None = None
 

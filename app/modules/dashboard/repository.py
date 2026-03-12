@@ -54,18 +54,18 @@ class DashboardRepository:
     ) -> list[BucketModelAggregate]:
         return await self._logs_repo.aggregate_by_bucket(since, bucket_seconds)
 
-    async def list_additional_limit_names(
+    async def list_additional_quota_keys(
         self,
         *,
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> list[str]:
-        return await self._additional_usage_repo.list_limit_names(account_ids=account_ids, since=since)
+        return await self._additional_usage_repo.list_quota_keys(account_ids=account_ids, since=since)
 
     async def latest_additional_usage_by_account(
-        self, limit_name: str, window: str
+        self, quota_key: str, window: str
     ) -> dict[str, AdditionalUsageHistory]:
-        return await self._additional_usage_repo.latest_by_account(limit_name, window)
+        return await self._additional_usage_repo.latest_by_account(quota_key, window)
 
     async def latest_additional_recorded_at(self) -> datetime | None:
         return await self._additional_usage_repo.latest_recorded_at()

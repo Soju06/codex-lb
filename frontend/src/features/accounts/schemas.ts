@@ -40,8 +40,10 @@ export const AccountAdditionalWindowSchema = z.object({
 });
 
 export const AccountAdditionalQuotaSchema = z.object({
+  quotaKey: z.string().nullable().optional(),
   limitName: z.string(),
   meteredFeature: z.string(),
+  displayLabel: z.string().nullable().optional(),
   primaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
   secondaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
 });

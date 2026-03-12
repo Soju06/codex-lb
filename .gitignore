@@ -47,3 +47,5 @@ certs/
 
 .agents/hooks/state/
 .venv
+
+.omx/

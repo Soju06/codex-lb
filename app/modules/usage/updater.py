@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol
+from typing import Any, Mapping, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.usage import UsageFetchError, fetch_usage
@@ -18,6 +19,7 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +58,21 @@ class AdditionalUsageRepositoryPort(Protocol):
         used_percent: float,
         reset_at: int | None = None,
         window_minutes: int | None = None,
+        quota_key: str | None = None,
     ) -> None: ...
 
     async def delete_for_account(self, account_id: str) -> None: ...
 
+    async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None: ...
+
     async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None: ...
+
+    async def delete_for_account_quota_key_window(
+        self,
+        account_id: str,
+        quota_key: str,
+        window: str,
+    ) -> None: ...
 
     async def delete_for_account_limit_window(
         self,
@@ -69,7 +81,9 @@ class AdditionalUsageRepositoryPort(Protocol):
         window: str,
     ) -> None: ...
 
-    async def list_limit_names(self, *, account_ids: list[str] | None = None) -> list[str]: ...
+    async def list_quota_keys(self, *, account_ids: Collection[str] | None = None) -> list[str]: ...
+
+    async def list_limit_names(self, *, account_ids: Collection[str] | None = None) -> list[str]: ...
 
     async def latest_recorded_at_for_account(self, account_id: str) -> datetime | None: ...
 
@@ -126,11 +140,11 @@ class UsageUpdater:
         self,
         usage_repo: UsageRepositoryPort,
         accounts_repo: AccountsRepositoryPort | None = None,
-        additional_usage_repo: AdditionalUsageRepositoryPort | None = None,
+        additional_usage_repo: Any | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._accounts_repo = accounts_repo
-        self._additional_usage_repo = additional_usage_repo
+        self._additional_usage_repo = cast(AdditionalUsageRepositoryPort | None, additional_usage_repo)
         self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
         self._auth_manager = AuthManager(accounts_repo) if accounts_repo else None
@@ -262,50 +276,77 @@ class UsageUpdater:
             if payload.additional_rate_limits:
                 current_entries: set[tuple[str, str]] = set()
                 for additional in payload.additional_rate_limits:
+                    quota_key = canonicalize_additional_quota_key(
+                        limit_name=additional.limit_name,
+                        metered_feature=additional.metered_feature,
+                    )
+                    if quota_key is None:
+                        logger.warning(
+                            "Skipping additional usage item without resolvable quota key "
+                            "account_id=%s limit_name=%s metered_feature=%s request_id=%s",
+                            account.id,
+                            additional.limit_name,
+                            additional.metered_feature,
+                            get_request_id(),
+                        )
+                        continue
                     if additional.rate_limit is None:
                         # Limit exists but upstream reports no window data; prune
                         # any previously stored rows so the dashboard doesn't show
                         # stale quota percentages.
-                        await self._additional_usage_repo.delete_for_account_and_limit(
+                        await _delete_additional_usage_quota_key(
+                            self._additional_usage_repo,
                             account.id,
-                            additional.limit_name,
+                            quota_key,
                         )
                         continue
                     add_primary = additional.rate_limit.primary_window
                     add_secondary = additional.rate_limit.secondary_window
                     if add_primary and add_primary.used_percent is not None:
-                        current_entries.add((additional.limit_name, "primary"))
-                        await self._additional_usage_repo.add_entry(
+                        current_entries.add((quota_key, "primary"))
+                        await _add_additional_usage_entry(
+                            self._additional_usage_repo,
                             account_id=account.id,
                             limit_name=additional.limit_name,
                             metered_feature=additional.metered_feature,
+                            quota_key=quota_key,
                             window="primary",
                             used_percent=float(add_primary.used_percent),
                             reset_at=_reset_at(add_primary.reset_at, add_primary.reset_after_seconds, now_epoch),
                             window_minutes=_window_minutes(add_primary.limit_window_seconds),
                         )
                     if add_secondary and add_secondary.used_percent is not None:
-                        current_entries.add((additional.limit_name, "secondary"))
-                        await self._additional_usage_repo.add_entry(
+                        current_entries.add((quota_key, "secondary"))
+                        await _add_additional_usage_entry(
+                            self._additional_usage_repo,
                             account_id=account.id,
                             limit_name=additional.limit_name,
                             metered_feature=additional.metered_feature,
+                            quota_key=quota_key,
                             window="secondary",
                             used_percent=float(add_secondary.used_percent),
                             reset_at=_reset_at(add_secondary.reset_at, add_secondary.reset_after_seconds, now_epoch),
                             window_minutes=_window_minutes(add_secondary.limit_window_seconds),
                         )
-                current_limit_names = {name for name, _ in current_entries}
-                existing_names = await self._additional_usage_repo.list_limit_names(account_ids=[account.id])
-                for stale_name in existing_names:
-                    if stale_name not in current_limit_names:
-                        await self._additional_usage_repo.delete_for_account_and_limit(account.id, stale_name)
+                current_quota_keys = {name for name, _ in current_entries}
+                existing_quota_keys = await _list_additional_usage_quota_keys(
+                    self._additional_usage_repo,
+                    account_ids=[account.id],
+                )
+                for stale_key in existing_quota_keys:
+                    if stale_key not in current_quota_keys:
+                        await _delete_additional_usage_quota_key(
+                            self._additional_usage_repo,
+                            account.id,
+                            stale_key,
+                        )
                         continue
                     for window in ("primary", "secondary"):
-                        if (stale_name, window) not in current_entries:
-                            await self._additional_usage_repo.delete_for_account_limit_window(
+                        if (stale_key, window) not in current_entries:
+                            await _delete_additional_usage_quota_key_window(
+                                self._additional_usage_repo,
                                 account.id,
-                                stale_name,
+                                stale_key,
                                 window,
                             )
             elif payload.additional_rate_limits is not None:
@@ -418,6 +459,79 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:
     return entry is not None
+
+
+async def _add_additional_usage_entry(
+    repo: AdditionalUsageRepositoryPort,
+    *,
+    account_id: str,
+    limit_name: str,
+    metered_feature: str,
+    quota_key: str,
+    window: str,
+    used_percent: float,
+    reset_at: int | None,
+    window_minutes: int | None,
+) -> None:
+    add_entry = repo.add_entry
+    if "quota_key" in inspect.signature(add_entry).parameters:
+        await add_entry(
+            account_id=account_id,
+            limit_name=limit_name,
+            metered_feature=metered_feature,
+            quota_key=quota_key,
+            window=window,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            window_minutes=window_minutes,
+        )
+        return
+
+    await add_entry(
+        account_id=account_id,
+        limit_name=limit_name,
+        metered_feature=metered_feature,
+        window=window,
+        used_percent=used_percent,
+        reset_at=reset_at,
+        window_minutes=window_minutes,
+    )
+
+
+async def _list_additional_usage_quota_keys(
+    repo: AdditionalUsageRepositoryPort,
+    *,
+    account_ids: Collection[str] | None = None,
+) -> list[str]:
+    list_quota_keys = getattr(repo, "list_quota_keys", None)
+    if callable(list_quota_keys):
+        return await list_quota_keys(account_ids=account_ids)
+    return await repo.list_limit_names(account_ids=account_ids)
+
+
+async def _delete_additional_usage_quota_key(
+    repo: AdditionalUsageRepositoryPort,
+    account_id: str,
+    quota_key: str,
+) -> None:
+    delete_by_quota_key = getattr(repo, "delete_for_account_and_quota_key", None)
+    if callable(delete_by_quota_key):
+        await delete_by_quota_key(account_id, quota_key)
+        return
+    await repo.delete_for_account_and_limit(account_id, quota_key)
+
+
+async def _delete_additional_usage_quota_key_window(
+    repo: AdditionalUsageRepositoryPort,
+    account_id: str,
+    quota_key: str,
+    window: str,
+) -> None:
+    delete_by_quota_key_window = getattr(repo, "delete_for_account_quota_key_window", None)
+    if callable(delete_by_quota_key_window):
+        await delete_by_quota_key_window(account_id, quota_key, window)
+        return
+    await repo.delete_for_account_limit_window(account_id, quota_key, window)
 
 
 def _latest_usage_is_fresh(

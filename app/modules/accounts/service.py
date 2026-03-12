@@ -27,6 +27,7 @@ from app.modules.accounts.schemas import (
     AccountSummary,
     AccountTrendsResponse,
 )
+from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 
@@ -72,10 +73,10 @@ class AccountsService:
         additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] = {}
         additional_usage_repo = cast(AdditionalUsageRepository | None, self._additional_usage_repo)
         if additional_usage_repo:
-            limit_names = await additional_usage_repo.list_limit_names(account_ids=account_ids)
-            for limit_name in limit_names:
-                primary_entries = await additional_usage_repo.latest_by_account(limit_name, "primary")
-                secondary_entries = await additional_usage_repo.latest_by_account(limit_name, "secondary")
+            quota_keys = await additional_usage_repo.list_quota_keys(account_ids=account_ids)
+            for quota_key in quota_keys:
+                primary_entries = await additional_usage_repo.latest_by_account(quota_key, "primary")
+                secondary_entries = await additional_usage_repo.latest_by_account(quota_key, "secondary")
                 for account_id in (set(primary_entries) | set(secondary_entries)) & account_id_set:
                     primary_entry = primary_entries.get(account_id)
                     secondary_entry = secondary_entries.get(account_id)
@@ -84,8 +85,11 @@ class AccountsService:
                         continue
                     additional_quotas_by_account.setdefault(account_id, []).append(
                         AccountAdditionalQuota(
-                            limit_name=limit_name,
+                            quota_key=quota_key,
+                            limit_name=reference_entry.limit_name,
                             metered_feature=reference_entry.metered_feature,
+                            display_label=get_additional_display_label_for_quota_key(quota_key)
+                            or reference_entry.limit_name,
                             primary_window=AccountAdditionalWindow(
                                 used_percent=primary_entry.used_percent,
                                 reset_at=primary_entry.reset_at,
@@ -103,7 +107,7 @@ class AccountsService:
                         )
                     )
         for account_quota_list in additional_quotas_by_account.values():
-            account_quota_list.sort(key=lambda quota: quota.limit_name)
+            account_quota_list.sort(key=lambda quota: quota.display_label or quota.quota_key or quota.limit_name)
 
         return build_account_summaries(
             accounts=accounts,

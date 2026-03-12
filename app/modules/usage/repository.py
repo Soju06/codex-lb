@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import AdditionalUsageHistory, UsageHistory
+from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
 
@@ -246,9 +247,17 @@ class AdditionalUsageRepository:
         reset_at: int | None = None,
         window_minutes: int | None = None,
         recorded_at: datetime | None = None,
+        quota_key: str | None = None,
     ) -> None:
+        effective_quota_key = quota_key or canonicalize_additional_quota_key(
+            limit_name=limit_name,
+            metered_feature=metered_feature,
+        )
+        if effective_quota_key is None:
+            raise ValueError("additional usage quota_key could not be determined")
         entry = AdditionalUsageHistory(
             account_id=account_id,
+            quota_key=effective_quota_key,
             limit_name=limit_name,
             metered_feature=metered_feature,
             window=window,
@@ -265,10 +274,27 @@ class AdditionalUsageRepository:
         await self._session.execute(stmt)
         await self._session.commit()
 
-    async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
+    async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
         stmt = delete(AdditionalUsageHistory).where(
             AdditionalUsageHistory.account_id == account_id,
-            AdditionalUsageHistory.limit_name == limit_name,
+            AdditionalUsageHistory.quota_key == quota_key,
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
+        await self.delete_for_account_and_quota_key(account_id, limit_name)
+
+    async def delete_for_account_quota_key_window(
+        self,
+        account_id: str,
+        quota_key: str,
+        window: str,
+    ) -> None:
+        stmt = delete(AdditionalUsageHistory).where(
+            AdditionalUsageHistory.account_id == account_id,
+            AdditionalUsageHistory.quota_key == quota_key,
+            AdditionalUsageHistory.window == window,
         )
         await self._session.execute(stmt)
         await self._session.commit()
@@ -279,25 +305,23 @@ class AdditionalUsageRepository:
         limit_name: str,
         window: str,
     ) -> None:
-        stmt = delete(AdditionalUsageHistory).where(
-            AdditionalUsageHistory.account_id == account_id,
-            AdditionalUsageHistory.limit_name == limit_name,
-            AdditionalUsageHistory.window == window,
-        )
-        await self._session.execute(stmt)
-        await self._session.commit()
+        await self.delete_for_account_quota_key_window(account_id, limit_name, window)
 
     async def latest_by_account(
         self,
-        limit_name: str,
-        window: str,
+        quota_key: str | None = None,
+        window: str | None = None,
         *,
+        limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
-        """Returns the most recent entry per account for a given limit_name + window."""
+        """Returns the most recent entry per account for a given canonical quota key + window."""
+        effective_quota_key = quota_key or limit_name
+        if effective_quota_key is None or window is None:
+            raise ValueError("quota_key/limit_name and window are required")
         conditions = [
-            AdditionalUsageHistory.limit_name == limit_name,
+            AdditionalUsageHistory.quota_key == effective_quota_key,
             AdditionalUsageHistory.window == window,
         ]
         if account_ids is not None:
@@ -325,13 +349,28 @@ class AdditionalUsageRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
-    async def list_limit_names(
+    async def latest_by_quota_key(
+        self,
+        quota_key: str,
+        window: str,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
+        return await self.latest_by_account(
+            limit_name=quota_key,
+            window=window,
+            account_ids=account_ids,
+            since=since,
+        )
+
+    async def list_quota_keys(
         self,
         *,
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> list[str]:
-        stmt = select(AdditionalUsageHistory.limit_name).distinct()
+        stmt = select(AdditionalUsageHistory.quota_key).distinct()
         if account_ids is not None:
             stmt = stmt.where(AdditionalUsageHistory.account_id.in_(account_ids))
         if since is not None:
@@ -339,19 +378,32 @@ class AdditionalUsageRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_limit_names(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
+        return await self.list_quota_keys(account_ids=account_ids, since=since)
+
     async def history_since(
         self,
         account_id: str,
-        limit_name: str,
-        window: str,
-        since: datetime,
+        quota_key: str | None = None,
+        window: str | None = None,
+        since: datetime | None = None,
+        *,
+        limit_name: str | None = None,
     ) -> list[AdditionalUsageHistory]:
         """Returns time-series entries for EWMA computation."""
+        effective_quota_key = quota_key or limit_name
+        if effective_quota_key is None or window is None or since is None:
+            raise ValueError("account_id, quota_key/limit_name, window, and since are required")
         stmt = (
             select(AdditionalUsageHistory)
             .where(
                 AdditionalUsageHistory.account_id == account_id,
-                AdditionalUsageHistory.limit_name == limit_name,
+                AdditionalUsageHistory.quota_key == effective_quota_key,
                 AdditionalUsageHistory.window == window,
                 AdditionalUsageHistory.recorded_at >= since,
             )

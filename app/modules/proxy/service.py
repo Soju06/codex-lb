@@ -747,17 +747,34 @@ class ProxyService:
             account = await self._ensure_fresh(account)
             return account, await self._open_upstream_websocket(account, headers)
         except ProxyResponseError as exc:
+            connect_error = exc
             if exc.status_code == 401:
                 try:
                     account = await self._ensure_fresh(account, force=True)
                     return account, await self._open_upstream_websocket(account, headers)
-                except (ProxyResponseError, RefreshError):
-                    pass
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                    logger.warning(
+                        "Websocket forced refresh/connect failed request_id=%s account_id=%s",
+                        request_state.request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    connect_error = ProxyResponseError(
+                        502,
+                        openai_error("upstream_unavailable", str(timeout_exc) or "Request to upstream timed out"),
+                    )
+                except ProxyResponseError as retry_exc:
+                    connect_error = retry_exc
             await self._release_websocket_reservation(request_state.api_key_reservation)
-            await self._handle_websocket_connect_error(account, exc)
+            await self._handle_websocket_connect_error(account, connect_error)
             async with client_send_lock:
                 await websocket.send_text(
-                    _serialize_websocket_error_event(_wrapped_websocket_error_event(exc.status_code, exc.payload))
+                    _serialize_websocket_error_event(
+                        _wrapped_websocket_error_event(connect_error.status_code, connect_error.payload)
+                    )
                 )
             return None, None
         except RefreshError as exc:

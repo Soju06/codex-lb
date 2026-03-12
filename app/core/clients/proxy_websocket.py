@@ -145,6 +145,7 @@ async def connect_responses_websocket(
             origin=origin,
             additional_headers=upstream_headers or None,
             user_agent_header=user_agent,
+            proxy=True if settings.upstream_websocket_trust_env else None,
             open_timeout=settings.upstream_connect_timeout_seconds,
             max_size=settings.max_sse_event_bytes,
         )

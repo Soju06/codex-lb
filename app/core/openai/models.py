@@ -127,11 +127,18 @@ class OpenAIResponsePayload(BaseModel):
 class CompactResponsePayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    object: StrictStr | None = None
+    object: StrictStr
     id: StrictStr | None = None
     status: StrictStr | None = None
     error: OpenAIError | None = None
     usage: ResponseUsage | None = None
+
+    @field_validator("object")
+    @classmethod
+    def _validate_object(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Compact response payload requires an object discriminator")
+        return value
 
     @field_validator("error", mode="before")
     @classmethod

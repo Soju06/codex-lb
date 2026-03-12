@@ -55,6 +55,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            upstream_websocket_trust_env=False,
             max_sse_event_bytes=4321,
         ),
     )
@@ -79,6 +80,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert kwargs["user_agent_header"] == "Codex CLI Test"
     assert kwargs["open_timeout"] == 7.0
     assert kwargs["max_size"] == 4321
+    assert kwargs["proxy"] is None
     additional_headers = cast(dict[str, str], kwargs["additional_headers"])
     assert additional_headers["Authorization"] == "Bearer access-token"
     assert additional_headers["chatgpt-account-id"] == "account-123"
@@ -108,6 +110,7 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            upstream_websocket_trust_env=False,
             max_sse_event_bytes=4321,
         ),
     )
@@ -122,3 +125,36 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
     assert exc_info.value.status_code == 403
     assert exc_info.value.payload["error"]["code"] == "forbidden"
     assert exc_info.value.payload["error"]["type"] == "permission_error"
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_honors_trust_env_proxy_setting(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            upstream_websocket_trust_env=True,
+            max_sse_event_bytes=4321,
+        ),
+    )
+
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        "account-123",
+    )
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert kwargs["proxy"] is True

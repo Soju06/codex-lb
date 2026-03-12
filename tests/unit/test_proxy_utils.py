@@ -16,7 +16,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.openai.models import CompactResponsePayload
 from app.core.errors import openai_error
 from app.core.openai.models import OpenAIResponsePayload
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import parse_compact_response_payload, parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.time import utcnow
@@ -127,6 +127,13 @@ def test_parse_sse_event_concats_multiple_data_lines():
 
     assert event is not None
     assert event.type == "response.completed"
+
+
+def test_parse_compact_response_payload_requires_object_discriminator():
+    assert parse_compact_response_payload({"detail": "bad gateway"}) is None
+    parsed = parse_compact_response_payload({"object": "response.compaction", "output": []})
+    assert parsed is not None
+    assert parsed.object == "response.compaction"
 
 
 def test_normalize_sse_event_block_rewrites_response_text_alias():
@@ -919,7 +926,7 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(_JsonCompactResponse({"output": []}))
+    session = _CompactSession(_JsonCompactResponse({"object": "response.compaction", "output": []}))
 
     result = await proxy_module.compact_responses(
         payload,
@@ -1103,7 +1110,7 @@ async def test_compact_responses_marks_upstream_502_as_retryable_same_contract(m
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_invalid_payload_is_fail_closed(monkeypatch):
+async def test_compact_responses_invalid_object_payload_is_fail_closed(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
@@ -1118,7 +1125,7 @@ async def test_compact_responses_invalid_payload_is_fail_closed(monkeypatch):
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(_JsonCompactResponse(["not", "a", "compact", "object"]))
+    session = _CompactSession(_JsonCompactResponse({"detail": "bad gateway"}))
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await proxy_module.compact_responses(
@@ -1133,6 +1140,78 @@ async def test_compact_responses_invalid_payload_is_fail_closed(monkeypatch):
     assert exc.status_code == 502
     assert exc.failure_phase == "parse"
     assert exc.retryable_same_contract is False
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_propagates_retry_handshake_error(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_retry_error")
+    selection = AccountSelection(account=account, error_message=None)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_retry_error",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+    )
+    client_send_lock = proxy_service.anyio.Lock()
+    websocket = SimpleNamespace(send_text=AsyncMock())
+    handled: list[proxy_module.ProxyResponseError] = []
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=selection),
+    )
+
+    async def fake_ensure_fresh(target: Account, *, force: bool = False, timeout_seconds: float | None = None):
+        del timeout_seconds
+        assert target is account
+        return account
+
+    errors = [
+        proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired")),
+        proxy_module.ProxyResponseError(502, openai_error("upstream_error", "bad gateway")),
+    ]
+
+    async def fake_open_upstream_websocket(target: Account, headers: dict[str, str]):
+        del headers
+        assert target is account
+        raise errors.pop(0)
+
+    async def fake_handle_websocket_connect_error(target: Account, exc: proxy_module.ProxyResponseError) -> None:
+        assert target is account
+        handled.append(exc)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(service, "_handle_websocket_connect_error", fake_handle_websocket_connect_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    result_account, upstream = await service._connect_proxy_websocket(
+        {"session_id": "sid-ws"},
+        sticky_key="sid-ws",
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        client_send_lock=client_send_lock,
+        websocket=websocket,
+    )
+
+    assert result_account is None
+    assert upstream is None
+    assert len(handled) == 1
+    assert handled[0].status_code == 502
+    assert handled[0].payload["error"]["code"] == "upstream_error"
+    websocket.send_text.assert_awaited_once()
+    sent_event = json.loads(websocket.send_text.await_args.args[0])
+    assert sent_event["status"] == 502
+    assert sent_event["error"]["code"] == "upstream_error"
 
 
 @pytest.mark.asyncio

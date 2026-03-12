@@ -591,6 +591,7 @@ class ProxyService:
                 request_state: _WebSocketRequestState | None = None
                 request_state_registered = False
                 request_affinity = _AffinityPolicy()
+                payload: dict[str, JsonValue] | None = None
 
                 if text_data is not None:
                     payload = _parse_websocket_payload(text_data)
@@ -654,6 +655,14 @@ class ProxyService:
                     request_state_registered = True
 
                 if upstream is None:
+                    if text_data is not None and payload is None:
+                        async with client_send_lock:
+                            await websocket.send_text(
+                                _serialize_websocket_error_event(
+                                    _wrapped_websocket_error_event(400, openai_invalid_payload_error())
+                                )
+                            )
+                        continue
                     if request_state is None:
                         async with client_send_lock:
                             await websocket.send_text(

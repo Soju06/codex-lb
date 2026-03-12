@@ -376,6 +376,42 @@ def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_insta
     assert event["error"]["message"] == "Invalid request payload"
 
 
+@pytest.mark.parametrize("frame", ['{"type":"response.create"', "[]"])
+def test_backend_responses_websocket_rejects_malformed_first_frame_as_invalid_payload(app_instance, monkeypatch, frame):
+    called = {"connect": False}
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fail_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        called["connect"] = True
+        raise AssertionError("malformed initial websocket frame must not open upstream")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(frame)
+            event = json.loads(websocket.receive_text())
+
+    assert called["connect"] is False
+    assert event["type"] == "error"
+    assert event["status"] == 400
+    assert event["error"]["type"] == "invalid_request_error"
+    assert event["error"]["message"] == "Invalid request payload"
+
+
 def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(app_instance, monkeypatch):
     fake_upstream = _FakeUpstreamWebSocket(
         [

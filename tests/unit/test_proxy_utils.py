@@ -1481,10 +1481,10 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     reserve_usage.assert_awaited_once_with(
         None,
         request_model="gpt-5.1",
-        request_service_tier=None,
+        request_service_tier="priority",
     )
     assert prepared.request_state.model == "gpt-5.1"
-    assert prepared.request_state.service_tier is None
+    assert prepared.request_state.service_tier == "priority"
     assert prepared.request_state.reasoning_effort is None
     assert prepared.affinity_policy.key == "thread_123"
     assert prepared.affinity_policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
@@ -1496,6 +1496,36 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert "prompt_cache_retention" not in normalized_payload
     assert normalized_payload["tools"] == [{"type": "web_search"}]
     assert "service_tier" not in normalized_payload
+
+
+def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+
+    timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
+        [90.0, 95.0],
+        proxy_request_budget_seconds=20.0,
+        stream_idle_timeout_seconds=5.0,
+    )
+
+    assert timeout is not None
+    assert timeout.timeout_seconds == 5.0
+    assert timeout.error_code == "stream_idle_timeout"
+    assert timeout.error_message == "Upstream stream idle timeout"
+
+
+def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+
+    timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
+        [90.0],
+        proxy_request_budget_seconds=11.0,
+        stream_idle_timeout_seconds=5.0,
+    )
+
+    assert timeout is not None
+    assert timeout.timeout_seconds == 1.0
+    assert timeout.error_code == "upstream_request_timeout"
+    assert timeout.error_message == "Proxy request budget exhausted"
 
 
 @pytest.mark.asyncio

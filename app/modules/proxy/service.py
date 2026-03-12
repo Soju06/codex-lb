@@ -547,6 +547,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
     ) -> None:
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
+        runtime_settings = get_settings()
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = bool(getattr(settings, "sticky_threads_enabled", False))
@@ -700,6 +701,8 @@ class ProxyService:
                             client_send_lock=client_send_lock,
                             api_key=api_key,
                             upstream_control=upstream_control,
+                            proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                            stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                         )
                     )
 
@@ -755,8 +758,8 @@ class ProxyService:
         validate_model_access(api_key, responses_payload.model)
 
         upstream_payload = dict(responses_payload.to_payload())
-        upstream_payload.pop("service_tier", None)
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
+        upstream_payload.pop("service_tier", None)
         reservation = await self._reserve_websocket_api_key_usage(
             api_key,
             request_model=responses_payload.model,
@@ -961,10 +964,46 @@ class ProxyService:
         client_send_lock: anyio.Lock,
         api_key: ApiKeyData | None,
         upstream_control: _WebSocketUpstreamControl,
+        proxy_request_budget_seconds: float,
+        stream_idle_timeout_seconds: float,
     ) -> None:
         try:
             while True:
-                message = await upstream.receive()
+                receive_timeout = await self._next_websocket_receive_timeout(
+                    pending_requests,
+                    pending_lock=pending_lock,
+                    proxy_request_budget_seconds=proxy_request_budget_seconds,
+                    stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+                )
+                try:
+                    if receive_timeout is None:
+                        message = await upstream.receive()
+                    elif receive_timeout.timeout_seconds <= 0:
+                        raise asyncio.TimeoutError()
+                    else:
+                        message = await asyncio.wait_for(
+                            upstream.receive(),
+                            timeout=receive_timeout.timeout_seconds,
+                        )
+                except asyncio.TimeoutError:
+                    if receive_timeout is None:
+                        raise
+                    await self._fail_pending_websocket_requests(
+                        account_id_value=account_id_value,
+                        pending_requests=pending_requests,
+                        pending_lock=pending_lock,
+                        error_code=receive_timeout.error_code,
+                        error_message=receive_timeout.error_message,
+                        api_key=api_key,
+                        websocket=websocket,
+                        client_send_lock=client_send_lock,
+                    )
+                    upstream_control.reconnect_requested = True
+                    try:
+                        await upstream.close()
+                    except Exception:
+                        logger.debug("Failed to close upstream websocket after timeout", exc_info=True)
+                    break
                 if message.kind == "text" and message.text is not None:
                     await self._process_upstream_websocket_text(
                         message.text,
@@ -1063,6 +1102,22 @@ class ProxyService:
             payload=payload,
             api_key=api_key,
             upstream_control=upstream_control,
+        )
+
+    async def _next_websocket_receive_timeout(
+        self,
+        pending_requests: deque[_WebSocketRequestState],
+        *,
+        pending_lock: anyio.Lock,
+        proxy_request_budget_seconds: float,
+        stream_idle_timeout_seconds: float,
+    ) -> _WebSocketReceiveTimeout | None:
+        async with pending_lock:
+            started_ats = [request_state.started_at for request_state in pending_requests]
+        return _websocket_receive_timeout_for_pending_requests(
+            started_ats,
+            proxy_request_budget_seconds=proxy_request_budget_seconds,
+            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
         )
 
     async def _finalize_websocket_request_state(
@@ -2500,6 +2555,13 @@ class _PreparedWebSocketRequest:
     affinity_policy: _AffinityPolicy
 
 
+@dataclass(frozen=True, slots=True)
+class _WebSocketReceiveTimeout:
+    timeout_seconds: float
+    error_code: str
+    error_message: str
+
+
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
     if event is not None:
         return event.type
@@ -2582,6 +2644,38 @@ def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) ->
     if message.close_code is not None:
         return f"Upstream websocket closed before response.completed (close_code={message.close_code})"
     return "Upstream websocket closed before response.completed"
+
+
+def _websocket_receive_timeout_for_pending_requests(
+    started_ats: Sequence[float],
+    *,
+    proxy_request_budget_seconds: float,
+    stream_idle_timeout_seconds: float,
+) -> _WebSocketReceiveTimeout | None:
+    if not started_ats:
+        return None
+
+    idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
+    oldest_started_at = min(started_ats)
+    remaining_budget = _remaining_budget_seconds(oldest_started_at + proxy_request_budget_seconds)
+
+    if remaining_budget <= 0:
+        return _WebSocketReceiveTimeout(
+            timeout_seconds=0.0,
+            error_code="upstream_request_timeout",
+            error_message="Proxy request budget exhausted",
+        )
+    if remaining_budget <= idle_timeout_seconds:
+        return _WebSocketReceiveTimeout(
+            timeout_seconds=remaining_budget,
+            error_code="upstream_request_timeout",
+            error_message="Proxy request budget exhausted",
+        )
+    return _WebSocketReceiveTimeout(
+        timeout_seconds=idle_timeout_seconds,
+        error_code="stream_idle_timeout",
+        error_message="Upstream stream idle timeout",
+    )
 
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:

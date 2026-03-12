@@ -1,10 +1,9 @@
 import { useMemo, useState } from "react";
-import { ChevronsUpDown, X } from "lucide-react";
+import { ChevronsUpDown } from "lucide-react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -108,20 +107,6 @@ function AccountTagSelect({ value, options, onChange, disabled = false }: Accoun
           {options.length === 0 ? <div className="px-2 py-1.5 text-xs text-muted-foreground">No account tags defined</div> : null}
         </DropdownMenuContent>
       </DropdownMenu>
-
-      {value.length > 0 ? (
-        <div className="flex flex-wrap gap-1">
-          {value.map((tag) => (
-            <Badge key={tag} variant="secondary" className="gap-1 text-xs">
-              {tag}
-              <button type="button" className="ml-0.5 hover:text-foreground" onClick={() => toggle(tag)} disabled={disabled}>
-                <X className="size-3" />
-                <span className="sr-only">Remove {tag}</span>
-              </button>
-            </Badge>
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }

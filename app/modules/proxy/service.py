@@ -704,6 +704,7 @@ class ProxyService:
                 pending_lock=pending_lock,
                 error_code="stream_incomplete",
                 error_message="Upstream websocket closed before response.completed",
+                api_key=api_key,
             )
 
     async def _connect_proxy_websocket(
@@ -875,26 +876,33 @@ class ProxyService:
         payload = parse_sse_data_json(event_block)
         event = parse_sse_event(event_block)
         event_type = _event_type_from_payload(event, payload)
+        response_id = _websocket_response_id(event, payload)
+        terminal_request_state: _WebSocketRequestState | None = None
 
         async with pending_lock:
-            request_state = pending_requests[0] if pending_requests else None
+            request_state = _websocket_request_state_for_event(
+                pending_requests,
+                event_type=event_type,
+                response_id=response_id,
+            )
             if request_state is not None:
+                if response_id is not None and request_state.response_id is None:
+                    request_state.response_id = response_id
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     request_state.service_tier = actual_service_tier
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
-                and pending_requests
+                and request_state is not None
             ):
-                request_state = pending_requests.popleft()
-            else:
-                request_state = None
+                pending_requests.remove(request_state)
+                terminal_request_state = request_state
 
-        if request_state is None:
+        if terminal_request_state is None:
             return
 
         await self._finalize_websocket_request_state(
-            request_state,
+            terminal_request_state,
             account_id_value=account_id_value,
             event=event,
             event_type=event_type,
@@ -916,7 +924,7 @@ class ProxyService:
         error_code = None
         error_message = None
         usage = None
-        response_id = request_state.request_id
+        response_id = request_state.response_id or request_state.request_id
         response_service_tier = request_state.service_tier
 
         if event_type == "error":
@@ -956,6 +964,7 @@ class ProxyService:
             request_state.api_key_reservation,
             settlement,
             response_id,
+            count_failure=True,
         )
 
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
@@ -989,20 +998,32 @@ class ProxyService:
         pending_lock: anyio.Lock,
         error_code: str,
         error_message: str,
+        api_key: ApiKeyData | None,
     ) -> None:
         async with pending_lock:
             remaining = list(pending_requests)
             pending_requests.clear()
 
         for request_state in remaining:
-            await self._release_websocket_reservation(request_state.api_key_reservation)
+            settlement = _StreamSettlement(
+                status="error",
+                model=request_state.model or "",
+                service_tier=request_state.service_tier,
+            )
+            await self._settle_stream_api_key_usage(
+                api_key,
+                request_state.api_key_reservation,
+                settlement,
+                request_state.response_id or request_state.request_id,
+                count_failure=True,
+            )
             if account_id_value is None:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
             await self._write_request_log(
                 account_id=account_id_value,
-                api_key=None,
-                request_id=request_state.request_id,
+                api_key=api_key,
+                request_id=request_state.response_id or request_state.request_id,
                 model=request_state.model or "",
                 latency_ms=latency_ms,
                 status="error",
@@ -1104,6 +1125,8 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None,
         settlement: _StreamSettlement,
         request_id: str,
+        *,
+        count_failure: bool = False,
     ) -> bool:
         """Settle stream reservation. Returns True if settled."""
         if api_key is None or api_key_reservation is None:
@@ -1128,6 +1151,15 @@ class ProxyService:
                             input_tokens=settlement.input_tokens,
                             output_tokens=settlement.output_tokens,
                             cached_input_tokens=settlement.cached_input_tokens or 0,
+                            service_tier=settlement.service_tier,
+                        )
+                    elif count_failure:
+                        await api_keys_service.fail_usage_reservation(
+                            reservation_id,
+                            model=model_name,
+                            input_tokens=settlement.input_tokens,
+                            output_tokens=settlement.output_tokens,
+                            cached_input_tokens=settlement.cached_input_tokens,
                             service_tier=settlement.service_tier,
                         )
                     else:
@@ -2210,6 +2242,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    response_id: str | None = None
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -2299,11 +2332,14 @@ def _prepare_websocket_request_payload(
     api_key: ApiKeyData | None,
 ) -> tuple[dict[str, JsonValue], str | None]:
     updated = _apply_api_key_enforcement_to_websocket_payload(payload, api_key)
-    service_tier = _normalize_service_tier_value(updated.get("service_tier"))
+    service_tier = _normalize_websocket_request_service_tier(updated.get("service_tier"))
     if "service_tier" not in updated:
         return updated, service_tier
     sanitized = dict(updated)
-    sanitized.pop("service_tier", None)
+    if service_tier is None:
+        sanitized.pop("service_tier", None)
+    else:
+        sanitized["service_tier"] = service_tier
     return sanitized, service_tier
 
 
@@ -2696,6 +2732,63 @@ def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> st
     if not isinstance(response, dict):
         return None
     return _normalize_service_tier_value(response.get("service_tier"))
+
+
+def _websocket_response_id(
+    event: OpenAIEvent | None,
+    payload: dict[str, JsonValue] | None,
+) -> str | None:
+    if event is not None and event.response is not None and isinstance(event.response.id, str):
+        stripped = event.response.id.strip()
+        return stripped or None
+    if not isinstance(payload, dict):
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    value = response.get("id")
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _websocket_request_state_for_event(
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    event_type: str | None,
+    response_id: str | None,
+) -> _WebSocketRequestState | None:
+    if not pending_requests:
+        return None
+    if event_type == "response.created":
+        for request_state in pending_requests:
+            if request_state.response_id is None:
+                return request_state
+        return pending_requests[0]
+    if response_id is not None:
+        for request_state in pending_requests:
+            if request_state.response_id == response_id:
+                return request_state
+        unassigned = [request_state for request_state in pending_requests if request_state.response_id is None]
+        if len(unassigned) == 1:
+            return unassigned[0]
+        return None
+    if len(pending_requests) == 1:
+        return pending_requests[0]
+    return None
+
+
+def _normalize_websocket_request_service_tier(value: object) -> str | None:
+    normalized = _normalize_service_tier_value(value)
+    if normalized is None:
+        return None
+    canonical = normalized.lower()
+    if canonical == "fast":
+        return "priority"
+    if canonical in {"auto", "default", "flex", "priority"}:
+        return canonical
+    return None
 
 
 def _normalize_service_tier_value(value: object) -> str | None:

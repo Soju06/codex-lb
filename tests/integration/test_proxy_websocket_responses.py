@@ -74,7 +74,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                         "id": "resp_ws_1",
                         "object": "response",
                         "status": "completed",
-                        "service_tier": "fast",
+                        "service_tier": "priority",
                         "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
                     },
                 },
@@ -129,7 +129,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",
-        "service_tier": "fast",
+        "service_tier": "priority",
         "reasoning": {"effort": "high"},
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "stream": True,
@@ -162,13 +162,13 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     forwarded_payload = json.loads(fake_upstream.sent_text[0])
     assert forwarded_payload["type"] == "response.create"
     assert forwarded_payload["model"] == "gpt-5.4"
-    assert "service_tier" not in forwarded_payload
+    assert forwarded_payload["service_tier"] == "priority"
     assert len(log_calls) == 1
     log = log_calls[0]
     assert log["account_id"] == "acct_ws_proxy"
     assert log["request_id"] == "resp_ws_1"
     assert log["model"] == "gpt-5.4"
-    assert log["service_tier"] == "fast"
+    assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
     assert log["status"] == "success"
     assert log["input_tokens"] == 3

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
@@ -1328,6 +1329,141 @@ async def test_connect_proxy_websocket_releases_reservation_on_refresh_timeout(m
     sent_event = json.loads(websocket.send_text.await_args.args[0])
     assert sent_event["status"] == 502
     assert sent_event["error"]["code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_correlates_terminal_event_by_response_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    pending_requests = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="req_ws_1",
+                model="gpt-5.1",
+                service_tier="priority",
+                reasoning_effort=None,
+                api_key_reservation=SimpleNamespace(reservation_id="resv_1"),
+                started_at=100.0,
+            ),
+            proxy_service._WebSocketRequestState(
+                request_id="req_ws_2",
+                model="gpt-5.1",
+                service_tier="priority",
+                reasoning_effort=None,
+                api_key_reservation=SimpleNamespace(reservation_id="resv_2"),
+                started_at=100.0,
+            ),
+        ]
+    )
+    pending_lock = proxy_service.anyio.Lock()
+    finalized: list[tuple[str, str | None]] = []
+
+    async def fake_finalize(
+        request_state: proxy_service._WebSocketRequestState,
+        *,
+        account_id_value: str,
+        event,
+        event_type: str | None,
+        payload,
+        api_key,
+    ) -> None:
+        del account_id_value, event, payload, api_key
+        finalized.append((request_state.request_id, event_type))
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", fake_finalize)
+
+    await service._process_upstream_websocket_text(
+        json.dumps({"type": "response.created", "response": {"id": "resp_1"}}),
+        account_id_value="acct_ws",
+        pending_requests=pending_requests,
+        pending_lock=pending_lock,
+        api_key=None,
+    )
+    await service._process_upstream_websocket_text(
+        json.dumps({"type": "response.created", "response": {"id": "resp_2"}}),
+        account_id_value="acct_ws",
+        pending_requests=pending_requests,
+        pending_lock=pending_lock,
+        api_key=None,
+    )
+    await service._process_upstream_websocket_text(
+        json.dumps({"type": "response.completed", "response": {"id": "resp_2"}}),
+        account_id_value="acct_ws",
+        pending_requests=pending_requests,
+        pending_lock=pending_lock,
+        api_key=None,
+    )
+
+    assert finalized == [("req_ws_2", "response.completed")]
+    assert len(pending_requests) == 1
+    assert pending_requests[0].request_id == "req_ws_1"
+    assert pending_requests[0].response_id == "resp_1"
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_settles_reservations(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    pending_requests = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="req_ws_incomplete",
+                model="gpt-5.1",
+                service_tier="priority",
+                reasoning_effort="high",
+                api_key_reservation=SimpleNamespace(reservation_id="resv_ws_incomplete"),
+                started_at=100.0,
+                response_id="resp_ws_incomplete",
+            )
+        ]
+    )
+    pending_lock = proxy_service.anyio.Lock()
+    settle_mock = AsyncMock(return_value=True)
+    api_key = SimpleNamespace(id="key_ws")
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_mock)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 101.0)
+
+    await service._fail_pending_websocket_requests(
+        account_id_value="acct_ws",
+        pending_requests=pending_requests,
+        pending_lock=pending_lock,
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=api_key,
+    )
+
+    settle_mock.assert_awaited_once()
+    args = settle_mock.await_args.args
+    kwargs = settle_mock.await_args.kwargs
+    assert args[0] is api_key
+    assert args[3] == "resp_ws_incomplete"
+    assert kwargs["count_failure"] is True
+    settlement = args[2]
+    assert settlement.status == "error"
+    assert settlement.service_tier == "priority"
+    assert request_logs.calls[0]["request_id"] == "resp_ws_incomplete"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+
+
+def test_prepare_websocket_request_payload_preserves_supported_service_tier():
+    payload, service_tier = proxy_service._prepare_websocket_request_payload(
+        {"type": "response.create", "model": "gpt-5.1", "service_tier": "priority"},
+        None,
+    )
+
+    assert payload["service_tier"] == "priority"
+    assert service_tier == "priority"
+
+
+def test_prepare_websocket_request_payload_maps_fast_to_priority():
+    payload, service_tier = proxy_service._prepare_websocket_request_payload(
+        {"type": "response.create", "model": "gpt-5.1", "service_tier": "fast"},
+        None,
+    )
+
+    assert payload["service_tier"] == "priority"
+    assert service_tier == "priority"
 
 
 @pytest.mark.asyncio

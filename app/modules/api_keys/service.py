@@ -448,6 +448,47 @@ class ApiKeysService:
         cached_input_tokens: int = 0,
         service_tier: str | None = None,
     ) -> None:
+        await self._settle_usage_reservation(
+            reservation_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            service_tier=service_tier,
+            status="finalized",
+        )
+
+    async def fail_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        model: str,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cached_input_tokens: int | None = None,
+        service_tier: str | None = None,
+    ) -> None:
+        await self._settle_usage_reservation(
+            reservation_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            service_tier=service_tier,
+            status="failed",
+        )
+
+    async def _settle_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        model: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None,
+        service_tier: str | None,
+        status: str,
+    ) -> None:
         reservation = await self._repository.get_usage_reservation(reservation_id)
         if reservation is None or reservation.status != "reserved":
             return
@@ -461,11 +502,14 @@ class ApiKeysService:
             await self._repository.rollback()
             return
 
+        effective_input_tokens = input_tokens or 0
+        effective_output_tokens = output_tokens or 0
+        effective_cached_input_tokens = cached_input_tokens or 0
         cost_microdollars = _calculate_cost_microdollars(
             model,
-            input_tokens,
-            output_tokens,
-            cached_input_tokens,
+            effective_input_tokens,
+            effective_output_tokens,
+            effective_cached_input_tokens,
             service_tier,
         )
 
@@ -473,8 +517,8 @@ class ApiKeysService:
             for item in reservation.items:
                 actual_delta = _compute_increment_for_limit_type(
                     item.limit_type,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
+                    input_tokens=effective_input_tokens,
+                    output_tokens=effective_output_tokens,
                     cost_microdollars=cost_microdollars,
                 )
                 delta = actual_delta - item.reserved_delta
@@ -492,7 +536,7 @@ class ApiKeysService:
 
             await self._repository.settle_usage_reservation(
                 reservation_id,
-                status="finalized",
+                status=status,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cached_input_tokens=cached_input_tokens,

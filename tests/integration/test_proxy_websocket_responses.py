@@ -333,16 +333,6 @@ def test_backend_responses_websocket_forwards_non_create_events_to_active_upstre
                     separators=(",", ":"),
                 ),
             ),
-            _FakeUpstreamMessage(
-                "text",
-                text=json.dumps(
-                    {
-                        "type": "response.completed",
-                        "response": {"id": "resp_ws_control", "object": "response", "status": "completed"},
-                    },
-                    separators=(",", ":"),
-                ),
-            ),
         ]
     )
 
@@ -410,6 +400,18 @@ def test_backend_responses_websocket_forwards_non_create_events_to_active_upstre
             websocket.send_text(json.dumps(request_payload))
             assert json.loads(websocket.receive_text())["type"] == "response.created"
             websocket.send_text(json.dumps(control_payload))
+            fake_upstream.push_message(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_control", "object": "response", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
             assert json.loads(websocket.receive_text())["type"] == "response.completed"
 
     assert len(fake_upstream.sent_text) == 2

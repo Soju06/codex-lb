@@ -166,7 +166,7 @@ def _definition_maps_for_path(
                 raise ValueError(
                     "duplicate additional quota alias in registry: "
                     f"{alias!r} -> {previous_alias!r}/{definition.quota_key!r}"
-            )
+                )
             alias_to_quota_key[alias] = definition.quota_key
 
         for quota_key_alias in definition.quota_key_aliases:

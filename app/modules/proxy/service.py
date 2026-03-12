@@ -5,7 +5,6 @@ import inspect
 import json
 import logging
 import time
-from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
@@ -581,13 +580,8 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         sticky_key = _sticky_key_from_session_header(headers) if codex_session_affinity else None
-        pending_requests: deque[_WebSocketRequestState] = deque()
-        pending_lock = anyio.Lock()
+        active_requests: dict[str, asyncio.Task[None]] = {}
         client_send_lock = anyio.Lock()
-        upstream: UpstreamResponsesWebSocket | None = None
-        upstream_reader: asyncio.Task[None] | None = None
-        upstream_reader_suppress_close: asyncio.Event | None = None
-        account: Account | None = None
 
         try:
             while True:
@@ -631,128 +625,35 @@ class ProxyService:
                                 )
                             continue
 
-                should_route_request = False
-                if request_state is not None:
-                    async with pending_lock:
-                        should_route_request = len(pending_requests) == 0
-
-                if request_state is not None and should_route_request:
-                    if upstream is None or account is None:
-                        next_account, next_upstream = await self._connect_proxy_websocket(
-                            filtered_headers,
-                            sticky_key=sticky_key,
-                            prefer_earlier_reset=prefer_earlier_reset,
-                            routing_strategy=routing_strategy,
-                            model=request_state.model,
-                            request_state=request_state,
-                            client_send_lock=client_send_lock,
-                            websocket=websocket,
-                        )
-                        if next_upstream is None or next_account is None:
-                            continue
-                        account = next_account
-                        upstream = next_upstream
-                        upstream_reader_suppress_close = asyncio.Event()
-                        upstream_reader = asyncio.create_task(
-                            self._relay_upstream_websocket_messages(
-                                websocket,
-                                upstream,
-                                account_id_value=account.id,
-                                pending_requests=pending_requests,
-                                pending_lock=pending_lock,
-                                client_send_lock=client_send_lock,
-                                api_key=api_key,
-                                suppress_downstream_close=upstream_reader_suppress_close,
-                            )
-                        )
-                    else:
-                        selection = await self._load_balancer.select_account(
-                            sticky_key=sticky_key,
-                            prefer_earlier_reset_accounts=prefer_earlier_reset,
-                            routing_strategy=routing_strategy,
-                            model=request_state.model,
-                        )
-                        selected_account = selection.account
-                        if not selected_account:
-                            error_code = selection.error_code or "no_accounts"
-                            error_message = selection.error_message or "No active accounts available"
-                            await self._release_websocket_reservation(request_state.api_key_reservation)
-                            async with client_send_lock:
-                                await websocket.send_text(
-                                    _serialize_websocket_error_event(
-                                        _wrapped_websocket_error_event(
-                                            503,
-                                            openai_error(
-                                                error_code,
-                                                error_message,
-                                                error_type="server_error",
-                                            ),
-                                        )
-                                    )
-                                )
-                            continue
-                        if selected_account.id != account.id:
-                            next_account, next_upstream = await self._connect_proxy_websocket(
-                                filtered_headers,
-                                sticky_key=sticky_key,
-                                prefer_earlier_reset=prefer_earlier_reset,
-                                routing_strategy=routing_strategy,
-                                model=request_state.model,
-                                request_state=request_state,
-                                client_send_lock=client_send_lock,
-                                websocket=websocket,
-                                exclude_account_ids={account.id},
-                            )
-                            if next_upstream is None or next_account is None:
-                                continue
-                            if upstream_reader is not None and upstream_reader_suppress_close is not None:
-                                upstream_reader_suppress_close.set()
-                                upstream_reader.cancel()
-                                try:
-                                    await upstream_reader
-                                except asyncio.CancelledError:
-                                    pass
-                            try:
-                                await upstream.close()
-                            except Exception:
-                                logger.debug("Failed to close replaced upstream websocket", exc_info=True)
-                            account = next_account
-                            upstream = next_upstream
-                            upstream_reader_suppress_close = asyncio.Event()
-                            upstream_reader = asyncio.create_task(
-                                self._relay_upstream_websocket_messages(
-                                    websocket,
-                                    upstream,
-                                    account_id_value=account.id,
-                                    pending_requests=pending_requests,
-                                    pending_lock=pending_lock,
-                                    client_send_lock=client_send_lock,
-                                    api_key=api_key,
-                                    suppress_downstream_close=upstream_reader_suppress_close,
+                if request_state is None:
+                    async with client_send_lock:
+                        await websocket.send_text(
+                            _serialize_websocket_error_event(
+                                _wrapped_websocket_error_event(
+                                    400,
+                                    openai_error(
+                                        "invalid_request_error",
+                                        "WebSocket connection has no active upstream session",
+                                        error_type="invalid_request_error",
+                                    ),
                                 )
                             )
-
-                if upstream is None:
-                    if request_state is None:
-                        async with client_send_lock:
-                            await websocket.send_text(
-                                _serialize_websocket_error_event(
-                                    _wrapped_websocket_error_event(
-                                        400,
-                                        openai_error(
-                                            "invalid_request_error",
-                                            "WebSocket connection has no active upstream session",
-                                            error_type="invalid_request_error",
-                                        ),
-                                    )
-                                )
-                            )
-                        continue
+                        )
                     continue
 
-                if request_state is not None:
-                    async with pending_lock:
-                        pending_requests.append(request_state)
+                account, upstream = await self._connect_proxy_websocket(
+                    filtered_headers,
+                    sticky_key=sticky_key,
+                    prefer_earlier_reset=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
+                    model=request_state.model,
+                    request_state=request_state,
+                    client_send_lock=client_send_lock,
+                    websocket=websocket,
+                )
+                if upstream is None or account is None:
+                    continue
+                request_state.account_id = account.id
 
                 try:
                     if text_data is not None:
@@ -760,32 +661,33 @@ class ProxyService:
                     elif bytes_data is not None:
                         await upstream.send_bytes(bytes_data)
                 except Exception:
-                    if request_state is not None:
-                        async with pending_lock:
-                            if pending_requests and pending_requests[-1] is request_state:
-                                pending_requests.pop()
-                        await self._release_websocket_reservation(request_state.api_key_reservation)
+                    await self._release_websocket_reservation(request_state.api_key_reservation)
+                    try:
+                        await upstream.close()
+                    except Exception:
+                        logger.debug("Failed to close upstream websocket after send failure", exc_info=True)
                     raise
+
+                reader_task = asyncio.create_task(
+                    self._relay_upstream_websocket_messages(
+                        websocket,
+                        upstream,
+                        request_state=request_state,
+                        active_requests=active_requests,
+                        client_send_lock=client_send_lock,
+                        api_key=api_key,
+                    )
+                )
+                active_requests[request_state.request_id] = reader_task
         finally:
-            if upstream_reader is not None:
-                upstream_reader.cancel()
+            active_reader_tasks = list(active_requests.values())
+            for reader_task in active_reader_tasks:
+                reader_task.cancel()
+            for reader_task in active_reader_tasks:
                 try:
-                    await upstream_reader
+                    await reader_task
                 except asyncio.CancelledError:
                     pass
-            if upstream is not None:
-                try:
-                    await upstream.close()
-                except Exception:
-                    logger.debug("Failed to close upstream websocket", exc_info=True)
-            await self._fail_pending_websocket_requests(
-                account_id_value=account.id if account else None,
-                pending_requests=pending_requests,
-                pending_lock=pending_lock,
-                error_code="stream_incomplete",
-                error_message="Upstream websocket closed before response.completed",
-                api_key=api_key,
-            )
 
     async def _connect_proxy_websocket(
         self,
@@ -910,26 +812,24 @@ class ProxyService:
         websocket: WebSocket,
         upstream: UpstreamResponsesWebSocket,
         *,
-        account_id_value: str,
-        pending_requests: deque[_WebSocketRequestState],
-        pending_lock: anyio.Lock,
+        request_state: _WebSocketRequestState,
+        active_requests: dict[str, asyncio.Task[None]],
         client_send_lock: anyio.Lock,
         api_key: ApiKeyData | None,
-        suppress_downstream_close: asyncio.Event,
     ) -> None:
         try:
             while True:
                 message = await upstream.receive()
                 if message.kind == "text" and message.text is not None:
-                    await self._process_upstream_websocket_text(
+                    terminal = await self._process_upstream_websocket_text(
                         message.text,
-                        account_id_value=account_id_value,
-                        pending_requests=pending_requests,
-                        pending_lock=pending_lock,
+                        request_state=request_state,
                         api_key=api_key,
                     )
                     async with client_send_lock:
                         await websocket.send_text(message.text)
+                    if terminal:
+                        break
                     continue
                 if message.kind == "binary" and message.data is not None:
                     async with client_send_lock:
@@ -937,58 +837,47 @@ class ProxyService:
                     continue
                 break
         finally:
-            if not suppress_downstream_close.is_set():
-                try:
-                    await websocket.close()
-                except Exception:
-                    logger.debug("Failed to close downstream websocket", exc_info=True)
+            active_requests.pop(request_state.request_id, None)
+            try:
+                await upstream.close()
+            except Exception:
+                logger.debug("Failed to close upstream websocket", exc_info=True)
+            if not request_state.terminal_event_seen:
+                await self._fail_websocket_request_state(
+                    request_state,
+                    error_code="stream_incomplete",
+                    error_message="Upstream websocket closed before response.completed",
+                    api_key=api_key,
+                )
 
     async def _process_upstream_websocket_text(
         self,
         text: str,
         *,
-        account_id_value: str,
-        pending_requests: deque[_WebSocketRequestState],
-        pending_lock: anyio.Lock,
+        request_state: _WebSocketRequestState,
         api_key: ApiKeyData | None,
-    ) -> None:
+    ) -> bool:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
         event = parse_sse_event(event_block)
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
-        terminal_request_state: _WebSocketRequestState | None = None
-
-        async with pending_lock:
-            request_state = _websocket_request_state_for_event(
-                pending_requests,
-                event_type=event_type,
-                response_id=response_id,
-            )
-            if request_state is not None:
-                if response_id is not None and request_state.response_id is None:
-                    request_state.response_id = response_id
-                actual_service_tier = _service_tier_from_event_payload(payload)
-                if actual_service_tier is not None:
-                    request_state.service_tier = actual_service_tier
-            if (
-                event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
-                and request_state is not None
-            ):
-                pending_requests.remove(request_state)
-                terminal_request_state = request_state
-
-        if terminal_request_state is None:
-            return
-
+        if response_id is not None and request_state.response_id is None:
+            request_state.response_id = response_id
+        actual_service_tier = _service_tier_from_event_payload(payload)
+        if actual_service_tier is not None:
+            request_state.service_tier = actual_service_tier
+        if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+            return False
         await self._finalize_websocket_request_state(
-            terminal_request_state,
-            account_id_value=account_id_value,
+            request_state,
+            account_id_value=request_state.account_id or "",
             event=event,
             event_type=event_type,
             payload=payload,
             api_key=api_key,
         )
+        return True
 
     async def _finalize_websocket_request_state(
         self,
@@ -1029,6 +918,7 @@ class ProxyService:
         if actual_service_tier is not None:
             response_service_tier = actual_service_tier
 
+        request_state.terminal_event_seen = True
         settlement = _StreamSettlement(
             status=status,
             model=request_state.model or "",
@@ -1070,49 +960,45 @@ class ProxyService:
             service_tier=response_service_tier,
         )
 
-    async def _fail_pending_websocket_requests(
+    async def _fail_websocket_request_state(
         self,
+        request_state: _WebSocketRequestState,
         *,
-        account_id_value: str | None,
-        pending_requests: deque[_WebSocketRequestState],
-        pending_lock: anyio.Lock,
         error_code: str,
         error_message: str,
         api_key: ApiKeyData | None,
     ) -> None:
-        async with pending_lock:
-            remaining = list(pending_requests)
-            pending_requests.clear()
-
-        for request_state in remaining:
-            settlement = _StreamSettlement(
-                status="error",
-                model=request_state.model or "",
-                service_tier=request_state.service_tier,
-            )
-            await self._settle_stream_api_key_usage(
-                api_key,
-                request_state.api_key_reservation,
-                settlement,
-                request_state.response_id or request_state.request_id,
-                count_failure=True,
-            )
-            if account_id_value is None:
-                continue
-            latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
-            await self._write_request_log(
-                account_id=account_id_value,
-                api_key=api_key,
-                request_id=request_state.response_id or request_state.request_id,
-                model=request_state.model or "",
-                latency_ms=latency_ms,
-                status="error",
-                error_code=error_code,
-                error_message=error_message,
-                reasoning_effort=request_state.reasoning_effort,
-                transport=_REQUEST_TRANSPORT_WEBSOCKET,
-                service_tier=request_state.service_tier,
-            )
+        if request_state.terminal_event_seen:
+            return
+        request_state.terminal_event_seen = True
+        settlement = _StreamSettlement(
+            status="error",
+            model=request_state.model or "",
+            service_tier=request_state.service_tier,
+        )
+        await self._settle_stream_api_key_usage(
+            api_key,
+            request_state.api_key_reservation,
+            settlement,
+            request_state.response_id or request_state.request_id,
+            count_failure=True,
+        )
+        if request_state.account_id is None:
+            return
+        latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
+        await self._write_request_log(
+            account_id=request_state.account_id,
+            api_key=api_key,
+            request_id=request_state.response_id or request_state.request_id,
+            model=request_state.model or "",
+            latency_ms=latency_ms,
+            status="error",
+            error_code=error_code,
+            error_message=error_message,
+            reasoning_effort=request_state.reasoning_effort,
+            transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            service_tier=request_state.service_tier,
+        )
 
     async def _reserve_websocket_api_key_usage(
         self,
@@ -2322,7 +2208,9 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    account_id: str | None = None
     response_id: str | None = None
+    terminal_event_seen: bool = False
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -2831,34 +2719,6 @@ def _websocket_response_id(
         return None
     stripped = value.strip()
     return stripped or None
-
-
-def _websocket_request_state_for_event(
-    pending_requests: deque[_WebSocketRequestState],
-    *,
-    event_type: str | None,
-    response_id: str | None,
-) -> _WebSocketRequestState | None:
-    if not pending_requests:
-        return None
-    if event_type == "error" and response_id is None:
-        return pending_requests[0]
-    if event_type == "response.created":
-        for request_state in pending_requests:
-            if request_state.response_id is None:
-                return request_state
-        return pending_requests[0]
-    if response_id is not None:
-        for request_state in pending_requests:
-            if request_state.response_id == response_id:
-                return request_state
-        unassigned = [request_state for request_state in pending_requests if request_state.response_id is None]
-        if len(unassigned) == 1:
-            return unassigned[0]
-        return None
-    if len(pending_requests) == 1:
-        return pending_requests[0]
-    return None
 
 
 def _normalize_websocket_request_service_tier(value: object) -> str | None:

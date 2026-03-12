@@ -40,6 +40,9 @@ class _FakeUpstreamWebSocket:
         for message in messages:
             self._messages.put_nowait(message)
 
+    def push_message(self, message: _FakeUpstreamMessage) -> None:
+        self._messages.put_nowait(message)
+
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
 
@@ -177,7 +180,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["output_tokens"] == 5
 
 
-def test_backend_responses_websocket_reselects_account_for_later_requests(app_instance, monkeypatch):
+def test_backend_responses_websocket_routes_overlapping_requests_independently(app_instance, monkeypatch):
     first_upstream = _FakeUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
@@ -186,16 +189,6 @@ def test_backend_responses_websocket_reselects_account_for_later_requests(app_in
                     {
                         "type": "response.created",
                         "response": {"id": "resp_ws_1", "object": "response", "status": "in_progress"},
-                    },
-                    separators=(",", ":"),
-                ),
-            ),
-            _FakeUpstreamMessage(
-                "text",
-                text=json.dumps(
-                    {
-                        "type": "response.completed",
-                        "response": {"id": "resp_ws_1", "object": "response", "status": "completed"},
                     },
                     separators=(",", ":"),
                 ),
@@ -290,13 +283,26 @@ def test_backend_responses_websocket_reselects_account_for_later_requests(app_in
     with TestClient(app_instance) as client:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(first_payload))
-            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_1"
-            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_1"
             websocket.send_text(json.dumps(second_payload))
-            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_2"
-            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_2"
+            first_upstream.push_message(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_1", "object": "response", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            events = [json.loads(websocket.receive_text()) for _ in range(4)]
 
+    response_ids = [event["response"]["id"] for event in events]
+    assert sorted(response_ids) == ["resp_ws_1", "resp_ws_1", "resp_ws_2", "resp_ws_2"]
     assert seen_models == ["gpt-5.4", "gpt-5.5"]
+    assert len(first_upstream.sent_text) == 1
+    assert len(second_upstream.sent_text) == 1
     assert first_upstream.closed is True
     assert second_upstream.closed is True
 

@@ -866,11 +866,13 @@ async def stream_responses(
     url = f"{upstream_base}/codex/responses"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id)
     pre_request_started_at = time.monotonic()
-    # Streaming responses rely on idle timeout for stuck-stream detection.
-    # No hard total timeout — complex AI tasks may legitimately stream for minutes.
-    # An explicit override (via push_stream_timeout_overrides) is still honoured.
-    _total_override = _STREAM_TOTAL_TIMEOUT_OVERRIDE.get()
-    effective_total_timeout: float | None = max(0.001, _total_override) if _total_override is not None else None
+    # Keep a default total timeout so direct callers cannot hang forever before
+    # response headers or the first SSE event. ProxyService stream attempts clamp
+    # this further by installing per-attempt overrides from the remaining budget.
+    effective_total_timeout = _effective_stream_timeout(
+        getattr(settings, "proxy_request_budget_seconds", 75.0),
+        "total",
+    )
     effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
     effective_idle_timeout = _effective_stream_timeout(settings.stream_idle_timeout_seconds, "idle")
 

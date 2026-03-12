@@ -23,6 +23,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy.load_balancer import AccountSelection
@@ -1457,8 +1458,37 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     reserve_usage = AsyncMock(return_value=None)
+    stale_api_key = ApiKeyData(
+        id="key_stale",
+        name="stale",
+        key_prefix="sk-stale",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    refreshed_api_key = ApiKeyData(
+        id="key_stale",
+        name="refreshed",
+        key_prefix="sk-fresh",
+        allowed_models=["gpt-5.2"],
+        enforced_model="gpt-5.2",
+        enforced_reasoning_effort="high",
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
 
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(
+        service,
+        "_refresh_websocket_api_key_policy",
+        AsyncMock(return_value=refreshed_api_key),
+    )
 
     prepared = await service._prepare_websocket_response_create_request(
         {
@@ -1469,23 +1499,24 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
             "promptCacheRetention": "12h",
             "tools": [{"type": "web_search_preview"}],
             "service_tier": "priority",
+            "reasoning": {"effort": "low"},
         },
         headers={"session_id": "sid-ignored"},
         codex_session_affinity=False,
         openai_cache_affinity=True,
         sticky_threads_enabled=False,
         openai_cache_affinity_max_age_seconds=300,
-        api_key=None,
+        api_key=stale_api_key,
     )
 
     reserve_usage.assert_awaited_once_with(
-        None,
-        request_model="gpt-5.1",
+        refreshed_api_key,
+        request_model="gpt-5.2",
         request_service_tier="priority",
     )
-    assert prepared.request_state.model == "gpt-5.1"
+    assert prepared.request_state.model == "gpt-5.2"
     assert prepared.request_state.service_tier == "priority"
-    assert prepared.request_state.reasoning_effort is None
+    assert prepared.request_state.reasoning_effort == "high"
     assert prepared.affinity_policy.key == "thread_123"
     assert prepared.affinity_policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
     normalized_payload = json.loads(prepared.text_data)
@@ -1495,6 +1526,8 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert "promptCacheRetention" not in normalized_payload
     assert "prompt_cache_retention" not in normalized_payload
     assert normalized_payload["tools"] == [{"type": "web_search"}]
+    assert normalized_payload["model"] == "gpt-5.2"
+    assert normalized_payload["reasoning"] == {"effort": "high"}
     assert "service_tier" not in normalized_payload
 
 
@@ -1619,6 +1652,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         payload=completed_payload,
         api_key=None,
         upstream_control=completed_upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
     )
 
     record_success.assert_awaited_once_with(account)
@@ -1654,6 +1688,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         payload=failed_payload,
         api_key=None,
         upstream_control=failed_upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
     )
 
     handle_args = handle_stream_error.await_args
@@ -1700,6 +1735,7 @@ async def test_process_upstream_websocket_text_does_not_match_foreign_response_i
         pending_lock=anyio.Lock(),
         api_key=None,
         upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
     )
 
     finalize_request_state.assert_not_awaited()

@@ -556,6 +556,7 @@ class ProxyService:
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
         client_send_lock = anyio.Lock()
+        response_create_gate = asyncio.Semaphore(1)
         upstream: UpstreamResponsesWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None
@@ -669,6 +670,7 @@ class ProxyService:
                         account = None
 
                 if request_state is not None:
+                    await response_create_gate.acquire()
                     async with pending_lock:
                         pending_requests.append(request_state)
                     request_state_registered = True
@@ -716,6 +718,7 @@ class ProxyService:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
+                            _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
                     upstream_control = _WebSocketUpstreamControl()
                     upstream_reader = asyncio.create_task(
@@ -729,6 +732,7 @@ class ProxyService:
                             client_send_lock=client_send_lock,
                             api_key=api_key,
                             upstream_control=upstream_control,
+                            response_create_gate=response_create_gate,
                             proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                         )
@@ -749,6 +753,7 @@ class ProxyService:
                         api_key=api_key,
                         websocket=websocket,
                         client_send_lock=client_send_lock,
+                        response_create_gate=response_create_gate,
                     )
                     if upstream_reader is not None:
                         upstream_reader.cancel()
@@ -787,6 +792,7 @@ class ProxyService:
                 api_key=api_key,
                 websocket=websocket,
                 client_send_lock=client_send_lock,
+                response_create_gate=response_create_gate,
             )
 
     async def _prepare_websocket_response_create_request(
@@ -800,15 +806,16 @@ class ProxyService:
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
     ) -> _PreparedWebSocketRequest:
+        refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
-        apply_api_key_enforcement(responses_payload, api_key)
-        validate_model_access(api_key, responses_payload.model)
+        apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        validate_model_access(refreshed_api_key, responses_payload.model)
 
         upstream_payload = dict(responses_payload.to_payload())
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         upstream_payload.pop("service_tier", None)
         reservation = await self._reserve_websocket_api_key_usage(
-            api_key,
+            refreshed_api_key,
             request_model=responses_payload.model,
             request_service_tier=forwarded_service_tier,
         )
@@ -822,6 +829,7 @@ class ProxyService:
                 reasoning_effort=responses_payload.reasoning.effort if responses_payload.reasoning else None,
                 api_key_reservation=reservation,
                 started_at=time.monotonic(),
+                awaiting_response_created=True,
             ),
             affinity_policy=_sticky_key_for_responses_request(
                 responses_payload,
@@ -990,6 +998,18 @@ class ProxyService:
         account_id = _header_account_id(account.chatgpt_account_id)
         return await connect_responses_websocket(headers, access_token, account_id)
 
+    async def _refresh_websocket_api_key_policy(self, api_key: ApiKeyData | None) -> ApiKeyData | None:
+        if api_key is None:
+            return None
+
+        with anyio.CancelScope(shield=True):
+            async with self._repo_factory() as repos:
+                service = ApiKeysService(repos.api_keys)
+                try:
+                    return await service.get_key_by_id(api_key.id)
+                except ApiKeyInvalidError as exc:
+                    raise ProxyAuthError(str(exc)) from exc
+
     async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> None:
         error = _parse_openai_error(exc.payload)
         error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -1011,6 +1031,7 @@ class ProxyService:
         client_send_lock: anyio.Lock,
         api_key: ApiKeyData | None,
         upstream_control: _WebSocketUpstreamControl,
+        response_create_gate: asyncio.Semaphore,
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
     ) -> None:
@@ -1045,6 +1066,7 @@ class ProxyService:
                             api_key=api_key,
                             websocket=websocket,
                             client_send_lock=client_send_lock,
+                            response_create_gate=response_create_gate,
                         )
                         upstream_control.reconnect_requested = True
                         try:
@@ -1062,6 +1084,7 @@ class ProxyService:
                         api_key=api_key,
                         websocket=websocket,
                         client_send_lock=client_send_lock,
+                        response_create_gate=response_create_gate,
                     )
                     continue
                 if message.kind == "text" and message.text is not None:
@@ -1073,6 +1096,7 @@ class ProxyService:
                         pending_lock=pending_lock,
                         api_key=api_key,
                         upstream_control=upstream_control,
+                        response_create_gate=response_create_gate,
                     )
                     async with client_send_lock:
                         await websocket.send_text(message.text)
@@ -1099,6 +1123,7 @@ class ProxyService:
                     api_key=api_key,
                     websocket=websocket,
                     client_send_lock=client_send_lock,
+                    response_create_gate=response_create_gate,
                 )
                 break
         finally:
@@ -1121,6 +1146,7 @@ class ProxyService:
         pending_lock: anyio.Lock,
         api_key: ApiKeyData | None,
         upstream_control: _WebSocketUpstreamControl,
+        response_create_gate: asyncio.Semaphore,
     ) -> None:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
@@ -1130,12 +1156,19 @@ class ProxyService:
 
         async with pending_lock:
             request_state = None
+            created_request_state = None
             if event_type == "response.created":
                 request_state = _assign_websocket_response_id(pending_requests, response_id)
+                created_request_state = request_state
+                release_create_gate = request_state is not None
             elif response_id is not None:
                 request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
+                release_create_gate = False
             elif response_id is None and len(pending_requests) == 1:
                 request_state = pending_requests[0]
+                release_create_gate = False
+            else:
+                release_create_gate = False
             if request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
@@ -1152,6 +1185,9 @@ class ProxyService:
             else:
                 request_state = None
 
+        if event_type == "response.created" and release_create_gate and created_request_state is not None:
+            _release_websocket_response_create_gate(created_request_state, response_create_gate)
+
         if request_state is None:
             return
 
@@ -1164,6 +1200,7 @@ class ProxyService:
             payload=payload,
             api_key=api_key,
             upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
         )
 
     async def _next_websocket_receive_timeout(
@@ -1194,6 +1231,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         websocket: WebSocket | None = None,
         client_send_lock: anyio.Lock | None = None,
+        response_create_gate: asyncio.Semaphore | None = None,
     ) -> None:
         now = time.monotonic()
         async with pending_lock:
@@ -1215,6 +1253,7 @@ class ProxyService:
             api_key=api_key,
             websocket=websocket,
             client_send_lock=client_send_lock,
+            response_create_gate=response_create_gate,
         )
 
     async def _finalize_websocket_request_state(
@@ -1228,6 +1267,7 @@ class ProxyService:
         payload: dict[str, JsonValue] | None,
         api_key: ApiKeyData | None,
         upstream_control: _WebSocketUpstreamControl,
+        response_create_gate: asyncio.Semaphore,
     ) -> None:
         status = "success"
         error_code = None
@@ -1278,6 +1318,7 @@ class ProxyService:
         if event_type in {"response.failed", "error"}:
             settlement.record_success = False
             settlement.account_health_error = _should_penalize_stream_error(error_code)
+        _release_websocket_response_create_gate(request_state, response_create_gate)
         await self._settle_stream_api_key_usage(
             api_key,
             request_state.api_key_reservation,
@@ -1377,12 +1418,15 @@ class ProxyService:
         api_key: ApiKeyData | None,
         websocket: WebSocket | None = None,
         client_send_lock: anyio.Lock | None = None,
+        response_create_gate: asyncio.Semaphore | None = None,
     ) -> None:
         async with pending_lock:
             remaining = list(pending_requests)
             pending_requests.clear()
 
         for request_state in remaining:
+            if response_create_gate is not None:
+                _release_websocket_response_create_gate(request_state, response_create_gate)
             if websocket is not None and client_send_lock is not None:
                 await self._emit_websocket_terminal_error(
                     websocket,
@@ -2638,6 +2682,7 @@ class _WebSocketRequestState:
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
     response_id: str | None = None
+    awaiting_response_created: bool = False
 
 
 @dataclass(slots=True)
@@ -2710,6 +2755,16 @@ def _assign_websocket_response_id(
             request_state.response_id = response_id
             return request_state
     return None
+
+
+def _release_websocket_response_create_gate(
+    request_state: _WebSocketRequestState,
+    response_create_gate: asyncio.Semaphore,
+) -> None:
+    if not request_state.awaiting_response_created:
+        return
+    request_state.awaiting_response_created = False
+    response_create_gate.release()
 
 
 def _pop_terminal_websocket_request_state(

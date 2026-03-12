@@ -547,6 +547,7 @@ class ProxyService:
         client_send_lock = anyio.Lock()
         upstream: UpstreamResponsesWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
+        upstream_control: _WebSocketUpstreamControl | None = None
         account: Account | None = None
 
         try:
@@ -558,6 +559,21 @@ class ProxyService:
                     break
                 if message_type != "websocket.receive":
                     continue
+
+                if upstream_reader is not None and upstream_reader.done():
+                    try:
+                        await upstream_reader
+                    except asyncio.CancelledError:
+                        pass
+                    upstream_reader = None
+                    upstream_control = None
+                    if upstream is not None:
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug("Failed to close upstream websocket", exc_info=True)
+                    upstream = None
+                    account = None
 
                 text_data = message.get("text")
                 bytes_data = message.get("bytes")
@@ -592,6 +608,23 @@ class ProxyService:
                                 )
                             continue
 
+                if (
+                    request_state is not None
+                    and upstream_control is not None
+                    and upstream_control.reconnect_requested
+                    and upstream_reader is not None
+                ):
+                    await upstream_reader
+                    upstream_reader = None
+                    upstream_control = None
+                    if upstream is not None:
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug("Failed to close upstream websocket", exc_info=True)
+                    upstream = None
+                    account = None
+
                 if upstream is None:
                     if request_state is None:
                         async with client_send_lock:
@@ -622,6 +655,7 @@ class ProxyService:
                     )
                     if upstream is None or account is None:
                         continue
+                    upstream_control = _WebSocketUpstreamControl()
                     upstream_reader = asyncio.create_task(
                         self._relay_upstream_websocket_messages(
                             websocket,
@@ -632,6 +666,7 @@ class ProxyService:
                             pending_lock=pending_lock,
                             client_send_lock=client_send_lock,
                             api_key=api_key,
+                            upstream_control=upstream_control,
                         )
                     )
 
@@ -845,6 +880,7 @@ class ProxyService:
         pending_lock: anyio.Lock,
         client_send_lock: anyio.Lock,
         api_key: ApiKeyData | None,
+        upstream_control: _WebSocketUpstreamControl,
     ) -> None:
         try:
             while True:
@@ -857,9 +893,19 @@ class ProxyService:
                         pending_requests=pending_requests,
                         pending_lock=pending_lock,
                         api_key=api_key,
+                        upstream_control=upstream_control,
                     )
                     async with client_send_lock:
                         await websocket.send_text(message.text)
+                    if upstream_control.reconnect_requested:
+                        async with pending_lock:
+                            should_reconnect = not pending_requests
+                        if should_reconnect:
+                            try:
+                                await upstream.close()
+                            except Exception:
+                                logger.debug("Failed to close upstream websocket for reconnect", exc_info=True)
+                            break
                     continue
                 if message.kind == "binary" and message.data is not None:
                     async with client_send_lock:
@@ -877,6 +923,8 @@ class ProxyService:
                 )
                 break
         finally:
+            if upstream_control.reconnect_requested:
+                return
             try:
                 await websocket.close()
             except Exception:
@@ -891,6 +939,7 @@ class ProxyService:
         pending_requests: deque[_WebSocketRequestState],
         pending_lock: anyio.Lock,
         api_key: ApiKeyData | None,
+        upstream_control: _WebSocketUpstreamControl,
     ) -> None:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
@@ -933,6 +982,7 @@ class ProxyService:
             event_type=event_type,
             payload=payload,
             api_key=api_key,
+            upstream_control=upstream_control,
         )
 
     async def _finalize_websocket_request_state(
@@ -945,6 +995,7 @@ class ProxyService:
         event_type: str | None,
         payload: dict[str, JsonValue] | None,
         api_key: ApiKeyData | None,
+        upstream_control: _WebSocketUpstreamControl,
     ) -> None:
         status = "success"
         error_code = None
@@ -1007,6 +1058,7 @@ class ProxyService:
                 _stream_settlement_error_payload(settlement),
                 settlement.error_code or "upstream_error",
             )
+            upstream_control.reconnect_requested = True
         elif settlement.record_success:
             await self._load_balancer.record_success(account)
 
@@ -2354,6 +2406,11 @@ class _WebSocketRequestState:
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
     response_id: str | None = None
+
+
+@dataclass(slots=True)
+class _WebSocketUpstreamControl:
+    reconnect_requested: bool = False
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

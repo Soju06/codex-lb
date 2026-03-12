@@ -1496,6 +1496,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         api_key_reservation=None,
         started_at=0.0,
     )
+    completed_upstream_control = proxy_service._WebSocketUpstreamControl()
 
     await service._finalize_websocket_request_state(
         completed_state,
@@ -1505,10 +1506,12 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         event_type="response.completed",
         payload=completed_payload,
         api_key=None,
+        upstream_control=completed_upstream_control,
     )
 
     record_success.assert_awaited_once_with(account)
     handle_stream_error.assert_not_awaited()
+    assert completed_upstream_control.reconnect_requested is False
 
     failed_payload = {
         "type": "response.failed",
@@ -1528,6 +1531,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         api_key_reservation=None,
         started_at=0.0,
     )
+    failed_upstream_control = proxy_service._WebSocketUpstreamControl()
 
     await service._finalize_websocket_request_state(
         failed_state,
@@ -1537,12 +1541,14 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         event_type="response.failed",
         payload=failed_payload,
         api_key=None,
+        upstream_control=failed_upstream_control,
     )
 
     handle_args = handle_stream_error.await_args
     assert handle_args is not None
     assert handle_args.args[0] == account
     assert handle_args.args[2] == "rate_limit_exceeded"
+    assert failed_upstream_control.reconnect_requested is True
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,5 @@
+- [x] 1. Add OpenSpec requirements for dashboard-managed prompt-cache TTL, sticky-session admin operations, and Settings page visibility.
+- [x] 2. Persist sticky-session kind and prompt-cache TTL in the database and wire the proxy to use typed sticky-session writes plus cached dashboard TTL reads.
+- [x] 3. Add sticky-session admin APIs and a background cleanup loop that deletes only stale prompt-cache mappings.
+- [x] 4. Add Settings UI controls and a sticky-session admin section for visibility and purge actions.
+- [x] 5. Add backend and frontend regressions covering TTL persistence, sticky-session typing, stale purge behavior, and dashboard flows.

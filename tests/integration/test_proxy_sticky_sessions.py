@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import timezone
+from datetime import timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 
 import app.modules.proxy.service as proxy_module
 from app.core.crypto import TokenEncryptor
@@ -16,6 +18,14 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+class _SettingsCache:
+    def __init__(self, settings: object) -> None:
+        self._settings = settings
+
+    async def get(self) -> object:
+        return self._settings
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -65,8 +75,33 @@ async def _set_routing_settings(
     assert response.status_code == 200
 
 
+def _install_proxy_settings_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sticky_threads_enabled: bool,
+    prefer_earlier_reset_accounts: bool = False,
+    openai_cache_affinity_max_age_seconds: int = 300,
+) -> None:
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+        sticky_threads_enabled=sticky_threads_enabled,
+        openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+        routing_strategy="usage_weighted",
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        upstream_compact_timeout_seconds=None,
+        log_proxy_request_payload=False,
+        log_proxy_request_shape=False,
+        log_proxy_request_shape_raw_cache_key=False,
+        log_proxy_service_tier_trace=False,
+    )
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+
+
 @pytest.mark.asyncio
-async def test_proxy_sticky_prompt_cache_key_pins_account(async_client, monkeypatch):
+async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_client, monkeypatch):
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
     acc_a_id = await _import_account(async_client, "acc_a", "a@example.com")
     acc_b_id = await _import_account(async_client, "acc_b", "b@example.com")
@@ -130,7 +165,7 @@ async def test_proxy_sticky_prompt_cache_key_pins_account(async_client, monkeypa
     response = await async_client.post("/backend-api/codex/responses", json=payload)
     assert response.status_code == 200
 
-    assert seen == ["acc_a", "acc_a"]
+    assert seen == ["acc_a", "acc_b"]
 
 
 @pytest.mark.asyncio
@@ -612,8 +647,16 @@ async def test_v1_session_id_does_not_pin_routing_without_sticky_threads(async_c
 
 
 @pytest.mark.asyncio
-async def test_v1_prompt_cache_key_pins_responses_and_compact_without_sticky_threads(async_client, monkeypatch):
+async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_sticky_threads(
+    async_client,
+    monkeypatch,
+):
     await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    _install_proxy_settings_cache(
+        monkeypatch,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=60,
+    )
     acc_a_id = await _import_account(async_client, "acc_v1_cache_a", "v1_cache_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_v1_cache_b", "v1_cache_b@example.com")
 
@@ -692,3 +735,87 @@ async def test_v1_prompt_cache_key_pins_responses_and_compact_without_sticky_thr
     response = await async_client.post("/v1/responses", json=stream_payload)
     assert response.status_code == 200
     assert stream_seen == ["acc_v1_cache_a", "acc_v1_cache_a"]
+
+
+@pytest.mark.asyncio
+async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_client, monkeypatch):
+    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    _install_proxy_settings_cache(
+        monkeypatch,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=60,
+    )
+    acc_a_id = await _import_account(async_client, "acc_v1_expire_a", "v1_expire_a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_v1_expire_b", "v1_expire_b@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    stream_seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        stream_seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_v1_cache_expire"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    thread_key = "v1-cache-expire-thread-123"
+    stream_payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "stream": True,
+        "prompt_cache_key": thread_key,
+    }
+    response = await async_client.post("/v1/responses", json=stream_payload)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_v1_expire_a"]
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=95.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        stale_updated_at = utcnow() - timedelta(minutes=10)
+        await session.execute(
+            text(
+                """
+                UPDATE sticky_sessions
+                SET updated_at = :stale_updated_at
+                WHERE key = :sticky_key AND kind = 'prompt_cache'
+                """
+            ),
+            {"sticky_key": thread_key, "stale_updated_at": stale_updated_at},
+        )
+        await session.commit()
+
+    response = await async_client.post("/v1/responses", json=stream_payload)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_v1_expire_a", "acc_v1_expire_b"]

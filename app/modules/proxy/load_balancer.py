@@ -24,7 +24,7 @@ from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
-from app.db.models import Account, AdditionalUsageHistory, UsageHistory
+from app.db.models import Account, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -73,7 +73,9 @@ class LoadBalancer:
         self,
         sticky_key: str | None = None,
         *,
+        sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
+        sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
@@ -107,7 +109,9 @@ class LoadBalancer:
                     states=states,
                     account_map=account_map,
                     sticky_key=sticky_key,
+                    sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
+                    sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
                     sticky_repo=repos.sticky_sessions,
@@ -318,7 +322,9 @@ class LoadBalancer:
         states: list[AccountState],
         account_map: dict[str, Account],
         sticky_key: str | None,
+        sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
+        sticky_max_age_seconds: int | None,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
@@ -329,6 +335,8 @@ class LoadBalancer:
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
             )
+        if sticky_kind is None:
+            raise ValueError("sticky_kind is required when sticky_key is provided")
 
         if reallocate_sticky:
             chosen = select_account(
@@ -337,14 +345,18 @@ class LoadBalancer:
                 routing_strategy=routing_strategy,
             )
             if chosen.account is not None and chosen.account.account_id in account_map:
-                await sticky_repo.upsert(sticky_key, chosen.account.account_id)
+                await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
             return chosen
 
-        existing = await sticky_repo.get_account_id(sticky_key)
+        existing = await sticky_repo.get_account_id(
+            sticky_key,
+            kind=sticky_kind,
+            max_age_seconds=sticky_max_age_seconds,
+        )
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is None:
-                await sticky_repo.delete(sticky_key)
+                await sticky_repo.delete(sticky_key, kind=sticky_kind)
             else:
                 pinned_result = select_account(
                     [pinned],
@@ -353,6 +365,8 @@ class LoadBalancer:
                     allow_backoff_fallback=False,
                 )
                 if pinned_result.account is not None:
+                    if sticky_max_age_seconds is not None:
+                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                     return pinned_result
 
         chosen = select_account(
@@ -361,7 +375,7 @@ class LoadBalancer:
             routing_strategy=routing_strategy,
         )
         if chosen.account is not None and chosen.account.account_id in account_map:
-            await sticky_repo.upsert(sticky_key, chosen.account.account_id)
+            await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
         return chosen
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:

@@ -11,6 +11,7 @@ describe("DashboardSettingsSchema", () => {
       stickyThreadsEnabled: true,
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
@@ -19,6 +20,7 @@ describe("DashboardSettingsSchema", () => {
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
     expect(parsed.routingStrategy).toBe("round_robin");
+    expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
   });
@@ -30,11 +32,13 @@ describe("SettingsUpdateRequestSchema", () => {
       stickyThreadsEnabled: false,
       preferEarlierResetAccounts: true,
       routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 120,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
     });
 
+    expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.totpRequiredOnLogin).toBe(true);
@@ -50,6 +54,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.importWithoutOverwrite).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
+    expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBeUndefined();
   });
 
   it("rejects invalid types", () => {

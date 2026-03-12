@@ -254,6 +254,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
@@ -900,6 +901,69 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     assert timeout.sock_connect == pytest.approx(2.0, abs=0.05)
     assert timeout.sock_read is None
     assert result.model_extra == {"output": []}
+
+
+def test_sticky_key_for_responses_request_uses_bounded_cache_affinity():
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    payload.prompt_cache_key = "thread_123"
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.key == "thread_123"
+    assert policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
+    assert policy.reallocate_sticky is False
+    assert policy.max_age_seconds == 300
+
+
+def test_sticky_key_for_responses_request_keeps_sticky_threads_durable():
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    payload.prompt_cache_key = "thread_123"
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    assert policy.key == "thread_123"
+    assert policy.kind == proxy_service.StickySessionKind.STICKY_THREAD
+    assert policy.reallocate_sticky is True
+    assert policy.max_age_seconds is None
+
+
+def test_sticky_key_for_compact_request_prefers_codex_session_affinity():
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "prompt_cache_key": "thread_123",
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_compact_request(
+        payload,
+        headers={"session_id": "codex-session-1"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    assert policy.key == "codex-session-1"
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert policy.reallocate_sticky is False
+    assert policy.max_age_seconds is None
 
 
 @pytest.mark.asyncio

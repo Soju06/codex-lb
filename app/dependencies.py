@@ -26,6 +26,7 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
+from app.modules.sticky_sessions.service import StickySessionsService
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
 
@@ -94,6 +95,14 @@ class FirewallContext:
     session: AsyncSession
     repository: FirewallRepository
     service: FirewallService
+
+
+@dataclass(slots=True)
+class StickySessionsContext:
+    session: AsyncSession
+    repository: StickySessionsRepository
+    settings_repository: SettingsRepository
+    service: StickySessionsService
 
 
 def get_accounts_context(
@@ -208,3 +217,17 @@ def get_firewall_context(
     repository = FirewallRepository(session)
     service = FirewallService(repository)
     return FirewallContext(session=session, repository=repository, service=service)
+
+
+def get_sticky_sessions_context(
+    session: AsyncSession = Depends(get_session),
+) -> StickySessionsContext:
+    repository = StickySessionsRepository(session)
+    settings_repository = SettingsRepository(session)
+    service = StickySessionsService(repository, settings_repository)
+    return StickySessionsContext(
+        session=session,
+        repository=repository,
+        settings_repository=settings_repository,
+        service=service,
+    )

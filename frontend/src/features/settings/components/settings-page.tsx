@@ -5,11 +5,13 @@ import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
+import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useSettings } from "@/features/settings/hooks/use-settings";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -49,6 +51,7 @@ export function SettingsPage() {
           <div className="space-y-4">
             <AppearanceSettings />
             <RoutingSettings
+              key={settings.openaiCacheAffinityMaxAgeSeconds}
               settings={settings}
               busy={busy}
               onSave={handleSave}
@@ -63,17 +66,11 @@ export function SettingsPage() {
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
               disabled={busy}
               onApiKeyAuthEnabledChange={(enabled) =>
-                void handleSave({
-                  stickyThreadsEnabled: settings.stickyThreadsEnabled,
-                  preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-                  routingStrategy: settings.routingStrategy,
-                  importWithoutOverwrite: settings.importWithoutOverwrite,
-                  totpRequiredOnLogin: settings.totpRequiredOnLogin,
-                  apiKeyAuthEnabled: enabled,
-                })
+                void handleSave(buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: enabled }))
               }
             />
             <FirewallSection />
+            <StickySessionsSection />
           </div>
 
           <LoadingOverlay visible={!!settings && busy} label="Saving settings..." />

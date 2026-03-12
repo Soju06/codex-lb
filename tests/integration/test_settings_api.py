@@ -13,6 +13,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["stickyThreadsEnabled"] is False
     assert payload["preferEarlierResetAccounts"] is False
     assert payload["routingStrategy"] == "usage_weighted"
+    assert payload["openaiCacheAffinityMaxAgeSeconds"] == 300
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
@@ -24,6 +25,7 @@ async def test_settings_api_get_and_update(async_client):
             "stickyThreadsEnabled": True,
             "preferEarlierResetAccounts": True,
             "routingStrategy": "round_robin",
+            "openaiCacheAffinityMaxAgeSeconds": 180,
             "importWithoutOverwrite": True,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
@@ -34,6 +36,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["stickyThreadsEnabled"] is True
     assert updated["preferEarlierResetAccounts"] is True
     assert updated["routingStrategy"] == "round_robin"
+    assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert updated["importWithoutOverwrite"] is True
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
@@ -45,6 +48,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["stickyThreadsEnabled"] is True
     assert payload["preferEarlierResetAccounts"] is True
     assert payload["routingStrategy"] == "round_robin"
+    assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False

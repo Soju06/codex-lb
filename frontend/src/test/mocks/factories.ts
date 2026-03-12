@@ -278,6 +278,7 @@ export function createDashboardSettings(overrides: Partial<DashboardSettings> = 
     stickyThreadsEnabled: true,
     preferEarlierResetAccounts: false,
     routingStrategy: "usage_weighted",
+    openaiCacheAffinityMaxAgeSeconds: 300,
     importWithoutOverwrite: false,
     totpRequiredOnLogin: false,
     totpConfigured: true,

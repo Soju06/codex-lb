@@ -172,15 +172,26 @@ Before forwarding Responses payloads upstream, the service MUST remove known uns
 - **THEN** the service preserves that field in forwarded payload
 
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
-For OpenAI-style `/v1/responses` and `/v1/responses/compact` requests, the service MUST treat a non-empty `prompt_cache_key` as the upstream account affinity key for prompt-cache correctness. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, and the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged.
+For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as a bounded upstream account affinity key for prompt-cache correctness. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
-#### Scenario: /v1 responses request pins account with prompt_cache_key
+#### Scenario: recent /v1 responses request reuses prompt-cache affinity
 - **WHEN** a client sends repeated `/v1/responses` requests with the same non-empty `prompt_cache_key` while `sticky_threads_enabled` is disabled
+- **AND** the previous mapping is still within the configured freshness window
 - **THEN** the service selects the same upstream account for those requests
 
-#### Scenario: /v1 compact request reuses prompt-cache affinity
+#### Scenario: recent /v1 compact request reuses prompt-cache affinity
 - **WHEN** a client sends `/v1/responses/compact` after `/v1/responses` with the same non-empty `prompt_cache_key` while `sticky_threads_enabled` is disabled
+- **AND** the previous mapping is still within the configured freshness window
 - **THEN** the compact request reuses the previously selected upstream account
+
+#### Scenario: expired prompt-cache affinity rebalances
+- **WHEN** a client sends a later OpenAI-style request with the same non-empty `prompt_cache_key`
+- **AND** the stored mapping is older than the configured freshness window
+- **THEN** the service ignores the stale mapping, re-runs account selection, and stores a fresh mapping for the chosen account
+
+#### Scenario: dashboard prompt-cache affinity TTL is applied
+- **WHEN** an operator updates the dashboard prompt-cache affinity TTL
+- **THEN** subsequent OpenAI-style prompt-cache affinity decisions use the new freshness window
 
 ### Requirement: Normalize prompt cache aliases for upstream compatibility
 Before forwarding Responses payloads upstream, the service MUST normalize OpenAI-compatible camelCase prompt cache controls so codex-lb applies compatibility behavior consistently. The service MUST forward `promptCacheKey` as `prompt_cache_key`, and MUST treat `promptCacheRetention` the same as `prompt_cache_retention` for stripping behavior.

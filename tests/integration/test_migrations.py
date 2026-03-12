@@ -267,6 +267,26 @@ async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only empty database migration test",
+)
+async def test_postgresql_upgrade_head_from_empty_database(db_setup):
+    async with SessionLocal() as session:
+        await session.execute(text("DROP SCHEMA public CASCADE"))
+        await session.execute(text("CREATE SCHEMA public"))
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
+        revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
+        assert revisions == [_HEAD_REVISION]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
     (not _is_postgresql_database_url(_DATABASE_URL)) or (not _HAS_REVISION_REMAP),
     reason="PostgreSQL-only migration remap test",
 )
@@ -462,6 +482,32 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
                 ).scalar_one()
                 assert routing_strategy == "usage_weighted"
+            assert "openai_cache_affinity_max_age_seconds" in dashboard_columns
+            affinity_ttl = (
+                await session.execute(
+                    text("SELECT openai_cache_affinity_max_age_seconds FROM dashboard_settings WHERE id=1")
+                )
+            ).scalar_one()
+            assert affinity_ttl == 300
+            sticky_columns_rows = (await session.execute(text("PRAGMA table_info(sticky_sessions)"))).fetchall()
+            sticky_columns = {str(row[1]) for row in sticky_columns_rows if len(row) > 1}
+            assert "kind" in sticky_columns
+            sticky_kind = (
+                await session.execute(text("SELECT kind FROM sticky_sessions WHERE key='sticky_1'"))
+            ).scalar_one()
+            assert sticky_kind == "sticky_thread"
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
+                    VALUES ('sticky_1', 'acc_legacy', 'prompt_cache', '2026-01-01 00:00:00', '2026-01-01 00:00:00')
+                    """
+                )
+            )
+            sticky_same_key_count = (
+                await session.execute(text("SELECT COUNT(*) FROM sticky_sessions WHERE key='sticky_1'"))
+            ).scalar_one()
+            assert sticky_same_key_count == 2
             index_rows = (await session.execute(text("PRAGMA index_list(accounts)"))).fetchall()
             has_email_non_unique_index = False
             for row in index_rows:
@@ -512,6 +558,6 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
 
             assert usage_count == 1
             assert logs_count == 1
-            assert sticky_count == 1
+            assert sticky_count == 2
     finally:
         await engine.dispose()

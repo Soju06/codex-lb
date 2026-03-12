@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -33,7 +33,7 @@ async def async_session() -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture(autouse=True)
-def _clear_registry_cache() -> AsyncIterator[None]:
+def _clear_registry_cache() -> Iterator[None]:
     clear_additional_quota_registry_cache()
     yield
     clear_additional_quota_registry_cache()

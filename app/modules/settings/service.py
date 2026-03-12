@@ -10,6 +10,7 @@ class DashboardSettingsData:
     sticky_threads_enabled: bool
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
+    openai_cache_affinity_max_age_seconds: int
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
@@ -21,6 +22,7 @@ class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
+    openai_cache_affinity_max_age_seconds: int
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
@@ -36,6 +38,7 @@ class SettingsService:
             sticky_threads_enabled=row.sticky_threads_enabled,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
+            openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
@@ -50,6 +53,7 @@ class SettingsService:
             sticky_threads_enabled=payload.sticky_threads_enabled,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             routing_strategy=payload.routing_strategy,
+            openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
@@ -58,6 +62,7 @@ class SettingsService:
             sticky_threads_enabled=row.sticky_threads_enabled,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
+            openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,

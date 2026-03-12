@@ -28,6 +28,8 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
+from app.modules.sticky_sessions import api as sticky_sessions_api
+from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
@@ -41,12 +43,15 @@ async def lifespan(_: FastAPI):
     await init_http_client()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()
+    sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     await usage_scheduler.start()
     await model_scheduler.start()
+    await sticky_session_cleanup_scheduler.start()
 
     try:
         yield
     finally:
+        await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await usage_scheduler.stop()
         try:
@@ -80,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)
     app.include_router(firewall_api.router)
+    app.include_router(sticky_sessions_api.router)
     app.include_router(api_keys_api.router)
     app.include_router(health_api.router)
 

@@ -13,7 +13,14 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import ModelRegistrySnapshot
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySession, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    AdditionalUsageHistory,
+    StickySession,
+    StickySessionKind,
+    UsageHistory,
+)
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import (
@@ -96,18 +103,24 @@ class StubStickySessionsRepository(StickySessionsRepository):
     def __init__(self) -> None:
         pass
 
-    async def get_account_id(self, key: str) -> str | None:
+    async def get_account_id(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> str | None:
         return None
 
-    async def upsert(self, key: str, account_id: str) -> StickySession:
-        return self._build_row(key, account_id)
+    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+        return self._build_row(key, account_id, kind)
 
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, *, kind: StickySessionKind | None = None) -> bool:
         return False
 
     @staticmethod
-    def _build_row(key: str, account_id: str) -> StickySession:
-        return StickySession(key=key, account_id=account_id)
+    def _build_row(key: str, account_id: str, kind: StickySessionKind) -> StickySession:
+        return StickySession(key=key, account_id=account_id, kind=kind)
 
 
 class StubRequestLogsRepository(RequestLogsRepository):

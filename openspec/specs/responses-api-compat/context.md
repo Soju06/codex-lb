@@ -19,6 +19,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - `include` values must be on the documented allowlist.
 - `previous_response_id` and `truncation` are rejected.
 - `/v1/responses/compact` is supported only when the upstream implements it.
+- `prompt_cache_key` affinity on OpenAI-style routes is intentionally bounded by a dashboard-managed freshness window, unlike durable backend `session_id` or dashboard sticky-thread routing.
 
 ## Include Allowlist (Reference)
 

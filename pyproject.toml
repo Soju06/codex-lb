@@ -5,7 +5,10 @@ description = "Codex load balancer and proxy for ChatGPT accounts with usage das
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Soju06", email = "qlskssk@gmail.com" }]
-maintainers = [{ name = "Soju06", email = "qlskssk@gmail.com" }]
+maintainers = [
+    { name = "Soju06", email = "qlskssk@gmail.com" },
+    { name = "choi138", email = "kidjustinchoi@gmail.com" },
+]
 keywords = [
     "codex",
     "load-balancer",

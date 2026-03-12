@@ -33,10 +33,12 @@ describe("useSettings", () => {
 
     await waitFor(() => expect(result.current.settingsQuery.isSuccess).toBe(true));
     expect(result.current.settingsQuery.data?.stickyThreadsEnabled).toBeTypeOf("boolean");
+    expect(result.current.settingsQuery.data?.openaiCacheAffinityMaxAgeSeconds).toBeTypeOf("number");
 
     await result.current.updateSettingsMutation.mutateAsync({
       stickyThreadsEnabled: false,
       preferEarlierResetAccounts: true,
+      openaiCacheAffinityMaxAgeSeconds: 180,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,

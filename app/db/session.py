@@ -135,10 +135,11 @@ async def _safe_close(session: AsyncSession) -> None:
 def _load_migration_entrypoints() -> tuple[
     Callable[[str], "MigrationState"],
     Callable[[str], Awaitable["MigrationRunResult"]],
+    Callable[[str], tuple[str, ...]],
 ]:
-    from app.db.migrate import inspect_migration_state, run_startup_migrations
+    from app.db.migrate import check_schema_drift, inspect_migration_state, run_startup_migrations
 
-    return inspect_migration_state, run_startup_migrations
+    return inspect_migration_state, run_startup_migrations, check_schema_drift
 
 
 def _load_sqlite_backup_creator() -> _SqliteBackupCreator:
@@ -211,7 +212,7 @@ async def init_db() -> None:
         return
 
     try:
-        inspect_migration_state, run_startup_migrations = _load_migration_entrypoints()
+        inspect_migration_state, run_startup_migrations, check_schema_drift = _load_migration_entrypoints()
     except ModuleNotFoundError as exc:
         if exc.name != "app.db.migrate":
             raise
@@ -256,6 +257,10 @@ async def init_db() -> None:
             )
         if result.current_revision is not None:
             logger.info("Database migration complete revision=%s", result.current_revision)
+        drift = await to_thread.run_sync(lambda: check_schema_drift(_settings.database_url))
+        if drift:
+            drift_details = "; ".join(drift)
+            raise RuntimeError(f"Schema drift detected after startup migrations: {drift_details}")
     except Exception:
         logger.exception("Failed to apply database migrations")
         if _settings.database_migrations_fail_fast:

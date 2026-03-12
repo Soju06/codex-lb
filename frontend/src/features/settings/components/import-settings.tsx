@@ -1,6 +1,7 @@
 import { Upload } from "lucide-react";
 
 import { Switch } from "@/components/ui/switch";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
 export type ImportSettingsProps = {
@@ -11,15 +12,7 @@ export type ImportSettingsProps = {
 
 export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) {
   const save = (patch: Partial<SettingsUpdateRequest>) =>
-    void onSave({
-      stickyThreadsEnabled: settings.stickyThreadsEnabled,
-      preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-      routingStrategy: settings.routingStrategy,
-      importWithoutOverwrite: settings.importWithoutOverwrite,
-      totpRequiredOnLogin: settings.totpRequiredOnLogin,
-      apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
-      ...patch,
-    });
+    void onSave(buildSettingsUpdateRequest(settings, patch));
 
   return (
     <section className="rounded-xl border bg-card p-5">

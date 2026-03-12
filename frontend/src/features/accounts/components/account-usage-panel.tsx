@@ -61,9 +61,19 @@ function QuotaRow({
   );
 }
 
-function formatAdditionalLimitName(limitName: string): string {
-  const map: Record<string, string> = { codex_other: "Codex Spark" };
-  return map[limitName] ?? limitName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const ADDITIONAL_LIMIT_LABELS: Record<string, string> = {
+  codex_spark: "GPT-5.3-Codex-Spark",
+  codex_other: "GPT-5.3-Codex-Spark",
+  "gpt-5.3-codex-spark": "GPT-5.3-Codex-Spark",
+};
+
+function formatAdditionalLimitName(limitName: string, quotaKey?: string | null): string {
+  const normalizedQuotaKey = quotaKey?.trim().toLowerCase();
+  if (normalizedQuotaKey && ADDITIONAL_LIMIT_LABELS[normalizedQuotaKey]) {
+    return ADDITIONAL_LIMIT_LABELS[normalizedQuotaKey];
+  }
+  const normalized = limitName.trim().toLowerCase();
+  return ADDITIONAL_LIMIT_LABELS[normalized] ?? limitName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatResetCountdown(resetAt: number | null): string | null {
@@ -144,8 +154,10 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
             Additional Quotas
           </p>
           {account.additionalQuotas.map((quota) => (
-            <div key={quota.limitName} className="rounded-md border bg-background/60 px-3 py-2 space-y-2">
-              <p className="text-xs font-medium">{formatAdditionalLimitName(quota.limitName)}</p>
+            <div key={quota.quotaKey ?? quota.limitName} className="rounded-md border bg-background/60 px-3 py-2 space-y-2">
+              <p className="text-xs font-medium">
+                {quota.displayLabel ?? formatAdditionalLimitName(quota.limitName, quota.quotaKey)}
+              </p>
               {quota.primaryWindow != null ? (
                 <AdditionalQuotaRow
                   label={formatWindowLabel("primary", quota.primaryWindow.windowMinutes ?? null)}

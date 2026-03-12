@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -464,10 +465,11 @@ def _dump_sse(payload: dict[str, JsonValue]) -> str:
 
 
 def _finish_reason_from_incomplete(response: JsonValue | None) -> str:
-    if not is_json_mapping(response):
+    response_mapping = _as_mapping(response)
+    if response_mapping is None:
         return "stop"
-    details = response.get("incomplete_details")
-    if is_json_mapping(details):
+    details = _as_mapping(response_mapping.get("incomplete_details"))
+    if details is not None:
         reason = details.get("reason")
         if reason in ("max_output_tokens", "max_tokens"):
             return "length"
@@ -638,7 +640,7 @@ def _tool_call_key(call_id: str | None, name: str | None) -> str | None:
 
 def _as_mapping(value: JsonValue) -> Mapping[str, JsonValue] | None:
     if is_json_mapping(value):
-        return value
+        return cast(Mapping[str, JsonValue], value)
     return None
 
 

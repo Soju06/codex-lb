@@ -16,7 +16,7 @@ from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -30,7 +30,7 @@ async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
-            additional_usage=object(),  # type: ignore[arg-type]
+            additional_usage=AdditionalUsageRepository(session),
         )
 
 
@@ -353,3 +353,77 @@ async def test_load_balancer_prefers_newer_weekly_primary_over_stale_secondary(d
         assert refreshed_free is not None
         await session.refresh(refreshed_free)
         assert refreshed_free.status == AccountStatus.QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    exhausted_account = Account(
+        id="acc_additional_full",
+        email="additional_full@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-full"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-full"),
+        id_token_encrypted=encryptor.encrypt("id-full"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    eligible_account = Account(
+        id="acc_additional_ok",
+        email="additional_ok@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-ok"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-ok"),
+        id_token_encrypted=encryptor.encrypt("id-ok"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        additional_repo = AdditionalUsageRepository(session)
+        await accounts_repo.upsert(exhausted_account)
+        await accounts_repo.upsert(eligible_account)
+
+        for account, used_percent in ((exhausted_account, 40.0), (eligible_account, 20.0)):
+            await usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=used_percent,
+                window="primary",
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+                recorded_at=now,
+            )
+
+        await additional_repo.add_entry(
+            account_id=exhausted_account.id,
+            limit_name="codex_other",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=100.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+            recorded_at=now,
+        )
+        await additional_repo.add_entry(
+            account_id=eligible_account.id,
+            limit_name="codex_other",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=25.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+            recorded_at=now,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account(additional_limit_name="codex_spark")
+
+    assert selection.account is not None
+    assert selection.account.id == eligible_account.id

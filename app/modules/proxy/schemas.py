@@ -73,14 +73,18 @@ class CreditStatusDetails(BaseModel):
 class AdditionalRateLimitStatus(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    quota_key: str | None = None
     limit_name: str
+    display_label: str | None = None
     metered_feature: str
     rate_limit: RateLimitStatusDetails | None = None
 
     @classmethod
     def from_data(cls, data: AdditionalRateLimitData) -> "AdditionalRateLimitStatus":
         return cls(
+            quota_key=data.quota_key,
             limit_name=data.limit_name,
+            display_label=data.display_label,
             metered_feature=data.metered_feature,
             rate_limit=RateLimitStatusDetails.from_data(data.rate_limit) if data.rate_limit else None,
         )

@@ -4,7 +4,7 @@ import copy
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import cast
 
 from fastapi import Request
 from uvicorn.config import LOGGING_CONFIG
@@ -25,7 +25,11 @@ class UtcAccessFormatter(AccessFormatter):
     converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
 
 
-def build_log_config() -> dict[str, Any]:
+type LogConfigValue = str | bool | None | dict[str, "LogConfigValue"]
+type LogConfig = dict[str, LogConfigValue]
+
+
+def build_log_config() -> LogConfig:
     config = copy.deepcopy(LOGGING_CONFIG)
     formatters = config.setdefault("formatters", {})
     formatters["default"] = {
@@ -40,7 +44,7 @@ def build_log_config() -> dict[str, Any]:
         "datefmt": "%Y-%m-%dT%H:%M:%SZ",
         "use_colors": None,
     }
-    return config
+    return cast(LogConfig, config)
 
 
 def log_error_response(

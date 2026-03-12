@@ -42,6 +42,7 @@ RUN adduser --disabled-password --gecos "" app \
 
 COPY --from=python-build /opt/venv /opt/venv
 COPY app app
+COPY config config
 COPY scripts scripts
 COPY --from=frontend-build /app/app/static app/static
 

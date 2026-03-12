@@ -37,6 +37,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.db.session import get_background_session
@@ -90,6 +91,12 @@ transcribe_router = APIRouter(
 )
 
 _TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
+_UNAVAILABLE_SELECTION_ERROR_CODES = {
+    "no_accounts",
+    "no_plan_support_for_model",
+    "additional_quota_data_unavailable",
+    "no_additional_quota_eligible_accounts",
+}
 
 
 @router.post(
@@ -374,7 +381,7 @@ async def v1_chat_completions(
     if isinstance(result, OpenAIErrorEnvelopeModel):
         error = result.error
         code = error.code if error else None
-        status_code = 503 if code == "no_accounts" else 502
+        status_code = 503 if code in _UNAVAILABLE_SELECTION_ERROR_CODES else 502
         return _logged_error_json_response(
             request,
             status_code,
@@ -651,7 +658,7 @@ def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
 def _logged_error_json_response(
     request: Request,
     status_code: int,
-    content: object,
+    content: Mapping[str, JsonValue] | OpenAIErrorEnvelopeModel | OpenAIErrorEnvelope,
     *,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
@@ -667,21 +674,22 @@ def _logged_error_json_response(
     return JSONResponse(status_code=status_code, content=content, headers=headers)
 
 
-def _error_details_from_content(content: object) -> tuple[str | None, str | None]:
+def _error_details_from_content(
+    content: Mapping[str, JsonValue] | OpenAIErrorEnvelopeModel | OpenAIErrorEnvelope,
+) -> tuple[str | None, str | None]:
     if isinstance(content, OpenAIErrorEnvelopeModel):
         error = content.error
         if error is None:
             return None, None
         return error.code, error.message
-    if not isinstance(content, dict):
+    if not isinstance(content, Mapping):
         return None, None
-    content_dict = cast(dict[str, object], content)
-    error = content_dict.get("error")
-    if not isinstance(error, dict):
+    error = content.get("error")
+    if not is_json_mapping(error):
         return None, None
-    error_dict = cast(dict[str, object], error)
-    code = error_dict.get("code")
-    message = error_dict.get("message")
+    error_mapping = cast(Mapping[str, JsonValue], error)
+    code = error_mapping.get("code")
+    message = error_mapping.get("message")
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
 
 
@@ -951,6 +959,6 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
 
 
 def _status_for_error(error_value: OpenAIError | None) -> int:
-    if error_value and error_value.code == "no_accounts":
+    if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
     return 502

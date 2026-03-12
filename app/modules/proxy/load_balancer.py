@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Iterable
 
 import anyio
@@ -18,15 +19,23 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.balancer.types import UpstreamError
+from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
-from app.db.models import Account, UsageHistory
+from app.core.utils.time import utcnow
+from app.db.models import Account, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.proxy.repo_bundle import ProxyRepoFactory
+from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
+from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 logger = logging.getLogger(__name__)
+
+NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
+ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
+NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
 
 
 @dataclass
@@ -42,6 +51,7 @@ class RuntimeState:
 class AccountSelection:
     account: Account | None
     error_message: str | None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +59,8 @@ class _SelectionInputs:
     accounts: list[Account]
     latest_primary: dict[str, UsageHistory]
     latest_secondary: dict[str, UsageHistory]
+    error_message: str | None = None
+    error_code: str | None = None
 
 
 class LoadBalancer:
@@ -61,16 +73,23 @@ class LoadBalancer:
         self,
         sticky_key: str | None = None,
         *,
+        sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
+        sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
+        additional_limit_name: str | None = None,
     ) -> AccountSelection:
-        selection_inputs = await self._load_selection_inputs(model=model)
-        if model and not selection_inputs.accounts:
+        selection_inputs = await self._load_selection_inputs(
+            model=model,
+            additional_limit_name=additional_limit_name,
+        )
+        if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
                 account=None,
-                error_message=f"No accounts with a plan supporting model '{model}'",
+                error_message=selection_inputs.error_message,
+                error_code=selection_inputs.error_code,
             )
 
         selected_snapshot: Account | None = None
@@ -90,7 +109,9 @@ class LoadBalancer:
                     states=states,
                     account_map=account_map,
                     sticky_key=sticky_key,
+                    sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
+                    sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
                     sticky_repo=repos.sticky_sessions,
@@ -123,7 +144,7 @@ class LoadBalancer:
                 model,
                 error_message,
             )
-            return AccountSelection(account=None, error_message=error_message)
+            return AccountSelection(account=None, error_message=error_message, error_code=None)
 
         runtime = self._runtime.setdefault(selected_snapshot.id, RuntimeState())
         runtime.last_selected_at = time.time()
@@ -134,13 +155,50 @@ class LoadBalancer:
             bool(sticky_key),
             model,
         )
-        return AccountSelection(account=selected_snapshot, error_message=None)
+        return AccountSelection(account=selected_snapshot, error_message=None, error_code=None)
 
-    async def _load_selection_inputs(self, *, model: str | None) -> _SelectionInputs:
+    async def _load_selection_inputs(
+        self,
+        *,
+        model: str | None,
+        additional_limit_name: str | None = None,
+    ) -> _SelectionInputs:
         async with self._repo_factory() as repos:
-            accounts = await repos.accounts.list_accounts()
-            if model:
+            all_accounts = await repos.accounts.list_accounts()
+            effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
+            accounts = all_accounts
+            if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
                 accounts = _filter_accounts_for_model(accounts, model)
+            if model and not accounts:
+                if not all_accounts:
+                    return _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                    )
+                return _SelectionInputs(
+                    accounts=[],
+                    latest_primary={},
+                    latest_secondary={},
+                    error_message=f"No accounts with a plan supporting model '{model}'",
+                    error_code=NO_PLAN_SUPPORT_FOR_MODEL,
+                )
+
+            if effective_limit_name:
+                accounts, error_code, error_message = await self._filter_accounts_for_additional_limit(
+                    accounts,
+                    model=model,
+                    limit_name=effective_limit_name,
+                    repos=repos,
+                )
+                if not accounts:
+                    return _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                        error_message=error_message,
+                        error_code=error_code,
+                    )
             if not accounts:
                 return _SelectionInputs(
                     accounts=[],
@@ -160,6 +218,98 @@ class LoadBalancer:
                 },
             )
 
+    async def _filter_accounts_for_additional_limit(
+        self,
+        accounts: list[Account],
+        *,
+        model: str | None,
+        limit_name: str,
+        repos: ProxyRepositories,
+    ) -> tuple[list[Account], str | None, str | None]:
+        if not accounts:
+            return [], None, None
+
+        fresh_since = _additional_usage_fresh_since()
+        account_ids = [account.id for account in accounts]
+        latest_primary = await _latest_additional_by_key(
+            repos.additional_usage,
+            limit_name,
+            "primary",
+            account_ids=account_ids,
+        )
+        latest_secondary = await _latest_additional_by_key(
+            repos.additional_usage,
+            limit_name,
+            "secondary",
+            account_ids=account_ids,
+        )
+        fresh_primary = await _latest_additional_by_key(
+            repos.additional_usage,
+            limit_name,
+            "primary",
+            account_ids=account_ids,
+            since=fresh_since,
+        )
+        fresh_secondary = await _latest_additional_by_key(
+            repos.additional_usage,
+            limit_name,
+            "secondary",
+            account_ids=account_ids,
+            since=fresh_since,
+        )
+
+        fresh_account_ids = set(fresh_primary) | set(fresh_secondary)
+
+        eligible_accounts: list[Account] = []
+        blocked_by_data = False
+        for account in accounts:
+            eligibility = _additional_quota_eligibility(
+                account_id=account.id,
+                latest_primary=latest_primary,
+                latest_secondary=latest_secondary,
+                fresh_primary=fresh_primary,
+                fresh_secondary=fresh_secondary,
+            )
+            if eligibility == "eligible":
+                eligible_accounts.append(account)
+                continue
+            if eligibility == "data_unavailable":
+                blocked_by_data = True
+
+        if not eligible_accounts:
+            error_code = ADDITIONAL_QUOTA_DATA_UNAVAILABLE if blocked_by_data else NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
+            error_message = (
+                f"No fresh additional quota data available for model '{model}'"
+                if blocked_by_data
+                else f"No accounts with available additional quota for model '{model}'"
+            )
+            logger.warning(
+                (
+                    "Blocked gated model routing model=%s limit_name=%s reason=%s "
+                    "freshness_since=%s candidate_accounts=%s fresh_accounts=%s"
+                ),
+                model,
+                limit_name,
+                error_code,
+                fresh_since.isoformat(),
+                len(accounts),
+                len(fresh_account_ids),
+            )
+            return ([], error_code, error_message)
+
+        logger.info(
+            (
+                "Applied gated model routing model=%s limit_name=%s "
+                "candidate_accounts=%s fresh_accounts=%s eligible_accounts=%s"
+            ),
+            model,
+            limit_name,
+            len(accounts),
+            len(fresh_account_ids),
+            len(eligible_accounts),
+        )
+        return eligible_accounts, None, None
+
     def _prune_runtime(self, accounts: Iterable[Account]) -> None:
         account_ids = {account.id for account in accounts}
         stale_ids = [account_id for account_id in self._runtime if account_id not in account_ids]
@@ -172,7 +322,9 @@ class LoadBalancer:
         states: list[AccountState],
         account_map: dict[str, Account],
         sticky_key: str | None,
+        sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
+        sticky_max_age_seconds: int | None,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
@@ -183,6 +335,8 @@ class LoadBalancer:
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
             )
+        if sticky_kind is None:
+            raise ValueError("sticky_kind is required when sticky_key is provided")
 
         if reallocate_sticky:
             chosen = select_account(
@@ -191,14 +345,18 @@ class LoadBalancer:
                 routing_strategy=routing_strategy,
             )
             if chosen.account is not None and chosen.account.account_id in account_map:
-                await sticky_repo.upsert(sticky_key, chosen.account.account_id)
+                await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
             return chosen
 
-        existing = await sticky_repo.get_account_id(sticky_key)
+        existing = await sticky_repo.get_account_id(
+            sticky_key,
+            kind=sticky_kind,
+            max_age_seconds=sticky_max_age_seconds,
+        )
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is None:
-                await sticky_repo.delete(sticky_key)
+                await sticky_repo.delete(sticky_key, kind=sticky_kind)
             else:
                 pinned_result = select_account(
                     [pinned],
@@ -207,6 +365,8 @@ class LoadBalancer:
                     allow_backoff_fallback=False,
                 )
                 if pinned_result.account is not None:
+                    if sticky_max_age_seconds is not None:
+                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                     return pinned_result
 
         chosen = select_account(
@@ -215,7 +375,7 @@ class LoadBalancer:
             routing_strategy=routing_strategy,
         )
         if chosen.account is not None and chosen.account.account_id in account_map:
-            await sticky_repo.upsert(sticky_key, chosen.account.account_id)
+            await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
         return chosen
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
@@ -381,6 +541,23 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
     return [a for a in accounts if a.plan_type in allowed_plans]
 
 
+def _gated_limit_name_for_model(model: str | None) -> str | None:
+    return get_additional_quota_key_for_model_id(model)
+
+
+def _mapped_model_has_registry_entry(model: str | None) -> bool:
+    if model is None:
+        return False
+    registry = get_model_registry()
+    get_snapshot = getattr(registry, "get_snapshot", None)
+    if not callable(get_snapshot):
+        return False
+    snapshot = get_snapshot()
+    if snapshot is None:
+        return False
+    return model.strip().lower() in snapshot.model_plans
+
+
 def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
     return UsageWindowRow(
         account_id=entry.account_id,
@@ -399,3 +576,73 @@ def _clone_account(account: Account) -> Account:
 def _clone_usage_history(entry: UsageHistory) -> UsageHistory:
     data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
     return UsageHistory(**data)
+
+
+async def _latest_additional_by_key(
+    additional_usage_repo,
+    quota_key: str,
+    window: str,
+    *,
+    account_ids: list[str] | None = None,
+    since: datetime | None = None,
+) -> dict[str, AdditionalUsageHistory]:
+    resolved_quota_key = canonicalize_additional_quota_key(
+        quota_key=quota_key,
+        limit_name=quota_key,
+    )
+    if resolved_quota_key is None:
+        return {}
+    if hasattr(additional_usage_repo, "latest_by_quota_key"):
+        return await additional_usage_repo.latest_by_quota_key(
+            resolved_quota_key,
+            window,
+            account_ids=account_ids,
+            since=since,
+        )
+    return await additional_usage_repo.latest_by_account(
+        resolved_quota_key,
+        window,
+        account_ids=account_ids,
+        since=since,
+    )
+
+
+def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
+    current_time = now or utcnow()
+    interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
+    return current_time - timedelta(seconds=interval_seconds)
+
+
+def _additional_quota_eligibility(
+    *,
+    account_id: str,
+    latest_primary: dict[str, AdditionalUsageHistory],
+    latest_secondary: dict[str, AdditionalUsageHistory],
+    fresh_primary: dict[str, AdditionalUsageHistory],
+    fresh_secondary: dict[str, AdditionalUsageHistory],
+) -> str:
+    latest_primary_entry = latest_primary.get(account_id)
+    latest_secondary_entry = latest_secondary.get(account_id)
+    primary_entry = fresh_primary.get(account_id)
+    secondary_entry = fresh_secondary.get(account_id)
+
+    if latest_primary_entry is None and latest_secondary_entry is None:
+        return "data_unavailable"
+    if latest_primary_entry is not None and primary_entry is None:
+        return "data_unavailable"
+    if latest_secondary_entry is not None and secondary_entry is None:
+        return "data_unavailable"
+
+    if primary_entry is not None and _additional_usage_is_exhausted(primary_entry):
+        return "quota_exhausted"
+    if secondary_entry is not None and _additional_usage_is_exhausted(secondary_entry):
+        return "quota_exhausted"
+    return "eligible"
+
+
+def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
+    if entry.used_percent is None:
+        return False
+    if entry.reset_at is not None and int(entry.reset_at) <= int(time.time()):
+        return False
+    return float(entry.used_percent) >= 100.0

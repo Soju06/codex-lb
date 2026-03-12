@@ -1,5 +1,8 @@
+import { useState } from "react";
 import { Route } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -8,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
 export type RoutingSettingsProps = {
@@ -17,15 +21,17 @@ export type RoutingSettingsProps = {
 };
 
 export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
+  const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
+    String(settings.openaiCacheAffinityMaxAgeSeconds),
+  );
+
   const save = (patch: Partial<SettingsUpdateRequest>) =>
-    void onSave({
-      stickyThreadsEnabled: settings.stickyThreadsEnabled,
-      preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-      routingStrategy: settings.routingStrategy,
-      totpRequiredOnLogin: settings.totpRequiredOnLogin,
-      apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
-      ...patch,
-    });
+    void onSave(buildSettingsUpdateRequest(settings, patch));
+
+  const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
+  const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
+  const cacheAffinityTtlChanged =
+    cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -84,6 +90,42 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               disabled={busy}
               onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
             />
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">Prompt-cache affinity TTL</p>
+              <p className="text-xs text-muted-foreground">
+                Keep OpenAI-style prompt-cache mappings warm for a bounded number of seconds.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={1}
+                step={1}
+                inputMode="numeric"
+                value={cacheAffinityTtl}
+                disabled={busy}
+                onChange={(event) => setCacheAffinityTtl(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && cacheAffinityTtlChanged) {
+                    void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl });
+                  }
+                }}
+                className="h-8 w-28 text-xs"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={busy || !cacheAffinityTtlChanged}
+                onClick={() => void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl })}
+              >
+                Save TTL
+              </Button>
+            </div>
           </div>
         </div>
       </div>

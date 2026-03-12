@@ -49,7 +49,7 @@ from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import Account, StickySessionKind, UsageHistory
+from app.db.models import Account, DashboardSettings, StickySessionKind, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy.helpers import (
@@ -76,6 +76,7 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
@@ -861,11 +862,7 @@ class ProxyService:
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
-                    stream_timeout_tokens = push_stream_timeout_overrides(
-                        connect_timeout_seconds=effective_attempt_timeout,
-                        idle_timeout_seconds=effective_attempt_timeout,
-                        total_timeout_seconds=effective_attempt_timeout,
-                    )
+                    stream_timeout_tokens = _push_stream_attempt_timeout_overrides(effective_attempt_timeout)
                     try:
                         async for line in self._stream_once(
                             account,
@@ -986,11 +983,7 @@ class ProxyService:
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
-                        stream_timeout_tokens = push_stream_timeout_overrides(
-                            connect_timeout_seconds=effective_attempt_timeout,
-                            idle_timeout_seconds=effective_attempt_timeout,
-                            total_timeout_seconds=effective_attempt_timeout,
-                        )
+                        stream_timeout_tokens = _push_stream_attempt_timeout_overrides(effective_attempt_timeout)
                         try:
                             async for line in self._stream_once(
                                 account,
@@ -1504,7 +1497,9 @@ class ProxyService:
 
             additional_limits.append(
                 AdditionalRateLimitData(
-                    limit_name=limit_name,
+                    quota_key=limit_name,
+                    limit_name=first_entry.limit_name,
+                    display_label=get_additional_display_label_for_quota_key(limit_name) or first_entry.limit_name,
                     metered_feature=metered_feature,
                     rate_limit=rate_limit_details,
                 )
@@ -1671,13 +1666,23 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     return None
 
 
-def _routing_strategy(settings: object) -> RoutingStrategy:
-    value = getattr(settings, "routing_strategy", "usage_weighted")
+def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
+    value = settings.routing_strategy or "usage_weighted"
     return "round_robin" if value == "round_robin" else "usage_weighted"
 
 
 def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
+
+
+def _push_stream_attempt_timeout_overrides(
+    timeout_seconds: float,
+) -> tuple[float | None, float | None, float | None]:
+    return push_stream_timeout_overrides(
+        connect_timeout_seconds=timeout_seconds,
+        idle_timeout_seconds=timeout_seconds,
+        total_timeout_seconds=timeout_seconds,
+    )
 
 
 def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -11,6 +12,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.updater import UsageUpdater, _last_successful_refresh
 
 pytestmark = pytest.mark.unit
@@ -129,6 +131,7 @@ class AdditionalUsageEntry:
     used_percent: float
     reset_at: int | None
     window_minutes: int | None
+    quota_key: str | None = None
 
 
 class StubAdditionalUsageRepository:
@@ -148,11 +151,18 @@ class StubAdditionalUsageRepository:
         used_percent: float,
         reset_at: int | None = None,
         window_minutes: int | None = None,
+        recorded_at: datetime | None = None,
+        quota_key: str | None = None,
     ) -> None:
         self._written_accounts.add(account_id)
         self.entries.append(
             AdditionalUsageEntry(
                 account_id=account_id,
+                quota_key=quota_key
+                or canonicalize_additional_quota_key(
+                    limit_name=limit_name,
+                    metered_feature=metered_feature,
+                ),
                 limit_name=limit_name,
                 metered_feature=metered_feature,
                 window=window,
@@ -168,18 +178,60 @@ class StubAdditionalUsageRepository:
     async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
         self.deleted_account_limit_pairs.append((account_id, limit_name))
 
+    async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
+        self.deleted_account_limit_pairs.append((account_id, quota_key))
+
     async def delete_for_account_limit_window(self, account_id: str, limit_name: str, window: str) -> None:
         self.deleted_account_limit_windows.append((account_id, limit_name, window))
+
+    async def delete_for_account_quota_key_window(self, account_id: str, quota_key: str, window: str) -> None:
+        self.deleted_account_limit_windows.append((account_id, quota_key, window))
 
     async def latest_recorded_at_for_account(self, account_id: str):
         from app.core.utils.time import utcnow
 
         return utcnow() if account_id in self._written_accounts else None
 
-    async def list_limit_names(self, *, account_ids: list[str] | None = None) -> list[str]:
+    async def list_limit_names(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
         if account_ids is None:
             return sorted({entry.limit_name for entry in self.entries})
         return sorted({entry.limit_name for entry in self.entries if entry.account_id in account_ids})
+
+    async def list_quota_keys(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
+        if account_ids is None:
+            return sorted(
+                {
+                    entry.quota_key
+                    or canonicalize_additional_quota_key(
+                        limit_name=entry.limit_name,
+                        metered_feature=entry.metered_feature,
+                    )
+                    or entry.limit_name
+                    for entry in self.entries
+                }
+            )
+        return sorted(
+            {
+                entry.quota_key
+                or canonicalize_additional_quota_key(
+                    limit_name=entry.limit_name,
+                    metered_feature=entry.metered_feature,
+                )
+                or entry.limit_name
+                for entry in self.entries
+                if entry.account_id in account_ids
+            }
+        )
 
 
 def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@example.com") -> Account:
@@ -813,6 +865,166 @@ async def test_additional_rate_limits_written_to_additional_repo(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_additional_rate_limits_normalize_known_alias_to_canonical_quota_key(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "GPT-5.3-Codex-Spark",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12.0,
+                                "reset_at": 1735689600,
+                                "limit_window_seconds": 300,
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    additional_repo = StubAdditionalUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+
+    await updater.refresh_accounts([_make_account("acc_alias", "workspace_alias")], latest_usage={})
+
+    assert len(additional_repo.entries) == 1
+    entry = additional_repo.entries[0]
+    assert entry.quota_key == "codex_spark"
+    assert entry.limit_name == "GPT-5.3-Codex-Spark"
+    assert entry.metered_feature == "codex_bengalfox"
+
+
+@pytest.mark.asyncio
+async def test_additional_rate_limits_merge_aliases_before_pruning_quota(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "GPT-5.3-Codex-Spark",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12.0,
+                                "reset_at": 1735689600,
+                                "limit_window_seconds": 300,
+                            }
+                        },
+                    },
+                    {
+                        "limit_name": "codex_other",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": None,
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    additional_repo = StubAdditionalUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+
+    await updater.refresh_accounts([_make_account("acc_alias_merge", "workspace_alias_merge")], latest_usage={})
+
+    assert len(additional_repo.entries) == 1
+    entry = additional_repo.entries[0]
+    assert entry.quota_key == "codex_spark"
+    assert entry.limit_name == "GPT-5.3-Codex-Spark"
+    assert additional_repo.deleted_account_limit_pairs == []
+
+
+@pytest.mark.asyncio
+async def test_additional_rate_limits_merge_windows_across_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "GPT-5.3-Codex-Spark",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12.0,
+                                "reset_at": 1735689600,
+                                "limit_window_seconds": 300,
+                            }
+                        },
+                    },
+                    {
+                        "limit_name": "codex_other",
+                        "metered_feature": "codex_bengalfox",
+                        "rate_limit": {
+                            "secondary_window": {
+                                "used_percent": 33.0,
+                                "reset_at": 1735689700,
+                                "limit_window_seconds": 1800,
+                            }
+                        },
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    additional_repo = StubAdditionalUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+
+    await updater.refresh_accounts([_make_account("acc_alias_windows", "workspace_alias_windows")], latest_usage={})
+
+    assert len(additional_repo.entries) == 2
+    by_window = {entry.window: entry for entry in additional_repo.entries}
+    assert by_window["primary"].quota_key == "codex_spark"
+    assert by_window["secondary"].quota_key == "codex_spark"
+    assert additional_repo.deleted_account_limit_pairs == []
+
+
+@pytest.mark.asyncio
 async def test_additional_rate_limits_null_writes_nothing(monkeypatch) -> None:
     """When additional_rate_limits is null, no additional entries are written."""
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
@@ -1184,7 +1396,7 @@ async def test_additional_rate_limits_prune_stale_limit_names(monkeypatch) -> No
 
     await updater.refresh_accounts([acc], latest_usage={})
 
-    assert additional_repo.deleted_account_limit_pairs == [("acc_prune", "legacy-limit")]
+    assert additional_repo.deleted_account_limit_pairs == [("acc_prune", "legacy_limit")]
 
 
 @pytest.mark.asyncio
@@ -1252,7 +1464,7 @@ async def test_additional_rate_limits_prune_stale_secondary_window(monkeypatch) 
     await updater.refresh_accounts([acc], latest_usage={})
 
     assert additional_repo.deleted_account_limit_pairs == []
-    assert additional_repo.deleted_account_limit_windows == [("acc_secondary_prune", "o-pro", "secondary")]
+    assert additional_repo.deleted_account_limit_windows == [("acc_secondary_prune", "o_pro", "secondary")]
 
 
 @pytest.mark.asyncio

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models import AdditionalUsageHistory, Base
+from app.modules.usage.additional_quota_keys import clear_additional_quota_registry_cache
 from app.modules.usage.repository import AdditionalUsageRepository
 
 pytestmark = pytest.mark.unit
@@ -27,6 +30,31 @@ async def async_session() -> AsyncIterator[AsyncSession]:
         await session.close()
 
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _clear_registry_cache() -> Iterator[None]:
+    clear_additional_quota_registry_cache()
+    yield
+    clear_additional_quota_registry_cache()
+
+
+def _write_registry(path: Path, *, quota_key: str, quota_key_aliases: list[str] | None = None) -> None:
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "quota_key": quota_key,
+                    "quota_key_aliases": quota_key_aliases or [],
+                    "display_label": "Spark Enterprise",
+                    "model_ids": ["gpt-5.3-codex-spark"],
+                    "limit_name_aliases": ["codex_other"],
+                    "metered_feature_aliases": ["codex_bengalfox"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.asyncio
@@ -187,6 +215,61 @@ async def test_latest_by_account_filters_by_window(async_session: AsyncSession) 
     assert len(result) == 1
     assert result["acc_1"].window == "1m"
     assert result["acc_1"].used_percent == 30.0
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_canonicalizes_legacy_limit_name_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_1",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now,
+    )
+
+    result = await repo.latest_by_account(limit_name="GPT-5.3-Codex-Spark", window="primary")
+
+    assert list(result) == ["acc_1"]
+    assert result["acc_1"].quota_key == "codex_spark"
+    assert result["acc_1"].limit_name == "codex_other"
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_reads_rows_under_legacy_quota_key_alias(
+    async_session: AsyncSession,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    async_session.add(
+        AdditionalUsageHistory(
+            account_id="acc_legacy",
+            quota_key="codex_spark",
+            limit_name="codex_other",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=42.0,
+            recorded_at=now,
+        )
+    )
+    await async_session.commit()
+
+    result = await repo.latest_by_account(quota_key="spark_enterprise", window="primary")
+
+    assert list(result) == ["acc_legacy"]
+    assert result["acc_legacy"].quota_key == "codex_spark"
+    assert await repo.list_quota_keys() == ["spark_enterprise"]
 
 
 @pytest.mark.asyncio
@@ -463,6 +546,88 @@ async def test_history_since_empty_when_no_data(async_session: AsyncSession) -> 
 
 
 @pytest.mark.asyncio
+async def test_history_since_canonicalizes_legacy_limit_name_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_1",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now - timedelta(minutes=5),
+    )
+    await repo.add_entry(
+        account_id="acc_1",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=45.0,
+        recorded_at=now,
+    )
+
+    result = await repo.history_since(
+        account_id="acc_1",
+        limit_name="GPT-5.3-Codex-Spark",
+        window="primary",
+        since=now - timedelta(hours=1),
+    )
+
+    assert [entry.used_percent for entry in result] == [30.0, 45.0]
+    assert all(entry.quota_key == "codex_spark" for entry in result)
+
+
+@pytest.mark.asyncio
+async def test_history_since_reads_rows_under_legacy_quota_key_alias(
+    async_session: AsyncSession,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    async_session.add_all(
+        [
+            AdditionalUsageHistory(
+                account_id="acc_legacy",
+                quota_key="codex_spark",
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=20.0,
+                recorded_at=now - timedelta(minutes=5),
+            ),
+            AdditionalUsageHistory(
+                account_id="acc_legacy",
+                quota_key="codex_spark",
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=45.0,
+                recorded_at=now,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    result = await repo.history_since(
+        account_id="acc_legacy",
+        quota_key="spark_enterprise",
+        window="primary",
+        since=now - timedelta(hours=1),
+    )
+
+    assert [entry.used_percent for entry in result] == [20.0, 45.0]
+    assert all(entry.quota_key == "codex_spark" for entry in result)
+
+
+@pytest.mark.asyncio
 async def test_delete_for_account_removes_all_rows(async_session: AsyncSession) -> None:
     repo = AdditionalUsageRepository(async_session)
     now = datetime.now(tz=timezone.utc)
@@ -557,6 +722,95 @@ async def test_delete_for_account_and_limit_removes_only_matching_rows(async_ses
 
 
 @pytest.mark.asyncio
+async def test_delete_for_account_and_limit_canonicalizes_legacy_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now,
+    )
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="requests_per_hour",
+        metered_feature="api_calls",
+        window="primary",
+        used_percent=60.0,
+        recorded_at=now,
+    )
+
+    await repo.delete_for_account_and_limit("acc_delete", "GPT-5.3-Codex-Spark")
+
+    result = await async_session.execute(
+        select(AdditionalUsageHistory).order_by(
+            AdditionalUsageHistory.account_id,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.window,
+        )
+    )
+    entries = result.scalars().all()
+
+    assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
+        ("acc_delete", "requests_per_hour", "primary"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_for_account_and_quota_key_removes_rows_under_legacy_quota_key_alias(
+    async_session: AsyncSession,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    async_session.add(
+        AdditionalUsageHistory(
+            account_id="acc_delete",
+            quota_key="codex_spark",
+            limit_name="codex_other",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=30.0,
+            recorded_at=now,
+        )
+    )
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="requests_per_hour",
+        metered_feature="api_calls",
+        window="primary",
+        used_percent=60.0,
+        recorded_at=now,
+    )
+    await async_session.commit()
+
+    await repo.delete_for_account_and_quota_key("acc_delete", "spark_enterprise")
+
+    result = await async_session.execute(
+        select(AdditionalUsageHistory).order_by(
+            AdditionalUsageHistory.account_id,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.window,
+        )
+    )
+    entries = result.scalars().all()
+
+    assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
+        ("acc_delete", "requests_per_hour", "primary"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delete_for_account_limit_window_removes_only_matching_window(async_session: AsyncSession) -> None:
     repo = AdditionalUsageRepository(async_session)
     now = datetime.now(tz=timezone.utc)
@@ -600,4 +854,42 @@ async def test_delete_for_account_limit_window_removes_only_matching_window(asyn
     assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
         ("acc_delete", "requests_per_hour", "primary"),
         ("acc_delete", "requests_per_minute", "primary"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_for_account_limit_window_canonicalizes_legacy_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now,
+    )
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="secondary",
+        used_percent=35.0,
+        recorded_at=now,
+    )
+
+    await repo.delete_for_account_limit_window("acc_delete", "GPT-5.3-Codex-Spark", "secondary")
+
+    result = await async_session.execute(
+        select(AdditionalUsageHistory).order_by(
+            AdditionalUsageHistory.account_id,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.window,
+        )
+    )
+    entries = result.scalars().all()
+
+    assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
+        ("acc_delete", "codex_other", "primary"),
     ]

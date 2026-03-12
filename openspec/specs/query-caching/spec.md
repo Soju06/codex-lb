@@ -2,7 +2,6 @@
 
 ## Purpose
 TBD - created by syncing change query-optimization-and-caching. Update Purpose after archive.
-
 ## Requirements
 ### Requirement: Rate limit headers cache
 The system MUST cache rate-limit header calculations on the proxy request path with a TTL aligned to the usage refresh interval, and it MUST invalidate that cache immediately when a usage refresh cycle completes.
@@ -179,3 +178,61 @@ Status facet option loading MUST ignore the status facet's own filter values so 
 #### Scenario: Non-status filters still narrow the options
 - **WHEN** filters such as time range, model, or account are applied
 - **THEN** those filters still narrow the status options normally (SHALL)
+
+### Requirement: Request-path selection uses cached usage snapshots
+`LoadBalancer.select_account()` on the proxy request path MUST use persisted usage snapshots that are already available in `usage_history` and MUST NOT run `UsageUpdater.refresh_accounts()` inline. Freshness MUST be provided by the background usage refresh scheduler instead of synchronous per-request refresh.
+
+#### Scenario: Request-path selection skips inline usage refresh
+- **WHEN** a stream, compact, or transcription proxy request needs account selection
+- **THEN** `LoadBalancer.select_account()` MUST NOT call `UsageUpdater.refresh_accounts()` inline
+- **AND** selection MUST continue using the latest cached primary and secondary usage rows already stored in the database
+
+#### Scenario: Selection proceeds without cached usage rows
+- **WHEN** account selection runs before any usage snapshot exists for an otherwise active account
+- **THEN** selection MUST proceed using current account status and runtime state
+- **AND** the request path MUST NOT block on a synchronous usage refresh
+
+### Requirement: Gated model selection uses canonical additional-usage quota keys
+When a request targets an explicitly gated model, the selection path MUST resolve that model through a canonical `model -> quota_key` mapping and use persisted `additional_usage_history` rows for that `quota_key` before normal candidate selection continues.
+
+#### Scenario: Mapped model uses canonical quota key
+- **WHEN** a request targets `gpt-5.3-codex-spark`
+- **THEN** the selection path resolves the request through the mapped additional-usage `quota_key`
+- **AND** candidate eligibility is evaluated from persisted rows for that canonical `quota_key`
+
+### Requirement: Additional usage persistence normalizes upstream aliases to canonical quota keys
+Persisted additional-usage rows MUST record one internal canonical `quota_key` even when upstream changes raw `limit_name` or `metered_feature` aliases.
+
+#### Scenario: Upstream alias drift still lands on the same canonical key
+- **WHEN** the usage API returns a known Spark quota alias such as `GPT-5.3-Codex-Spark` instead of `codex_other`
+- **THEN** persistence stores the raw upstream fields for observability
+- **AND** it records the same canonical `quota_key` used by routing for that model
+- **AND** subsequent selection reads those rows through the canonical `quota_key`
+
+#### Scenario: Legacy stored quota key remains readable after a registry rename
+- **GIVEN** the registry renames a canonical additional-usage `quota_key`
+- **AND** it keeps the prior durable key as a configured legacy `quota_key` alias for that same quota family
+- **WHEN** selection, dashboard, or cleanup code reads or deletes persisted rows for the current canonical key
+- **THEN** rows written under the legacy `quota_key` remain available through the current canonical key
+- **AND** canonical list/read results surface the current key instead of the legacy durable alias
+
+### Requirement: Gated model selection fails closed on stale or missing quota data
+Explicitly mapped gated models MUST NOT fall back to the general account pool when their persisted additional-usage snapshot is stale, missing, or yields zero eligible accounts.
+
+#### Scenario: Stale additional-usage snapshot blocks mapped model routing
+- **WHEN** a mapped model request resolves to a `quota_key` whose latest persisted snapshot is older than the freshness threshold
+- **THEN** account selection returns no account
+- **AND** the proxy reports a stable gated-model selection error instead of routing through unrelated accounts
+
+#### Scenario: No eligible accounts for mapped quota key
+- **WHEN** a mapped model request resolves to a fresh `quota_key` snapshot but every candidate account is ineligible for that quota
+- **THEN** account selection returns no account
+- **AND** the proxy reports a stable `no_additional_quota_eligible_accounts` style error instead of falling back to non-eligible accounts
+
+### Requirement: Gated eligibility checks preserve balancer state semantics
+Additional-quota eligibility filtering MUST NOT mutate persisted account status or change the meaning of `AccountState` fields while computing the candidate set.
+
+#### Scenario: Eligibility pruning leaves persisted status unchanged
+- **WHEN** gated-model selection evaluates candidate accounts against persisted additional-usage rows
+- **THEN** it may read account status and runtime snapshots to decide eligibility
+- **AND** it MUST NOT persist status changes or rewrite shared runtime state unless a normal post-selection balancer transition occurs

@@ -76,8 +76,8 @@ async def test_additional_usage_persisted_to_db(db_setup):
 
         await additional_repo.add_entry(
             account_id=account_id,
-            limit_name="codex_other",
-            metered_feature="codex_other",
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
             window="primary",
             used_percent=70.0,
             reset_at=1741500000,
@@ -86,11 +86,12 @@ async def test_additional_usage_persisted_to_db(db_setup):
         )
 
         # Query back via repository
-        latest = await additional_repo.latest_by_account("codex_other", "primary")
+        latest = await additional_repo.latest_by_account("codex_spark", "primary")
         assert account_id in latest
 
         entry = latest[account_id]
-        assert entry.limit_name == "codex_other"
+        assert entry.quota_key == "codex_spark"
+        assert entry.limit_name == "GPT-5.3-Codex-Spark"
         assert entry.window == "primary"
         assert entry.used_percent == pytest.approx(70.0)
         assert entry.reset_at == 1741500000
@@ -120,8 +121,8 @@ async def test_accounts_list_returns_additional_quotas(async_client, db_setup):
         # Seed additional usage
         await additional_repo.add_entry(
             account_id=account_id,
-            limit_name="codex_other",
-            metered_feature="codex_other",
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
             window="primary",
             used_percent=55.0,
             reset_at=1741500000,
@@ -139,8 +140,10 @@ async def test_accounts_list_returns_additional_quotas(async_client, db_setup):
     assert len(account["additionalQuotas"]) >= 1
 
     quota = account["additionalQuotas"][0]
-    assert quota["limitName"] == "codex_other"
-    assert quota["meteredFeature"] == "codex_other"
+    assert quota["quotaKey"] == "codex_spark"
+    assert isinstance(quota["limitName"], str)
+    assert quota["displayLabel"] == "GPT-5.3-Codex-Spark"
+    assert quota["meteredFeature"] == "codex_bengalfox"
     assert quota["primaryWindow"] is not None
     assert quota["primaryWindow"]["usedPercent"] == pytest.approx(55.0)
 
@@ -193,8 +196,8 @@ async def test_dashboard_overview_omits_aggregated_additional_quotas_even_when_p
         )
         await additional_repo.add_entry(
             account_id=account_id,
-            limit_name="codex_other",
-            metered_feature="codex_other",
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
             window="primary",
             used_percent=55.0,
             reset_at=1741500000,

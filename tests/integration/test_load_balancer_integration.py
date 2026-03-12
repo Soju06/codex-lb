@@ -423,7 +423,7 @@ async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_s
         )
 
     balancer = LoadBalancer(_repo_factory)
-    selection = await balancer.select_account(additional_limit_name="codex_other")
+    selection = await balancer.select_account(additional_limit_name="codex_spark")
 
     assert selection.account is not None
     assert selection.account.id == eligible_account.id

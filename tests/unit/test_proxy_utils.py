@@ -1588,6 +1588,7 @@ async def test_process_upstream_websocket_text_does_not_match_foreign_response_i
         pending_requests=pending_requests,
         pending_lock=anyio.Lock(),
         api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
     )
 
     finalize_request_state.assert_not_awaited()

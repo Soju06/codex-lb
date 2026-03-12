@@ -538,6 +538,7 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         sticky_key = _sticky_key_from_session_header(headers) if codex_session_affinity else None
+        sticky_kind = StickySessionKind.CODEX_SESSION if sticky_key else None
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
         client_send_lock = anyio.Lock()
@@ -607,6 +608,7 @@ class ProxyService:
                     account, upstream = await self._connect_proxy_websocket(
                         filtered_headers,
                         sticky_key=sticky_key,
+                        sticky_kind=sticky_kind,
                         prefer_earlier_reset=prefer_earlier_reset,
                         routing_strategy=routing_strategy,
                         model=request_state.model,
@@ -669,6 +671,7 @@ class ProxyService:
         headers: dict[str, str],
         *,
         sticky_key: str | None,
+        sticky_kind: StickySessionKind | None,
         prefer_earlier_reset: bool,
         routing_strategy: RoutingStrategy,
         model: str | None,
@@ -678,6 +681,7 @@ class ProxyService:
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         selection = await self._load_balancer.select_account(
             sticky_key=sticky_key,
+            sticky_kind=sticky_kind,
             prefer_earlier_reset_accounts=prefer_earlier_reset,
             routing_strategy=routing_strategy,
             model=model,

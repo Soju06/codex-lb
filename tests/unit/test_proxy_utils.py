@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from typing import Protocol, cast
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
+from fastapi import WebSocket
 from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
@@ -1201,6 +1203,48 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
     assert select_account.await_count == 1
     record_error.assert_not_awaited()
     record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_sticky")
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    upstream = SimpleNamespace()
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(return_value=upstream))
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_1",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key="codex-session-1",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == account
+    assert selected_upstream is upstream
+    await_args = select_account.await_args
+    assert await_args is not None
+    assert await_args.kwargs["sticky_key"] == "codex-session-1"
+    assert await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
 
 
 @pytest.mark.asyncio

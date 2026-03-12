@@ -102,6 +102,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         headers,
         *,
         sticky_key,
+        sticky_kind,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -111,6 +112,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     ):
         seen["headers"] = dict(headers)
         seen["sticky_key"] = sticky_key
+        seen["sticky_kind"] = sticky_kind
         seen["prefer_earlier_reset"] = prefer_earlier_reset
         seen["routing_strategy"] = routing_strategy
         seen["model"] = model
@@ -155,6 +157,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
     assert seen["sticky_key"] == "thread-ws-1"
+    assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
     assert seen["model"] == "gpt-5.4"
@@ -195,6 +198,7 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         headers,
         *,
         sticky_key,
+        sticky_kind,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -202,7 +206,7 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         client_send_lock,
         websocket,
     ):
-        del headers, sticky_key, prefer_earlier_reset, routing_strategy, model, request_state, self
+        del headers, sticky_key, sticky_kind, prefer_earlier_reset, routing_strategy, model, request_state, self
         async with client_send_lock:
             await websocket.send_text(json.dumps({"type": "error", "status": 503, "error": {"code": "no_accounts"}}))
         return None, None

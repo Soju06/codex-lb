@@ -126,8 +126,12 @@ export function RecentRequestsTable({
                       <div className="text-xs text-muted-foreground">{time.date}</div>
                     </div>
                   </TableCell>
-                  <TableCell className={`align-top text-sm${isEmailLabel && blurred ? " privacy-blur" : " truncate"}`}>
-                    {accountLabel}
+                  <TableCell className="truncate align-top text-sm">
+                    {isEmailLabel && blurred ? (
+                      <span className="privacy-blur">{accountLabel}</span>
+                    ) : (
+                      accountLabel
+                    )}
                   </TableCell>
                   <TableCell className="truncate align-top text-xs text-muted-foreground">
                     {request.apiKeyName || "--"}

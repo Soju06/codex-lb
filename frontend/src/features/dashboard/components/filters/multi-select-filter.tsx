@@ -96,7 +96,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
               onSelect={(e) => e.preventDefault()}
             >
               <span className="flex min-w-0 flex-1 items-center gap-2">
-                <span className={blurred && option.isEmail ? "privacy-blur" : "truncate"}>{option.label}</span>
+                <span className={blurred && option.isEmail ? "truncate privacy-blur" : "truncate"}>{option.label}</span>
                 {option.isStale ? (
                   <Badge variant="secondary" className="text-[10px]">
                     Stale

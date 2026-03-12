@@ -7,8 +7,6 @@ Create Date: 2026-03-12 02:00:00.000000
 
 from __future__ import annotations
 
-from alembic import op
-
 # revision identifiers, used by Alembic.
 revision = "20260312_020000_merge_request_logs_transport_and_sticky_heads"
 down_revision = (

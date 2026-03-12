@@ -81,6 +81,7 @@ _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
         "x-codex-beta-features",
     }
 )
+_AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({403, 404, 426})
 
 logger = logging.getLogger(__name__)
 _STREAM_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
@@ -679,6 +680,13 @@ def _resolve_stream_transport(settings: object, model: str | None, headers: Mapp
     return "http"
 
 
+def _should_fallback_to_http_after_websocket_handshake_error(
+    transport_mode: str,
+    exc: aiohttp.WSServerHandshakeError,
+) -> bool:
+    return transport_mode == "auto" and exc.status in _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES
+
+
 async def _open_upstream_websocket(
     *,
     session: aiohttp.ClientSession,
@@ -774,20 +782,13 @@ async def _stream_responses_via_websocket(
         _remaining_total_timeout(effective_total_timeout, request_started_at, time.monotonic())
         or effective_connect_timeout,
     )
-    try:
-        websocket_cm, websocket = await _open_upstream_websocket(
-            session=client_session,
-            url=websocket_url,
-            headers=headers,
-            connect_timeout_seconds=connect_timeout_seconds,
-            max_msg_size=max_event_bytes,
-        )
-    except aiohttp.WSServerHandshakeError as exc:
-        payload = openai_error("upstream_error", str(exc))
-        if raise_for_status:
-            raise ProxyResponseError(exc.status, payload) from exc
-        yield format_sse_event(response_failed_event("upstream_error", str(exc), response_id=get_request_id()))
-        return
+    websocket_cm, websocket = await _open_upstream_websocket(
+        session=client_session,
+        url=websocket_url,
+        headers=headers,
+        connect_timeout_seconds=connect_timeout_seconds,
+        max_msg_size=max_event_bytes,
+    )
 
     try:
         send_json = getattr(websocket, "send_json", None)
@@ -1102,7 +1103,7 @@ async def stream_responses(
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/responses"
     pre_request_started_at = time.monotonic()
-    effective_total_timeout = _effective_stream_timeout(
+    request_total_timeout = _effective_stream_timeout(
         getattr(settings, "proxy_request_budget_seconds", 75.0),
         "total",
     )
@@ -1129,6 +1130,7 @@ async def stream_responses(
         if upstream_stream_transport_override is not None
         else settings
     )
+    transport_mode = _configured_stream_transport(stream_settings)
     transport = _resolve_stream_transport(stream_settings, payload.model, headers)
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
@@ -1136,17 +1138,51 @@ async def stream_responses(
     else:
         upstream_headers = _build_upstream_headers(headers, access_token, account_id)
         method = "POST"
-    effective_total_timeout = _remaining_total_timeout(
-        effective_total_timeout,
+    remaining_request_timeout = _remaining_total_timeout(
+        request_total_timeout,
         pre_request_started_at,
         time.monotonic(),
     )
     timeout = aiohttp.ClientTimeout(
-        total=effective_total_timeout,
+        total=remaining_request_timeout,
         sock_connect=effective_connect_timeout,
         sock_read=None,
     )
     started_at = time.monotonic()
+
+    async def _stream_via_http(current_headers: Mapping[str, str], current_timeout: aiohttp.ClientTimeout) -> AsyncIterator[str]:
+        nonlocal status_code, error_code, error_message, seen_terminal
+
+        async with client_session.post(
+            url,
+            json=payload_dict,
+            headers=current_headers,
+            timeout=current_timeout,
+        ) as resp:
+            status_code = resp.status
+            if resp.status >= 400:
+                if raise_for_status:
+                    error_payload = await _error_payload_from_response(resp)
+                    error_code, error_message = _error_details_from_envelope(error_payload)
+                    raise ProxyResponseError(resp.status, error_payload)
+                event = await _error_event_from_response(resp)
+                error_code, error_message = _error_details_from_failed_event(event)
+                yield format_sse_event(event)
+                return
+
+            async for event_block in _iter_sse_events(
+                resp,
+                effective_idle_timeout,
+                settings.max_sse_event_bytes,
+            ):
+                event_block = _normalize_sse_event_block(event_block)
+                event = parse_sse_event(event_block)
+                if event:
+                    event_type = event.type
+                    if event_type in ("response.completed", "response.failed", "response.incomplete"):
+                        seen_terminal = True
+                yield event_block
+
     _maybe_log_upstream_request_start(
         kind="responses",
         url=url,
@@ -1159,57 +1195,87 @@ async def stream_responses(
     )
     try:
         if transport == "websocket":
-            async for event_block in _stream_responses_via_websocket(
-                payload_dict=payload_dict,
-                url=url,
-                headers=upstream_headers,
-                client_session=client_session,
-                effective_total_timeout=(
-                    effective_total_timeout or getattr(settings, "proxy_request_budget_seconds", 75.0)
-                ),
-                effective_connect_timeout=effective_connect_timeout,
-                effective_idle_timeout=effective_idle_timeout,
-                max_event_bytes=settings.max_sse_event_bytes,
-                raise_for_status=raise_for_status,
-            ):
-                if status_code is None:
-                    status_code = 101
-                event = parse_sse_event(event_block)
-                if event:
-                    event_type = event.type
-                    if event_type in ("response.completed", "response.failed", "response.incomplete"):
-                        seen_terminal = True
-                yield event_block
-        else:
-            async with client_session.post(
-                url,
-                json=payload_dict,
-                headers=upstream_headers,
-                timeout=timeout,
-            ) as resp:
-                status_code = resp.status
-                if resp.status >= 400:
-                    if raise_for_status:
-                        error_payload = await _error_payload_from_response(resp)
-                        error_code, error_message = _error_details_from_envelope(error_payload)
-                        raise ProxyResponseError(resp.status, error_payload)
-                    event = await _error_event_from_response(resp)
-                    error_code, error_message = _error_details_from_failed_event(event)
-                    yield format_sse_event(event)
-                    return
-
-                async for event_block in _iter_sse_events(
-                    resp,
-                    effective_idle_timeout,
-                    settings.max_sse_event_bytes,
+            try:
+                async for event_block in _stream_responses_via_websocket(
+                    payload_dict=payload_dict,
+                    url=url,
+                    headers=upstream_headers,
+                    client_session=client_session,
+                    effective_total_timeout=(
+                        remaining_request_timeout or getattr(settings, "proxy_request_budget_seconds", 75.0)
+                    ),
+                    effective_connect_timeout=effective_connect_timeout,
+                    effective_idle_timeout=effective_idle_timeout,
+                    max_event_bytes=settings.max_sse_event_bytes,
+                    raise_for_status=raise_for_status,
                 ):
-                    event_block = _normalize_sse_event_block(event_block)
+                    if status_code is None:
+                        status_code = 101
                     event = parse_sse_event(event_block)
                     if event:
                         event_type = event.type
                         if event_type in ("response.completed", "response.failed", "response.incomplete"):
                             seen_terminal = True
                     yield event_block
+            except aiohttp.WSServerHandshakeError as exc:
+                if not _should_fallback_to_http_after_websocket_handshake_error(transport_mode, exc):
+                    payload = openai_error("upstream_error", str(exc))
+                    status_code = exc.status
+                    error_code = "upstream_error"
+                    error_message = str(exc)
+                    if raise_for_status:
+                        raise ProxyResponseError(exc.status, payload) from exc
+                    yield format_sse_event(
+                        response_failed_event("upstream_error", str(exc), response_id=get_request_id())
+                    )
+                    return
+
+                logger.warning(
+                    "upstream_websocket_handshake_rejected request_id=%s status=%s target=%s retrying_transport=http",
+                    get_request_id(),
+                    exc.status,
+                    _summarize_upstream_target(url),
+                )
+                _maybe_log_upstream_request_complete(
+                    kind="responses",
+                    url=url,
+                    headers=upstream_headers,
+                    method=method,
+                    started_at=started_at,
+                    status_code=exc.status,
+                    error_code="upstream_websocket_handshake_rejected",
+                    error_message=str(exc),
+                )
+
+                transport = "http"
+                upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+                method = "POST"
+                remaining_request_timeout = _remaining_total_timeout(
+                    request_total_timeout,
+                    pre_request_started_at,
+                    time.monotonic(),
+                )
+                timeout = aiohttp.ClientTimeout(
+                    total=remaining_request_timeout,
+                    sock_connect=effective_connect_timeout,
+                    sock_read=None,
+                )
+                started_at = time.monotonic()
+                _maybe_log_upstream_request_start(
+                    kind="responses",
+                    url=url,
+                    headers=upstream_headers,
+                    method=method,
+                    payload_summary=_summarize_json_payload(payload_dict),
+                    payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+                    if settings.log_upstream_request_payload
+                    else None,
+                )
+                async for event_block in _stream_via_http(upstream_headers, timeout):
+                    yield event_block
+        else:
+            async for event_block in _stream_via_http(upstream_headers, timeout):
+                yield event_block
     except ProxyResponseError as exc:
         status_code = exc.status_code
         raise

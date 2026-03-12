@@ -11,6 +11,12 @@ For streaming Codex/Responses proxy requests, the system MUST let operators choo
 - **WHEN** the dashboard setting `upstream_stream_transport` is set to `"http"`
 - **THEN** streaming upstream `/backend-api/codex/responses` traffic MUST use the existing HTTP Responses transport
 
+#### Scenario: Auto transport falls back when websocket upgrades are rejected
+- **WHEN** the resolved upstream transport strategy is `"auto"`
+- **AND** the proxy initially selects the native Responses WebSocket transport
+- **AND** the upstream rejects the websocket upgrade with HTTP `403`, `404`, or `426`
+- **THEN** the proxy MUST retry the same streaming request over the existing HTTP Responses transport before failing the client stream
+
 ### Requirement: Fast service tier aliases priority upstream
 When a Responses request includes `service_tier: "fast"`, the service MUST preserve the requested tier for local observability while normalizing the outbound upstream payload to `service_tier: "priority"`.
 

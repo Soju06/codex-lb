@@ -22,19 +22,26 @@ For streaming Codex/Responses proxy requests, the system MUST let operators choo
 - **AND** it does not include an allowlisted native Codex `originator` or explicit Codex websocket feature headers
 - **THEN** the `"auto"` transport strategy MUST keep using the existing HTTP Responses transport unless model preference selects websocket
 
+#### Scenario: Auto transport honors websocket-preferred bootstrap models before registry warmup
+- **WHEN** the upstream transport strategy is `"auto"`
+- **AND** the model registry snapshot has not loaded yet
+- **AND** the request targets a locally bootstrapped websocket-preferred model
+- **THEN** the proxy MUST still select the native Responses WebSocket transport
+
 #### Scenario: Websocket upstream handshake strips hop-by-hop inbound headers
 - **WHEN** streaming upstream traffic uses the native Responses WebSocket transport
 - **THEN** the upstream websocket handshake MUST omit hop-by-hop request headers such as `Connection`, `Keep-Alive`, `Transfer-Encoding`, and `Upgrade`
 - **AND** the proxy MUST also omit any additional header names named by the inbound `Connection` header before calling the upstream websocket client
 
-### Requirement: Fast service tier aliases priority upstream
-When a Responses request includes `service_tier: "fast"`, the service MUST preserve the requested tier for local observability while normalizing the outbound upstream payload to `service_tier: "priority"`.
+### Requirement: Fast service tier aliases canonical priority locally and upstream
+When a Responses request includes `service_tier: "fast"`, the service MUST canonicalize that alias to `service_tier: "priority"` for local billable state and outbound upstream payloads.
 
 #### Scenario: Fast mode request remains locally visible
 - **WHEN** a client sends a valid Responses request with `service_tier: "fast"`
 - **THEN** the proxy accepts the request
+- **AND** the local request state uses the canonical value `"priority"`
 - **AND** the outbound upstream request uses `service_tier: "priority"`
-- **AND** operators can still observe the requested tier separately from the persisted billable request-log tier
+- **AND** operators can still compare requested-versus-actual tier behavior without persisting the raw alias into billable request logs
 
 ### Requirement: Streaming request logs preserve the billable service tier
 When a streaming Responses request completes, the persisted request log MUST keep the effective service tier used for pricing and summaries, while requested-versus-actual tier comparison remains an observability concern outside the billable `service_tier` field.

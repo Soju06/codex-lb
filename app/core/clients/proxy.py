@@ -695,7 +695,14 @@ def _resolve_stream_transport(settings: object, model: str | None, headers: Mapp
     if _has_native_codex_transport_headers(headers):
         return "websocket"
 
-    snapshot = get_model_registry().get_snapshot()
+    registry = get_model_registry()
+    prefers_websockets = getattr(registry, "prefers_websockets", None)
+    if callable(prefers_websockets):
+        if prefers_websockets(model):
+            return "websocket"
+        return "http"
+
+    snapshot = registry.get_snapshot()
     if snapshot is None or not isinstance(model, str):
         return "http"
     upstream_model = snapshot.models.get(model)

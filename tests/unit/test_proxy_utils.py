@@ -1405,6 +1405,55 @@ async def test_stream_responses_auto_transport_uses_model_preference(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_auto_transport_uses_bootstrap_model_preference_when_registry_unloaded(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "auto"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "get_model_registry", lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"))
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    websocket = _WsResponse(
+        [
+            SimpleNamespace(
+                type=proxy_module.aiohttp.WSMsgType.TEXT,
+                data='{"type":"response.completed","response":{"id":"resp_auto_bootstrap"}}',
+            )
+        ]
+    )
+    session = _WsSession(websocket)
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert session.ws_calls
+    assert not getattr(session, "post_calls", [])
+    assert events == [
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_auto_bootstrap"}}\n\n'
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_auto_transport_keeps_http_for_bare_session_affinity(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

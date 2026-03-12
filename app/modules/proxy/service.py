@@ -2005,4 +2005,8 @@ def _normalize_service_tier_value(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()
-    return stripped or None
+    if not stripped:
+        return None
+    if stripped.lower() == "fast":
+        return "priority"
+    return stripped

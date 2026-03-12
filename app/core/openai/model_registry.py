@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 
 from app.core.types import JsonValue
 
@@ -41,6 +42,9 @@ class ModelRegistrySnapshot:
     fetched_at: float
 
 
+_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = ("gpt-5.4",)
+
+
 class ModelRegistry:
     def __init__(self, *, ttl_seconds: float = 300.0) -> None:
         if ttl_seconds <= 0:
@@ -55,6 +59,20 @@ class ModelRegistry:
         if self._snapshot is None:
             return None
         return self._snapshot.model_plans.get(slug, frozenset())
+
+    def prefers_websockets(self, slug: str | None) -> bool:
+        if not isinstance(slug, str):
+            return False
+        normalized_slug = slug.strip().lower()
+        if not normalized_slug:
+            return False
+
+        if self._snapshot is not None:
+            model = self._snapshot.models.get(slug) or self._snapshot.models.get(normalized_slug)
+            if model is not None:
+                return model.prefer_websockets
+
+        return any(fnmatchcase(normalized_slug, pattern) for pattern in _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS)
 
     def needs_refresh(self) -> bool:
         if self._snapshot is None:

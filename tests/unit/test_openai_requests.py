@@ -82,7 +82,7 @@ def test_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     }
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.service_tier == "fast"
+    assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
 
@@ -113,7 +113,7 @@ def test_compact_normalizes_fast_service_tier_to_priority_for_upstream():
     }
     request = ResponsesCompactRequest.model_validate(payload)
 
-    assert request.model_extra == {"service_tier": "fast"}
+    assert request.model_extra == {"service_tier": "priority"}
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
 
@@ -199,7 +199,7 @@ def test_v1_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     }
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
-    assert request.service_tier == "fast"
+    assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
 

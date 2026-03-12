@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -61,6 +62,22 @@ def test_plan_types_for_model_returns_plans():
     assert registry.plan_types_for_model("model-a") == frozenset({"plus", "pro"})
     assert registry.plan_types_for_model("model-b") == frozenset({"plus"})
     assert registry.plan_types_for_model("model-c") == frozenset({"pro"})
+
+
+def test_prefers_websockets_uses_snapshot_value():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    preferred = replace(_model("model-ws"), prefer_websockets=True)
+    registry.update({"plus": [preferred]})
+
+    assert registry.prefers_websockets("model-ws") is True
+    assert registry.prefers_websockets("unknown-model") is False
+
+
+def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
+    registry = ModelRegistry(ttl_seconds=60.0)
+
+    assert registry.prefers_websockets("gpt-5.4") is True
+    assert registry.prefers_websockets("gpt-5.1") is False
 
 
 def test_update_merges_models_across_plans():

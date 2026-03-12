@@ -578,6 +578,7 @@ class ProxyService:
                 text_data = message.get("text")
                 bytes_data = message.get("bytes")
                 request_state: _WebSocketRequestState | None = None
+                request_state_registered = False
 
                 if text_data is not None:
                     payload = _parse_websocket_payload(text_data)
@@ -625,6 +626,11 @@ class ProxyService:
                     upstream = None
                     account = None
 
+                if request_state is not None:
+                    async with pending_lock:
+                        pending_requests.append(request_state)
+                    request_state_registered = True
+
                 if upstream is None:
                     if request_state is None:
                         async with client_send_lock:
@@ -654,6 +660,10 @@ class ProxyService:
                         websocket=websocket,
                     )
                     if upstream is None or account is None:
+                        if request_state_registered:
+                            async with pending_lock:
+                                if request_state in pending_requests:
+                                    pending_requests.remove(request_state)
                         continue
                     upstream_control = _WebSocketUpstreamControl()
                     upstream_reader = asyncio.create_task(
@@ -670,10 +680,6 @@ class ProxyService:
                         )
                     )
 
-                if request_state is not None:
-                    async with pending_lock:
-                        pending_requests.append(request_state)
-
                 try:
                     if text_data is not None:
                         await upstream.send_text(text_data)
@@ -681,10 +687,13 @@ class ProxyService:
                         await upstream.send_bytes(bytes_data)
                 except Exception:
                     if request_state is not None:
+                        removed_request_state = False
                         async with pending_lock:
-                            if pending_requests and pending_requests[-1] is request_state:
-                                pending_requests.pop()
-                        await self._release_websocket_reservation(request_state.api_key_reservation)
+                            if request_state in pending_requests:
+                                pending_requests.remove(request_state)
+                                removed_request_state = True
+                        if removed_request_state:
+                            await self._release_websocket_reservation(request_state.api_key_reservation)
                     raise
         finally:
             if upstream_reader is not None:
@@ -953,7 +962,7 @@ class ProxyService:
                 request_state = _assign_websocket_response_id(pending_requests, response_id)
             elif response_id is not None:
                 request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
-            elif len(pending_requests) == 1:
+            elif response_id is None and len(pending_requests) == 1:
                 request_state = pending_requests[0]
             if request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
@@ -2484,7 +2493,7 @@ def _pop_terminal_websocket_request_state(
         request_state = unresolved_requests[0]
         pending_requests.remove(request_state)
         return request_state
-    if len(pending_requests) == 1:
+    if response_id is None and len(pending_requests) == 1:
         return pending_requests.popleft()
     return None
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from types import SimpleNamespace
 from typing import Protocol, cast
 from unittest.mock import AsyncMock
@@ -1549,6 +1550,48 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     assert handle_args.args[0] == account
     assert handle_args.args[2] == "rate_limit_exceeded"
     assert failed_upstream_control.reconnect_requested is True
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_does_not_match_foreign_response_id_to_only_pending_request(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_pending")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_pending",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_a",
+    )
+    pending_requests = deque([pending_request])
+    payload = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ws_b",
+            "usage": {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
+        },
+    }
+
+    await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+    )
+
+    finalize_request_state.assert_not_awaited()
+    assert list(pending_requests) == [pending_request]
 
 
 @pytest.mark.asyncio

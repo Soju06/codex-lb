@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from types import SimpleNamespace
 from typing import cast
 
@@ -51,6 +52,24 @@ class _FakeUpstreamWebSocket:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _SequencedUpstreamWebSocket(_FakeUpstreamWebSocket):
+    def __init__(
+        self,
+        messages: list[_FakeUpstreamMessage],
+        *,
+        deferred_message_batches: list[list[_FakeUpstreamMessage]] | None = None,
+    ) -> None:
+        super().__init__(messages)
+        self._deferred_message_batches = deque(deferred_message_batches or [])
+
+    async def send_text(self, text: str) -> None:
+        await super().send_text(text)
+        if not self._deferred_message_batches:
+            return
+        for message in self._deferred_message_batches.popleft():
+            self._messages.put_nowait(message)
 
 
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
@@ -394,36 +413,43 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
                 separators=(",", ":"),
             ),
         ),
-        _FakeUpstreamMessage(
-            "text",
-            text=json.dumps(
-                {
-                    "type": "response.completed",
-                    "response": {
-                        "id": "resp_ws_b",
-                        "status": "completed",
-                        "usage": {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
-                    },
-                },
-                separators=(",", ":"),
-            ),
-        ),
-        _FakeUpstreamMessage(
-            "text",
-            text=json.dumps(
-                {
-                    "type": "response.completed",
-                    "response": {
-                        "id": "resp_ws_a",
-                        "status": "completed",
-                        "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
-                    },
-                },
-                separators=(",", ":"),
-            ),
-        ),
     ]
-    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+    fake_upstream = _SequencedUpstreamWebSocket(
+        upstream_messages,
+        deferred_message_batches=[
+            [],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_ws_b",
+                                "status": "completed",
+                                "usage": {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_ws_a",
+                                "status": "completed",
+                                "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        ],
+    )
     log_calls: list[dict[str, object]] = []
 
     class _FakeSettingsCache:

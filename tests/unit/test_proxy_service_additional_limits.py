@@ -69,9 +69,22 @@ class StubAdditionalUsageRepository:
     async def list_limit_names(self, *, account_ids: list[str] | None = None) -> list[str]:
         return self._limit_names
 
-    async def latest_by_account(self, limit_name: str, window: str) -> dict[str, AdditionalUsageHistory]:
+    async def latest_by_account(
+        self,
+        limit_name: str,
+        window: str,
+        *,
+        account_ids: list[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
         source = self._secondary if window == "secondary" else self._primary
-        return source.get(limit_name, {})
+        rows = dict(source.get(limit_name, {}))
+        if account_ids is not None:
+            allowed = set(account_ids)
+            rows = {account_id: entry for account_id, entry in rows.items() if account_id in allowed}
+        if since is not None:
+            rows = {account_id: entry for account_id, entry in rows.items() if entry.recorded_at >= since}
+        return rows
 
 
 @pytest.mark.asyncio

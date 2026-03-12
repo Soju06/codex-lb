@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 
@@ -15,7 +15,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -49,6 +49,48 @@ async def test_proxy_compact_no_accounts(async_client):
     assert response.status_code == 503
     error = response.json()["error"]
     assert error["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_surfaces_no_additional_quota_eligible_accounts(async_client):
+    email = "compact-gated@example.com"
+    raw_account_id = "acc_compact_gated"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        additional_repo = AdditionalUsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=expected_account_id,
+            used_percent=25.0,
+            window="primary",
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+            recorded_at=now,
+        )
+        await additional_repo.add_entry(
+            account_id=expected_account_id,
+            limit_name="codex_other",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=100.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+            recorded_at=now,
+        )
+
+    payload = {"model": "gpt-5.3-codex-spark", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "no_additional_quota_eligible_accounts"
 
 
 @pytest.mark.asyncio

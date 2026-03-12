@@ -2,19 +2,34 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.openai.model_registry import ModelRegistrySnapshot
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, StickySession, StickySessionKind, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    AdditionalUsageHistory,
+    StickySession,
+    StickySessionKind,
+    UsageHistory,
+)
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState
+from app.modules.proxy.load_balancer import (
+    ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
+    NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS,
+    NO_PLAN_SUPPORT_FOR_MODEL,
+    LoadBalancer,
+    RuntimeState,
+)
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -119,8 +134,57 @@ class StubApiKeysRepository(ApiKeysRepository):
 
 
 class StubAdditionalUsageRepository(AdditionalUsageRepository):
-    def __init__(self) -> None:
-        pass
+    def __init__(
+        self,
+        primary: dict[str, AdditionalUsageHistory] | None = None,
+        secondary: dict[str, AdditionalUsageHistory] | None = None,
+    ) -> None:
+        self._primary = primary or {}
+        self._secondary = secondary or {}
+
+    async def latest_by_account(
+        self,
+        limit_name: str,
+        window: str,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
+        if window == "secondary":
+            source = self._secondary
+        else:
+            source = self._primary
+        rows = source
+        if account_ids is not None:
+            account_id_set = set(account_ids)
+            rows = {account_id: entry for account_id, entry in rows.items() if account_id in account_id_set}
+        if since is not None:
+            rows = {account_id: entry for account_id, entry in rows.items() if entry.recorded_at >= since}
+        return dict(rows)
+
+
+def _additional_entry(
+    entry_id: int,
+    *,
+    account_id: str,
+    window: str,
+    used_percent: float,
+    recorded_at: datetime | None = None,
+    limit_name: str = "codex_other",
+    reset_at: int = 1741500000,
+) -> AdditionalUsageHistory:
+    now = recorded_at or utcnow()
+    return AdditionalUsageHistory(
+        id=entry_id,
+        account_id=account_id,
+        limit_name=limit_name,
+        metered_feature="codex_bengalfox",
+        window=window,
+        used_percent=used_percent,
+        reset_at=reset_at,
+        window_minutes=5 if window == "primary" else 10080,
+        recorded_at=now,
+    )
 
 
 @asynccontextmanager
@@ -128,6 +192,7 @@ async def _repo_factory(
     accounts_repo: StubAccountsRepository,
     usage_repo: StubUsageRepository,
     sticky_repo: StubStickySessionsRepository,
+    additional_usage_repo: StubAdditionalUsageRepository | None = None,
 ) -> AsyncIterator[ProxyRepositories]:
     yield ProxyRepositories(
         accounts=accounts_repo,
@@ -135,7 +200,7 @@ async def _repo_factory(
         request_logs=StubRequestLogsRepository(),
         sticky_sessions=sticky_repo,
         api_keys=StubApiKeysRepository(),
-        additional_usage=StubAdditionalUsageRepository(),
+        additional_usage=additional_usage_repo or StubAdditionalUsageRepository(),
     )
 
 
@@ -251,6 +316,137 @@ async def test_select_account_proceeds_without_cached_usage_rows(monkeypatch) ->
     assert selection.account.id == account.id
     assert usage_repo.primary_calls == 1
     assert usage_repo.secondary_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_select_account_prefilters_accounts_by_additional_usage_limit() -> None:
+    account_ineligible = _make_account("acc-additional-exhausted", email="full@example.com")
+    account_eligible = _make_account("acc-additional-eligible", email="ok@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account_ineligible.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=20.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    primary_entry_ok = UsageHistory(
+        id=2,
+        account_id=account_eligible.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+
+    accounts_repo = StubAccountsRepository([account_ineligible, account_eligible])
+    usage_repo = StubUsageRepository(
+        primary={account_ineligible.id: primary_entry, account_eligible.id: primary_entry_ok},
+        secondary={},
+    )
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account_ineligible.id: _additional_entry(
+                11,
+                account_id=account_ineligible.id,
+                window="primary",
+                used_percent=100.0,
+                recorded_at=now,
+            ),
+            account_eligible.id: _additional_entry(
+                12,
+                account_id=account_eligible.id,
+                window="primary",
+                used_percent=35.0,
+                recorded_at=now,
+            ),
+        }
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(additional_limit_name="codex_other")
+
+    assert selection.account is not None
+    assert selection.account.id == account_eligible.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_requires_fresh_additional_usage_data(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(usage_refresh_interval_seconds=600),
+    )
+
+    account_stale = _make_account("acc-additional-stale", email="stale@example.com")
+    account_fresh = _make_account("acc-additional-fresh", email="fresh@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_rows = {
+        account_stale.id: UsageHistory(
+            id=21,
+            account_id=account_stale.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=15.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        account_fresh.id: UsageHistory(
+            id=22,
+            account_id=account_fresh.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    accounts_repo = StubAccountsRepository([account_stale, account_fresh])
+    usage_repo = StubUsageRepository(primary=usage_rows, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account_stale.id: _additional_entry(
+                31,
+                account_id=account_stale.id,
+                window="primary",
+                used_percent=5.0,
+                recorded_at=now - timedelta(seconds=1201),
+            ),
+            account_fresh.id: _additional_entry(
+                32,
+                account_id=account_fresh.id,
+                window="primary",
+                used_percent=5.0,
+                recorded_at=now - timedelta(seconds=1199),
+            ),
+        }
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(additional_limit_name="codex_other")
+
+    assert selection.account is not None
+    assert selection.account.id == account_fresh.id
 
 
 @pytest.mark.asyncio
@@ -485,7 +681,7 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
         yield ProxyRepositories(
             accounts=accounts_repo,
             usage=usage_repo,
-            additional_usage=object(),  # type: ignore[arg-type]
+            additional_usage=StubAdditionalUsageRepository(),
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,
             api_keys=object(),  # type: ignore[arg-type]
@@ -506,3 +702,463 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
     release_accounts.set()
     selection = await select_task
     assert selection.account is not None
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
+    account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(model_plans={}),
+            plan_types_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_respects_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
+    account = _make_account("acc-gated-plan-filtered", "gated-plan-filtered@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: ModelRegistrySnapshot(
+                models={},
+                model_plans={"gpt-5.3-codex-spark": frozenset({"pro"})},
+                plan_models={"pro": frozenset({"gpt-5.3-codex-spark"})},
+                fetched_at=0.0,
+            ),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+
+@pytest.mark.asyncio
+async def test_select_account_returns_plan_support_error_for_ungated_model(monkeypatch) -> None:
+    account = _make_account("acc-ungated-plan-filtered", "ungated-plan-filtered@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex")
+
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex'"
+
+
+@pytest.mark.asyncio
+async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_request(monkeypatch) -> None:
+    accounts_repo = StubAccountsRepository([])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex")
+
+    assert selection.account is None
+    assert selection.error_code is None
+    assert selection.error_message == "No available accounts"
+
+
+@pytest.mark.asyncio
+async def test_select_account_returns_data_unavailable_error_for_mapped_model(monkeypatch) -> None:
+    account = _make_account("acc-gated-stale", "gated-stale@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                recorded_at=now - timedelta(seconds=181),
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == ADDITIONAL_QUOTA_DATA_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_select_account_returns_data_unavailable_when_secondary_window_is_stale(monkeypatch) -> None:
+    account = _make_account("acc-gated-stale-secondary", "gated-stale-secondary@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+        secondary={
+            account.id: _additional_entry(
+                3,
+                account_id=account.id,
+                window="secondary",
+                used_percent=20.0,
+                reset_at=now_epoch + 3600,
+                recorded_at=now - timedelta(seconds=181),
+            )
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == ADDITIONAL_QUOTA_DATA_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_select_account_allows_primary_only_account_when_other_account_has_secondary_history(
+    monkeypatch,
+) -> None:
+    primary_only_account = _make_account("acc-primary-only", "primary-only@example.com")
+    stale_secondary_account = _make_account("acc-stale-secondary", "stale-secondary@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_rows = {
+        primary_only_account.id: UsageHistory(
+            id=1,
+            account_id=primary_only_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=5.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        stale_secondary_account.id: UsageHistory(
+            id=2,
+            account_id=stale_secondary_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=5.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    accounts_repo = StubAccountsRepository([primary_only_account, stale_secondary_account])
+    usage_repo = StubUsageRepository(primary=usage_rows, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            primary_only_account.id: _additional_entry(
+                11,
+                account_id=primary_only_account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            ),
+            stale_secondary_account.id: _additional_entry(
+                12,
+                account_id=stale_secondary_account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            ),
+        },
+        secondary={
+            stale_secondary_account.id: _additional_entry(
+                13,
+                account_id=stale_secondary_account.id,
+                window="secondary",
+                used_percent=20.0,
+                reset_at=now_epoch + 3600,
+                recorded_at=now - timedelta(seconds=181),
+            ),
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == primary_only_account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_returns_no_eligible_error_for_mapped_model(monkeypatch) -> None:
+    account = _make_account("acc-gated-exhausted", "gated-exhausted@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=100.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+        secondary={
+            account.id: _additional_entry(
+                3,
+                account_id=account.id,
+                window="secondary",
+                used_percent=10.0,
+                reset_at=now_epoch + 3600,
+                recorded_at=now,
+            )
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
+
+
+@pytest.mark.asyncio
+async def test_select_account_additional_limit_filter_does_not_mutate_account_status(monkeypatch) -> None:
+    account = _make_account("acc-gated-status-stable", "status-stable@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.ACTIVE
+    assert account.deactivation_reason is None

@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.4.0](https://github.com/Soju06/codex-lb/compare/v1.3.2...v1.4.0) (2026-03-11)
+
+
+### Features
+
+* **proxy:** bound request latency across proxy paths ([#178](https://github.com/Soju06/codex-lb/issues/178)) ([3ca7124](https://github.com/Soju06/codex-lb/commit/3ca71249b20971f0f9d3ab86fe45d8d5bbf2ccaa))
+
+
+### Bug Fixes
+
+* **proxy:** route gated models by additional usage ([#173](https://github.com/Soju06/codex-lb/issues/173)) ([73bf90c](https://github.com/Soju06/codex-lb/commit/73bf90cc477628e780a95c5e22c09406f3d7c62d))
+
+## [1.3.2](https://github.com/Soju06/codex-lb/compare/v1.3.1...v1.3.2) (2026-03-10)
+
+
+### Bug Fixes
+
+* **db:** add migration to normalize postgresql enum value casing ([#170](https://github.com/Soju06/codex-lb/issues/170)) ([e597fd6](https://github.com/Soju06/codex-lb/commit/e597fd6af983481acfdbe489bbd73bb39a2d6b7c))
+
+## [1.3.1](https://github.com/Soju06/codex-lb/compare/v1.3.0...v1.3.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* **proxy:** avoid refresh blocking and dedupe stale refreshes ([#162](https://github.com/Soju06/codex-lb/issues/162)) ([3b2fbd5](https://github.com/Soju06/codex-lb/commit/3b2fbd526711dee3eb09a60321a8972fe33baefd))
+* **proxy:** decouple usage refresh from request selection ([#155](https://github.com/Soju06/codex-lb/issues/155)) ([dddd961](https://github.com/Soju06/codex-lb/commit/dddd961555727fa529b16750bc65eea49e6bbef8))
+* safe line rendering, additional quotas relocation, and screenshot updates ([#166](https://github.com/Soju06/codex-lb/issues/166)) ([a1c788d](https://github.com/Soju06/codex-lb/commit/a1c788d612860c23eafe75a75d5ebdba5dc3ef52))
+
+
+### Documentation
+
+* add defin85 as a contributor for code ([#168](https://github.com/Soju06/codex-lb/issues/168)) ([703a2c9](https://github.com/Soju06/codex-lb/commit/703a2c92fb97fa408f057c8152dca805177d9fa1))
+
 ## [1.3.0](https://github.com/Soju06/codex-lb/compare/v1.2.0...v1.3.0) (2026-03-10)
 
 

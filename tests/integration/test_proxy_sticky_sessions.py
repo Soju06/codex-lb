@@ -87,19 +87,17 @@ def _install_proxy_settings_cache(
         sticky_threads_enabled=sticky_threads_enabled,
         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
         routing_strategy="usage_weighted",
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        upstream_compact_timeout_seconds=None,
+        log_proxy_request_payload=False,
+        log_proxy_request_shape=False,
+        log_proxy_request_shape_raw_cache_key=False,
+        log_proxy_service_tier_trace=False,
     )
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(
-        proxy_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
-            log_proxy_request_payload=False,
-            log_proxy_request_shape=False,
-            log_proxy_request_shape_raw_cache_key=False,
-            log_proxy_service_tier_trace=False,
-        ),
-    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
 
 
 @pytest.mark.asyncio

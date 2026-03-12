@@ -61,9 +61,14 @@ function QuotaRow({
   );
 }
 
+const ADDITIONAL_LIMIT_LABELS: Record<string, string> = {
+  codex_other: "GPT-5.3-Codex-Spark",
+  "gpt-5.3-codex-spark": "GPT-5.3-Codex-Spark",
+};
+
 function formatAdditionalLimitName(limitName: string): string {
-  const map: Record<string, string> = { codex_other: "Codex Spark" };
-  return map[limitName] ?? limitName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const normalized = limitName.trim().toLowerCase();
+  return ADDITIONAL_LIMIT_LABELS[normalized] ?? limitName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatResetCountdown(resetAt: number | null): string | null {

@@ -9,7 +9,13 @@ from urllib.parse import urlparse, urlunparse
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.datastructures import Headers
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, InvalidHandshake, InvalidProxy, InvalidStatus
+from websockets.exceptions import (
+    ConnectionClosedError,
+    ConnectionClosedOK,
+    InvalidHandshake,
+    InvalidProxy,
+    InvalidStatus,
+)
 from websockets.typing import Origin
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers

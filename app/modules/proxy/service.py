@@ -9,12 +9,13 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import AsyncIterator, Mapping, NoReturn
+from typing import AsyncIterator, Mapping, NoReturn, cast
 from uuid import uuid4
 
 import aiohttp
 import anyio
 from fastapi import WebSocket
+from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import (
@@ -47,12 +48,11 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
 from app.core.exceptions import AppError, ProxyAuthError, ProxyModelNotAllowed, ProxyRateLimitError
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesRequest
-from pydantic import ValidationError
-from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -593,7 +593,7 @@ class ProxyService:
         queued_create_frames: deque[str] = deque()
         client_send_lock = anyio.Lock()
         current_request: _WebSocketRequestHandle | None = None
-        downstream_receive_task: asyncio.Task[dict[str, object]] | None = None
+        downstream_receive_task: asyncio.Task[object] | None = None
 
         try:
             while True:
@@ -613,7 +613,7 @@ class ProxyService:
                     continue
 
                 if downstream_receive_task is None:
-                    downstream_receive_task = asyncio.create_task(websocket.receive())
+                    downstream_receive_task = cast(asyncio.Task[object], asyncio.create_task(websocket.receive()))
 
                 wait_tasks: set[asyncio.Task[object]] = {downstream_receive_task}
                 if current_request is not None:
@@ -632,7 +632,7 @@ class ProxyService:
                 if downstream_receive_task not in done:
                     continue
 
-                message = downstream_receive_task.result()
+                message = cast(Mapping[str, object], downstream_receive_task.result())
                 downstream_receive_task = None
                 message_type = message["type"]
 
@@ -651,7 +651,7 @@ class ProxyService:
                 text_data = message.get("text")
                 bytes_data = message.get("bytes")
 
-                if text_data is not None:
+                if isinstance(text_data, str):
                     payload = _parse_websocket_payload(text_data)
                     if payload is not None and _is_websocket_response_create(payload):
                         queued_create_frames.append(text_data)
@@ -990,7 +990,10 @@ class ProxyService:
                         remaining_budget = _remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
                             logger.warning(
-                                "Websocket request budget exhausted before forced refresh retry request_id=%s account_id=%s",
+                                (
+                                    "Websocket request budget exhausted before forced refresh retry "
+                                    "request_id=%s account_id=%s"
+                                ),
                                 request_state.request_id,
                                 account.id,
                             )
@@ -1003,7 +1006,10 @@ class ProxyService:
                         remaining_budget = _remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
                             logger.warning(
-                                "Websocket request budget exhausted before post-refresh upstream connect request_id=%s account_id=%s",
+                                (
+                                    "Websocket request budget exhausted before post-refresh upstream connect "
+                                    "request_id=%s account_id=%s"
+                                ),
                                 request_state.request_id,
                                 account.id,
                             )
@@ -2845,7 +2851,7 @@ def _maybe_log_proxy_service_tier_trace(
     actual_service_tier: str | None,
 ) -> None:
     settings = get_settings()
-    if not settings.log_proxy_service_tier_trace:
+    if not getattr(settings, "log_proxy_service_tier_trace", False):
         return
 
     logger.warning(
@@ -2867,7 +2873,11 @@ def _maybe_log_compact_contract_trace(
     affinity_source: str,
 ) -> None:
     settings = get_settings()
-    if not settings.log_upstream_request_summary and not settings.log_proxy_service_tier_trace:
+    if not getattr(settings, "log_upstream_request_summary", False) and not getattr(
+        settings,
+        "log_proxy_service_tier_trace",
+        False,
+    ):
         return
 
     logger.warning(

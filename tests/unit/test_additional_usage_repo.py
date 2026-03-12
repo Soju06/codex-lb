@@ -190,6 +190,27 @@ async def test_latest_by_account_filters_by_window(async_session: AsyncSession) 
 
 
 @pytest.mark.asyncio
+async def test_latest_by_account_canonicalizes_legacy_limit_name_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_1",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now,
+    )
+
+    result = await repo.latest_by_account(limit_name="GPT-5.3-Codex-Spark", window="primary")
+
+    assert list(result) == ["acc_1"]
+    assert result["acc_1"].quota_key == "codex_spark"
+    assert result["acc_1"].limit_name == "codex_other"
+
+
+@pytest.mark.asyncio
 async def test_list_limit_names_returns_distinct_names(async_session: AsyncSession) -> None:
     """Test list_limit_names returns distinct limit names."""
     repo = AdditionalUsageRepository(async_session)
@@ -463,6 +484,39 @@ async def test_history_since_empty_when_no_data(async_session: AsyncSession) -> 
 
 
 @pytest.mark.asyncio
+async def test_history_since_canonicalizes_legacy_limit_name_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_1",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now - timedelta(minutes=5),
+    )
+    await repo.add_entry(
+        account_id="acc_1",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=45.0,
+        recorded_at=now,
+    )
+
+    result = await repo.history_since(
+        account_id="acc_1",
+        limit_name="GPT-5.3-Codex-Spark",
+        window="primary",
+        since=now - timedelta(hours=1),
+    )
+
+    assert [entry.used_percent for entry in result] == [30.0, 45.0]
+    assert all(entry.quota_key == "codex_spark" for entry in result)
+
+
+@pytest.mark.asyncio
 async def test_delete_for_account_removes_all_rows(async_session: AsyncSession) -> None:
     repo = AdditionalUsageRepository(async_session)
     now = datetime.now(tz=timezone.utc)
@@ -557,6 +611,44 @@ async def test_delete_for_account_and_limit_removes_only_matching_rows(async_ses
 
 
 @pytest.mark.asyncio
+async def test_delete_for_account_and_limit_canonicalizes_legacy_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now,
+    )
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="requests_per_hour",
+        metered_feature="api_calls",
+        window="primary",
+        used_percent=60.0,
+        recorded_at=now,
+    )
+
+    await repo.delete_for_account_and_limit("acc_delete", "GPT-5.3-Codex-Spark")
+
+    result = await async_session.execute(
+        select(AdditionalUsageHistory).order_by(
+            AdditionalUsageHistory.account_id,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.window,
+        )
+    )
+    entries = result.scalars().all()
+
+    assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
+        ("acc_delete", "requests_per_hour", "primary"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delete_for_account_limit_window_removes_only_matching_window(async_session: AsyncSession) -> None:
     repo = AdditionalUsageRepository(async_session)
     now = datetime.now(tz=timezone.utc)
@@ -600,4 +692,42 @@ async def test_delete_for_account_limit_window_removes_only_matching_window(asyn
     assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
         ("acc_delete", "requests_per_hour", "primary"),
         ("acc_delete", "requests_per_minute", "primary"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_for_account_limit_window_canonicalizes_legacy_alias(async_session: AsyncSession) -> None:
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="primary",
+        used_percent=30.0,
+        recorded_at=now,
+    )
+    await repo.add_entry(
+        account_id="acc_delete",
+        limit_name="codex_other",
+        metered_feature="codex_bengalfox",
+        window="secondary",
+        used_percent=35.0,
+        recorded_at=now,
+    )
+
+    await repo.delete_for_account_limit_window("acc_delete", "GPT-5.3-Codex-Spark", "secondary")
+
+    result = await async_session.execute(
+        select(AdditionalUsageHistory).order_by(
+            AdditionalUsageHistory.account_id,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.window,
+        )
+    )
+    entries = result.scalars().all()
+
+    assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
+        ("acc_delete", "codex_other", "primary"),
     ]

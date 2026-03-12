@@ -24,6 +24,21 @@ def _window_clause(window: str | None):
     return UsageHistory.window == window
 
 
+def _resolve_additional_quota_key(
+    *,
+    quota_key: str | None = None,
+    limit_name: str | None = None,
+    metered_feature: str | None = None,
+) -> str | None:
+    candidate = quota_key if quota_key is not None else limit_name
+    if candidate is None and metered_feature is None:
+        return None
+    return canonicalize_additional_quota_key(
+        limit_name=candidate,
+        metered_feature=metered_feature,
+    )
+
+
 class UsageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -275,9 +290,12 @@ class AdditionalUsageRepository:
         await self._session.commit()
 
     async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
+        effective_quota_key = _resolve_additional_quota_key(quota_key=quota_key)
+        if effective_quota_key is None:
+            raise ValueError("additional usage quota_key could not be determined")
         stmt = delete(AdditionalUsageHistory).where(
             AdditionalUsageHistory.account_id == account_id,
-            AdditionalUsageHistory.quota_key == quota_key,
+            AdditionalUsageHistory.quota_key == effective_quota_key,
         )
         await self._session.execute(stmt)
         await self._session.commit()
@@ -291,9 +309,12 @@ class AdditionalUsageRepository:
         quota_key: str,
         window: str,
     ) -> None:
+        effective_quota_key = _resolve_additional_quota_key(quota_key=quota_key)
+        if effective_quota_key is None:
+            raise ValueError("additional usage quota_key could not be determined")
         stmt = delete(AdditionalUsageHistory).where(
             AdditionalUsageHistory.account_id == account_id,
-            AdditionalUsageHistory.quota_key == quota_key,
+            AdditionalUsageHistory.quota_key == effective_quota_key,
             AdditionalUsageHistory.window == window,
         )
         await self._session.execute(stmt)
@@ -317,7 +338,10 @@ class AdditionalUsageRepository:
         since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
         """Returns the most recent entry per account for a given canonical quota key + window."""
-        effective_quota_key = quota_key or limit_name
+        effective_quota_key = _resolve_additional_quota_key(
+            quota_key=quota_key,
+            limit_name=limit_name,
+        )
         if effective_quota_key is None or window is None:
             raise ValueError("quota_key/limit_name and window are required")
         conditions = [
@@ -396,7 +420,10 @@ class AdditionalUsageRepository:
         limit_name: str | None = None,
     ) -> list[AdditionalUsageHistory]:
         """Returns time-series entries for EWMA computation."""
-        effective_quota_key = quota_key or limit_name
+        effective_quota_key = _resolve_additional_quota_key(
+            quota_key=quota_key,
+            limit_name=limit_name,
+        )
         if effective_quota_key is None or window is None or since is None:
             raise ValueError("account_id, quota_key/limit_name, window, and since are required")
         stmt = (

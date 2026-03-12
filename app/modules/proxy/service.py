@@ -586,6 +586,7 @@ class ProxyService:
         client_send_lock = anyio.Lock()
         upstream: UpstreamResponsesWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
+        upstream_reader_suppress_close: asyncio.Event | None = None
         account: Account | None = None
 
         try:
@@ -630,6 +631,107 @@ class ProxyService:
                                 )
                             continue
 
+                should_route_request = False
+                if request_state is not None:
+                    async with pending_lock:
+                        should_route_request = len(pending_requests) == 0
+
+                if request_state is not None and should_route_request:
+                    if upstream is None or account is None:
+                        next_account, next_upstream = await self._connect_proxy_websocket(
+                            filtered_headers,
+                            sticky_key=sticky_key,
+                            prefer_earlier_reset=prefer_earlier_reset,
+                            routing_strategy=routing_strategy,
+                            model=request_state.model,
+                            request_state=request_state,
+                            client_send_lock=client_send_lock,
+                            websocket=websocket,
+                        )
+                        if next_upstream is None or next_account is None:
+                            continue
+                        account = next_account
+                        upstream = next_upstream
+                        upstream_reader_suppress_close = asyncio.Event()
+                        upstream_reader = asyncio.create_task(
+                            self._relay_upstream_websocket_messages(
+                                websocket,
+                                upstream,
+                                account_id_value=account.id,
+                                pending_requests=pending_requests,
+                                pending_lock=pending_lock,
+                                client_send_lock=client_send_lock,
+                                api_key=api_key,
+                                suppress_downstream_close=upstream_reader_suppress_close,
+                            )
+                        )
+                    else:
+                        selection = await self._load_balancer.select_account(
+                            sticky_key=sticky_key,
+                            prefer_earlier_reset_accounts=prefer_earlier_reset,
+                            routing_strategy=routing_strategy,
+                            model=request_state.model,
+                        )
+                        selected_account = selection.account
+                        if not selected_account:
+                            error_code = selection.error_code or "no_accounts"
+                            error_message = selection.error_message or "No active accounts available"
+                            await self._release_websocket_reservation(request_state.api_key_reservation)
+                            async with client_send_lock:
+                                await websocket.send_text(
+                                    _serialize_websocket_error_event(
+                                        _wrapped_websocket_error_event(
+                                            503,
+                                            openai_error(
+                                                error_code,
+                                                error_message,
+                                                error_type="server_error",
+                                            ),
+                                        )
+                                    )
+                                )
+                            continue
+                        if selected_account.id != account.id:
+                            next_account, next_upstream = await self._connect_proxy_websocket(
+                                filtered_headers,
+                                sticky_key=sticky_key,
+                                prefer_earlier_reset=prefer_earlier_reset,
+                                routing_strategy=routing_strategy,
+                                model=request_state.model,
+                                request_state=request_state,
+                                client_send_lock=client_send_lock,
+                                websocket=websocket,
+                                exclude_account_ids={account.id},
+                            )
+                            if next_upstream is None or next_account is None:
+                                continue
+                            if upstream_reader is not None and upstream_reader_suppress_close is not None:
+                                upstream_reader_suppress_close.set()
+                                upstream_reader.cancel()
+                                try:
+                                    await upstream_reader
+                                except asyncio.CancelledError:
+                                    pass
+                            try:
+                                await upstream.close()
+                            except Exception:
+                                logger.debug("Failed to close replaced upstream websocket", exc_info=True)
+                            account = next_account
+                            upstream = next_upstream
+                            upstream_reader_suppress_close = asyncio.Event()
+                            upstream_reader = asyncio.create_task(
+                                self._relay_upstream_websocket_messages(
+                                    websocket,
+                                    upstream,
+                                    account_id_value=account.id,
+                                    pending_requests=pending_requests,
+                                    pending_lock=pending_lock,
+                                    client_send_lock=client_send_lock,
+                                    api_key=api_key,
+                                    suppress_downstream_close=upstream_reader_suppress_close,
+                                )
+                            )
+
                 if upstream is None:
                     if request_state is None:
                         async with client_send_lock:
@@ -646,29 +748,7 @@ class ProxyService:
                                 )
                             )
                         continue
-                    account, upstream = await self._connect_proxy_websocket(
-                        filtered_headers,
-                        sticky_key=sticky_key,
-                        prefer_earlier_reset=prefer_earlier_reset,
-                        routing_strategy=routing_strategy,
-                        model=request_state.model,
-                        request_state=request_state,
-                        client_send_lock=client_send_lock,
-                        websocket=websocket,
-                    )
-                    if upstream is None or account is None:
-                        continue
-                    upstream_reader = asyncio.create_task(
-                        self._relay_upstream_websocket_messages(
-                            websocket,
-                            upstream,
-                            account_id_value=account.id,
-                            pending_requests=pending_requests,
-                            pending_lock=pending_lock,
-                            client_send_lock=client_send_lock,
-                            api_key=api_key,
-                        )
-                    )
+                    continue
 
                 if request_state is not None:
                     async with pending_lock:
@@ -718,96 +798,94 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        exclude_account_ids: set[str] | None = None,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
-        selection = await self._load_balancer.select_account(
-            sticky_key=sticky_key,
-            prefer_earlier_reset_accounts=prefer_earlier_reset,
-            routing_strategy=routing_strategy,
-            model=model,
-        )
-        account = selection.account
-        if not account:
-            error_code = selection.error_code or "no_accounts"
-            error_message = selection.error_message or "No active accounts available"
-            await self._release_websocket_reservation(request_state.api_key_reservation)
-            async with client_send_lock:
-                await websocket.send_text(
-                    _serialize_websocket_error_event(
-                        _wrapped_websocket_error_event(
-                            503,
-                            openai_error(
-                                error_code,
-                                error_message,
-                                error_type="server_error",
-                            ),
+        attempted_account_ids = set(exclude_account_ids or ())
+        last_connect_error: ProxyResponseError | None = None
+
+        while True:
+            selection = await self._load_balancer.select_account(
+                sticky_key=sticky_key,
+                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                routing_strategy=routing_strategy,
+                model=model,
+                exclude_account_ids=attempted_account_ids,
+            )
+            account = selection.account
+            if not account:
+                await self._release_websocket_reservation(request_state.api_key_reservation)
+                if last_connect_error is not None:
+                    async with client_send_lock:
+                        await websocket.send_text(
+                            _serialize_websocket_error_event(
+                                _wrapped_websocket_error_event(
+                                    last_connect_error.status_code,
+                                    last_connect_error.payload,
+                                )
+                            )
+                        )
+                    return None, None
+
+                error_code = selection.error_code or "no_accounts"
+                error_message = selection.error_message or "No active accounts available"
+                async with client_send_lock:
+                    await websocket.send_text(
+                        _serialize_websocket_error_event(
+                            _wrapped_websocket_error_event(
+                                503,
+                                openai_error(
+                                    error_code,
+                                    error_message,
+                                    error_type="server_error",
+                                ),
+                            )
                         )
                     )
-                )
-            return None, None
+                return None, None
 
-        connect_error: ProxyResponseError | None = None
-        try:
-            account = await self._ensure_fresh(account)
-            return account, await self._open_upstream_websocket(account, headers)
-        except ProxyResponseError as exc:
-            connect_error = exc
-            if exc.status_code == 401:
-                try:
-                    account = await self._ensure_fresh(account, force=True)
-                    return account, await self._open_upstream_websocket(account, headers)
-                except RefreshError as refresh_exc:
-                    if refresh_exc.is_permanent:
-                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
-                    logger.warning(
-                        "Websocket forced refresh/connect failed request_id=%s account_id=%s",
-                        request_state.request_id,
-                        account.id,
-                        exc_info=True,
-                    )
-                    connect_error = ProxyResponseError(
-                        502,
-                        openai_error("upstream_unavailable", str(timeout_exc) or "Request to upstream timed out"),
-                    )
-                except ProxyResponseError as retry_exc:
-                    connect_error = retry_exc
-        except RefreshError as exc:
-            if exc.is_permanent:
-                await self._load_balancer.mark_permanent_failure(account, exc.code)
-            await self._release_websocket_reservation(request_state.api_key_reservation)
-            async with client_send_lock:
-                await websocket.send_text(
-                    _serialize_websocket_error_event(
-                        _wrapped_websocket_error_event(
-                            401,
-                            openai_error(
-                                "invalid_api_key",
-                                exc.message,
-                                error_type="authentication_error",
-                            ),
+            connect_error: ProxyResponseError | None = None
+            try:
+                account = await self._ensure_fresh(account)
+                return account, await self._open_upstream_websocket(account, headers)
+            except ProxyResponseError as exc:
+                connect_error = exc
+                if exc.status_code == 401:
+                    try:
+                        account = await self._ensure_fresh(account, force=True)
+                        return account, await self._open_upstream_websocket(account, headers)
+                    except RefreshError as refresh_exc:
+                        if refresh_exc.is_permanent:
+                            await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        attempted_account_ids.add(account.id)
+                        continue
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                        logger.warning(
+                            "Websocket forced refresh/connect failed request_id=%s account_id=%s",
+                            request_state.request_id,
+                            account.id,
+                            exc_info=True,
                         )
-                    )
+                        connect_error = _proxy_unavailable_error(str(timeout_exc) or "Request to upstream timed out")
+                    except ProxyResponseError as retry_exc:
+                        connect_error = retry_exc
+            except RefreshError as exc:
+                if exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, exc.code)
+                attempted_account_ids.add(account.id)
+                continue
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Websocket refresh/connect failed request_id=%s account_id=%s",
+                    request_state.request_id,
+                    account.id,
+                    exc_info=True,
                 )
-            return None, None
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            logger.warning(
-                "Websocket refresh/connect failed request_id=%s account_id=%s",
-                request_state.request_id,
-                account.id,
-                exc_info=True,
-            )
-            connect_error = _proxy_unavailable_error(str(exc) or "Request to upstream timed out")
+                connect_error = _proxy_unavailable_error(str(exc) or "Request to upstream timed out")
 
-        assert connect_error is not None
-        await self._release_websocket_reservation(request_state.api_key_reservation)
-        await self._handle_websocket_connect_error(account, connect_error)
-        async with client_send_lock:
-            await websocket.send_text(
-                _serialize_websocket_error_event(
-                    _wrapped_websocket_error_event(connect_error.status_code, connect_error.payload)
-                )
-            )
-        return None, None
+            assert connect_error is not None
+            await self._handle_websocket_connect_error(account, connect_error)
+            attempted_account_ids.add(account.id)
+            last_connect_error = connect_error
 
     async def _open_upstream_websocket(
         self,
@@ -837,6 +915,7 @@ class ProxyService:
         pending_lock: anyio.Lock,
         client_send_lock: anyio.Lock,
         api_key: ApiKeyData | None,
+        suppress_downstream_close: asyncio.Event,
     ) -> None:
         try:
             while True:
@@ -858,10 +937,11 @@ class ProxyService:
                     continue
                 break
         finally:
-            try:
-                await websocket.close()
-            except Exception:
-                logger.debug("Failed to close downstream websocket", exc_info=True)
+            if not suppress_downstream_close.is_set():
+                try:
+                    await websocket.close()
+                except Exception:
+                    logger.debug("Failed to close downstream websocket", exc_info=True)
 
     async def _process_upstream_websocket_text(
         self,
@@ -2761,6 +2841,8 @@ def _websocket_request_state_for_event(
 ) -> _WebSocketRequestState | None:
     if not pending_requests:
         return None
+    if event_type == "error" and response_id is None:
+        return pending_requests[0]
     if event_type == "response.created":
         for request_state in pending_requests:
             if request_state.response_id is None:

@@ -108,7 +108,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         request_state,
         client_send_lock,
         websocket,
+        exclude_account_ids=None,
     ):
+        del exclude_account_ids
         seen["headers"] = dict(headers)
         seen["sticky_key"] = sticky_key
         seen["prefer_earlier_reset"] = prefer_earlier_reset
@@ -175,6 +177,130 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["output_tokens"] == 5
 
 
+def test_backend_responses_websocket_reselects_account_for_later_requests(app_instance, monkeypatch):
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_1", "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_ws_1", "object": "response", "status": "completed"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    second_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_2", "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_ws_2", "object": "response", "status": "completed"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    upstreams = [first_upstream, second_upstream]
+    seen_models: list[str | None] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return SimpleNamespace(prefer_earlier_reset_accounts=False, routing_strategy="usage_weighted")
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None):
+        assert authorization is None
+        return None
+
+    async def fake_select_account(self, sticky_key=None, **kwargs):
+        del self, sticky_key
+        model = kwargs.get("model")
+        if model == "gpt-5.4":
+            return proxy_module.AccountSelection(account=SimpleNamespace(id="acct_ws_one"), error_message=None)
+        return proxy_module.AccountSelection(account=SimpleNamespace(id="acct_ws_two"), error_message=None)
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        client_send_lock,
+        websocket,
+        exclude_account_ids=None,
+    ):
+        del self, headers, sticky_key, prefer_earlier_reset, routing_strategy, request_state, client_send_lock, websocket
+        seen_models.append(model)
+        if exclude_account_ids:
+            assert exclude_account_ids == {"acct_ws_one"}
+        upstream = upstreams.pop(0)
+        account_id = "acct_ws_one" if model == "gpt-5.4" else "acct_ws_two"
+        return SimpleNamespace(id=account_id), upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.LoadBalancer, "select_account", fake_select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    first_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": True,
+    }
+    second_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "again"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(first_payload))
+            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_1"
+            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_1"
+            websocket.send_text(json.dumps(second_payload))
+            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_2"
+            assert json.loads(websocket.receive_text())["response"]["id"] == "resp_ws_2"
+
+    assert seen_models == ["gpt-5.4", "gpt-5.5"]
+    assert first_upstream.closed is True
+    assert second_upstream.closed is True
+
+
 def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monkeypatch):
     request_payload = {
         "type": "response.create",
@@ -205,8 +331,9 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         request_state,
         client_send_lock,
         websocket,
+        exclude_account_ids=None,
     ):
-        del headers, sticky_key, prefer_earlier_reset, routing_strategy, model, request_state, self
+        del headers, sticky_key, prefer_earlier_reset, routing_strategy, model, request_state, self, exclude_account_ids
         async with client_send_lock:
             await websocket.send_text(json.dumps({"type": "error", "status": 503, "error": {"code": "no_accounts"}}))
         return None, None

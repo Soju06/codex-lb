@@ -1235,6 +1235,7 @@ async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monke
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
+        api_key=None,
         client_send_lock=anyio.Lock(),
         websocket=websocket,
     )
@@ -1245,6 +1246,182 @@ async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monke
     assert await_args is not None
     assert await_args.kwargs["sticky_key"] == "codex-session-1"
     assert await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None, error_message="No active accounts available", error_code="no_accounts"
+        )
+    )
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_no_accounts",
+        model="gpt-5.1",
+        service_tier="default",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    assert request_logs.calls[0]["request_id"] == "ws_req_no_accounts"
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "no_accounts"
+    assert request_logs.calls[0]["transport"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_retry_error")
+    first_exc = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
+    second_exc = proxy_module.ProxyResponseError(403, openai_error("forbidden", "denied"))
+    handle_connect_error = AsyncMock()
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_exc, second_exc]))
+    monkeypatch.setattr(service, "_handle_websocket_connect_error", handle_connect_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_retry_error",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    await_args = handle_connect_error.await_args
+    assert await_args is not None
+    assert await_args.args[1] is second_exc
+    sent_payload = json.loads(websocket_send.await_args.args[0])
+    assert sent_payload["status"] == 403
+    assert sent_payload["error"]["code"] == "forbidden"
+    assert request_logs.calls[0]["error_code"] == "forbidden"
+
+
+@pytest.mark.asyncio
+async def test_finalize_websocket_request_state_updates_balancer_state(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_finalize")
+    record_success = AsyncMock()
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    completed_payload = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ws_complete",
+            "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+        },
+    }
+    completed_event = parse_sse_event(f"data: {json.dumps(completed_payload)}\n\n")
+    assert completed_event is not None
+    completed_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_complete",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    await service._finalize_websocket_request_state(
+        completed_state,
+        account=account,
+        account_id_value=account.id,
+        event=completed_event,
+        event_type="response.completed",
+        payload=completed_payload,
+        api_key=None,
+    )
+
+    record_success.assert_awaited_once_with(account)
+    handle_stream_error.assert_not_awaited()
+
+    failed_payload = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_failed",
+            "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+        },
+    }
+    failed_event = parse_sse_event(f"data: {json.dumps(failed_payload)}\n\n")
+    assert failed_event is not None
+    failed_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_failed",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    await service._finalize_websocket_request_state(
+        failed_state,
+        account=account,
+        account_id_value=account.id,
+        event=failed_event,
+        event_type="response.failed",
+        payload=failed_payload,
+        api_key=None,
+    )
+
+    handle_args = handle_stream_error.await_args
+    assert handle_args is not None
+    assert handle_args.args[0] == account
+    assert handle_args.args[2] == "rate_limit_exceeded"
 
 
 @pytest.mark.asyncio

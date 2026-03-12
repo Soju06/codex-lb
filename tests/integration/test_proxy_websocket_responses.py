@@ -107,9 +107,11 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         routing_strategy,
         model,
         request_state,
+        api_key,
         client_send_lock,
         websocket,
     ):
+        del api_key
         seen["headers"] = dict(headers)
         seen["sticky_key"] = sticky_key
         seen["sticky_kind"] = sticky_kind
@@ -203,10 +205,21 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         routing_strategy,
         model,
         request_state,
+        api_key,
         client_send_lock,
         websocket,
     ):
-        del headers, sticky_key, sticky_kind, prefer_earlier_reset, routing_strategy, model, request_state, self
+        del (
+            headers,
+            sticky_key,
+            sticky_kind,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            self,
+        )
         async with client_send_lock:
             await websocket.send_text(json.dumps({"type": "error", "status": 503, "error": {"code": "no_accounts"}}))
         return None, None

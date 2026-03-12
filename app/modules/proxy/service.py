@@ -613,6 +613,7 @@ class ProxyService:
                         routing_strategy=routing_strategy,
                         model=request_state.model,
                         request_state=request_state,
+                        api_key=api_key,
                         client_send_lock=client_send_lock,
                         websocket=websocket,
                     )
@@ -622,6 +623,7 @@ class ProxyService:
                         self._relay_upstream_websocket_messages(
                             websocket,
                             upstream,
+                            account=account,
                             account_id_value=account.id,
                             pending_requests=pending_requests,
                             pending_lock=pending_lock,
@@ -676,6 +678,7 @@ class ProxyService:
         routing_strategy: RoutingStrategy,
         model: str | None,
         request_state: _WebSocketRequestState,
+        api_key: ApiKeyData | None,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
@@ -689,14 +692,23 @@ class ProxyService:
         account = selection.account
         if not account:
             await self._release_websocket_reservation(request_state.api_key_reservation)
+            error_code = selection.error_code or "no_accounts"
+            error_message = selection.error_message or "No active accounts available"
+            await self._write_websocket_connect_failure(
+                account_id=None,
+                api_key=api_key,
+                request_state=request_state,
+                error_code=error_code,
+                error_message=error_message,
+            )
             async with client_send_lock:
                 await websocket.send_text(
                     _serialize_websocket_error_event(
                         _wrapped_websocket_error_event(
                             503,
                             openai_error(
-                                "no_accounts",
-                                selection.error_message or "No active accounts available",
+                                error_code,
+                                error_message,
                                 error_type="server_error",
                             ),
                         )
@@ -711,11 +723,47 @@ class ProxyService:
             if exc.status_code == 401:
                 try:
                     account = await self._ensure_fresh(account, force=True)
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    await self._release_websocket_reservation(request_state.api_key_reservation)
+                    await self._write_websocket_connect_failure(
+                        account_id=account.id,
+                        api_key=api_key,
+                        request_state=request_state,
+                        error_code="invalid_api_key",
+                        error_message=refresh_exc.message,
+                    )
+                    async with client_send_lock:
+                        await websocket.send_text(
+                            _serialize_websocket_error_event(
+                                _wrapped_websocket_error_event(
+                                    401,
+                                    openai_error(
+                                        "invalid_api_key",
+                                        refresh_exc.message,
+                                        error_type="authentication_error",
+                                    ),
+                                )
+                            )
+                        )
+                    return None, None
+                try:
                     return account, await self._open_upstream_websocket(account, headers)
-                except (ProxyResponseError, RefreshError):
-                    pass
+                except ProxyResponseError as retry_exc:
+                    exc = retry_exc
             await self._release_websocket_reservation(request_state.api_key_reservation)
             await self._handle_websocket_connect_error(account, exc)
+            error = _parse_openai_error(exc.payload)
+            error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+            error_message = error.message if error else None
+            await self._write_websocket_connect_failure(
+                account_id=account.id,
+                api_key=api_key,
+                request_state=request_state,
+                error_code=error_code or "upstream_error",
+                error_message=error_message or "Upstream error",
+            )
             async with client_send_lock:
                 await websocket.send_text(
                     _serialize_websocket_error_event(_wrapped_websocket_error_event(exc.status_code, exc.payload))
@@ -725,6 +773,13 @@ class ProxyService:
             if exc.is_permanent:
                 await self._load_balancer.mark_permanent_failure(account, exc.code)
             await self._release_websocket_reservation(request_state.api_key_reservation)
+            await self._write_websocket_connect_failure(
+                account_id=account.id,
+                api_key=api_key,
+                request_state=request_state,
+                error_code="invalid_api_key",
+                error_message=exc.message,
+            )
             async with client_send_lock:
                 await websocket.send_text(
                     _serialize_websocket_error_event(
@@ -763,6 +818,7 @@ class ProxyService:
         websocket: WebSocket,
         upstream: UpstreamResponsesWebSocket,
         *,
+        account: Account,
         account_id_value: str,
         pending_requests: deque[_WebSocketRequestState],
         pending_lock: anyio.Lock,
@@ -775,6 +831,7 @@ class ProxyService:
                 if message.kind == "text" and message.text is not None:
                     await self._process_upstream_websocket_text(
                         message.text,
+                        account=account,
                         account_id_value=account_id_value,
                         pending_requests=pending_requests,
                         pending_lock=pending_lock,
@@ -798,6 +855,7 @@ class ProxyService:
         self,
         text: str,
         *,
+        account: Account,
         account_id_value: str,
         pending_requests: deque[_WebSocketRequestState],
         pending_lock: anyio.Lock,
@@ -827,6 +885,7 @@ class ProxyService:
 
         await self._finalize_websocket_request_state(
             request_state,
+            account=account,
             account_id_value=account_id_value,
             event=event,
             event_type=event_type,
@@ -838,6 +897,7 @@ class ProxyService:
         self,
         request_state: _WebSocketRequestState,
         *,
+        account: Account,
         account_id_value: str,
         event: OpenAIEvent | None,
         event_type: str | None,
@@ -848,6 +908,7 @@ class ProxyService:
         error_code = None
         error_message = None
         usage = None
+        error_payload: UpstreamError | None = None
         response_id = request_state.request_id
         response_service_tier = request_state.service_tier
 
@@ -856,11 +917,14 @@ class ProxyService:
             error = event.error if event else None
             error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
             error_message = error.message if error else None
+            error_payload = _upstream_error_from_openai(error)
         elif event_type in {"response.failed", "response.incomplete"}:
             status = "error"
             error = event.response.error if event and event.response else None
             error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
             error_message = error.message if error else None
+            if event_type == "response.failed":
+                error_payload = _upstream_error_from_openai(error)
             usage = event.response.usage if event and event.response else None
             if event and event.response and event.response.id:
                 response_id = event.response.id
@@ -882,13 +946,27 @@ class ProxyService:
             cached_input_tokens=(
                 usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
             ),
+            error_code=error_code,
+            error_message=error_message,
+            error=error_payload,
         )
+        if event_type in {"response.failed", "error"}:
+            settlement.record_success = False
+            settlement.account_health_error = _should_penalize_stream_error(error_code)
         await self._settle_stream_api_key_usage(
             api_key,
             request_state.api_key_reservation,
             settlement,
             response_id,
         )
+        if settlement.account_health_error:
+            await self._handle_stream_error(
+                account,
+                _stream_settlement_error_payload(settlement),
+                settlement.error_code or "upstream_error",
+            )
+        elif settlement.record_success:
+            await self._load_balancer.record_success(account)
 
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
@@ -911,6 +989,29 @@ class ProxyService:
             reasoning_effort=request_state.reasoning_effort,
             transport=_REQUEST_TRANSPORT_WEBSOCKET,
             service_tier=response_service_tier,
+        )
+
+    async def _write_websocket_connect_failure(
+        self,
+        *,
+        account_id: str | None,
+        api_key: ApiKeyData | None,
+        request_state: _WebSocketRequestState,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        await self._write_request_log(
+            account_id=account_id,
+            api_key=api_key,
+            request_id=request_state.request_id,
+            model=request_state.model or "",
+            latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
+            status="error",
+            error_code=error_code,
+            error_message=error_message,
+            reasoning_effort=request_state.reasoning_effort,
+            transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            service_tier=request_state.service_tier,
         )
 
     async def _fail_pending_websocket_requests(

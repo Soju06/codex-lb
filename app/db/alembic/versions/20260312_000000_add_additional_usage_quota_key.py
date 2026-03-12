@@ -7,11 +7,11 @@ Create Date: 2026-03-12
 
 from __future__ import annotations
 
-import re
-
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
+
+from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 # revision identifiers, used by Alembic.
 revision = "20260312_000000_add_additional_usage_quota_key"
@@ -39,24 +39,14 @@ def _indexes(connection: Connection, table_name: str) -> set[str]:
     return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
 
 
-def _normalize_identifier(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
-    return normalized or None
-
-
 def _canonical_quota_key(limit_name: str | None, metered_feature: str | None) -> str:
-    normalized_limit = _normalize_identifier(limit_name)
-    normalized_feature = _normalize_identifier(metered_feature)
-    aliases = {normalized_limit, normalized_feature}
-    if {"codex_other", "gpt_5_3_codex_spark", "codex_bengalfox"} & aliases:
-        return "codex_spark"
-    if normalized_limit is not None:
-        return normalized_limit
-    if normalized_feature is not None:
-        return normalized_feature
-    return "unknown"
+    return (
+        canonicalize_additional_quota_key(
+            limit_name=limit_name,
+            metered_feature=metered_feature,
+        )
+        or "unknown"
+    )
 
 
 def upgrade() -> None:

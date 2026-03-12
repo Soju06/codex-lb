@@ -849,9 +849,7 @@ class ProxyService:
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
-                    stream_timeout_tokens = push_stream_timeout_overrides(
-                        connect_timeout_seconds=effective_attempt_timeout,
-                    )
+                    stream_timeout_tokens = _push_stream_attempt_timeout_overrides(effective_attempt_timeout)
                     try:
                         async for line in self._stream_once(
                             account,
@@ -972,9 +970,7 @@ class ProxyService:
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
-                        stream_timeout_tokens = push_stream_timeout_overrides(
-                            connect_timeout_seconds=effective_attempt_timeout,
-                        )
+                        stream_timeout_tokens = _push_stream_attempt_timeout_overrides(effective_attempt_timeout)
                         try:
                             async for line in self._stream_once(
                                 account,
@@ -1660,6 +1656,16 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
 
 def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
+
+
+def _push_stream_attempt_timeout_overrides(
+    timeout_seconds: float,
+) -> tuple[float | None, float | None, float | None]:
+    return push_stream_timeout_overrides(
+        connect_timeout_seconds=timeout_seconds,
+        idle_timeout_seconds=timeout_seconds,
+        total_timeout_seconds=timeout_seconds,
+    )
 
 
 def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Coroutine
-from typing import Any
+from collections.abc import Awaitable, Callable
 
 import anyio
 
@@ -17,7 +16,7 @@ class RateLimitHeadersCache:
 
     async def get(
         self,
-        compute: Callable[[], Coroutine[Any, Any, dict[str, str]]],
+        compute: Callable[[], Awaitable[dict[str, str]]],
     ) -> dict[str, str]:
         ttl = get_settings().usage_refresh_interval_seconds
         now = time.monotonic()

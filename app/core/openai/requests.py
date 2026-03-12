@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -36,6 +37,18 @@ _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
 
 
+def _json_mapping_or_none(value: object) -> Mapping[str, JsonValue] | None:
+    if not is_json_mapping(value):
+        return None
+    return cast(Mapping[str, JsonValue], value)
+
+
+def _json_parts(value: JsonValue) -> list[JsonValue]:
+    if is_json_list(value):
+        return cast(list[JsonValue], value)
+    return [value]
+
+
 def normalize_tool_type(tool_type: str) -> str:
     return _TOOL_TYPE_ALIASES.get(tool_type, tool_type)
 
@@ -43,11 +56,12 @@ def normalize_tool_type(tool_type: str) -> str:
 def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     if not is_json_mapping(choice):
         return choice
-    tool_type = choice.get("type")
+    choice_mapping = cast(Mapping[str, JsonValue], choice)
+    tool_type = choice_mapping.get("type")
     if isinstance(tool_type, str):
         normalized_type = normalize_tool_type(tool_type)
         if normalized_type != tool_type:
-            updated = dict(choice)
+            updated = dict(choice_mapping)
             updated["type"] = normalized_type
             return updated
     return choice
@@ -59,11 +73,12 @@ def validate_tool_types(tools: list[JsonValue]) -> list[JsonValue]:
         if not is_json_mapping(tool):
             normalized_tools.append(tool)
             continue
-        tool_type = tool.get("type")
+        tool_mapping = cast(Mapping[str, JsonValue], tool)
+        tool_type = tool_mapping.get("type")
         if isinstance(tool_type, str):
             normalized_type = normalize_tool_type(tool_type)
             if normalized_type != tool_type:
-                tool = dict(tool)
+                tool = dict(tool_mapping)
                 tool["type"] = normalized_type
                 tool_type = normalized_type
             if tool_type in UNSUPPORTED_TOOL_TYPES:
@@ -76,19 +91,20 @@ def _has_input_file_id(input_items: list[JsonValue]) -> bool:
     for item in input_items:
         if not is_json_mapping(item):
             continue
-        if _is_input_file_with_id(item):
+        item_mapping = cast(Mapping[str, JsonValue], item)
+        if _is_input_file_with_id(item_mapping):
             return True
-        content = item.get("content")
+        content = item_mapping.get("content")
         if is_json_list(content):
-            parts = content
+            parts = cast(list[JsonValue], content)
         elif is_json_mapping(content):
-            parts = [content]
+            parts = [cast(Mapping[str, JsonValue], content)]
         else:
             parts = []
         for part in parts:
             if not is_json_mapping(part):
                 continue
-            if _is_input_file_with_id(part):
+            if _is_input_file_with_id(cast(Mapping[str, JsonValue], part)):
                 return True
     return False
 
@@ -111,11 +127,12 @@ def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
 
 
 def _sanitize_interleaved_reasoning_input_item(item: JsonValue) -> JsonValue | None:
-    if not is_json_mapping(item):
+    item_mapping = _json_mapping_or_none(item)
+    if item_mapping is None:
         return item
 
     sanitized_item: dict[str, JsonValue] = {}
-    for key, value in item.items():
+    for key, value in item_mapping.items():
         if key in _INTERLEAVED_REASONING_KEYS:
             continue
         if key == "content":
@@ -131,39 +148,42 @@ def _sanitize_interleaved_reasoning_input_item(item: JsonValue) -> JsonValue | N
 def _sanitize_interleaved_reasoning_content(content: JsonValue) -> JsonValue | None:
     if is_json_list(content):
         sanitized_parts: list[JsonValue] = []
-        for part in content:
+        for part in _json_parts(content):
             sanitized_part = _sanitize_interleaved_reasoning_content_part(part)
             if sanitized_part is None:
                 continue
             sanitized_parts.append(sanitized_part)
         return sanitized_parts
-    if is_json_mapping(content):
-        return _sanitize_interleaved_reasoning_content_part(content)
+    content_mapping = _json_mapping_or_none(content)
+    if content_mapping is not None:
+        return _sanitize_interleaved_reasoning_content_part(content_mapping)
     return content
 
 
 def _sanitize_interleaved_reasoning_content_part(part: JsonValue) -> JsonValue | None:
-    if not is_json_mapping(part):
+    part_mapping = _json_mapping_or_none(part)
+    if part_mapping is None:
         return part
 
-    part_type = part.get("type")
+    part_type = part_mapping.get("type")
     if isinstance(part_type, str) and part_type in _INTERLEAVED_REASONING_PART_TYPES:
         return None
 
-    sanitized_part = dict(part)
+    sanitized_part = dict(part_mapping)
     for key in _INTERLEAVED_REASONING_KEYS:
         sanitized_part.pop(key, None)
     return sanitized_part
 
 
 def _normalize_role_input_item(value: JsonValue) -> JsonValue:
-    if not is_json_mapping(value):
+    value_mapping = _json_mapping_or_none(value)
+    if value_mapping is None:
         return value
-    role = value.get("role")
+    role = value_mapping.get("role")
     if role == "assistant":
-        return _normalize_assistant_input_item(value)
+        return _normalize_assistant_input_item(value_mapping)
     if role == "tool":
-        return _normalize_tool_input_item(value)
+        return _normalize_tool_input_item(value_mapping)
     return value
 
 
@@ -194,7 +214,7 @@ def _normalize_tool_output_value(content: JsonValue) -> str:
         return content
     if is_json_list(content):
         parts: list[str] = []
-        for part in content:
+        for part in _json_parts(content):
             if isinstance(part, str):
                 parts.append(part)
                 continue
@@ -228,9 +248,10 @@ def _normalize_assistant_content(content: JsonValue) -> JsonValue:
     if isinstance(content, str):
         return [{"type": "output_text", "text": content}]
     if is_json_list(content):
-        return [_normalize_assistant_content_part(part) for part in content]
-    if is_json_mapping(content):
-        return [_normalize_assistant_content_part(content)]
+        return [_normalize_assistant_content_part(part) for part in _json_parts(content)]
+    content_mapping = _json_mapping_or_none(content)
+    if content_mapping is not None:
+        return [_normalize_assistant_content_part(content_mapping)]
     return content
 
 
@@ -246,16 +267,23 @@ def _normalize_assistant_content_part(part: JsonValue) -> JsonValue:
 
 
 def _extract_text_content_part(part: JsonValue, allowed_types: frozenset[str]) -> str | None:
-    if not is_json_mapping(part):
+    part_mapping = _json_mapping_or_none(part)
+    if part_mapping is None:
         return None
-    part_type = part.get("type")
-    text = part.get("text")
+    part_type = part_mapping.get("type")
+    text = part_mapping.get("text")
     if ((isinstance(part_type, str) and part_type in allowed_types) or part_type is None) and isinstance(text, str):
         return text
-    refusal = part.get("refusal")
+    refusal = part_mapping.get("refusal")
     if isinstance(part_type, str) and part_type == "refusal" and isinstance(refusal, str):
         return refusal
     return None
+
+
+def _json_list_or_none(value: JsonValue) -> list[JsonValue] | None:
+    if not is_json_list(value):
+        return None
+    return cast(list[JsonValue], value)
 
 
 class ResponsesReasoning(BaseModel):
@@ -310,9 +338,10 @@ class ResponsesRequest(BaseModel):
                 raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            if _has_input_file_id(value):
+            input_items = cast(list[JsonValue], value)
+            if _has_input_file_id(input_items):
                 raise ValueError("input_file.file_id is not supported")
-            return _sanitize_input_items(value)
+            return _sanitize_input_items(input_items)
         raise ValueError("input must be a string or array")
 
     @field_validator("include")
@@ -382,9 +411,10 @@ class ResponsesCompactRequest(BaseModel):
                 raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            if _has_input_file_id(value):
+            input_items = cast(list[JsonValue], value)
+            if _has_input_file_id(input_items):
                 raise ValueError("input_file.file_id is not supported")
-            return _sanitize_input_items(value)
+            return _sanitize_input_items(input_items)
         raise ValueError("input must be a string or array")
 
     def to_payload(self) -> JsonObject:
@@ -410,9 +440,10 @@ def _strip_unsupported_fields(payload: dict[str, JsonValue]) -> dict[str, JsonVa
 
 def _sanitize_interleaved_reasoning_input(payload: dict[str, JsonValue]) -> None:
     input_value = payload.get("input")
-    if not is_json_list(input_value):
+    input_items = _json_list_or_none(input_value)
+    if input_items is None:
         return
-    payload["input"] = _sanitize_input_items(input_value)
+    payload["input"] = _sanitize_input_items(input_items)
 
 
 def _normalize_openai_compatible_aliases(payload: dict[str, JsonValue]) -> None:
@@ -428,9 +459,9 @@ def _normalize_openai_compatible_aliases(payload: dict[str, JsonValue]) -> None:
     if isinstance(prompt_cache_retention, str) and "prompt_cache_retention" not in payload:
         payload["prompt_cache_retention"] = prompt_cache_retention
 
-    reasoning_payload = payload.get("reasoning")
-    if is_json_mapping(reasoning_payload):
-        reasoning_map: dict[str, JsonValue] = dict(reasoning_payload)
+    reasoning_payload = _json_mapping_or_none(payload.get("reasoning"))
+    if reasoning_payload is not None:
+        reasoning_map: dict[str, JsonValue] = dict(reasoning_payload.items())
     else:
         reasoning_map = {}
 
@@ -441,9 +472,9 @@ def _normalize_openai_compatible_aliases(payload: dict[str, JsonValue]) -> None:
     if reasoning_map:
         payload["reasoning"] = reasoning_map
 
-    text_payload = payload.get("text")
-    if is_json_mapping(text_payload):
-        text_map: dict[str, JsonValue] = dict(text_payload)
+    text_payload = _json_mapping_or_none(payload.get("text"))
+    if text_payload is not None:
+        text_map: dict[str, JsonValue] = dict(text_payload.items())
     else:
         text_map = {}
 

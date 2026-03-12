@@ -49,7 +49,7 @@ from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import Account, UsageHistory
+from app.db.models import Account, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy.helpers import (
@@ -1653,8 +1653,8 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     return None
 
 
-def _routing_strategy(settings: object) -> RoutingStrategy:
-    value = getattr(settings, "routing_strategy", "usage_weighted")
+def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
+    value = settings.routing_strategy or "usage_weighted"
     return "round_robin" if value == "round_robin" else "usage_weighted"
 
 

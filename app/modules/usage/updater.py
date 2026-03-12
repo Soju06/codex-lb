@@ -7,7 +7,7 @@ import math
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Protocol, cast
+from typing import Mapping, Protocol
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.usage import UsageFetchError, fetch_usage
@@ -20,6 +20,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.repository import AdditionalUsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class AdditionalUsageRepositoryPort(Protocol):
         used_percent: float,
         reset_at: int | None = None,
         window_minutes: int | None = None,
+        recorded_at: datetime | None = None,
         quota_key: str | None = None,
     ) -> None: ...
 
@@ -81,9 +83,19 @@ class AdditionalUsageRepositoryPort(Protocol):
         window: str,
     ) -> None: ...
 
-    async def list_quota_keys(self, *, account_ids: Collection[str] | None = None) -> list[str]: ...
+    async def list_quota_keys(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]: ...
 
-    async def list_limit_names(self, *, account_ids: Collection[str] | None = None) -> list[str]: ...
+    async def list_limit_names(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]: ...
 
     async def latest_recorded_at_for_account(self, account_id: str) -> datetime | None: ...
 
@@ -140,11 +152,11 @@ class UsageUpdater:
         self,
         usage_repo: UsageRepositoryPort,
         accounts_repo: AccountsRepositoryPort | None = None,
-        additional_usage_repo: Any | None = None,
+        additional_usage_repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._accounts_repo = accounts_repo
-        self._additional_usage_repo = cast(AdditionalUsageRepositoryPort | None, additional_usage_repo)
+        self._additional_usage_repo = additional_usage_repo
         self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
         self._auth_manager = AuthManager(accounts_repo) if accounts_repo else None
@@ -462,7 +474,7 @@ def _usage_entry_written(entry: UsageHistory | None) -> bool:
 
 
 async def _add_additional_usage_entry(
-    repo: AdditionalUsageRepositoryPort,
+    repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository,
     *,
     account_id: str,
     limit_name: str,
@@ -499,7 +511,7 @@ async def _add_additional_usage_entry(
 
 
 async def _list_additional_usage_quota_keys(
-    repo: AdditionalUsageRepositoryPort,
+    repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository,
     *,
     account_ids: Collection[str] | None = None,
 ) -> list[str]:
@@ -510,7 +522,7 @@ async def _list_additional_usage_quota_keys(
 
 
 async def _delete_additional_usage_quota_key(
-    repo: AdditionalUsageRepositoryPort,
+    repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository,
     account_id: str,
     quota_key: str,
 ) -> None:
@@ -522,7 +534,7 @@ async def _delete_additional_usage_quota_key(
 
 
 async def _delete_additional_usage_quota_key_window(
-    repo: AdditionalUsageRepositoryPort,
+    repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository,
     account_id: str,
     quota_key: str,
     window: str,

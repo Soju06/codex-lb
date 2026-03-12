@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -150,6 +151,7 @@ class StubAdditionalUsageRepository:
         used_percent: float,
         reset_at: int | None = None,
         window_minutes: int | None = None,
+        recorded_at: datetime | None = None,
         quota_key: str | None = None,
     ) -> None:
         self._written_accounts.add(account_id)
@@ -190,12 +192,22 @@ class StubAdditionalUsageRepository:
 
         return utcnow() if account_id in self._written_accounts else None
 
-    async def list_limit_names(self, *, account_ids: list[str] | None = None) -> list[str]:
+    async def list_limit_names(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
         if account_ids is None:
             return sorted({entry.limit_name for entry in self.entries})
         return sorted({entry.limit_name for entry in self.entries if entry.account_id in account_ids})
 
-    async def list_quota_keys(self, *, account_ids: list[str] | None = None) -> list[str]:
+    async def list_quota_keys(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
         if account_ids is None:
             return sorted(
                 {

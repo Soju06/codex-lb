@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
 
@@ -33,6 +33,14 @@ class AdditionalQuotaRegistryStatus:
     definition_count: int
 
 
+class AdditionalQuotaRegistryEntry(TypedDict, total=False):
+    quota_key: str
+    display_label: str
+    model_ids: list[str]
+    limit_name_aliases: list[str]
+    metered_feature_aliases: list[str]
+
+
 def _default_registry_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "additional_quota_registry.json"
 
@@ -44,7 +52,7 @@ def _registry_path() -> Path:
     return _default_registry_path()
 
 
-def _definition_from_json(item: dict[str, Any]) -> AdditionalQuotaDefinition:
+def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuotaDefinition:
     quota_key = str(item["quota_key"]).strip()
     display_label = str(item["display_label"]).strip()
     model_ids = frozenset(

@@ -721,15 +721,32 @@ class ProxyService:
                     elif bytes_data is not None:
                         await upstream.send_bytes(bytes_data)
                 except Exception:
-                    if request_state is not None:
-                        removed_request_state = False
-                        async with pending_lock:
-                            if request_state in pending_requests:
-                                pending_requests.remove(request_state)
-                                removed_request_state = True
-                        if removed_request_state:
-                            await self._release_websocket_reservation(request_state.api_key_reservation)
-                    raise
+                    await self._fail_pending_websocket_requests(
+                        account_id_value=account.id if account else None,
+                        pending_requests=pending_requests,
+                        pending_lock=pending_lock,
+                        error_code="stream_incomplete",
+                        error_message="Upstream websocket closed before response.completed",
+                        api_key=api_key,
+                        websocket=websocket,
+                        client_send_lock=client_send_lock,
+                    )
+                    if upstream_reader is not None:
+                        upstream_reader.cancel()
+                        try:
+                            await upstream_reader
+                        except asyncio.CancelledError:
+                            pass
+                        upstream_reader = None
+                    upstream_control = None
+                    if upstream is not None:
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug("Failed to close upstream websocket after send failure", exc_info=True)
+                    upstream = None
+                    account = None
+                    continue
         finally:
             if upstream_reader is not None:
                 upstream_reader.cancel()
@@ -749,6 +766,8 @@ class ProxyService:
                 error_code="stream_incomplete",
                 error_message="Upstream websocket closed before response.completed",
                 api_key=api_key,
+                websocket=websocket,
+                client_send_lock=client_send_lock,
             )
 
     async def _prepare_websocket_response_create_request(
@@ -997,22 +1016,35 @@ class ProxyService:
                 except asyncio.TimeoutError:
                     if receive_timeout is None:
                         raise
-                    await self._fail_pending_websocket_requests(
+                    if receive_timeout.fail_all_pending:
+                        await self._fail_pending_websocket_requests(
+                            account_id_value=account_id_value,
+                            pending_requests=pending_requests,
+                            pending_lock=pending_lock,
+                            error_code=receive_timeout.error_code,
+                            error_message=receive_timeout.error_message,
+                            api_key=api_key,
+                            websocket=websocket,
+                            client_send_lock=client_send_lock,
+                        )
+                        upstream_control.reconnect_requested = True
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug("Failed to close upstream websocket after timeout", exc_info=True)
+                        break
+                    await self._fail_expired_pending_websocket_requests(
                         account_id_value=account_id_value,
                         pending_requests=pending_requests,
                         pending_lock=pending_lock,
+                        request_budget_seconds=proxy_request_budget_seconds,
                         error_code=receive_timeout.error_code,
                         error_message=receive_timeout.error_message,
                         api_key=api_key,
                         websocket=websocket,
                         client_send_lock=client_send_lock,
                     )
-                    upstream_control.reconnect_requested = True
-                    try:
-                        await upstream.close()
-                    except Exception:
-                        logger.debug("Failed to close upstream websocket after timeout", exc_info=True)
-                    break
+                    continue
                 if message.kind == "text" and message.text is not None:
                     await self._process_upstream_websocket_text(
                         message.text,
@@ -1127,6 +1159,41 @@ class ProxyService:
             started_ats,
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+        )
+
+    async def _fail_expired_pending_websocket_requests(
+        self,
+        *,
+        account_id_value: str | None,
+        pending_requests: deque[_WebSocketRequestState],
+        pending_lock: anyio.Lock,
+        request_budget_seconds: float,
+        error_code: str,
+        error_message: str,
+        api_key: ApiKeyData | None,
+        websocket: WebSocket | None = None,
+        client_send_lock: anyio.Lock | None = None,
+    ) -> None:
+        now = time.monotonic()
+        async with pending_lock:
+            expired_requests = [
+                request_state
+                for request_state in list(pending_requests)
+                if now >= request_state.started_at + request_budget_seconds
+            ]
+            for request_state in expired_requests:
+                pending_requests.remove(request_state)
+        if not expired_requests:
+            return
+        await self._fail_pending_websocket_requests(
+            account_id_value=account_id_value,
+            pending_requests=deque(expired_requests),
+            pending_lock=anyio.Lock(),
+            error_code=error_code,
+            error_message=error_message,
+            api_key=api_key,
+            websocket=websocket,
+            client_send_lock=client_send_lock,
         )
 
     async def _finalize_websocket_request_state(
@@ -2569,6 +2636,7 @@ class _WebSocketReceiveTimeout:
     timeout_seconds: float
     error_code: str
     error_message: str
+    fail_all_pending: bool = False
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -2674,6 +2742,13 @@ def _websocket_receive_timeout_for_pending_requests(
             error_code="upstream_request_timeout",
             error_message="Proxy request budget exhausted",
         )
+    if idle_timeout_seconds <= remaining_budget:
+        return _WebSocketReceiveTimeout(
+            timeout_seconds=idle_timeout_seconds,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+            fail_all_pending=True,
+        )
     if remaining_budget <= idle_timeout_seconds:
         return _WebSocketReceiveTimeout(
             timeout_seconds=remaining_budget,
@@ -2684,6 +2759,7 @@ def _websocket_receive_timeout_for_pending_requests(
         timeout_seconds=idle_timeout_seconds,
         error_code="stream_idle_timeout",
         error_message="Upstream stream idle timeout",
+        fail_all_pending=True,
     )
 
 

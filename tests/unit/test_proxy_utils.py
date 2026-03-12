@@ -1529,6 +1529,57 @@ def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    emit_terminal_error = AsyncMock()
+    release_reservation = AsyncMock()
+
+    monkeypatch.setattr(service, "_emit_websocket_terminal_error", emit_terminal_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+
+    expired_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_expired",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=90.0,
+        response_id="resp_expired",
+    )
+    newer_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_newer",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=99.5,
+        response_id="resp_newer",
+    )
+    pending_requests = deque([expired_request, newer_request])
+
+    await service._fail_expired_pending_websocket_requests(
+        account_id_value="acc_ws_budget",
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        request_budget_seconds=5.0,
+        error_code="upstream_request_timeout",
+        error_message="Proxy request budget exhausted",
+        api_key=None,
+        websocket=cast(WebSocket, SimpleNamespace()),
+        client_send_lock=anyio.Lock(),
+    )
+
+    assert list(pending_requests) == [newer_request]
+    emit_terminal_error.assert_awaited_once()
+    release_reservation.assert_awaited_once_with(None)
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["request_id"] == "resp_expired"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
 async def test_finalize_websocket_request_state_updates_balancer_state(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

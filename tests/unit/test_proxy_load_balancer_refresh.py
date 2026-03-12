@@ -157,6 +157,21 @@ class StubAdditionalUsageRepository(AdditionalUsageRepository):
             rows = {account_id: entry for account_id, entry in rows.items() if entry.recorded_at >= since}
         return dict(rows)
 
+    async def latest_by_quota_key(
+        self,
+        quota_key: str,
+        window: str,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
+        return await self.latest_by_account(
+            quota_key=quota_key,
+            window=window,
+            account_ids=account_ids,
+            since=since,
+        )
+
 
 def _additional_entry(
     entry_id: int,
@@ -493,6 +508,54 @@ async def test_select_account_uses_canonical_quota_key_for_upstream_limit_alias(
         )
     )
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("additional_limit_name", ["codex_other", "GPT-5.3-Codex-Spark"])
+async def test_select_account_accepts_legacy_additional_limit_aliases(additional_limit_name: str) -> None:
+    account = _make_account(f"acc-additional-{additional_limit_name}")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=51,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                52,
+                account_id=account.id,
+                window="primary",
+                limit_name="GPT-5.3-Codex-Spark",
+                quota_key="codex_spark",
+                used_percent=5.0,
+                recorded_at=now,
+            )
+        }
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([account]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(additional_limit_name=additional_limit_name)
 
     assert selection.account is not None
     assert selection.account.id == account.id

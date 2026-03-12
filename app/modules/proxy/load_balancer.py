@@ -29,6 +29,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 logger = logging.getLogger(__name__)
 
@@ -571,15 +572,21 @@ async def _latest_additional_by_key(
     account_ids: list[str] | None = None,
     since: datetime | None = None,
 ) -> dict[str, AdditionalUsageHistory]:
+    resolved_quota_key = canonicalize_additional_quota_key(
+        quota_key=quota_key,
+        limit_name=quota_key,
+    )
+    if resolved_quota_key is None:
+        return {}
     if hasattr(additional_usage_repo, "latest_by_quota_key"):
         return await additional_usage_repo.latest_by_quota_key(
-            quota_key,
+            resolved_quota_key,
             window,
             account_ids=account_ids,
             since=since,
         )
     return await additional_usage_repo.latest_by_account(
-        quota_key,
+        resolved_quota_key,
         window,
         account_ids=account_ids,
         since=since,

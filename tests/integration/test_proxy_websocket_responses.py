@@ -163,7 +163,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
     assert seen["model"] == "gpt-5.4"
-    assert fake_upstream.sent_text == [json.dumps(request_payload, separators=(",", ":"))]
+    expected_upstream_request = dict(request_payload)
+    expected_upstream_request.pop("service_tier")
+    assert fake_upstream.sent_text == [json.dumps(expected_upstream_request, separators=(",", ":"))]
     assert len(log_calls) == 1
     log = log_calls[0]
     assert log["account_id"] == "acct_ws_proxy"

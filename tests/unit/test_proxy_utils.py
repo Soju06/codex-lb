@@ -1348,6 +1348,126 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_surfaces_refresh_transport_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_refresh_timeout")
+    release_reservation = AsyncMock()
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=asyncio.TimeoutError()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_refresh_timeout",
+        model="gpt-5.1",
+        service_tier="fast",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    release_reservation.assert_awaited_once_with(None)
+    sent_payload = json.loads(websocket_send.await_args.args[0])
+    assert sent_payload["status"] == 502
+    assert sent_payload["error"]["code"] == "upstream_unavailable"
+    assert sent_payload["error"]["message"] == "Request to upstream timed out"
+    assert request_logs.calls[0]["request_id"] == "ws_req_refresh_timeout"
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["transport"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_surfaces_forced_refresh_transport_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_forced_refresh_timeout")
+    initial_error = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
+    release_reservation = AsyncMock()
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account, asyncio.TimeoutError()]))
+    monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=initial_error))
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_forced_refresh_timeout",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    release_reservation.assert_awaited_once_with(None)
+    sent_payload = json.loads(websocket_send.await_args.args[0])
+    assert sent_payload["status"] == 502
+    assert sent_payload["error"]["code"] == "upstream_unavailable"
+    assert sent_payload["error"]["message"] == "Request to upstream timed out"
+    assert request_logs.calls[0]["request_id"] == "ws_req_forced_refresh_timeout"
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["transport"] == "websocket"
+
+
+def test_apply_api_key_enforcement_to_websocket_payload_strips_service_tier():
+    payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "service_tier": "fast",
+        "reasoning": {"effort": "medium"},
+    }
+
+    result = proxy_service._apply_api_key_enforcement_to_websocket_payload(payload, api_key=None)
+
+    assert result["type"] == "response.create"
+    assert result["model"] == "gpt-5.1"
+    assert "service_tier" not in result
+    assert payload["service_tier"] == "fast"
+
+
+@pytest.mark.asyncio
 async def test_finalize_websocket_request_state_updates_balancer_state(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

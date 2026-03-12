@@ -49,7 +49,10 @@ from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_err
 from app.core.exceptions import AppError, ProxyAuthError, ProxyModelNotAllowed, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
+from app.core.openai.v1_requests import V1ResponsesRequest
+from pydantic import ValidationError
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -580,7 +583,7 @@ class ProxyService:
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
-        sticky_key = _sticky_key_from_session_header(headers) if codex_session_affinity else None
+        sticky_threads_enabled = getattr(settings, "sticky_threads_enabled", False)
         queued_create_frames: deque[str] = deque()
         client_send_lock = anyio.Lock()
         current_request: _WebSocketRequestHandle | None = None
@@ -592,8 +595,10 @@ class ProxyService:
                     current_request = await self._start_websocket_request(
                         queued_create_frames.popleft(),
                         websocket=websocket,
+                        headers=headers,
                         filtered_headers=filtered_headers,
-                        sticky_key=sticky_key,
+                        codex_session_affinity=codex_session_affinity,
+                        sticky_threads_enabled=sticky_threads_enabled,
                         prefer_earlier_reset=prefer_earlier_reset,
                         routing_strategy=routing_strategy,
                         client_send_lock=client_send_lock,
@@ -685,8 +690,10 @@ class ProxyService:
         text_data: str,
         *,
         websocket: WebSocket,
+        headers: Mapping[str, str],
         filtered_headers: dict[str, str],
-        sticky_key: str | None,
+        codex_session_affinity: bool,
+        sticky_threads_enabled: bool,
         prefer_earlier_reset: bool,
         routing_strategy: RoutingStrategy,
         client_send_lock: anyio.Lock,
@@ -698,25 +705,37 @@ class ProxyService:
 
         try:
             request_payload, request_service_tier = _prepare_websocket_request_payload(payload, api_key)
-            request_model = _websocket_request_model(request_payload)
-            _validate_websocket_model_access(api_key, request_model)
+            _validate_websocket_model_access(api_key, request_payload.model)
             reservation = await self._reserve_websocket_api_key_usage(
                 api_key,
-                request_model=request_model,
+                request_model=request_payload.model,
                 request_service_tier=request_service_tier,
             )
             request_state = _WebSocketRequestState(
                 request_id=f"ws_{uuid4().hex}",
-                model=request_model,
+                model=request_payload.model,
                 service_tier=request_service_tier,
-                reasoning_effort=_websocket_reasoning_effort(request_payload),
+                reasoning_effort=request_payload.reasoning.effort if request_payload.reasoning else None,
                 api_key_reservation=reservation,
                 started_at=time.monotonic(),
             )
-            serialized_payload = json.dumps(request_payload, ensure_ascii=True, separators=(",", ":"))
+            serialized_payload = _serialize_websocket_request_create_event(request_payload)
+            sticky_key = _sticky_key_for_responses_request(
+                request_payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                openai_cache_affinity=not codex_session_affinity,
+                sticky_threads_enabled=sticky_threads_enabled,
+            )
         except AppError as exc:
             async with client_send_lock:
                 await websocket.send_text(_serialize_websocket_error_event(_app_error_to_websocket_event(exc)))
+            return None
+        except (ClientPayloadError, ValidationError) as exc:
+            async with client_send_lock:
+                await websocket.send_text(
+                    _serialize_websocket_error_event(_websocket_invalid_payload_event(_validation_param(exc)))
+                )
             return None
 
         account, upstream = await self._connect_proxy_websocket(
@@ -913,25 +932,28 @@ class ProxyService:
             except Exception:
                 logger.debug("Failed to close upstream websocket", exc_info=True)
             if not request_state.terminal_event_seen:
-                async with client_send_lock:
-                    await websocket.send_text(
-                        _serialize_websocket_error_event(
-                            _wrapped_websocket_error_event(
-                                502,
-                                openai_error(
-                                    "stream_incomplete",
-                                    disconnect_error_message,
-                                    error_type="server_error",
-                                ),
-                            )
-                        )
-                    )
                 await self._fail_websocket_request_state(
                     request_state,
                     error_code="stream_incomplete",
                     error_message=disconnect_error_message,
                     api_key=api_key,
                 )
+                try:
+                    async with client_send_lock:
+                        await websocket.send_text(
+                            _serialize_websocket_error_event(
+                                _wrapped_websocket_error_event(
+                                    502,
+                                    openai_error(
+                                        "stream_incomplete",
+                                        disconnect_error_message,
+                                        error_type="server_error",
+                                    ),
+                                )
+                            )
+                        )
+                except Exception:
+                    logger.debug("Failed to send downstream websocket disconnect event", exc_info=True)
 
     async def _process_upstream_websocket_text(
         self,
@@ -2395,40 +2417,46 @@ def _validate_websocket_model_access(api_key: ApiKeyData | None, model: str | No
 
 
 def _apply_api_key_enforcement_to_websocket_payload(
-    payload: dict[str, JsonValue],
+    payload: ResponsesRequest,
     api_key: ApiKeyData | None,
-) -> dict[str, JsonValue]:
+) -> ResponsesRequest:
     if api_key is None:
         return payload
-
-    updated = dict(payload)
-    if api_key.enforced_model and updated.get("model") != api_key.enforced_model:
-        updated["model"] = api_key.enforced_model
+    if api_key.enforced_model and payload.model != api_key.enforced_model:
+        payload.model = api_key.enforced_model
 
     if api_key.enforced_reasoning_effort is not None:
-        reasoning = updated.get("reasoning")
-        if not isinstance(reasoning, dict):
-            reasoning = {}
-        reasoning = dict(reasoning)
-        reasoning["effort"] = api_key.enforced_reasoning_effort
-        updated["reasoning"] = reasoning
-    return updated
+        if payload.reasoning is None:
+            payload.reasoning = ResponsesReasoning(effort=api_key.enforced_reasoning_effort)
+        else:
+            payload.reasoning.effort = api_key.enforced_reasoning_effort
+    return payload
 
 
 def _prepare_websocket_request_payload(
     payload: dict[str, JsonValue],
     api_key: ApiKeyData | None,
-) -> tuple[dict[str, JsonValue], str | None]:
-    updated = _apply_api_key_enforcement_to_websocket_payload(payload, api_key)
-    service_tier = _normalize_websocket_request_service_tier(updated.get("service_tier"))
-    if "service_tier" not in updated:
-        return updated, service_tier
-    sanitized = dict(updated)
-    if service_tier is None:
-        sanitized.pop("service_tier", None)
-    else:
-        sanitized["service_tier"] = service_tier
-    return sanitized, service_tier
+) -> tuple[ResponsesRequest, str | None]:
+    request_payload = _normalize_websocket_request_payload(payload)
+    request_payload = _apply_api_key_enforcement_to_websocket_payload(request_payload, api_key)
+    request_payload.service_tier = _normalize_websocket_request_service_tier(request_payload.service_tier)
+    return request_payload, request_payload.service_tier
+
+
+def _normalize_websocket_request_payload(payload: dict[str, JsonValue]) -> ResponsesRequest:
+    payload_type = payload.get("type")
+    body = {key: value for key, value in payload.items() if key != "type"}
+    if payload_type == "response.create.v1":
+        return V1ResponsesRequest.model_validate(body).to_responses_request()
+    try:
+        return ResponsesRequest.model_validate(body)
+    except ValidationError:
+        return V1ResponsesRequest.model_validate(body).to_responses_request()
+
+
+def _serialize_websocket_request_create_event(payload: ResponsesRequest) -> str:
+    event_payload: dict[str, JsonValue] = {"type": "response.create", **payload.to_payload()}
+    return json.dumps(event_payload, ensure_ascii=True, separators=(",", ":"))
 
 
 def _app_error_to_websocket_event(exc: AppError) -> dict[str, JsonValue]:
@@ -2436,6 +2464,26 @@ def _app_error_to_websocket_event(exc: AppError) -> dict[str, JsonValue]:
         exc.status_code,
         openai_error(exc.code, exc.message, error_type=getattr(exc, "error_type", "server_error")),
     )
+
+
+def _websocket_invalid_payload_event(param: str | None = None) -> dict[str, JsonValue]:
+    payload = openai_error("invalid_request_error", "Invalid request payload", error_type="invalid_request_error")
+    if param:
+        payload["error"]["param"] = param
+    return _wrapped_websocket_error_event(400, payload)
+
+
+def _validation_param(exc: ValidationError | ClientPayloadError) -> str | None:
+    if isinstance(exc, ClientPayloadError):
+        return exc.param
+    errors = exc.errors()
+    if not errors:
+        return None
+    loc = errors[0].get("loc")
+    if isinstance(loc, (list, tuple)):
+        parts = [str(part) for part in loc if part != "body"]
+        return ".".join(parts) or None
+    return None
 
 
 def _wrapped_websocket_error_event(

@@ -1547,6 +1547,52 @@ async def test_fail_websocket_request_state_settles_reservations(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_relay_upstream_websocket_messages_settles_before_downstream_disconnect_send(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    upstream = SimpleNamespace(
+        receive=AsyncMock(return_value=SimpleNamespace(kind="error", text=None, data=None, error="boom")),
+        close=AsyncMock(),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_closed_client",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=SimpleNamespace(reservation_id="resv_ws_closed_client"),
+        started_at=100.0,
+        account_id="acct_ws",
+    )
+    settle_mock = AsyncMock()
+    order: list[str] = []
+
+    async def fake_fail(*args, **kwargs):
+        del args, kwargs
+        order.append("settle")
+
+    async def fake_send_text(*args, **kwargs):
+        del args, kwargs
+        order.append("send")
+        raise anyio.ClosedResourceError
+
+    monkeypatch.setattr(service, "_fail_websocket_request_state", fake_fail)
+
+    websocket = SimpleNamespace(send_text=fake_send_text, send_bytes=AsyncMock())
+    lock = proxy_service.anyio.Lock()
+
+    await service._relay_upstream_websocket_messages(
+        websocket,
+        upstream,
+        request_state=request_state,
+        client_send_lock=lock,
+        api_key=None,
+    )
+
+    assert order == ["settle", "send"]
+    upstream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_forward_websocket_client_event_sends_text_to_active_upstream():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -1598,22 +1644,42 @@ async def test_write_stream_preflight_error_records_transport(monkeypatch):
 
 def test_prepare_websocket_request_payload_preserves_supported_service_tier():
     payload, service_tier = proxy_service._prepare_websocket_request_payload(
-        {"type": "response.create", "model": "gpt-5.1", "service_tier": "priority"},
+        {"type": "response.create", "model": "gpt-5.1", "input": "hello", "service_tier": "priority"},
         None,
     )
 
-    assert payload["service_tier"] == "priority"
+    assert payload.service_tier == "priority"
+    assert payload.to_payload()["service_tier"] == "priority"
     assert service_tier == "priority"
 
 
 def test_prepare_websocket_request_payload_maps_fast_to_priority():
     payload, service_tier = proxy_service._prepare_websocket_request_payload(
-        {"type": "response.create", "model": "gpt-5.1", "service_tier": "fast"},
+        {"type": "response.create", "model": "gpt-5.1", "input": "hello", "service_tier": "fast"},
         None,
     )
 
-    assert payload["service_tier"] == "priority"
+    assert payload.service_tier == "priority"
+    assert payload.to_payload()["service_tier"] == "priority"
     assert service_tier == "priority"
+
+
+def test_prepare_websocket_request_payload_normalizes_v1_prompt_cache_fields():
+    payload, _ = proxy_service._prepare_websocket_request_payload(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": "hello",
+            "promptCacheKey": "thread_123",
+            "promptCacheRetention": "4h",
+        },
+        None,
+    )
+
+    dumped = payload.to_payload()
+    assert dumped["prompt_cache_key"] == "thread_123"
+    assert "promptCacheKey" not in dumped
+    assert "prompt_cache_retention" not in dumped
 
 
 @pytest.mark.asyncio

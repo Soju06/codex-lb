@@ -433,6 +433,93 @@ def test_backend_responses_websocket_surfaces_upstream_disconnect(app_instance, 
     assert event["error"]["message"] == "upstream closed unexpectedly"
 
 
+def test_v1_responses_websocket_uses_prompt_cache_affinity_and_http_normalization(app_instance, monkeypatch):
+    fake_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_v1", "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_ws_v1", "object": "response", "status": "completed"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    seen: dict[str, object] = {}
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return SimpleNamespace(
+                prefer_earlier_reset_accounts=False,
+                routing_strategy="usage_weighted",
+                sticky_threads_enabled=False,
+            )
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None):
+        assert authorization is None
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        client_send_lock,
+        websocket,
+        exclude_account_ids=None,
+    ):
+        del self, headers, prefer_earlier_reset, routing_strategy, model, request_state, client_send_lock, websocket, exclude_account_ids
+        seen["sticky_key"] = sticky_key
+        return SimpleNamespace(id="acct_ws_v1"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "cache me",
+        "promptCacheKey": "thread_123",
+        "promptCacheRetention": "4h",
+        "temperature": 0.2,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+    assert seen["sticky_key"] == "thread_123"
+    forwarded_payload = json.loads(fake_upstream.sent_text[0])
+    assert forwarded_payload["prompt_cache_key"] == "thread_123"
+    assert "promptCacheKey" not in forwarded_payload
+    assert "prompt_cache_retention" not in forwarded_payload
+    assert "temperature" not in forwarded_payload
+
+
 def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monkeypatch):
     request_payload = {
         "type": "response.create",

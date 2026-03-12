@@ -136,9 +136,12 @@ class CompactResponsePayload(BaseModel):
     @field_validator("object")
     @classmethod
     def _validate_object(cls, value: str) -> str:
-        if not value.strip():
+        normalized = value.strip()
+        if not normalized:
             raise ValueError("Compact response payload requires an object discriminator")
-        return value
+        if normalized != "response.compaction":
+            raise ValueError("Compact response payload requires object='response.compaction'")
+        return normalized
 
     @field_validator("error", mode="before")
     @classmethod

@@ -131,6 +131,7 @@ def test_parse_sse_event_concats_multiple_data_lines():
 
 def test_parse_compact_response_payload_requires_object_discriminator():
     assert parse_compact_response_payload({"detail": "bad gateway"}) is None
+    assert parse_compact_response_payload({"object": "response", "output": []}) is None
     parsed = parse_compact_response_payload({"object": "response.compaction", "output": []})
     assert parsed is not None
     assert parsed.object == "response.compaction"

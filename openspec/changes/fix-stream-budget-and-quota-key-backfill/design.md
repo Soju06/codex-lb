@@ -3,8 +3,9 @@
 This change closes two gaps where runtime behavior drifted from the intended contract:
 
 1. Streaming Responses attempts already compute a remaining request budget, but only pass that budget to the upstream connect timeout override. The idle and total stream timeouts must be clamped to the same remaining budget on every attempt.
-2. The `quota_key` backfill migration must align with the configured registry at upgrade time, while runtime canonicalization and reads must keep historical rows visible if canonical keys later diverge.
+2. The `quota_key` backfill migration must stay deterministic across environments, while runtime canonicalization must normalize configured keys before persisting or querying them.
 3. Additional-usage refresh can receive multiple upstream aliases for the same canonical quota in one payload, so refresh-time pruning must operate on the merged canonical quota state rather than item order.
+4. Registry-driven quota-key renames must not make still-fresh persisted rows unreadable before the next refresh cycle.
 
 ## Decisions
 
@@ -16,13 +17,13 @@ This change closes two gaps where runtime behavior drifted from the intended con
 
 `AdditionalQuotaDefinition` now stores a normalized canonical key instead of the raw configured `quota_key`. That keeps model lookup, alias resolution, persistence, and delete/read filters on the same identifier even when operators spell the configured key with mixed case or punctuation.
 
-### Keep migration backfill aligned with the configured registry
+### Preserve legacy stored quota keys through registry aliases
 
-The migration resolves `quota_key` values from the configured registry file available at upgrade time instead of hard-coding the default Spark key. That ensures the first post-upgrade runtime sees the same canonical key that the deployment configured for routing.
+The runtime registry now distinguishes raw upstream aliases from stored `quota_key` aliases. Operators can attach legacy durable keys to the current canonical quota family, and repository read/delete paths must treat those aliases as compatible query targets. Repository reads also canonicalize persisted row metadata back through the current registry so dashboards and gated-model selection still surface the current canonical key while legacy rows remain visible until refresh rewrites them.
 
-### Read historical rows through raw alias compatibility
+### Keep migration backfill self-contained and versioned
 
-Repository lookups and deletes no longer rely only on the persisted `quota_key` column. When a request targets a known canonical quota, repository filters also match the raw upstream alias fields (`limit_name` / `metered_feature`) registered for that quota. This keeps previously persisted rows visible even if an operator later renames the canonical key or the migration and runtime use different registry files.
+The migration no longer imports runtime registry resolution. Instead, it carries a revision-local alias snapshot for the known additional quota families and falls back to normalized raw identifiers when no versioned alias matches. This keeps the backfill reproducible for the lifetime of the revision and avoids environment-specific durable data.
 
 ### Merge refresh aliases before deleting stale quota rows
 
@@ -33,6 +34,6 @@ The usage refresh path now folds `additional_rate_limits` into one `quota_key ->
 - unit coverage proves the remaining budget is forwarded to connect, idle, and total overrides on the initial stream attempt
 - unit coverage proves the forced-refresh retry path reapplies all three overrides with the recomputed remaining budget
 - unit coverage proves mixed-case configured quota keys are normalized before runtime mapping and persistence
-- migration coverage proves backfill follows the configured canonical key supplied by the deployment registry
-- repository coverage proves raw alias compatibility keeps historical rows queryable and deletable after canonical key renames
+- unit coverage proves legacy stored `quota_key` aliases remain readable, listable, and deletable under the current canonical key
+- migration coverage proves backfill remains pinned to the revision-local alias snapshot even when the runtime registry is overridden
 - usage refresh coverage proves mixed aliases for the same canonical quota are merged before stale-row pruning runs

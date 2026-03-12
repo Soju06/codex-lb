@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -28,6 +30,31 @@ async def async_session() -> AsyncIterator[AsyncSession]:
         await session.close()
 
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _clear_registry_cache() -> AsyncIterator[None]:
+    clear_additional_quota_registry_cache()
+    yield
+    clear_additional_quota_registry_cache()
+
+
+def _write_registry(path: Path, *, quota_key: str, quota_key_aliases: list[str] | None = None) -> None:
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "quota_key": quota_key,
+                    "quota_key_aliases": quota_key_aliases or [],
+                    "display_label": "Spark Enterprise",
+                    "model_ids": ["gpt-5.3-codex-spark"],
+                    "limit_name_aliases": ["codex_other"],
+                    "metered_feature_aliases": ["codex_bengalfox"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.asyncio
@@ -212,110 +239,37 @@ async def test_latest_by_account_canonicalizes_legacy_limit_name_alias(async_ses
 
 
 @pytest.mark.asyncio
-async def test_latest_by_account_matches_raw_aliases_when_canonical_key_changes(
+async def test_latest_by_account_reads_rows_under_legacy_quota_key_alias(
     async_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    monkeypatch,
+    tmp_path: Path,
 ) -> None:
     registry = tmp_path / "additional_quota_registry.json"
-    registry.write_text(
-        """
-        [
-          {
-            "quota_key": "spark_enterprise",
-            "display_label": "Spark Enterprise",
-            "limit_name_aliases": ["codex_other", "GPT-5.3-Codex-Spark"],
-            "metered_feature_aliases": ["codex_bengalfox"]
-          }
-        ]
-        """.strip(),
-        encoding="utf-8",
-    )
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
     clear_additional_quota_registry_cache()
 
     repo = AdditionalUsageRepository(async_session)
     now = datetime.now(tz=timezone.utc)
 
-    await repo.add_entry(
-        account_id="acc_1",
-        quota_key="codex_spark",
-        limit_name="codex_other",
-        metered_feature="codex_bengalfox",
-        window="primary",
-        used_percent=30.0,
-        recorded_at=now,
+    async_session.add(
+        AdditionalUsageHistory(
+            account_id="acc_legacy",
+            quota_key="codex_spark",
+            limit_name="codex_other",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=42.0,
+            recorded_at=now,
+        )
     )
+    await async_session.commit()
 
     result = await repo.latest_by_account(quota_key="spark_enterprise", window="primary")
 
-    assert list(result) == ["acc_1"]
-    assert result["acc_1"].quota_key == "codex_spark"
-
-
-@pytest.mark.asyncio
-async def test_latest_by_account_matches_rows_written_with_renamed_canonical_key(
-    async_session: AsyncSession,
-) -> None:
-    repo = AdditionalUsageRepository(async_session)
-    now = datetime.now(tz=timezone.utc)
-
-    await repo.add_entry(
-        account_id="acc_1",
-        quota_key="spark_enterprise",
-        limit_name="codex_other",
-        metered_feature="codex_bengalfox",
-        window="primary",
-        used_percent=30.0,
-        recorded_at=now,
-    )
-
-    result = await repo.latest_by_account(quota_key="codex_spark", window="primary")
-
-    assert list(result) == ["acc_1"]
-    assert result["acc_1"].quota_key == "spark_enterprise"
-
-
-@pytest.mark.asyncio
-async def test_latest_by_account_matches_case_folded_raw_aliases_after_canonical_rename(
-    async_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    registry = tmp_path / "additional_quota_registry.json"
-    registry.write_text(
-        """
-        [
-          {
-            "quota_key": "spark_enterprise",
-            "display_label": "Spark Enterprise",
-            "limit_name_aliases": ["GPT-5.3-Codex-Spark"],
-            "metered_feature_aliases": ["codex_bengalfox"]
-          }
-        ]
-        """.strip(),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
-    clear_additional_quota_registry_cache()
-
-    repo = AdditionalUsageRepository(async_session)
-    now = datetime.now(tz=timezone.utc)
-
-    await repo.add_entry(
-        account_id="acc_1",
-        quota_key="codex_spark",
-        limit_name="gpt-5.3-codex-spark",
-        metered_feature="codex_bengalfox",
-        window="primary",
-        used_percent=30.0,
-        recorded_at=now,
-    )
-
-    result = await repo.latest_by_account(quota_key="spark_enterprise", window="primary")
-
-    assert list(result) == ["acc_1"]
-    assert result["acc_1"].limit_name == "gpt-5.3-codex-spark"
+    assert list(result) == ["acc_legacy"]
+    assert result["acc_legacy"].quota_key == "codex_spark"
+    assert await repo.list_quota_keys() == ["spark_enterprise"]
 
 
 @pytest.mark.asyncio
@@ -625,58 +579,52 @@ async def test_history_since_canonicalizes_legacy_limit_name_alias(async_session
 
 
 @pytest.mark.asyncio
-async def test_history_since_matches_raw_aliases_when_canonical_key_changes(
+async def test_history_since_reads_rows_under_legacy_quota_key_alias(
     async_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    monkeypatch,
+    tmp_path: Path,
 ) -> None:
     registry = tmp_path / "additional_quota_registry.json"
-    registry.write_text(
-        """
-        [
-          {
-            "quota_key": "spark_enterprise",
-            "display_label": "Spark Enterprise",
-            "limit_name_aliases": ["codex_other", "GPT-5.3-Codex-Spark"],
-            "metered_feature_aliases": ["codex_bengalfox"]
-          }
-        ]
-        """.strip(),
-        encoding="utf-8",
-    )
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
     clear_additional_quota_registry_cache()
 
     repo = AdditionalUsageRepository(async_session)
     now = datetime.now(tz=timezone.utc)
 
-    await repo.add_entry(
-        account_id="acc_1",
-        quota_key="codex_spark",
-        limit_name="codex_other",
-        metered_feature="codex_bengalfox",
-        window="primary",
-        used_percent=30.0,
-        recorded_at=now - timedelta(minutes=5),
+    async_session.add_all(
+        [
+            AdditionalUsageHistory(
+                account_id="acc_legacy",
+                quota_key="codex_spark",
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=20.0,
+                recorded_at=now - timedelta(minutes=5),
+            ),
+            AdditionalUsageHistory(
+                account_id="acc_legacy",
+                quota_key="codex_spark",
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=45.0,
+                recorded_at=now,
+            ),
+        ]
     )
-    await repo.add_entry(
-        account_id="acc_1",
-        quota_key="codex_spark",
-        limit_name="codex_other",
-        metered_feature="codex_bengalfox",
-        window="primary",
-        used_percent=45.0,
-        recorded_at=now,
-    )
+    await async_session.commit()
 
     result = await repo.history_since(
-        account_id="acc_1",
+        account_id="acc_legacy",
         quota_key="spark_enterprise",
         window="primary",
         since=now - timedelta(hours=1),
     )
 
-    assert [entry.used_percent for entry in result] == [30.0, 45.0]
+    assert [entry.used_percent for entry in result] == [20.0, 45.0]
+    assert all(entry.quota_key == "codex_spark" for entry in result)
 
 
 @pytest.mark.asyncio
@@ -812,39 +760,29 @@ async def test_delete_for_account_and_limit_canonicalizes_legacy_alias(async_ses
 
 
 @pytest.mark.asyncio
-async def test_delete_for_account_and_limit_matches_raw_aliases_when_canonical_key_changes(
+async def test_delete_for_account_and_quota_key_removes_rows_under_legacy_quota_key_alias(
     async_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    monkeypatch,
+    tmp_path: Path,
 ) -> None:
     registry = tmp_path / "additional_quota_registry.json"
-    registry.write_text(
-        """
-        [
-          {
-            "quota_key": "spark_enterprise",
-            "display_label": "Spark Enterprise",
-            "limit_name_aliases": ["codex_other", "GPT-5.3-Codex-Spark"],
-            "metered_feature_aliases": ["codex_bengalfox"]
-          }
-        ]
-        """.strip(),
-        encoding="utf-8",
-    )
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
     clear_additional_quota_registry_cache()
 
     repo = AdditionalUsageRepository(async_session)
     now = datetime.now(tz=timezone.utc)
 
-    await repo.add_entry(
-        account_id="acc_delete",
-        quota_key="codex_spark",
-        limit_name="codex_other",
-        metered_feature="codex_bengalfox",
-        window="primary",
-        used_percent=30.0,
-        recorded_at=now,
+    async_session.add(
+        AdditionalUsageHistory(
+            account_id="acc_delete",
+            quota_key="codex_spark",
+            limit_name="codex_other",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=30.0,
+            recorded_at=now,
+        )
     )
     await repo.add_entry(
         account_id="acc_delete",
@@ -854,8 +792,9 @@ async def test_delete_for_account_and_limit_matches_raw_aliases_when_canonical_k
         used_percent=60.0,
         recorded_at=now,
     )
+    await async_session.commit()
 
-    await repo.delete_for_account_and_limit("acc_delete", "spark_enterprise")
+    await repo.delete_for_account_and_quota_key("acc_delete", "spark_enterprise")
 
     result = await async_session.execute(
         select(AdditionalUsageHistory).order_by(

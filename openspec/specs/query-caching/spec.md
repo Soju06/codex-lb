@@ -209,6 +209,13 @@ Persisted additional-usage rows MUST record one internal canonical `quota_key` e
 - **AND** it records the same canonical `quota_key` used by routing for that model
 - **AND** subsequent selection reads those rows through the canonical `quota_key`
 
+#### Scenario: Legacy stored quota key remains readable after a registry rename
+- **GIVEN** the registry renames a canonical additional-usage `quota_key`
+- **AND** it keeps the prior durable key as a configured legacy `quota_key` alias for that same quota family
+- **WHEN** selection, dashboard, or cleanup code reads or deletes persisted rows for the current canonical key
+- **THEN** rows written under the legacy `quota_key` remain available through the current canonical key
+- **AND** canonical list/read results surface the current key instead of the legacy durable alias
+
 ### Requirement: Gated model selection fails closed on stale or missing quota data
 Explicitly mapped gated models MUST NOT fall back to the general account pool when their persisted additional-usage snapshot is stale, missing, or yields zero eligible accounts.
 
@@ -229,4 +236,3 @@ Additional-quota eligibility filtering MUST NOT mutate persisted account status 
 - **WHEN** gated-model selection evaluates candidate accounts against persisted additional-usage rows
 - **THEN** it may read account status and runtime snapshots to decide eligibility
 - **AND** it MUST NOT persist status changes or rewrite shared runtime state unless a normal post-selection balancer transition occurs
-

@@ -21,3 +21,8 @@
 - [x] 4.1 Validate OpenSpec artifacts
 - [x] 4.2 Run targeted unit test coverage for proxy timeout, migration, and usage refresh regressions
 - [x] 4.3 Review diffs, commit, and push branch updates
+
+## 5. Legacy quota-key compatibility
+
+- [x] 5.1 Add registry/runtime support for legacy `quota_key` aliases so renamed canonical keys can still read/delete existing rows.
+- [x] 5.2 Add regression coverage for legacy `quota_key` aliases across repository list/read/delete paths.

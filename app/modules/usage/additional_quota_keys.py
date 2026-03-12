@@ -23,6 +23,7 @@ class AdditionalQuotaDefinition:
     quota_key: str
     display_label: str
     model_ids: frozenset[str] = frozenset()
+    quota_key_aliases: frozenset[str] = frozenset()
     limit_name_aliases: frozenset[str] = frozenset()
     metered_feature_aliases: frozenset[str] = frozenset()
     raw_limit_name_aliases: frozenset[str] = frozenset()
@@ -32,6 +33,7 @@ class AdditionalQuotaDefinition:
 @dataclass(frozen=True, slots=True)
 class AdditionalQuotaQueryScope:
     quota_key: str
+    quota_key_match_values: frozenset[str] = frozenset()
     limit_name_match_values: frozenset[str] = frozenset()
     metered_feature_match_values: frozenset[str] = frozenset()
 
@@ -46,6 +48,7 @@ class AdditionalQuotaRegistryEntry(TypedDict, total=False):
     quota_key: str
     display_label: str
     model_ids: list[str]
+    quota_key_aliases: list[str]
     limit_name_aliases: list[str]
     metered_feature_aliases: list[str]
 
@@ -78,6 +81,11 @@ def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuota
         for normalized in (_normalize_identifier(str(value)) for value in item.get("model_ids", []))
         if normalized is not None
     )
+    quota_key_aliases = frozenset(
+        normalized
+        for normalized in (_normalize_identifier(str(value)) for value in item.get("quota_key_aliases", []))
+        if normalized is not None and normalized != quota_key
+    )
     limit_name_aliases = frozenset(
         normalized
         for normalized in (_normalize_identifier(str(value)) for value in item.get("limit_name_aliases", []))
@@ -92,6 +100,7 @@ def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuota
         quota_key=quota_key,
         display_label=display_label,
         model_ids=model_ids,
+        quota_key_aliases=quota_key_aliases,
         limit_name_aliases=limit_name_aliases,
         metered_feature_aliases=metered_feature_aliases,
         raw_limit_name_aliases=raw_limit_name_aliases,
@@ -116,12 +125,14 @@ def _definition_maps_for_path(
     dict[str, str],
     dict[str, AdditionalQuotaDefinition],
     dict[str, str],
+    dict[str, str],
 ]:
     definitions = _definitions_for_path(path_str)
     by_quota_key: dict[str, AdditionalQuotaDefinition] = {}
     model_to_quota_key: dict[str, str] = {}
     model_to_definition: dict[str, AdditionalQuotaDefinition] = {}
     alias_to_quota_key: dict[str, str] = {}
+    quota_key_alias_to_quota_key: dict[str, str] = {}
 
     for definition in definitions:
         previous_quota = by_quota_key.get(definition.quota_key)
@@ -131,6 +142,13 @@ def _definition_maps_for_path(
                 f"{definition.quota_key!r} conflicts with {previous_quota.quota_key!r}"
             )
         by_quota_key[definition.quota_key] = definition
+        previous_key_alias = quota_key_alias_to_quota_key.get(definition.quota_key)
+        if previous_key_alias is not None and previous_key_alias != definition.quota_key:
+            raise ValueError(
+                "duplicate additional quota key alias in registry: "
+                f"{definition.quota_key!r} -> {previous_key_alias!r}/{definition.quota_key!r}"
+            )
+        quota_key_alias_to_quota_key[definition.quota_key] = definition.quota_key
 
         for model_id in definition.model_ids:
             previous_model = model_to_quota_key.get(model_id)
@@ -148,10 +166,19 @@ def _definition_maps_for_path(
                 raise ValueError(
                     "duplicate additional quota alias in registry: "
                     f"{alias!r} -> {previous_alias!r}/{definition.quota_key!r}"
-                )
+            )
             alias_to_quota_key[alias] = definition.quota_key
 
-    return by_quota_key, model_to_quota_key, model_to_definition, alias_to_quota_key
+        for quota_key_alias in definition.quota_key_aliases:
+            previous_quota_key_alias = quota_key_alias_to_quota_key.get(quota_key_alias)
+            if previous_quota_key_alias is not None and previous_quota_key_alias != definition.quota_key:
+                raise ValueError(
+                    "duplicate additional quota key alias in registry: "
+                    f"{quota_key_alias!r} -> {previous_quota_key_alias!r}/{definition.quota_key!r}"
+                )
+            quota_key_alias_to_quota_key[quota_key_alias] = definition.quota_key
+
+    return by_quota_key, model_to_quota_key, model_to_definition, alias_to_quota_key, quota_key_alias_to_quota_key
 
 
 def clear_additional_quota_registry_cache() -> None:
@@ -173,14 +200,23 @@ def reload_additional_quota_registry() -> AdditionalQuotaRegistryStatus:
 def canonicalize_additional_quota_key(
     *,
     model: str | None = None,
+    quota_key: str | None = None,
     limit_name: str | None = None,
     metered_feature: str | None = None,
 ) -> str | None:
-    _, model_to_quota_key, _, alias_to_quota_key = _definition_maps_for_path(str(_registry_path()))
+    _, model_to_quota_key, _, alias_to_quota_key, quota_key_alias_to_quota_key = _definition_maps_for_path(
+        str(_registry_path())
+    )
 
     model_key = _normalize_identifier(model)
     if model_key is not None:
         resolved = model_to_quota_key.get(model_key)
+        if resolved is not None:
+            return resolved
+
+    normalized_quota_key = _normalize_identifier(quota_key)
+    if normalized_quota_key is not None:
+        resolved = quota_key_alias_to_quota_key.get(normalized_quota_key)
         if resolved is not None:
             return resolved
 
@@ -192,7 +228,33 @@ def canonicalize_additional_quota_key(
         if resolved is not None:
             return resolved
 
-    return _normalize_identifier(limit_name) or _normalize_identifier(metered_feature)
+    return _normalize_identifier(limit_name) or _normalize_identifier(metered_feature) or normalized_quota_key
+
+
+def get_additional_quota_lookup_keys(
+    *,
+    quota_key: str | None = None,
+    limit_name: str | None = None,
+    metered_feature: str | None = None,
+) -> frozenset[str] | None:
+    (
+        by_quota_key,
+        _model_to_quota_key,
+        _model_to_definition,
+        _alias_to_quota_key,
+        _quota_key_alias_to_quota_key,
+    ) = _definition_maps_for_path(str(_registry_path()))
+    resolved_key = canonicalize_additional_quota_key(
+        quota_key=quota_key,
+        limit_name=limit_name,
+        metered_feature=metered_feature,
+    )
+    if resolved_key is None:
+        return None
+    definition = by_quota_key.get(resolved_key)
+    if definition is None:
+        return frozenset({resolved_key})
+    return frozenset({resolved_key, *definition.quota_key_aliases})
 
 
 def get_additional_quota_key_for_model(model: str | None) -> str | None:
@@ -200,7 +262,7 @@ def get_additional_quota_key_for_model(model: str | None) -> str | None:
 
 
 def get_additional_quota_definition_for_model(model: str | None) -> AdditionalQuotaDefinition | None:
-    _, _, model_to_definition, _ = _definition_maps_for_path(str(_registry_path()))
+    _, _, model_to_definition, _, _ = _definition_maps_for_path(str(_registry_path()))
     normalized = _normalize_identifier(model)
     if normalized is None:
         return None
@@ -208,11 +270,11 @@ def get_additional_quota_definition_for_model(model: str | None) -> AdditionalQu
 
 
 def get_additional_quota_definition(quota_key: str | None) -> AdditionalQuotaDefinition | None:
-    by_quota_key, _, _, _ = _definition_maps_for_path(str(_registry_path()))
-    normalized = _normalize_identifier(quota_key)
-    if normalized is None:
+    by_quota_key, _, _, _, _ = _definition_maps_for_path(str(_registry_path()))
+    resolved_key = canonicalize_additional_quota_key(quota_key=quota_key)
+    if resolved_key is None:
         return None
-    return by_quota_key.get(normalized)
+    return by_quota_key.get(resolved_key)
 
 
 def get_additional_quota_query_scope(
@@ -223,6 +285,7 @@ def get_additional_quota_query_scope(
 ) -> AdditionalQuotaQueryScope | None:
     candidate_limit_name = quota_key if quota_key is not None else limit_name
     resolved = canonicalize_additional_quota_key(
+        quota_key=quota_key,
         limit_name=candidate_limit_name,
         metered_feature=metered_feature,
     )
@@ -230,9 +293,13 @@ def get_additional_quota_query_scope(
         return None
     definition = get_additional_quota_definition(resolved)
     if definition is None:
-        return AdditionalQuotaQueryScope(quota_key=resolved)
+        return AdditionalQuotaQueryScope(
+            quota_key=resolved,
+            quota_key_match_values=frozenset({resolved}),
+        )
     return AdditionalQuotaQueryScope(
         quota_key=resolved,
+        quota_key_match_values=frozenset({resolved, *definition.quota_key_aliases}),
         limit_name_match_values=frozenset(
             {alias.lower() for alias in definition.raw_limit_name_aliases} | set(definition.limit_name_aliases)
         ),
@@ -244,11 +311,11 @@ def get_additional_quota_query_scope(
 
 
 def get_additional_display_label_for_quota_key(quota_key: str | None) -> str | None:
-    by_quota_key, _, _, _ = _definition_maps_for_path(str(_registry_path()))
-    normalized = _normalize_identifier(quota_key)
-    if normalized is None:
+    by_quota_key, _, _, _, _ = _definition_maps_for_path(str(_registry_path()))
+    resolved_key = canonicalize_additional_quota_key(quota_key=quota_key)
+    if resolved_key is None:
         return None
-    definition = by_quota_key.get(normalized)
+    definition = by_quota_key.get(resolved_key)
     return definition.display_label if definition is not None else None
 
 

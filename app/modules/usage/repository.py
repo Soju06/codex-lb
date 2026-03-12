@@ -34,11 +34,12 @@ def _resolve_additional_quota_key(
     limit_name: str | None = None,
     metered_feature: str | None = None,
 ) -> str | None:
-    candidate = quota_key if quota_key is not None else limit_name
-    if candidate is None and metered_feature is None:
+    candidate_limit_name = quota_key if quota_key is not None else limit_name
+    if candidate_limit_name is None and metered_feature is None:
         return None
     return canonicalize_additional_quota_key(
-        limit_name=candidate,
+        quota_key=quota_key,
+        limit_name=candidate_limit_name,
         metered_feature=metered_feature,
     )
 
@@ -57,7 +58,7 @@ def _resolve_additional_quota_query_scope(
 
 
 def _additional_quota_match_clause(scope: AdditionalQuotaQueryScope):
-    clauses = [AdditionalUsageHistory.quota_key == scope.quota_key]
+    clauses = [AdditionalUsageHistory.quota_key.in_(tuple(scope.quota_key_match_values or {scope.quota_key}))]
     if scope.limit_name_match_values:
         clauses.append(func.lower(AdditionalUsageHistory.limit_name).in_(tuple(scope.limit_name_match_values)))
     if scope.metered_feature_match_values:
@@ -292,7 +293,8 @@ class AdditionalUsageRepository:
         recorded_at: datetime | None = None,
         quota_key: str | None = None,
     ) -> None:
-        effective_quota_key = quota_key or canonicalize_additional_quota_key(
+        effective_quota_key = _resolve_additional_quota_key(
+            quota_key=quota_key,
             limit_name=limit_name,
             metered_feature=metered_feature,
         )
@@ -410,7 +412,7 @@ class AdditionalUsageRepository:
         since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
         return await self.latest_by_account(
-            limit_name=quota_key,
+            quota_key=quota_key,
             window=window,
             account_ids=account_ids,
             since=since,
@@ -422,13 +424,29 @@ class AdditionalUsageRepository:
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> list[str]:
-        stmt = select(AdditionalUsageHistory.quota_key).distinct()
+        stmt = select(
+            AdditionalUsageHistory.quota_key,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.metered_feature,
+        ).distinct()
         if account_ids is not None:
             stmt = stmt.where(AdditionalUsageHistory.account_id.in_(account_ids))
         if since is not None:
             stmt = stmt.where(AdditionalUsageHistory.recorded_at >= since)
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        resolved_keys = {
+            resolved_key
+            for quota_key_value, limit_name_value, metered_feature_value in result.all()
+            if (
+                resolved_key := canonicalize_additional_quota_key(
+                    quota_key=quota_key_value,
+                    limit_name=limit_name_value,
+                    metered_feature=metered_feature_value,
+                )
+            )
+            is not None
+        }
+        return sorted(resolved_keys)
 
     async def list_limit_names(
         self,

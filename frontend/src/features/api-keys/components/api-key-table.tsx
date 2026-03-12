@@ -84,13 +84,12 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
     <Table className="table-fixed">
       <TableHeader>
           <TableRow>
-            <TableHead className="w-[20%] min-w-[12rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
-            <TableHead className="w-[10%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
-            <TableHead className="w-[10%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Tags</TableHead>
-            <TableHead className="w-[9%] min-w-[6.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
-          <TableHead className="w-[40%] min-w-[24rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
+            <TableHead className="w-[22%] min-w-[12rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
+            <TableHead className="w-[12%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
+            <TableHead className="w-[10%] min-w-[6.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
+          <TableHead className="w-[42%] min-w-[24rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
           <TableHead className="w-[8%] min-w-[7rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
-          <TableHead className="w-[7%] min-w-[5.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
+          <TableHead className="w-[8%] min-w-[5.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
           <TableHead className="w-[6%] min-w-[4.5rem] pr-4 text-right text-[11px] uppercase tracking-wider text-muted-foreground/80">Actions</TableHead>
         </TableRow>
       </TableHeader>
@@ -112,7 +111,6 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
             <TableRow key={apiKey.id}>
               <TableCell className="pl-4 font-medium truncate">{apiKey.name}</TableCell>
               <TableCell className="truncate font-mono text-xs">{apiKey.keyPrefix}</TableCell>
-              <TableCell className="truncate text-xs">{apiKey.tags.join(", ") || "All accounts"}</TableCell>
               <TableCell className="truncate">{models}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{usageText}</TableCell>
               <TableCell className="truncate text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt)}</TableCell>

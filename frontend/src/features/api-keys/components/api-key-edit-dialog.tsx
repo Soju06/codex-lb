@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
+import { ChevronsUpDown, X } from "lucide-react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,10 +14,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { TagInput } from "@/components/tag-input";
 import {
   Select,
   SelectContent,
@@ -42,6 +49,7 @@ export type ApiKeyEditDialogProps = {
   open: boolean;
   busy: boolean;
   apiKey: ApiKey | null;
+  availableTags?: string[];
   onOpenChange: (open: boolean) => void;
   onSubmit: (payload: ApiKeyUpdateRequest) => Promise<void>;
 };
@@ -49,9 +57,74 @@ export type ApiKeyEditDialogProps = {
 type ApiKeyEditFormProps = {
   apiKey: ApiKey;
   busy: boolean;
+  availableTags: string[];
   onSubmit: (payload: ApiKeyUpdateRequest) => Promise<void>;
   onClose: () => void;
 };
+
+type AccountTagSelectProps = {
+  value: string[];
+  options: string[];
+  onChange: (value: string[]) => void;
+  disabled?: boolean;
+};
+
+function AccountTagSelect({ value, options, onChange, disabled = false }: AccountTagSelectProps) {
+  const selectedSet = useMemo(() => new Set(value), [value]);
+
+  const toggle = (tag: string) => {
+    if (selectedSet.has(tag)) {
+      onChange(value.filter((entry) => entry !== tag));
+      return;
+    }
+    onChange([...value, tag]);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button type="button" variant="outline" className="w-full justify-between font-normal" disabled={disabled}>
+            <span className="truncate text-left">
+              {value.length === 0 ? "All account tags" : `${value.length} tag${value.length > 1 ? "s" : ""} selected`}
+            </span>
+            <ChevronsUpDown className="ml-1 size-4 shrink-0 opacity-50" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-[var(--radix-dropdown-menu-trigger-width)]">
+          <DropdownMenuCheckboxItem checked={value.length === 0} onCheckedChange={() => onChange([])} onSelect={(e) => e.preventDefault()}>
+            All account tags
+          </DropdownMenuCheckboxItem>
+          {options.map((tag) => (
+            <DropdownMenuCheckboxItem
+              key={tag}
+              checked={selectedSet.has(tag)}
+              onCheckedChange={() => toggle(tag)}
+              onSelect={(e) => e.preventDefault()}
+            >
+              {tag}
+            </DropdownMenuCheckboxItem>
+          ))}
+          {options.length === 0 ? <div className="px-2 py-1.5 text-xs text-muted-foreground">No account tags defined</div> : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {value.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {value.map((tag) => (
+            <Badge key={tag} variant="secondary" className="gap-1 text-xs">
+              {tag}
+              <button type="button" className="ml-0.5 hover:text-foreground" onClick={() => toggle(tag)} disabled={disabled}>
+                <X className="size-3" />
+                <span className="sr-only">Remove {tag}</span>
+              </button>
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function limitsToCreateRules(apiKey: ApiKey): LimitRuleCreate[] {
   return apiKey.limits.map((l) => ({
@@ -62,7 +135,7 @@ function limitsToCreateRules(apiKey: ApiKey): LimitRuleCreate[] {
   }));
 }
 
-function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
+function ApiKeyEditForm({ apiKey, busy, availableTags, onSubmit, onClose }: ApiKeyEditFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -71,8 +144,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     },
   });
 
+  const normalizedAvailableTags = useMemo(() => [...new Set(availableTags)].sort(), [availableTags]);
   const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
-  const [tags, setTags] = useState<string[]>(apiKey.tags || []);
+  const [tags, setTags] = useState<string[]>(() =>
+    (apiKey.tags || []).filter((tag, index, all) => normalizedAvailableTags.includes(tag) && all.indexOf(tag) === index),
+  );
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
@@ -123,16 +199,16 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Tags</div>
-              <TagInput value={tags} onChange={setTags} disabled={busy} />
+              <AccountTagSelect value={tags} options={normalizedAvailableTags} onChange={setTags} disabled={busy} />
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Allowed models</label>
+              <div className="text-sm font-medium">Allowed models</div>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced model</label>
+              <div className="text-sm font-medium">Enforced model</div>
               <Input
                 value={enforcedModel}
                 onChange={(e) => setEnforcedModel(e.target.value)}
@@ -142,7 +218,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced reasoning</label>
+              <div className="text-sm font-medium">Enforced reasoning</div>
               <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
                 <SelectTrigger>
                   <SelectValue placeholder="None" />
@@ -159,7 +235,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Expiry</label>
+              <div className="text-sm font-medium">Expiry</div>
               <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
             </div>
 
@@ -182,7 +258,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             {apiKey.limits.length > 0 ? (
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Current usage</label>
+                <div className="text-xs font-medium text-muted-foreground">Current usage</div>
                 <div className="space-y-1">
                   {apiKey.limits.map((limit) => (
                     <LimitUsageBar key={limit.id} limit={limit} />
@@ -245,7 +321,7 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }: ApiKeyEditDialogProps) {
+export function ApiKeyEditDialog({ open, busy, apiKey, availableTags = [], onOpenChange, onSubmit }: ApiKeyEditDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl">
@@ -259,6 +335,7 @@ export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }:
             key={`${apiKey.id}:${open ? "open" : "closed"}`}
             apiKey={apiKey}
             busy={busy}
+            availableTags={availableTags}
             onSubmit={onSubmit}
             onClose={() => onOpenChange(false)}
           />

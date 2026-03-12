@@ -29,4 +29,19 @@ describe("AccountCard", () => {
     expect(screen.queryByText("Primary")).not.toBeInTheDocument();
     expect(screen.getByText("Secondary")).toBeInTheDocument();
   });
+
+  it("renders tags inline with the email subtitle", () => {
+    const account = createAccountSummary({
+      displayName: "Primary Account",
+      email: "primary@example.com",
+      tags: ["paid", "team-a"],
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(
+      screen.getByText((_, element) => element?.textContent === "primary@example.com | Tags paid, team-a"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("paid")).not.toBeInTheDocument();
+  });
 });

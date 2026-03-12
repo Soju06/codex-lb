@@ -102,6 +102,38 @@ describe("ApiKeyEditDialog", () => {
       },
     ]);
   });
+
+  it("limits editable tags to account-defined options", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const apiKey = createApiKey({ tags: ["paid"] });
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={apiKey}
+        availableTags={["paid", "team-a"]}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /1 tag selected/i }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "paid" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemcheckbox", { name: "team-a" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitemcheckbox", { name: "legacy" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "team-a" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].tags).toEqual(["paid", "team-a"]);
+  });
 });
 
 describe("hasLimitRuleChanges", () => {

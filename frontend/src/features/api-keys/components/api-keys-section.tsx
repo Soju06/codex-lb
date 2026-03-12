@@ -10,6 +10,7 @@ import { ApiKeyCreatedDialog } from "@/features/api-keys/components/api-key-crea
 import { ApiKeyTable } from "@/features/api-keys/components/api-key-table";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
 import type { ApiKey, ApiKeyCreateRequest, ApiKeyUpdateRequest } from "@/features/api-keys/schemas";
+import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const ApiKeyCreateDialog = lazy(() =>
@@ -37,6 +38,7 @@ export function ApiKeysSection({
     deleteMutation,
     regenerateMutation,
   } = useApiKeys();
+  const { accountsQuery } = useAccounts();
 
   const createDialog = useDialogState();
   const editDialog = useDialogState<ApiKey>();
@@ -44,6 +46,10 @@ export function ApiKeysSection({
   const createdDialog = useDialogState<string>();
 
   const keys = apiKeysQuery.data ?? [];
+  const availableTags = useMemo(
+    () => [...new Set((accountsQuery.data ?? []).flatMap((account) => account.tags))].sort(),
+    [accountsQuery.data],
+  );
   const busy =
     disabled ||
     apiKeysQuery.isFetching ||
@@ -121,6 +127,7 @@ export function ApiKeysSection({
         open={editDialog.open}
         busy={updateMutation.isPending}
         apiKey={editDialog.data}
+        availableTags={availableTags}
         onOpenChange={editDialog.onOpenChange}
         onSubmit={handleUpdate}
       />

@@ -1452,20 +1452,50 @@ async def test_connect_proxy_websocket_surfaces_forced_refresh_transport_error(m
     assert request_logs.calls[0]["transport"] == "websocket"
 
 
-def test_apply_api_key_enforcement_to_websocket_payload_strips_service_tier():
-    payload = {
-        "type": "response.create",
-        "model": "gpt-5.1",
-        "service_tier": "fast",
-        "reasoning": {"effort": "medium"},
-    }
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_normalizes_payload_and_reserves_forwarded_tier(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
 
-    result = proxy_service._apply_api_key_enforcement_to_websocket_payload(payload, api_key=None)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
 
-    assert result["type"] == "response.create"
-    assert result["model"] == "gpt-5.1"
-    assert "service_tier" not in result
-    assert payload["service_tier"] == "fast"
+    prepared = await service._prepare_websocket_response_create_request(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": "hello",
+            "promptCacheKey": "thread_123",
+            "promptCacheRetention": "12h",
+            "tools": [{"type": "web_search_preview"}],
+            "service_tier": "priority",
+        },
+        headers={"session_id": "sid-ignored"},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=None,
+    )
+
+    reserve_usage.assert_awaited_once_with(
+        None,
+        request_model="gpt-5.1",
+        request_service_tier=None,
+    )
+    assert prepared.request_state.model == "gpt-5.1"
+    assert prepared.request_state.service_tier is None
+    assert prepared.request_state.reasoning_effort is None
+    assert prepared.affinity_policy.key == "thread_123"
+    assert prepared.affinity_policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
+    normalized_payload = json.loads(prepared.text_data)
+    assert normalized_payload["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+    assert normalized_payload["prompt_cache_key"] == "thread_123"
+    assert "promptCacheKey" not in normalized_payload
+    assert "promptCacheRetention" not in normalized_payload
+    assert "prompt_cache_retention" not in normalized_payload
+    assert normalized_payload["tools"] == [{"type": "web_search"}]
+    assert "service_tier" not in normalized_payload
 
 
 @pytest.mark.asyncio

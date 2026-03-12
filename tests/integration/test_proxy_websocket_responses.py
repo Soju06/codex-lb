@@ -53,7 +53,6 @@ class _FakeUpstreamWebSocket:
     async def close(self) -> None:
         self.closed = True
 
-
 class _SequencedUpstreamWebSocket(_FakeUpstreamWebSocket):
     def __init__(
         self,
@@ -70,6 +69,17 @@ class _SequencedUpstreamWebSocket(_FakeUpstreamWebSocket):
             return
         for message in self._deferred_message_batches.popleft():
             self._messages.put_nowait(message)
+
+
+def _websocket_settings(**overrides):
+    values = {
+        "prefer_earlier_reset_accounts": False,
+        "sticky_threads_enabled": False,
+        "openai_cache_affinity_max_age_seconds": 300,
+        "routing_strategy": "usage_weighted",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
@@ -107,7 +117,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
 
     class _FakeSettingsCache:
         async def get(self):
-            return SimpleNamespace(prefer_earlier_reset_accounts=False, routing_strategy="usage_weighted")
+            return _websocket_settings()
 
     async def allow_firewall(_websocket):
         return None
@@ -122,6 +132,8 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         *,
         sticky_key,
         sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -130,7 +142,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         client_send_lock,
         websocket,
     ):
-        del api_key
+        del api_key, reallocate_sticky, sticky_max_age_seconds
         seen["headers"] = dict(headers)
         seen["sticky_key"] = sticky_key
         seen["sticky_kind"] = sticky_kind
@@ -152,6 +164,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",
+        "instructions": "",
         "service_tier": "fast",
         "reasoning": {"effort": "high"},
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
@@ -182,9 +195,19 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
     assert seen["model"] == "gpt-5.4"
-    expected_upstream_request = dict(request_payload)
-    expected_upstream_request.pop("service_tier")
-    assert fake_upstream.sent_text == [json.dumps(expected_upstream_request, separators=(",", ":"))]
+    assert [json.loads(message) for message in fake_upstream.sent_text] == [
+        {
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "tools": [],
+            "reasoning": {"effort": "high"},
+            "store": False,
+            "stream": True,
+            "include": [],
+            "type": "response.create",
+        }
+    ]
     assert len(log_calls) == 1
     log = log_calls[0]
     assert log["account_id"] == "acct_ws_proxy"
@@ -195,6 +218,161 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["status"] == "success"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5
+
+
+def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {"type": "response.created", "response": {"id": "resp_ws_v1", "status": "in_progress"}},
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_v1",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+    seen: dict[str, object] = {}
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del self, headers, request_state, api_key, client_send_lock, websocket
+        seen["sticky_key"] = sticky_key
+        seen["sticky_kind"] = sticky_kind
+        seen["reallocate_sticky"] = reallocate_sticky
+        seen["sticky_max_age_seconds"] = sticky_max_age_seconds
+        seen["prefer_earlier_reset"] = prefer_earlier_reset
+        seen["routing_strategy"] = routing_strategy
+        seen["model"] = model
+        return SimpleNamespace(id="acct_ws_proxy_v1"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "cache me",
+        "promptCacheKey": "thread_alias",
+        "promptCacheRetention": "12h",
+        "tools": [{"type": "web_search_preview"}],
+        "service_tier": "priority",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first = json.loads(websocket.receive_text())
+            second = json.loads(websocket.receive_text())
+
+    assert first["type"] == "response.created"
+    assert second["type"] == "response.completed"
+    assert seen["sticky_key"] == "thread_alias"
+    assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
+    assert seen["reallocate_sticky"] is False
+    assert seen["sticky_max_age_seconds"] == 300
+    assert seen["model"] == "gpt-5.4"
+    assert [json.loads(message) for message in fake_upstream.sent_text] == [
+        {
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "cache me"}]}],
+            "tools": [{"type": "web_search"}],
+            "store": False,
+            "stream": True,
+            "include": [],
+            "prompt_cache_key": "thread_alias",
+            "type": "response.create",
+        }
+    ]
+
+
+def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_instance, monkeypatch):
+    called = {"connect": False}
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fail_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        called["connect"] = True
+        raise AssertionError("invalid websocket payload must not open upstream")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "hi",
+                        "store": True,
+                    }
+                )
+            )
+            event = json.loads(websocket.receive_text())
+
+    assert called["connect"] is False
+    assert event["type"] == "error"
+    assert event["status"] == 400
+    assert event["error"]["type"] == "invalid_request_error"
+    assert event["error"]["message"] == "Invalid request payload"
 
 
 def test_backend_responses_websocket_reconnects_after_account_health_failure(app_instance, monkeypatch):
@@ -255,7 +433,7 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
 
     class _FakeSettingsCache:
         async def get(self):
-            return SimpleNamespace(prefer_earlier_reset_accounts=False, routing_strategy="usage_weighted")
+            return _websocket_settings()
 
     async def allow_firewall(_websocket):
         return None
@@ -269,6 +447,8 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
         *,
         sticky_key,
         sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -282,6 +462,8 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
             headers,
             sticky_key,
             sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
             prefer_earlier_reset,
             routing_strategy,
             request_state,
@@ -297,21 +479,27 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
         del self, account, error
         handled_error_codes.append(code)
 
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
     first_request = {
         "type": "response.create",
         "model": "gpt-5.1",
+        "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
         "stream": True,
     }
     second_request = {
         "type": "response.create",
         "model": "gpt-5.2",
+        "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
         "stream": True,
     }
@@ -330,14 +518,37 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
     assert connect_models == ["gpt-5.1", "gpt-5.2"]
     assert handled_error_codes == ["rate_limit_exceeded"]
     assert first_upstream.closed is True
-    assert first_upstream.sent_text == [json.dumps(first_request, separators=(",", ":"))]
-    assert second_upstream.sent_text == [json.dumps(second_request, separators=(",", ":"))]
+    assert [json.loads(message) for message in first_upstream.sent_text] == [
+        {
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
+            "tools": [],
+            "store": False,
+            "stream": True,
+            "include": [],
+            "type": "response.create",
+        }
+    ]
+    assert [json.loads(message) for message in second_upstream.sent_text] == [
+        {
+            "model": "gpt-5.2",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
+            "tools": [],
+            "store": False,
+            "stream": True,
+            "include": [],
+            "type": "response.create",
+        }
+    ]
 
 
 def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monkeypatch):
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",
+        "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "stream": True,
     }
@@ -351,7 +562,7 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
 
     class _FakeSettingsCache:
         async def get(self):
-            return SimpleNamespace(prefer_earlier_reset_accounts=False, routing_strategy="usage_weighted")
+            return _websocket_settings()
 
     async def fake_connect_proxy_websocket(
         self,
@@ -359,6 +570,8 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
         *,
         sticky_key,
         sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -371,6 +584,8 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
             headers,
             sticky_key,
             sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
             prefer_earlier_reset,
             routing_strategy,
             model,
@@ -454,7 +669,7 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
 
     class _FakeSettingsCache:
         async def get(self):
-            return SimpleNamespace(prefer_earlier_reset_accounts=False, routing_strategy="usage_weighted")
+            return _websocket_settings()
 
     async def allow_firewall(_websocket):
         return None
@@ -468,6 +683,8 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
         *,
         sticky_key,
         sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -481,6 +698,8 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
             headers,
             sticky_key,
             sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
             prefer_earlier_reset,
             routing_strategy,
             model,
@@ -504,12 +723,14 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
     first_request = {
         "type": "response.create",
         "model": "gpt-5.1",
+        "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
         "stream": True,
     }
     second_request = {
         "type": "response.create",
         "model": "gpt-5.2",
+        "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
         "stream": True,
     }
@@ -551,7 +772,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
 
     class _FakeSettingsCache:
         async def get(self):
-            return SimpleNamespace(prefer_earlier_reset_accounts=False, routing_strategy="usage_weighted")
+            return _websocket_settings()
 
     async def allow_firewall(_websocket):
         return None
@@ -565,6 +786,8 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
         *,
         sticky_key,
         sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
         prefer_earlier_reset,
         routing_strategy,
         model,
@@ -578,6 +801,8 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
             headers,
             sticky_key,
             sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
             prefer_earlier_reset,
             routing_strategy,
             model,
@@ -601,6 +826,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",
+        "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "stream": True,
     }

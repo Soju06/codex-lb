@@ -627,7 +627,7 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
 
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == pytest.approx(11.0)
+    assert timeout.total is None
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
     assert recorded["started_at"] == 104.0
 
@@ -696,7 +696,6 @@ async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatc
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
-        proxy_request_budget_seconds = 5.0
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -706,16 +705,21 @@ async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatc
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
 
-    events = [
-        event
-        async for event in proxy_module.stream_responses(
-            payload,
-            headers={},
-            access_token="token",
-            account_id="acc_1",
-            session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
-        )
-    ]
+    token = set_request_id("req_total_override")
+    try:
+        with proxy_module.override_stream_timeouts(total_timeout_seconds=0.5):
+            events = [
+                event
+                async for event in proxy_module.stream_responses(
+                    payload,
+                    headers={},
+                    access_token="token",
+                    account_id="acc_1",
+                    session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
+                )
+            ]
+    finally:
+        reset_request_id(token)
 
     event = json.loads(events[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_request_timeout"
@@ -1433,7 +1437,7 @@ async def test_stream_attempt_timeout_overrides_follow_remaining_budget(monkeypa
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
-    assert overrides == [{"connect": 3.0, "idle": 3.0, "total": 3.0}]
+    assert overrides == [{"connect": 3.0, "idle": None, "total": None}]
 
 
 @pytest.mark.asyncio
@@ -1500,8 +1504,8 @@ async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(m
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
     assert len(overrides) == 2
-    assert overrides[-1] == {"connect": 2.0, "idle": 2.0, "total": 2.0}
-    assert all(override["connect"] == override["idle"] == override["total"] for override in overrides)
+    assert overrides[-1] == {"connect": 2.0, "idle": None, "total": None}
+    assert all(override["idle"] is None and override["total"] is None for override in overrides)
 
 
 @pytest.mark.asyncio

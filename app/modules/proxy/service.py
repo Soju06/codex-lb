@@ -1680,8 +1680,6 @@ def _push_stream_attempt_timeout_overrides(
 ) -> tuple[float | None, float | None, float | None]:
     return push_stream_timeout_overrides(
         connect_timeout_seconds=timeout_seconds,
-        idle_timeout_seconds=timeout_seconds,
-        total_timeout_seconds=timeout_seconds,
     )
 
 

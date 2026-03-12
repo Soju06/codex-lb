@@ -1546,6 +1546,56 @@ async def test_fail_websocket_request_state_settles_reservations(monkeypatch):
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
 
 
+@pytest.mark.asyncio
+async def test_forward_websocket_client_event_sends_text_to_active_upstream():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    upstream = SimpleNamespace(send_text=AsyncMock(), send_bytes=AsyncMock(), close=AsyncMock())
+    handle = proxy_service._WebSocketRequestHandle(
+        state=proxy_service._WebSocketRequestState(
+            request_id="req_ws_forward",
+            model="gpt-5.1",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=100.0,
+        ),
+        upstream=upstream,
+        reader_task=AsyncMock(),
+    )
+
+    forwarded = await service._forward_websocket_client_event(
+        handle,
+        text_data='{"type":"response.cancel"}',
+        bytes_data=None,
+    )
+
+    assert forwarded is True
+    upstream.send_text.assert_awaited_once_with('{"type":"response.cancel"}')
+
+
+@pytest.mark.asyncio
+async def test_write_stream_preflight_error_records_transport(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 101.0)
+
+    await service._write_stream_preflight_error(
+        account_id="acct_http",
+        api_key=None,
+        request_id="req_http_preflight",
+        model="gpt-5.1",
+        start=100.0,
+        error_code="upstream_unavailable",
+        error_message="boom",
+        reasoning_effort=None,
+        service_tier="priority",
+        transport="http",
+    )
+
+    assert request_logs.calls[0]["transport"] == "http"
+
+
 def test_prepare_websocket_request_payload_preserves_supported_service_tier():
     payload, service_tier = proxy_service._prepare_websocket_request_payload(
         {"type": "response.create", "model": "gpt-5.1", "service_tier": "priority"},

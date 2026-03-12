@@ -1740,9 +1740,7 @@ async def test_proxy_responses_websocket_marks_downstream_disconnect_as_client_d
         if receive_calls["count"] == 1:
             return {
                 "type": "websocket.receive",
-                "text": json.dumps(
-                    {"type": "response.create", "model": "gpt-5.1", "input": "hi"}
-                ),
+                "text": json.dumps({"type": "response.create", "model": "gpt-5.1", "input": "hi"}),
             }
         return {"type": "websocket.disconnect"}
 

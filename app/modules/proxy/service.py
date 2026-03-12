@@ -781,9 +781,7 @@ class ProxyService:
             try:
                 async with client_send_lock:
                     await websocket.send_text(
-                        _serialize_websocket_error_event(
-                            _wrapped_websocket_error_event(exc.status_code, exc.payload)
-                        )
+                        _serialize_websocket_error_event(_wrapped_websocket_error_event(exc.status_code, exc.payload))
                     )
             except Exception:
                 logger.debug("Failed to send websocket startup proxy error event", exc_info=True)
@@ -904,10 +902,13 @@ class ProxyService:
                 await self._release_websocket_reservation(request_state.api_key_reservation)
                 if last_connect_error is not None:
                     last_error = _parse_openai_error(last_connect_error.payload)
-                    error_code = _normalize_error_code(
-                        last_error.code if last_error else None,
-                        last_error.type if last_error else None,
-                    ) or "upstream_unavailable"
+                    error_code = (
+                        _normalize_error_code(
+                            last_error.code if last_error else None,
+                            last_error.type if last_error else None,
+                        )
+                        or "upstream_unavailable"
+                    )
                     error_message = last_error.message if last_error and last_error.message else "Upstream unavailable"
                     await self._write_request_log(
                         account_id=last_connect_account.id if last_connect_account else None,

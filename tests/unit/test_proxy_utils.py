@@ -1437,7 +1437,7 @@ async def test_stream_attempt_timeout_overrides_follow_remaining_budget(monkeypa
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
-    assert overrides == [{"connect": 3.0, "idle": None, "total": None}]
+    assert overrides == [{"connect": 3.0, "idle": 3.0, "total": 3.0}]
 
 
 @pytest.mark.asyncio
@@ -1504,8 +1504,10 @@ async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(m
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
     assert len(overrides) == 2
-    assert overrides[-1] == {"connect": 2.0, "idle": None, "total": None}
-    assert all(override["idle"] is None and override["total"] is None for override in overrides)
+    assert overrides == [
+        {"connect": 6.0, "idle": 6.0, "total": 6.0},
+        {"connect": 2.0, "idle": 2.0, "total": 2.0},
+    ]
 
 
 @pytest.mark.asyncio

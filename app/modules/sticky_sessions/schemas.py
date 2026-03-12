@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
@@ -28,7 +29,7 @@ class StickySessionDeleteResponse(DashboardModel):
 
 
 class StickySessionsPurgeRequest(DashboardModel):
-    stale_only: bool = True
+    stale_only: Literal[True] = True
 
 
 class StickySessionsPurgeResponse(DashboardModel):

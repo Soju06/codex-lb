@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from urllib.parse import quote
 
 import pytest
 from sqlalchemy import text
@@ -143,6 +144,33 @@ async def test_sticky_sessions_api_lists_metadata_and_purges_stale(async_client)
 
 
 @pytest.mark.asyncio
+async def test_sticky_sessions_api_rejects_non_stale_purge_requests(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+    await _insert_sticky_session(
+        key="prompt-cache-stale",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=600,
+    )
+    await _insert_sticky_session(
+        key="codex-session-old",
+        account_id=accounts[1].id,
+        kind=StickySessionKind.CODEX_SESSION,
+        updated_at_offset_seconds=600,
+    )
+
+    response = await async_client.post("/api/sticky-sessions/purge", json={"staleOnly": False})
+    assert response.status_code == 422
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["stalePromptCacheCount"] == 1
+    assert {entry["key"] for entry in payload["entries"]} == {"prompt-cache-stale", "codex-session-old"}
+
+
+@pytest.mark.asyncio
 async def test_sticky_sessions_api_counts_hidden_stale_rows_and_deletes_by_kind(async_client):
     accounts = await _create_accounts()
     await _set_affinity_ttl(60)
@@ -191,6 +219,31 @@ async def test_sticky_sessions_api_counts_hidden_stale_rows_and_deletes_by_kind(
     after_delete = response.json()
     assert after_delete["stalePromptCacheCount"] == 0
     assert any(entry["key"] == "shared-key" and entry["kind"] == "codex_session" for entry in after_delete["entries"])
+
+
+@pytest.mark.asyncio
+async def test_sticky_sessions_api_deletes_slash_containing_keys(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+    sticky_key = "folder/session"
+
+    await _insert_sticky_session(
+        key=sticky_key,
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=10,
+    )
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    assert any(entry["key"] == sticky_key for entry in response.json()["entries"])
+
+    response = await async_client.delete(f"/api/sticky-sessions/prompt_cache/{quote(sticky_key, safe='')}")
+    assert response.status_code == 200
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    assert all(entry["key"] != sticky_key for entry in response.json()["entries"])
 
 
 @pytest.mark.asyncio

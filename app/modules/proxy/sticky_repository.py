@@ -113,12 +113,6 @@ class StickySessionsRepository:
         await self._session.commit()
         return deleted
 
-    async def purge_all(self) -> int:
-        result = await self._session.execute(delete(StickySession).returning(StickySession.key))
-        deleted = len(result.scalars().all())
-        await self._session.commit()
-        return deleted
-
     def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":

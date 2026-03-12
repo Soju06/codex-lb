@@ -46,7 +46,16 @@ async def list_sticky_sessions(
     )
 
 
-@router.delete("/{kind}/{key}", response_model=StickySessionDeleteResponse)
+@router.post("/purge", response_model=StickySessionsPurgeResponse)
+async def purge_sticky_sessions(
+    payload: StickySessionsPurgeRequest = Body(default=StickySessionsPurgeRequest()),
+    context: StickySessionsContext = Depends(get_sticky_sessions_context),
+) -> StickySessionsPurgeResponse:
+    deleted_count = await context.service.purge_entries()
+    return StickySessionsPurgeResponse(deleted_count=deleted_count)
+
+
+@router.delete("/{kind}/{key:path}", response_model=StickySessionDeleteResponse)
 async def delete_sticky_session(
     kind: StickySessionKind,
     key: str,
@@ -56,12 +65,3 @@ async def delete_sticky_session(
     if not deleted:
         raise DashboardNotFoundError("Sticky session not found", code="sticky_session_not_found")
     return StickySessionDeleteResponse(status="deleted")
-
-
-@router.post("/purge", response_model=StickySessionsPurgeResponse)
-async def purge_sticky_sessions(
-    payload: StickySessionsPurgeRequest = Body(default=StickySessionsPurgeRequest()),
-    context: StickySessionsContext = Depends(get_sticky_sessions_context),
-) -> StickySessionsPurgeResponse:
-    deleted_count = await context.service.purge_entries(stale_only=payload.stale_only)
-    return StickySessionsPurgeResponse(deleted_count=deleted_count)

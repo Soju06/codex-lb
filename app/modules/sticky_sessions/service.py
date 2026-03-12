@@ -60,9 +60,7 @@ class StickySessionsService:
     async def delete_entry(self, key: str, *, kind: StickySessionKind) -> bool:
         return await self._repository.delete(key, kind=kind)
 
-    async def purge_entries(self, *, stale_only: bool) -> int:
-        if not stale_only:
-            return await self._repository.purge_all()
+    async def purge_entries(self) -> int:
         settings = await self._settings_repository.get_or_create()
         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
         return await self._repository.purge_prompt_cache_before(cutoff)

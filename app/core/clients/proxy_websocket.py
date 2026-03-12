@@ -9,7 +9,7 @@ from urllib.parse import urlparse, urlunparse
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.datastructures import Headers
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, InvalidHandshake, InvalidStatus
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.typing import Origin
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
@@ -166,6 +166,11 @@ async def connect_responses_websocket(
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", str(exc) or "Invalid upstream websocket handshake"),
+        ) from exc
+    except InvalidProxy as exc:
+        raise ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", str(exc) or "Invalid upstream websocket proxy configuration"),
         ) from exc
     except OSError as exc:
         raise ProxyResponseError(

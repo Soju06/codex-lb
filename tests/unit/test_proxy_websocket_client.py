@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidHandshake, InvalidStatus
+from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
@@ -177,6 +177,36 @@ async def test_connect_responses_websocket_maps_invalid_handshake(monkeypatch):
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
             upstream_websocket_trust_env=False,
+            max_sse_event_bytes=4321,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise InvalidProxy("http://proxy.invalid", "unsupported proxy scheme")
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            upstream_websocket_trust_env=True,
             max_sse_event_bytes=4321,
         ),
     )

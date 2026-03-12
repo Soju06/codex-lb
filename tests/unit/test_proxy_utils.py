@@ -135,6 +135,9 @@ def test_parse_compact_response_payload_requires_object_discriminator():
     parsed = parse_compact_response_payload({"object": "response.compaction", "output": []})
     assert parsed is not None
     assert parsed.object == "response.compaction"
+    versioned = parse_compact_response_payload({"object": "response.compaction.v2", "output": []})
+    assert versioned is not None
+    assert versioned.object == "response.compaction.v2"
 
 
 def test_normalize_sse_event_block_rewrites_response_text_alias():

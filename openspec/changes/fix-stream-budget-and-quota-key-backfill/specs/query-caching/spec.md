@@ -9,3 +9,10 @@ Persisted additional-usage rows MUST record one internal canonical `quota_key` e
 - **WHEN** the refresh persists additional usage
 - **THEN** it merges all aliases by canonical `quota_key` before deleting stale rows
 - **AND** persisted rows for the usable window remain available for later gated-model selection
+
+#### Scenario: Historical rows remain readable after canonical key rename
+- **GIVEN** persisted `additional_usage_history` rows were written under an earlier canonical `quota_key`
+- **AND** the current registry still recognizes the same raw upstream aliases for that quota family
+- **WHEN** selection or dashboard queries request the current canonical `quota_key`
+- **THEN** repository reads match both the current `quota_key` and the known raw alias fields
+- **AND** the historical rows remain visible until refresh rewrites them under the newer canonical key

@@ -7,8 +7,9 @@
 ## 2. Registry-backed migration backfill
 
 - [x] 2.1 Normalize configured additional quota keys before storing runtime definitions
-- [x] 2.2 Backfill `additional_usage_history.quota_key` through a migration-local, versioned alias mapping
-- [x] 2.3 Add regression coverage for normalized runtime keys and deterministic migration backfill
+- [x] 2.2 Backfill `additional_usage_history.quota_key` through the configured registry mapping available at upgrade time
+- [x] 2.3 Keep repository queries/deletes compatible with raw aliases after canonical key renames
+- [x] 2.4 Add regression coverage for normalized runtime keys, configured backfill, and compatibility reads
 
 ## 3. Canonical alias refresh coalescing
 

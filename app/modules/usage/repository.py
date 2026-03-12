@@ -3,13 +3,17 @@ from __future__ import annotations
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import Integer, cast, delete, func, literal_column, select
+from sqlalchemy import Integer, cast, delete, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import AdditionalUsageHistory, UsageHistory
-from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.additional_quota_keys import (
+    AdditionalQuotaQueryScope,
+    canonicalize_additional_quota_key,
+    get_additional_quota_query_scope,
+)
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
 
@@ -37,6 +41,30 @@ def _resolve_additional_quota_key(
         limit_name=candidate,
         metered_feature=metered_feature,
     )
+
+
+def _resolve_additional_quota_query_scope(
+    *,
+    quota_key: str | None = None,
+    limit_name: str | None = None,
+    metered_feature: str | None = None,
+) -> AdditionalQuotaQueryScope | None:
+    return get_additional_quota_query_scope(
+        quota_key=quota_key,
+        limit_name=limit_name,
+        metered_feature=metered_feature,
+    )
+
+
+def _additional_quota_match_clause(scope: AdditionalQuotaQueryScope):
+    clauses = [AdditionalUsageHistory.quota_key == scope.quota_key]
+    if scope.limit_name_match_values:
+        clauses.append(func.lower(AdditionalUsageHistory.limit_name).in_(tuple(scope.limit_name_match_values)))
+    if scope.metered_feature_match_values:
+        clauses.append(
+            func.lower(AdditionalUsageHistory.metered_feature).in_(tuple(scope.metered_feature_match_values))
+        )
+    return or_(*clauses)
 
 
 class UsageRepository:
@@ -290,12 +318,12 @@ class AdditionalUsageRepository:
         await self._session.commit()
 
     async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
-        effective_quota_key = _resolve_additional_quota_key(quota_key=quota_key)
-        if effective_quota_key is None:
+        scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
+        if scope is None:
             raise ValueError("additional usage quota_key could not be determined")
         stmt = delete(AdditionalUsageHistory).where(
             AdditionalUsageHistory.account_id == account_id,
-            AdditionalUsageHistory.quota_key == effective_quota_key,
+            _additional_quota_match_clause(scope),
         )
         await self._session.execute(stmt)
         await self._session.commit()
@@ -309,12 +337,12 @@ class AdditionalUsageRepository:
         quota_key: str,
         window: str,
     ) -> None:
-        effective_quota_key = _resolve_additional_quota_key(quota_key=quota_key)
-        if effective_quota_key is None:
+        scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
+        if scope is None:
             raise ValueError("additional usage quota_key could not be determined")
         stmt = delete(AdditionalUsageHistory).where(
             AdditionalUsageHistory.account_id == account_id,
-            AdditionalUsageHistory.quota_key == effective_quota_key,
+            _additional_quota_match_clause(scope),
             AdditionalUsageHistory.window == window,
         )
         await self._session.execute(stmt)
@@ -338,14 +366,14 @@ class AdditionalUsageRepository:
         since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
         """Returns the most recent entry per account for a given canonical quota key + window."""
-        effective_quota_key = _resolve_additional_quota_key(
+        scope = _resolve_additional_quota_query_scope(
             quota_key=quota_key,
             limit_name=limit_name,
         )
-        if effective_quota_key is None or window is None:
+        if scope is None or window is None:
             raise ValueError("quota_key/limit_name and window are required")
         conditions = [
-            AdditionalUsageHistory.quota_key == effective_quota_key,
+            _additional_quota_match_clause(scope),
             AdditionalUsageHistory.window == window,
         ]
         if account_ids is not None:
@@ -420,17 +448,17 @@ class AdditionalUsageRepository:
         limit_name: str | None = None,
     ) -> list[AdditionalUsageHistory]:
         """Returns time-series entries for EWMA computation."""
-        effective_quota_key = _resolve_additional_quota_key(
+        scope = _resolve_additional_quota_query_scope(
             quota_key=quota_key,
             limit_name=limit_name,
         )
-        if effective_quota_key is None or window is None or since is None:
+        if scope is None or window is None or since is None:
             raise ValueError("account_id, quota_key/limit_name, window, and since are required")
         stmt = (
             select(AdditionalUsageHistory)
             .where(
                 AdditionalUsageHistory.account_id == account_id,
-                AdditionalUsageHistory.quota_key == effective_quota_key,
+                _additional_quota_match_clause(scope),
                 AdditionalUsageHistory.window == window,
                 AdditionalUsageHistory.recorded_at >= since,
             )

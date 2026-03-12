@@ -7,7 +7,11 @@ Create Date: 2026-03-12
 
 from __future__ import annotations
 
+import json
+import os
 import re
+from functools import lru_cache
+from pathlib import Path
 
 import sqlalchemy as sa
 from alembic import op
@@ -20,12 +24,6 @@ branch_labels = None
 depends_on = None
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
-_VERSIONED_ADDITIONAL_QUOTA_KEY_ALIASES = {
-    "codex_spark": "codex_spark",
-    "codex_other": "codex_spark",
-    "gpt_5_3_codex_spark": "codex_spark",
-    "codex_bengalfox": "codex_spark",
-}
 
 
 def _table_exists(connection: Connection, table_name: str) -> bool:
@@ -54,13 +52,57 @@ def _normalize_identifier(value: str | None) -> str | None:
     return normalized or None
 
 
+def _default_registry_path() -> Path:
+    return Path(__file__).resolve().parents[4] / "config" / "additional_quota_registry.json"
+
+
+def _registry_path() -> Path:
+    configured = os.environ.get("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return _default_registry_path()
+
+
+@lru_cache(maxsize=1)
+def _registry_alias_map() -> dict[str, str]:
+    path = _registry_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError(f"additional quota registry must be a list: {path}")
+    aliases: dict[str, str] = {}
+    seen_quota_keys: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        raw_quota_key = str(item.get("quota_key", "")).strip()
+        quota_key = _normalize_identifier(raw_quota_key)
+        if quota_key is None:
+            raise ValueError(f"invalid additional quota_key in registry: {raw_quota_key!r}")
+        if quota_key in seen_quota_keys:
+            raise ValueError(f"duplicate additional quota_key in registry: {raw_quota_key!r}")
+        seen_quota_keys.add(quota_key)
+        for candidate in (
+            *(str(value) for value in item.get("limit_name_aliases", [])),
+            *(str(value) for value in item.get("metered_feature_aliases", [])),
+            str(item.get("quota_key", "")),
+        ):
+            normalized = _normalize_identifier(candidate)
+            if normalized is None:
+                continue
+            previous = aliases.get(normalized)
+            if previous is not None and previous != quota_key:
+                raise ValueError(f"duplicate additional quota alias in registry: {candidate!r}")
+            aliases[normalized] = quota_key
+    return aliases
+
+
 def _canonical_quota_key(limit_name: str | None, metered_feature: str | None) -> str:
-    # Keep the backfill deterministic across environments and future registry edits.
+    registry_aliases = _registry_alias_map()
     for candidate in (limit_name, metered_feature):
         normalized = _normalize_identifier(candidate)
         if normalized is None:
             continue
-        resolved = _VERSIONED_ADDITIONAL_QUOTA_KEY_ALIASES.get(normalized)
+        resolved = registry_aliases.get(normalized)
         if resolved is not None:
             return resolved
     return _normalize_identifier(limit_name) or _normalize_identifier(metered_feature) or "unknown"
@@ -70,6 +112,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     if not _table_exists(bind, "additional_usage_history"):
         return
+    _registry_alias_map()
 
     existing_columns = _columns(bind, "additional_usage_history")
     if "quota_key" not in existing_columns:

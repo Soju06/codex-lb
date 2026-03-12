@@ -199,7 +199,7 @@ def test_run_upgrade_repairs_branched_legacy_revision_ids_with_parallel_head(tmp
     assert result.current_revision == inspect_migration_state(url).head_revision
 
 
-def test_run_upgrade_backfills_additional_usage_quota_key_from_versioned_mapping(
+def test_run_upgrade_backfills_additional_usage_quota_key_from_configured_registry(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -313,7 +313,43 @@ def test_run_upgrade_backfills_additional_usage_quota_key_from_versioned_mapping
     with create_engine(sync_url, future=True).connect() as connection:
         quota_key = connection.execute(text("SELECT quota_key FROM additional_usage_history")).scalar_one()
 
-    assert quota_key == "codex_spark"
+    assert quota_key == "spark_enterprise"
+    clear_additional_quota_registry_cache()
+
+
+def test_run_upgrade_rejects_duplicate_additional_quota_aliases_in_registry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "quota-registry-invalid.db"
+    url = _db_url(db_path)
+    registry_path = tmp_path / "additional_quota_registry.json"
+    registry_path.write_text(
+        json.dumps(
+            [
+                {
+                    "quota_key": "spark_enterprise",
+                    "display_label": "Spark Enterprise",
+                    "limit_name_aliases": ["codex_other"],
+                },
+                {
+                    "quota_key": "spark_enterprise_backup",
+                    "display_label": "Spark Enterprise Backup",
+                    "limit_name_aliases": ["codex_other"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry_path))
+    clear_additional_quota_registry_cache()
+
+    run_upgrade(url, "20260309_000000_add_additional_usage_history", bootstrap_legacy=False)
+
+    with pytest.raises(ValueError, match="duplicate additional quota alias"):
+        run_upgrade(url, "head", bootstrap_legacy=False)
+
     clear_additional_quota_registry_cache()
 
 

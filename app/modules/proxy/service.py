@@ -649,6 +649,25 @@ class ProxyService:
                     upstream = None
                     account = None
 
+                if request_state is not None and upstream is not None:
+                    async with pending_lock:
+                        has_pending_requests = bool(pending_requests)
+                    if not has_pending_requests:
+                        if upstream_reader is not None:
+                            upstream_reader.cancel()
+                            try:
+                                await upstream_reader
+                            except asyncio.CancelledError:
+                                pass
+                            upstream_reader = None
+                        upstream_control = None
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug("Failed to close idle upstream websocket before reselect", exc_info=True)
+                        upstream = None
+                        account = None
+
                 if request_state is not None:
                     async with pending_lock:
                         pending_requests.append(request_state)
@@ -1083,7 +1102,9 @@ class ProxyService:
                 )
                 break
         finally:
-            if upstream_control.reconnect_requested:
+            async with pending_lock:
+                has_pending_requests = bool(pending_requests)
+            if upstream_control.reconnect_requested or not has_pending_requests:
                 return
             try:
                 await websocket.close()

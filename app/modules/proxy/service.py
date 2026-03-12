@@ -632,6 +632,13 @@ class ProxyService:
                 message_type = message["type"]
 
                 if message_type == "websocket.disconnect":
+                    if current_request is not None:
+                        await self._fail_websocket_request_state(
+                            current_request.state,
+                            error_code="client_disconnect",
+                            error_message="Downstream websocket disconnected",
+                            api_key=api_key,
+                        )
                     break
                 if message_type != "websocket.receive":
                     continue

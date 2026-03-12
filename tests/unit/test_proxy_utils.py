@@ -1578,6 +1578,55 @@ async def test_start_websocket_request_cleans_up_reservation_on_connect_exceptio
     websocket.send_text.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_marks_downstream_disconnect_as_client_disconnect(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    fail_mock = AsyncMock()
+
+    async def fake_receive():
+        if not hasattr(fake_receive, "calls"):
+            fake_receive.calls = 0
+        fake_receive.calls += 1
+        if fake_receive.calls == 1:
+            return {"type": "websocket.receive", "text": json.dumps({"type": "response.create", "model": "gpt-5.1", "input": "hi"})}
+        return {"type": "websocket.disconnect"}
+
+    reader_task = asyncio.create_task(asyncio.sleep(3600))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_client_disconnect",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=SimpleNamespace(reservation_id="resv_ws_client_disconnect"),
+        started_at=100.0,
+        account_id="acct_ws",
+    )
+    handle = proxy_service._WebSocketRequestHandle(state=request_state, upstream=SimpleNamespace(), reader_task=reader_task)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_start_websocket_request", AsyncMock(return_value=handle))
+    monkeypatch.setattr(service, "_fail_websocket_request_state", fail_mock)
+
+    websocket = SimpleNamespace(receive=fake_receive, headers={})
+
+    await service.proxy_responses_websocket(
+        websocket,
+        {},
+        codex_session_affinity=True,
+        api_key=None,
+    )
+
+    fail_mock.assert_awaited_once()
+    assert fail_mock.await_args.kwargs["error_code"] == "client_disconnect"
+    reader_task.cancel()
+    try:
+        await reader_task
+    except asyncio.CancelledError:
+        pass
+
+
 def test_is_websocket_response_create_accepts_v1_event_type():
     assert proxy_service._is_websocket_response_create({"type": "response.create.v1"}) is True
 

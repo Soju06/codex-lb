@@ -1255,10 +1255,12 @@ class _CompactCommandTransport:
                     failure_phase = "body_read"
                     failure_detail = message
                     failure_exception_type = type(exc).__name__
+                    retryable_same_contract = True
                     raise ProxyResponseError(
                         502,
                         openai_error("upstream_unavailable", message),
                         failure_phase=failure_phase,
+                        retryable_same_contract=retryable_same_contract,
                         failure_detail=failure_detail,
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,

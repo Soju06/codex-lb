@@ -964,9 +964,17 @@ class ProxyService:
         api_key: ApiKeyData | None,
     ) -> None:
         disconnect_error_message = "Upstream websocket closed before response.completed"
+        idle_timeout_seconds = getattr(get_settings(), "stream_idle_timeout_seconds", None)
         try:
             while True:
-                message = await upstream.receive()
+                if isinstance(idle_timeout_seconds, (int, float)) and idle_timeout_seconds > 0:
+                    try:
+                        message = await asyncio.wait_for(upstream.receive(), timeout=float(idle_timeout_seconds))
+                    except asyncio.TimeoutError:
+                        disconnect_error_message = "Upstream websocket idle timeout"
+                        break
+                else:
+                    message = await upstream.receive()
                 if message.kind == "text" and message.text is not None:
                     terminal = await self._process_upstream_websocket_text(
                         message.text,

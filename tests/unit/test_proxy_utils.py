@@ -263,6 +263,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool, log_upstream_req
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
         routing_strategy="usage_weighted",
+        stream_idle_timeout_seconds=30.0,
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
@@ -1032,6 +1033,49 @@ async def test_compact_responses_preserves_retained_items_without_rewriting(monk
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_preserves_usage_extra_fields(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {
+                "object": "response.compaction",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "custom_counter": 7,
+                    "input_tokens_details": {"cached_tokens": 1, "provider_counter": 9},
+                },
+            }
+        )
+    )
+
+    result = await proxy_module.compact_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    dumped = result.model_dump(mode="json", exclude_none=True)
+    assert dumped["usage"]["custom_counter"] == 7
+    assert dumped["usage"]["input_tokens_details"]["provider_counter"] == 9
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_uses_direct_compact_endpoint_without_read_timeout_by_default(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -1106,6 +1150,57 @@ async def test_compact_responses_marks_upstream_502_as_retryable_same_contract(m
     exc = exc_info.value
     assert exc.status_code == 502
     assert exc.failure_phase == "status"
+    assert exc.retryable_same_contract is True
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_marks_body_read_timeout_as_retryable_same_contract(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = False
+
+    class _BodyReadTimeoutResponse:
+        status = 200
+        reason = "OK"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, content_type=None):
+            del content_type
+            raise asyncio.TimeoutError()
+
+    class _BodyReadTimeoutSession:
+        def post(self, *args, **kwargs):
+            del args, kwargs
+            return _BodyReadTimeoutResponse()
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _BodyReadTimeoutSession()),
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.failure_phase == "body_read"
     assert exc.retryable_same_contract is True
 
 
@@ -1638,6 +1733,45 @@ async def test_relay_upstream_websocket_messages_settles_before_downstream_disco
 
     assert order == ["settle", "send"]
     upstream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_messages_enforces_idle_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 0.01
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    upstream = SimpleNamespace(receive=AsyncMock(side_effect=asyncio.TimeoutError()), close=AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_idle",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=SimpleNamespace(reservation_id="resv_ws_idle"),
+        started_at=100.0,
+        account_id="acct_ws",
+    )
+    fail_mock = AsyncMock()
+    websocket = SimpleNamespace(send_text=AsyncMock(), send_bytes=AsyncMock())
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_fail_websocket_request_state", fail_mock)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 101.0)
+
+    await service._relay_upstream_websocket_messages(
+        websocket,
+        upstream,
+        request_state=request_state,
+        client_send_lock=proxy_service.anyio.Lock(),
+        api_key=None,
+    )
+
+    fail_mock.assert_awaited_once()
+    assert fail_mock.await_args.kwargs["error_message"] == "Upstream websocket idle timeout"
+    websocket.send_text.assert_awaited_once()
+    event = json.loads(websocket.send_text.await_args.args[0])
+    assert event["error"]["code"] == "stream_incomplete"
+    assert event["error"]["message"] == "Upstream websocket idle timeout"
 
 
 @pytest.mark.asyncio

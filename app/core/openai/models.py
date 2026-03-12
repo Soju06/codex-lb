@@ -32,14 +32,14 @@ class OpenAIErrorEnvelope(BaseModel):
 
 
 class ResponseUsageDetails(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     cached_tokens: StrictInt | None = None
     reasoning_tokens: StrictInt | None = None
 
 
 class ResponseUsage(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     input_tokens: StrictInt | None = None
     output_tokens: StrictInt | None = None

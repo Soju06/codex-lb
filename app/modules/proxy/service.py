@@ -606,10 +606,9 @@ class ProxyService:
                     payload = _parse_websocket_payload(text_data)
                     if payload is not None and _is_websocket_response_create(payload):
                         try:
-                            request_payload = _apply_api_key_enforcement_to_websocket_payload(payload, api_key)
+                            request_payload, request_service_tier = _prepare_websocket_request_payload(payload, api_key)
                             request_model = _websocket_request_model(request_payload)
                             _validate_websocket_model_access(api_key, request_model)
-                            request_service_tier = _normalize_service_tier_value(request_payload.get("service_tier"))
                             reservation = await self._reserve_websocket_api_key_usage(
                                 api_key,
                                 request_model=request_model,
@@ -727,6 +726,8 @@ class ProxyService:
         )
         account = selection.account
         if not account:
+            error_code = selection.error_code or "no_accounts"
+            error_message = selection.error_message or "No active accounts available"
             await self._release_websocket_reservation(request_state.api_key_reservation)
             async with client_send_lock:
                 await websocket.send_text(
@@ -734,8 +735,8 @@ class ProxyService:
                         _wrapped_websocket_error_event(
                             503,
                             openai_error(
-                                "no_accounts",
-                                selection.error_message or "No active accounts available",
+                                error_code,
+                                error_message,
                                 error_type="server_error",
                             ),
                         )
@@ -743,6 +744,7 @@ class ProxyService:
                 )
             return None, None
 
+        connect_error: ProxyResponseError | None = None
         try:
             account = await self._ensure_fresh(account)
             return account, await self._open_upstream_websocket(account, headers)
@@ -768,15 +770,6 @@ class ProxyService:
                     )
                 except ProxyResponseError as retry_exc:
                     connect_error = retry_exc
-            await self._release_websocket_reservation(request_state.api_key_reservation)
-            await self._handle_websocket_connect_error(account, connect_error)
-            async with client_send_lock:
-                await websocket.send_text(
-                    _serialize_websocket_error_event(
-                        _wrapped_websocket_error_event(connect_error.status_code, connect_error.payload)
-                    )
-                )
-            return None, None
         except RefreshError as exc:
             if exc.is_permanent:
                 await self._load_balancer.mark_permanent_failure(account, exc.code)
@@ -795,6 +788,25 @@ class ProxyService:
                     )
                 )
             return None, None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning(
+                "Websocket refresh/connect failed request_id=%s account_id=%s",
+                request_state.request_id,
+                account.id,
+                exc_info=True,
+            )
+            connect_error = _proxy_unavailable_error(str(exc) or "Request to upstream timed out")
+
+        assert connect_error is not None
+        await self._release_websocket_reservation(request_state.api_key_reservation)
+        await self._handle_websocket_connect_error(account, connect_error)
+        async with client_send_lock:
+            await websocket.send_text(
+                _serialize_websocket_error_event(
+                    _wrapped_websocket_error_event(connect_error.status_code, connect_error.payload)
+                )
+            )
+        return None, None
 
     async def _open_upstream_websocket(
         self,
@@ -2282,6 +2294,19 @@ def _apply_api_key_enforcement_to_websocket_payload(
     return updated
 
 
+def _prepare_websocket_request_payload(
+    payload: dict[str, JsonValue],
+    api_key: ApiKeyData | None,
+) -> tuple[dict[str, JsonValue], str | None]:
+    updated = _apply_api_key_enforcement_to_websocket_payload(payload, api_key)
+    service_tier = _normalize_service_tier_value(updated.get("service_tier"))
+    if "service_tier" not in updated:
+        return updated, service_tier
+    sanitized = dict(updated)
+    sanitized.pop("service_tier", None)
+    return sanitized, service_tier
+
+
 def _app_error_to_websocket_event(exc: AppError) -> dict[str, JsonValue]:
     return _wrapped_websocket_error_event(
         exc.status_code,
@@ -2329,7 +2354,11 @@ def _raise_proxy_budget_exhausted() -> NoReturn:
 
 
 def _raise_proxy_unavailable(message: str) -> NoReturn:
-    raise ProxyResponseError(
+    raise _proxy_unavailable_error(message)
+
+
+def _proxy_unavailable_error(message: str) -> ProxyResponseError:
+    return ProxyResponseError(
         502,
         openai_error("upstream_unavailable", message),
     )

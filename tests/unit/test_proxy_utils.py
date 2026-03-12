@@ -1215,6 +1215,122 @@ async def test_connect_proxy_websocket_propagates_retry_handshake_error(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_preserves_selection_error_code(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    selection = AccountSelection(
+        account=None,
+        error_message="No accounts with a plan supporting model 'gpt-5.4'",
+        error_code="no_plan_support_for_model",
+    )
+    reservation = SimpleNamespace(id="resv_ws_no_plan")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_no_plan",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=100.0,
+    )
+    client_send_lock = proxy_service.anyio.Lock()
+    websocket = SimpleNamespace(send_text=AsyncMock())
+    release_mock = AsyncMock()
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=selection),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_mock)
+
+    result_account, upstream = await service._connect_proxy_websocket(
+        {"session_id": "sid-ws"},
+        sticky_key="sid-ws",
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.4",
+        request_state=request_state,
+        client_send_lock=client_send_lock,
+        websocket=websocket,
+    )
+
+    assert result_account is None
+    assert upstream is None
+    release_mock.assert_awaited_once_with(reservation)
+    websocket.send_text.assert_awaited_once()
+    sent_event = json.loads(websocket.send_text.await_args.args[0])
+    assert sent_event["status"] == 503
+    assert sent_event["error"]["code"] == "no_plan_support_for_model"
+    assert sent_event["error"]["message"] == "No accounts with a plan supporting model 'gpt-5.4'"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_releases_reservation_on_refresh_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_refresh_timeout")
+    selection = AccountSelection(account=account, error_message=None)
+    reservation = SimpleNamespace(id="resv_ws_refresh_timeout")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_refresh_timeout",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=100.0,
+    )
+    client_send_lock = proxy_service.anyio.Lock()
+    websocket = SimpleNamespace(send_text=AsyncMock())
+    handled: list[proxy_module.ProxyResponseError] = []
+    release_mock = AsyncMock()
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=selection),
+    )
+
+    async def fake_ensure_fresh(target: Account, *, force: bool = False, timeout_seconds: float | None = None):
+        del force, timeout_seconds
+        assert target is account
+        raise asyncio.TimeoutError()
+
+    async def fake_handle_websocket_connect_error(target: Account, exc: proxy_module.ProxyResponseError) -> None:
+        assert target is account
+        handled.append(exc)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_handle_websocket_connect_error", fake_handle_websocket_connect_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_mock)
+
+    result_account, upstream = await service._connect_proxy_websocket(
+        {"session_id": "sid-ws"},
+        sticky_key="sid-ws",
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        client_send_lock=client_send_lock,
+        websocket=websocket,
+    )
+
+    assert result_account is None
+    assert upstream is None
+    release_mock.assert_awaited_once_with(reservation)
+    assert len(handled) == 1
+    assert handled[0].status_code == 502
+    assert handled[0].payload["error"]["code"] == "upstream_unavailable"
+    websocket.send_text.assert_awaited_once()
+    sent_event = json.loads(websocket.send_text.await_args.args[0])
+    assert sent_event["status"] == 502
+    assert sent_event["error"]["code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_maps_transport_timeout_to_upstream_unavailable(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

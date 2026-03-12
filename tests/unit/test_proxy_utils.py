@@ -1256,22 +1256,13 @@ async def test_connect_proxy_websocket_propagates_retry_handshake_error(monkeypa
     websocket = SimpleNamespace(send_text=AsyncMock())
     handled: list[proxy_module.ProxyResponseError] = []
 
-    async def fake_select_account(
-        sticky_key=None,
-        *,
-        prefer_earlier_reset_accounts=False,
-        routing_strategy="usage_weighted",
-        model=None,
-        exclude_account_ids=None,
-        additional_limit_name=None,
-        reallocate_sticky=False,
-    ):
-        del sticky_key, prefer_earlier_reset_accounts, routing_strategy, model, additional_limit_name, reallocate_sticky
-        if exclude_account_ids:
+    async def fake_select_account(*args, **kwargs):
+        del args
+        if kwargs.get("exclude_account_ids"):
             return AccountSelection(account=None, error_message="No active accounts available")
         return selection
 
-    monkeypatch.setattr(service._load_balancer, "select_account", fake_select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", AsyncMock(side_effect=fake_select_account))
 
     async def fake_ensure_fresh(target: Account, *, force: bool = False, timeout_seconds: float | None = None):
         del timeout_seconds
@@ -1308,6 +1299,7 @@ async def test_connect_proxy_websocket_propagates_retry_handshake_error(monkeypa
         client_send_lock=client_send_lock,
         websocket=websocket,
         api_key=None,
+        deadline=10_000_000.0,
     )
 
     assert result_account is None
@@ -1341,18 +1333,9 @@ async def test_connect_proxy_websocket_retries_another_account_after_connect_fai
     handled: list[tuple[str, str]] = []
     upstream_socket = SimpleNamespace()
 
-    async def fake_select_account(
-        sticky_key=None,
-        *,
-        prefer_earlier_reset_accounts=False,
-        routing_strategy="usage_weighted",
-        model=None,
-        exclude_account_ids=None,
-        additional_limit_name=None,
-        reallocate_sticky=False,
-    ):
-        del sticky_key, prefer_earlier_reset_accounts, routing_strategy, model, additional_limit_name, reallocate_sticky
-        excluded = set(exclude_account_ids or ())
+    async def fake_select_account(*args, **kwargs):
+        del args
+        excluded = set(kwargs.get("exclude_account_ids") or ())
         if first_account.id not in excluded:
             return AccountSelection(account=first_account, error_message=None)
         return AccountSelection(account=second_account, error_message=None)
@@ -1371,7 +1354,7 @@ async def test_connect_proxy_websocket_retries_another_account_after_connect_fai
         handled.append((target.id, exc.payload["error"]["code"]))
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(service._load_balancer, "select_account", fake_select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", AsyncMock(side_effect=fake_select_account))
     monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
     monkeypatch.setattr(service, "_open_upstream_websocket", fake_open_upstream_websocket)
     monkeypatch.setattr(service, "_handle_websocket_connect_error", fake_handle_websocket_connect_error)
@@ -1387,6 +1370,7 @@ async def test_connect_proxy_websocket_retries_another_account_after_connect_fai
         client_send_lock=client_send_lock,
         websocket=websocket,
         api_key=None,
+        deadline=10_000_000.0,
     )
 
     assert result_account is second_account
@@ -1418,7 +1402,7 @@ async def test_connect_proxy_websocket_preserves_selection_error_code(monkeypatc
     websocket = SimpleNamespace(send_text=AsyncMock())
     release_mock = AsyncMock()
 
-    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(return_value=selection))
+    monkeypatch.setattr(service, "_select_account_with_budget", AsyncMock(return_value=selection))
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service, "_release_websocket_reservation", release_mock)
 
@@ -1432,6 +1416,7 @@ async def test_connect_proxy_websocket_preserves_selection_error_code(monkeypatc
         client_send_lock=client_send_lock,
         websocket=websocket,
         api_key=None,
+        deadline=10_000_000.0,
     )
 
     assert result_account is None
@@ -1467,22 +1452,13 @@ async def test_connect_proxy_websocket_releases_reservation_on_refresh_timeout(m
     handled: list[proxy_module.ProxyResponseError] = []
     release_mock = AsyncMock()
 
-    async def fake_select_account(
-        sticky_key=None,
-        *,
-        prefer_earlier_reset_accounts=False,
-        routing_strategy="usage_weighted",
-        model=None,
-        exclude_account_ids=None,
-        additional_limit_name=None,
-        reallocate_sticky=False,
-    ):
-        del sticky_key, prefer_earlier_reset_accounts, routing_strategy, model, additional_limit_name, reallocate_sticky
-        if exclude_account_ids:
+    async def fake_select_account(*args, **kwargs):
+        del args
+        if kwargs.get("exclude_account_ids"):
             return AccountSelection(account=None, error_message="No active accounts available")
         return selection
 
-    monkeypatch.setattr(service._load_balancer, "select_account", fake_select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", AsyncMock(side_effect=fake_select_account))
 
     async def fake_ensure_fresh(target: Account, *, force: bool = False, timeout_seconds: float | None = None):
         del force, timeout_seconds
@@ -1508,6 +1484,7 @@ async def test_connect_proxy_websocket_releases_reservation_on_refresh_timeout(m
         client_send_lock=client_send_lock,
         websocket=websocket,
         api_key=None,
+        deadline=10_000_000.0,
     )
 
     assert result_account is None
@@ -1562,6 +1539,47 @@ async def test_start_websocket_request_maps_startup_send_failure_to_error_event(
     sent_event = json.loads(websocket.send_text.await_args.args[0])
     assert sent_event["error"]["code"] == "upstream_unavailable"
     upstream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_websocket_request_cleans_up_reservation_on_connect_exception(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    websocket = SimpleNamespace(send_text=AsyncMock())
+    fail_mock = AsyncMock()
+    reservation = SimpleNamespace(reservation_id="resv_ws_connect_exception")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_connect_proxy_websocket",
+        AsyncMock(side_effect=proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "boom"))),
+    )
+    monkeypatch.setattr(service, "_fail_websocket_request_state", fail_mock)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=reservation))
+
+    handle = await service._start_websocket_request(
+        json.dumps({"type": "response.create", "model": "gpt-5.1", "input": "hi"}),
+        websocket=websocket,
+        headers={"session_id": "sid"},
+        filtered_headers={"session_id": "sid"},
+        codex_session_affinity=True,
+        sticky_threads_enabled=False,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        client_send_lock=proxy_service.anyio.Lock(),
+        api_key=None,
+    )
+
+    assert handle is None
+    fail_mock.assert_awaited_once()
+    websocket.send_text.assert_awaited_once()
+
+
+def test_is_websocket_response_create_accepts_v1_event_type():
+    assert proxy_service._is_websocket_response_create({"type": "response.create.v1"}) is True
 
 
 @pytest.mark.asyncio

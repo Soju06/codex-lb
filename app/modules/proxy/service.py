@@ -700,6 +700,8 @@ class ProxyService:
         client_send_lock: anyio.Lock,
         api_key: ApiKeyData | None,
     ) -> _WebSocketRequestHandle | None:
+        start = time.monotonic()
+        deadline = start + get_settings().proxy_request_budget_seconds
         payload = _parse_websocket_payload(text_data)
         if payload is None or not _is_websocket_response_create(payload):
             return None
@@ -739,17 +741,62 @@ class ProxyService:
                 )
             return None
 
-        account, upstream = await self._connect_proxy_websocket(
-            filtered_headers,
-            sticky_key=sticky_key,
-            prefer_earlier_reset=prefer_earlier_reset,
-            routing_strategy=routing_strategy,
-            model=request_state.model,
-            request_state=request_state,
-            client_send_lock=client_send_lock,
-            websocket=websocket,
-            api_key=api_key,
-        )
+        try:
+            account, upstream = await self._connect_proxy_websocket(
+                filtered_headers,
+                sticky_key=sticky_key,
+                prefer_earlier_reset=prefer_earlier_reset,
+                routing_strategy=routing_strategy,
+                model=request_state.model,
+                request_state=request_state,
+                client_send_lock=client_send_lock,
+                websocket=websocket,
+                api_key=api_key,
+                deadline=deadline,
+            )
+        except ProxyResponseError as exc:
+            error = _parse_openai_error(exc.payload)
+            await self._fail_websocket_request_state(
+                request_state,
+                error_code=_normalize_error_code(error.code if error else None, error.type if error else None)
+                or "upstream_unavailable",
+                error_message=error.message if error and error.message else "Upstream unavailable",
+                api_key=api_key,
+            )
+            try:
+                async with client_send_lock:
+                    await websocket.send_text(
+                        _serialize_websocket_error_event(
+                            _wrapped_websocket_error_event(exc.status_code, exc.payload)
+                        )
+                    )
+            except Exception:
+                logger.debug("Failed to send websocket startup proxy error event", exc_info=True)
+            return None
+        except Exception:
+            await self._fail_websocket_request_state(
+                request_state,
+                error_code="internal_error",
+                error_message="WebSocket request setup failed",
+                api_key=api_key,
+            )
+            try:
+                async with client_send_lock:
+                    await websocket.send_text(
+                        _serialize_websocket_error_event(
+                            _wrapped_websocket_error_event(
+                                500,
+                                openai_error(
+                                    "internal_error",
+                                    "WebSocket request setup failed",
+                                    error_type="server_error",
+                                ),
+                            )
+                        )
+                    )
+            except Exception:
+                logger.debug("Failed to send websocket startup internal error event", exc_info=True)
+            return None
         if upstream is None or account is None:
             return None
         request_state.account_id = account.id
@@ -813,6 +860,7 @@ class ProxyService:
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
         api_key: ApiKeyData | None,
+        deadline: float,
         exclude_account_ids: set[str] | None = None,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         attempted_account_ids = set(exclude_account_ids or ())
@@ -820,7 +868,10 @@ class ProxyService:
         last_connect_account: Account | None = None
 
         while True:
-            selection = await self._load_balancer.select_account(
+            selection = await self._select_account_with_budget(
+                deadline,
+                request_id=request_state.request_id,
+                kind="websocket",
                 sticky_key=sticky_key,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
@@ -894,14 +945,52 @@ class ProxyService:
             connect_error: ProxyResponseError | None = None
             last_connect_account = account
             try:
-                account = await self._ensure_fresh(account)
-                return account, await self._open_upstream_websocket(account, headers)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Websocket request budget exhausted before freshness check request_id=%s account_id=%s",
+                        request_state.request_id,
+                        account.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Websocket request budget exhausted before upstream connect request_id=%s account_id=%s",
+                        request_state.request_id,
+                        account.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                with anyio.fail_after(remaining_budget):
+                    return account, await self._open_upstream_websocket(account, headers)
             except ProxyResponseError as exc:
                 connect_error = exc
                 if exc.status_code == 401:
                     try:
-                        account = await self._ensure_fresh(account, force=True)
-                        return account, await self._open_upstream_websocket(account, headers)
+                        remaining_budget = _remaining_budget_seconds(deadline)
+                        if remaining_budget <= 0:
+                            logger.warning(
+                                "Websocket request budget exhausted before forced refresh retry request_id=%s account_id=%s",
+                                request_state.request_id,
+                                account.id,
+                            )
+                            _raise_proxy_budget_exhausted()
+                        account = await self._ensure_fresh_with_budget(
+                            account,
+                            force=True,
+                            timeout_seconds=remaining_budget,
+                        )
+                        remaining_budget = _remaining_budget_seconds(deadline)
+                        if remaining_budget <= 0:
+                            logger.warning(
+                                "Websocket request budget exhausted before post-refresh upstream connect request_id=%s account_id=%s",
+                                request_state.request_id,
+                                account.id,
+                            )
+                            _raise_proxy_budget_exhausted()
+                        with anyio.fail_after(remaining_budget):
+                            return account, await self._open_upstream_websocket(account, headers)
                     except RefreshError as refresh_exc:
                         if refresh_exc.is_permanent:
                             await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
@@ -930,6 +1019,8 @@ class ProxyService:
                     exc_info=True,
                 )
                 connect_error = _proxy_unavailable_error(str(exc) or "Request to upstream timed out")
+            except TimeoutError:
+                connect_error = _proxy_unavailable_error("Proxy request budget exhausted")
 
             assert connect_error is not None
             await self._handle_websocket_connect_error(account, connect_error)
@@ -2318,6 +2409,7 @@ class ProxyService:
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        exclude_account_ids: set[str] | None = None,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -2334,6 +2426,7 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,
+                    exclude_account_ids=exclude_account_ids,
                 )
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
@@ -2471,7 +2564,7 @@ def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:
 
 def _is_websocket_response_create(payload: dict[str, JsonValue]) -> bool:
     payload_type = payload.get("type")
-    return isinstance(payload_type, str) and payload_type == "response.create"
+    return isinstance(payload_type, str) and payload_type in {"response.create", "response.create.v1"}
 
 
 def _websocket_request_model(payload: dict[str, JsonValue]) -> str | None:

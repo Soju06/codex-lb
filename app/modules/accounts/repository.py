@@ -7,9 +7,10 @@ from datetime import datetime
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.usage.pricing import UsageTokens, calculate_cost_from_usage, get_pricing_for_model
-from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
+from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, Tag, UsageHistory
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
@@ -37,11 +38,29 @@ class AccountsRepository:
         self._session = session
 
     async def get_by_id(self, account_id: str) -> Account | None:
-        return await self._session.get(Account, account_id)
+        result = await self._session.execute(
+            select(Account).options(selectinload(Account.tags)).where(Account.id == account_id)
+        )
+        return result.scalar_one_or_none()
 
     async def list_accounts(self) -> list[Account]:
-        result = await self._session.execute(select(Account).order_by(Account.email))
+        result = await self._session.execute(
+            select(Account).options(selectinload(Account.tags)).order_by(Account.email)
+        )
         return list(result.scalars().all())
+
+    async def list_accounts_by_any_tag(self, tag_names: list[str]) -> list[Account]:
+        normalized_tags = _normalize_tag_names(tag_names)
+        if not normalized_tags:
+            return await self.list_accounts()
+        result = await self._session.execute(
+            select(Account)
+            .options(selectinload(Account.tags))
+            .join(Account.tags)
+            .where(Tag.name.in_(normalized_tags))
+            .order_by(Account.email)
+        )
+        return list(result.scalars().unique().all())
 
     async def list_request_usage_summary_by_account(
         self,
@@ -222,6 +241,32 @@ class AccountsRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def replace_tags(self, account_id: str, tag_names: list[str]) -> Account | None:
+        account = await self.get_by_id(account_id)
+        if account is None:
+            return None
+        normalized_tags = _normalize_tag_names(tag_names)
+        account.tags = await self._resolve_tags(normalized_tags)
+        await self._session.commit()
+        await self._session.refresh(account, attribute_names=["tags"])
+        return account
+
+    async def _resolve_tags(self, tag_names: list[str]) -> list[Tag]:
+        if not tag_names:
+            return []
+        result = await self._session.execute(select(Tag).where(Tag.name.in_(tag_names)))
+        existing = {tag.name: tag for tag in result.scalars().all()}
+        resolved: list[Tag] = []
+        for name in tag_names:
+            tag = existing.get(name)
+            if tag is None:
+                tag = Tag(name=name)
+                self._session.add(tag)
+                existing[name] = tag
+            resolved.append(tag)
+        await self._session.flush()
+        return resolved
+
     async def _merge_by_email_enabled(self) -> bool:
         settings = await self._session.get(DashboardSettings, _SETTINGS_ROW_ID)
         if settings is None:
@@ -291,3 +336,15 @@ def _apply_account_updates(target: Account, source: Account) -> None:
 def _advisory_lock_key(scope: str, value: str) -> int:
     digest = hashlib.sha256(f"{scope}:{value}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _normalize_tag_names(tag_names: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tag_name in tag_names:
+        candidate = tag_name.strip().lower()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized

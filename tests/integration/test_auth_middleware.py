@@ -141,6 +141,7 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
         created = await service.create_key(
             ApiKeyCreateData(
                 name="middleware-key",
+                tags=None,
                 allowed_models=None,
                 expires_at=None,
             )

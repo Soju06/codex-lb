@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { TagInput } from "@/components/tag-input";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
@@ -46,6 +47,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   });
 
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [tags, setTags] = useState<string[]>([]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>([]);
   const [expiresAt, setExpiresAt] = useState<Date | null>(null);
   const [enforcedModel, setEnforcedModel] = useState("");
@@ -55,6 +57,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
     const validLimits = limitRules.filter((r) => r.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
+      tags: tags.length > 0 ? tags : undefined,
       allowedModels: selectedModels.length > 0 ? selectedModels : undefined,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
@@ -63,6 +66,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
     };
     await onSubmit(payload);
     form.reset();
+    setTags([]);
     setSelectedModels([]);
     setLimitRules([]);
     setExpiresAt(null);
@@ -99,6 +103,11 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                     </FormItem>
                   )}
                 />
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Tags</label>
+                  <TagInput value={tags} onChange={setTags} />
+                </div>
 
                 <div className="space-y-1">
                   <label className="text-sm font-medium">Allowed models</label>

@@ -12,6 +12,7 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     accountId: overrides.accountId,
     email: overrides.email,
     displayName: overrides.displayName ?? overrides.email,
+    tags: overrides.tags ?? [],
     planType: overrides.planType ?? "plus",
     status: overrides.status ?? "active",
     usage: overrides.usage ?? null,

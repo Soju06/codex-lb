@@ -51,6 +51,8 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def delete(self, key_id: str) -> bool: ...
 
+    async def replace_tags(self, key_id: str, tag_names: list[str]) -> ApiKey | None: ...
+
     async def update_last_used(self, key_id: str) -> None: ...
 
     async def commit(self) -> None: ...
@@ -166,6 +168,7 @@ class LimitRuleInput:
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreateData:
     name: str
+    tags: list[str] | None
     allowed_models: list[str] | None
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
@@ -177,6 +180,8 @@ class ApiKeyCreateData:
 class ApiKeyUpdateData:
     name: str | None = None
     name_set: bool = False
+    tags: list[str] | None = None
+    tags_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
     enforced_model: str | None = None
@@ -197,6 +202,7 @@ class ApiKeyData:
     id: str
     name: str
     key_prefix: str
+    tags: list[str]
     allowed_models: list[str] | None
     enforced_model: str | None
     enforced_reasoning_effort: str | None
@@ -235,6 +241,7 @@ class ApiKeysService:
     async def create_key(self, payload: ApiKeyCreateData) -> ApiKeyCreatedData:
         now = utcnow()
         plain_key = _generate_plain_key()
+        normalized_tags = _normalize_tag_names(payload.tags)
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
@@ -253,6 +260,11 @@ class ApiKeysService:
             last_used_at=None,
         )
         created = await self._repository.create(row)
+
+        if normalized_tags:
+            tagged = await self._repository.replace_tags(created.id, normalized_tags)
+            if tagged is not None:
+                created = tagged
 
         if payload.limits:
             limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
@@ -273,6 +285,7 @@ class ApiKeysService:
         ]
 
     async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
+        normalized_tags = _normalize_tag_names(payload.tags) if payload.tags_set else None
         if payload.allowed_models_set:
             allowed_models = _normalize_allowed_models(payload.allowed_models)
         else:
@@ -314,6 +327,12 @@ class ApiKeysService:
         )
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+
+        if payload.tags_set:
+            tagged = await self._repository.replace_tags(key_id, normalized_tags or [])
+            if tagged is None:
+                raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+            row = tagged
 
         if payload.limits_set:
             now = utcnow()
@@ -607,6 +626,20 @@ def _normalize_allowed_models(allowed_models: list[str] | None) -> list[str] | N
     return [model.strip() for model in allowed_models if model and model.strip()]
 
 
+def _normalize_tag_names(tag_names: list[str] | None) -> list[str]:
+    if tag_names is None:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tag_name in tag_names:
+        candidate = tag_name.strip().lower()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
 def _normalize_model_slug(value: str | None) -> str | None:
     if value is None:
         return None
@@ -774,6 +807,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         id=data.id,
         name=data.name,
         key_prefix=data.key_prefix,
+        tags=data.tags,
         allowed_models=data.allowed_models,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
@@ -793,6 +827,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         id=row.id,
         name=row.name,
         key_prefix=row.key_prefix,
+        tags=sorted(tag.name for tag in row.tags),
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),

@@ -41,6 +41,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const baseSubtitle = emailSubtitle ?? formatSlug(account.planType);
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
+  const tagsLabel = account.tags.length > 0 ? ` | Tags ${account.tags.join(", ")}` : "";
 
   return (
     <button
@@ -59,7 +60,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             {titleIsEmail && blurred ? <span className="privacy-blur">{title}</span> : title}
           </p>
           <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
+            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}{tagsLabel}</> : <>{baseSubtitle}{idSuffix}{tagsLabel}</>}
           </p>
         </div>
         <StatusBadge status={status} />

@@ -28,6 +28,7 @@ describe("RecentRequestsTable", () => {
              accountId: "acc-primary",
              email: "primary@example.com",
              displayName: "Primary Account",
+             tags: [],
              planType: "plus",
              status: "active",
              additionalQuotas: [],

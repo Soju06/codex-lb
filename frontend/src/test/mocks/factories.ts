@@ -63,6 +63,7 @@ export function createAccountSummary(overrides: Partial<AccountSummary> = {}): A
     accountId: "acc_primary",
     email: "primary@example.com",
     displayName: "primary@example.com",
+    tags: [],
     planType: "plus",
     status: "active",
     usage: {
@@ -327,6 +328,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
     id: "key_1",
     name: "Default key",
     keyPrefix: "sk-test",
+    tags: [],
     allowedModels: ["gpt-5.1"],
     expiresAt: offsetIso(30 * 24 * 60),
     isActive: true,
@@ -364,6 +366,7 @@ export function createDefaultApiKeys(): ApiKey[] {
       id: "key_2",
       name: "Read only key",
       keyPrefix: "sk-second",
+      tags: ["paid"],
       allowedModels: ["gpt-4o-mini"],
       isActive: false,
       expiresAt: null,

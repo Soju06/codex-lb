@@ -99,6 +99,15 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._limits.pop(key_id, None)
         return True
 
+    async def replace_tags(self, key_id: str, tag_names: list[str]) -> ApiKey | None:
+        row = self.rows.get(key_id)
+        if row is None:
+            return None
+        from app.db.models import Tag
+
+        row.tags = [Tag(name=tag_name) for tag_name in tag_names]
+        return row
+
     async def update_last_used(self, key_id: str) -> None:
         row = self.rows.get(key_id)
         if row is not None:
@@ -371,7 +380,7 @@ async def test_create_key_stores_hash_and_prefix() -> None:
     service = ApiKeysService(repo)
 
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="dev-key",
             allowed_models=["o3-pro"],
             expires_at=None,
@@ -395,7 +404,7 @@ async def test_create_key_rejects_enforced_model_outside_allowed_models() -> Non
 
     with pytest.raises(ValueError, match="enforced_model"):
         await service.create_key(
-            ApiKeyCreateData(
+            ApiKeyCreateData(tags=None, 
                 name="invalid-policy",
                 allowed_models=["model-alpha"],
                 enforced_model="model-beta",
@@ -410,7 +419,7 @@ async def test_create_key_normalizes_enforced_reasoning_effort() -> None:
     service = ApiKeysService(repo)
 
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="reasoning-policy",
             allowed_models=None,
             enforced_reasoning_effort="HIGH",
@@ -427,7 +436,7 @@ async def test_create_key_with_limits() -> None:
     service = ApiKeysService(repo)
 
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="limited-key",
             allowed_models=None,
             expires_at=None,
@@ -453,7 +462,7 @@ async def test_validate_key_checks_expiry_and_limit() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="limited-key",
             allowed_models=None,
             expires_at=None,
@@ -487,7 +496,7 @@ async def test_validate_key_lazy_resets_expired_limit() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="reset-key",
             allowed_models=None,
             expires_at=None,
@@ -516,7 +525,7 @@ async def test_validate_key_advances_reset_strictly_into_future(monkeypatch: pyt
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="boundary-key",
             allowed_models=None,
             expires_at=None,
@@ -544,7 +553,7 @@ async def test_validate_key_multi_limit_all_must_pass() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="multi-limit-key",
             allowed_models=None,
             expires_at=None,
@@ -575,7 +584,7 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     priority_created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="priority-cost-reserve-key",
             allowed_models=None,
             expires_at=None,
@@ -597,7 +606,7 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
     assert priority_cost_limit.current_value == 184_319
 
     standard_created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="standard-cost-reserve-key",
             allowed_models=None,
             expires_at=None,
@@ -622,7 +631,7 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
 async def test_regenerate_key_rotates_hash_and_prefix() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
-    created = await service.create_key(ApiKeyCreateData(name="regen-key", allowed_models=None, expires_at=None))
+    created = await service.create_key(ApiKeyCreateData(tags=None, name="regen-key", allowed_models=None, expires_at=None))
 
     row_before = await repo.get_by_id(created.id)
     assert row_before is not None
@@ -643,7 +652,7 @@ async def test_record_usage_increments_matching_limits() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="usage-key",
             allowed_models=None,
             expires_at=None,
@@ -678,7 +687,7 @@ async def test_record_usage_model_filter_matching() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="model-filter-key",
             allowed_models=None,
             expires_at=None,
@@ -725,7 +734,7 @@ async def test_record_usage_cost_limit_uses_service_tier_pricing() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="priority-cost-key",
             allowed_models=None,
             expires_at=None,
@@ -753,7 +762,7 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="flex-cost-key",
             allowed_models=None,
             expires_at=None,
@@ -781,7 +790,7 @@ async def test_release_usage_reservation_restores_reserved_counter() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="reservation-release-key",
             allowed_models=None,
             expires_at=None,
@@ -805,7 +814,7 @@ async def test_finalize_usage_reservation_is_idempotent() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="reservation-finalize-key",
             allowed_models=None,
             expires_at=None,
@@ -841,7 +850,7 @@ async def test_release_after_finalize_is_noop() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="finalize-then-release-key",
             allowed_models=None,
             expires_at=None,
@@ -879,7 +888,7 @@ async def test_finalize_after_release_is_noop() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
-        ApiKeyCreateData(
+        ApiKeyCreateData(tags=None, 
             name="release-then-finalize-key",
             allowed_models=None,
             expires_at=None,

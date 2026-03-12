@@ -1,5 +1,8 @@
 import { User } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { TagInput } from "@/components/tag-input";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
@@ -17,6 +20,7 @@ export type AccountDetailProps = {
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
+  onUpdateTags: (accountId: string, tags: string[]) => void;
 };
 
 export function AccountDetail({
@@ -27,9 +31,15 @@ export function AccountDetail({
   onResume,
   onDelete,
   onReauth,
+  onUpdateTags,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
+  const [tagsDraft, setTagsDraft] = useState<string[]>(account?.tags ?? []);
+
+  useEffect(() => {
+    setTagsDraft(account?.tags ?? []);
+  }, [account]);
 
   if (!account) {
     return (
@@ -63,6 +73,24 @@ export function AccountDetail({
             <span className={blurred ? "privacy-blur" : ""}>{emailSubtitle}</span>{showAccountId ? ` | ID ${compactId}` : ""}
           </p>
         ) : null}
+      </div>
+
+      <div className="space-y-2 rounded-lg border p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium">Tags</h3>
+            <p className="text-xs text-muted-foreground">Used to build API-key-specific account pools.</p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            disabled={busy}
+            onClick={() => onUpdateTags(account.accountId, tagsDraft)}
+          >
+            Save tags
+          </Button>
+        </div>
+        <TagInput value={tagsDraft} onChange={setTagsDraft} disabled={busy} />
       </div>
 
       <AccountUsagePanel account={account} trends={trends} />

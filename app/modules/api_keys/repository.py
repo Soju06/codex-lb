@@ -18,6 +18,7 @@ from app.db.models import (
     LimitType,
     LimitWindow,
     RequestLog,
+    Tag,
 )
 
 
@@ -70,20 +71,29 @@ class ApiKeysRepository:
     async def create(self, row: ApiKey) -> ApiKey:
         self._session.add(row)
         await self._session.commit()
-        await self._session.refresh(row)
+        await self._session.refresh(row, attribute_names=["limits", "tags"])
         return row
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
-        return await self._session.get(ApiKey, key_id)
+        result = await self._session.execute(
+            select(ApiKey).options(selectinload(ApiKey.limits), selectinload(ApiKey.tags)).where(ApiKey.id == key_id)
+        )
+        return result.scalar_one_or_none()
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         result = await self._session.execute(
-            select(ApiKey).options(selectinload(ApiKey.limits)).where(ApiKey.key_hash == key_hash)
+            select(ApiKey)
+            .options(selectinload(ApiKey.limits), selectinload(ApiKey.tags))
+            .where(ApiKey.key_hash == key_hash)
         )
         return result.scalar_one_or_none()
 
     async def list_all(self) -> list[ApiKey]:
-        result = await self._session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
+        result = await self._session.execute(
+            select(ApiKey)
+            .options(selectinload(ApiKey.limits), selectinload(ApiKey.tags))
+            .order_by(ApiKey.created_at.desc())
+        )
         return list(result.scalars().unique().all())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
@@ -202,7 +212,7 @@ class ApiKeysRepository:
             assert isinstance(key_prefix, str)
             row.key_prefix = key_prefix
         await self._session.commit()
-        await self._session.refresh(row)
+        await self._session.refresh(row, attribute_names=["limits", "tags"])
         return row
 
     async def delete(self, key_id: str) -> bool:
@@ -267,6 +277,32 @@ class ApiKeysRepository:
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
+
+    async def replace_tags(self, key_id: str, tag_names: list[str]) -> ApiKey | None:
+        row = await self.get_by_id(key_id)
+        if row is None:
+            return None
+        normalized_tags = _normalize_tag_names(tag_names)
+        row.tags = await self._resolve_tags(normalized_tags)
+        await self._session.commit()
+        await self._session.refresh(row, attribute_names=["limits", "tags"])
+        return row
+
+    async def _resolve_tags(self, tag_names: list[str]) -> list[Tag]:
+        if not tag_names:
+            return []
+        result = await self._session.execute(select(Tag).where(Tag.name.in_(tag_names)))
+        existing = {tag.name: tag for tag in result.scalars().all()}
+        resolved: list[Tag] = []
+        for name in tag_names:
+            tag = existing.get(name)
+            if tag is None:
+                tag = Tag(name=name)
+                self._session.add(tag)
+                existing[name] = tag
+            resolved.append(tag)
+        await self._session.flush()
+        return resolved
 
     async def increment_limit_usage(
         self,
@@ -540,3 +576,15 @@ def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int
 
 def _limit_key(limit: ApiKeyLimit) -> tuple[LimitType, LimitWindow, str | None]:
     return (limit.limit_type, limit.limit_window, limit.model_filter)
+
+
+def _normalize_tag_names(tag_names: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tag_name in tag_names:
+        candidate = tag_name.strip().lower()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized

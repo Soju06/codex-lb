@@ -6,6 +6,7 @@ from enum import Enum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Column,
     DateTime,
     Float,
     ForeignKey,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
+    Table,
     Text,
     UniqueConstraint,
     false,
@@ -46,6 +48,42 @@ class StickySessionKind(str, Enum):
     PROMPT_CACHE = "prompt_cache"
 
 
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+
+    accounts: Mapped[list["Account"]] = relationship(
+        secondary=lambda: account_tags_table,
+        back_populates="tags",
+        lazy="selectin",
+    )
+    api_keys: Mapped[list["ApiKey"]] = relationship(
+        secondary=lambda: api_key_tags_table,
+        back_populates="tags",
+        lazy="selectin",
+    )
+
+
+account_tags_table = Table(
+    "account_tags",
+    Base.metadata,
+    Column("account_id", String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+    UniqueConstraint("account_id", "tag_id", name="uq_account_tags_account_tag"),
+)
+
+
+api_key_tags_table = Table(
+    "api_key_tags",
+    Base.metadata,
+    Column("api_key_id", String, ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+    UniqueConstraint("api_key_id", "tag_id", name="uq_api_key_tags_key_tag"),
+)
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -73,6 +111,13 @@ class Account(Base):
     )
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    tags: Mapped[list[Tag]] = relationship(
+        secondary=account_tags_table,
+        back_populates="accounts",
+        lazy="selectin",
+        order_by="Tag.name",
+    )
 
 
 class UsageHistory(Base):
@@ -228,6 +273,12 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    tags: Mapped[list[Tag]] = relationship(
+        secondary=api_key_tags_table,
+        back_populates="api_keys",
+        lazy="selectin",
+        order_by="Tag.name",
+    )
 
 
 class LimitType(str, Enum):
@@ -361,6 +412,11 @@ Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index("idx_tags_name", Tag.name)
+Index("idx_account_tags_account_id", account_tags_table.c.account_id)
+Index("idx_account_tags_tag_id", account_tags_table.c.tag_id)
+Index("idx_api_key_tags_key_id", api_key_tags_table.c.api_key_id)
+Index("idx_api_key_tags_tag_id", api_key_tags_table.c.tag_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)

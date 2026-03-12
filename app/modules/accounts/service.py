@@ -184,3 +184,31 @@ class AccountsService:
 
     async def delete_account(self, account_id: str) -> bool:
         return await self._repo.delete(account_id)
+
+    async def update_account_tags(self, account_id: str, tags: list[str]) -> AccountSummary | None:
+        account = await self._repo.replace_tags(account_id, tags)
+        if account is None:
+            return None
+
+        primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
+        secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
+        request_usage_rows = await self._repo.list_request_usage_summary_by_account([account.id])
+        request_usage = request_usage_rows.get(account.id)
+        summaries = build_account_summaries(
+            accounts=[account],
+            primary_usage=primary_usage,
+            secondary_usage=secondary_usage,
+            request_usage_by_account={
+                account.id: AccountRequestUsage(
+                    request_count=request_usage.request_count,
+                    total_tokens=request_usage.total_tokens,
+                    cached_input_tokens=request_usage.cached_input_tokens,
+                    total_cost_usd=request_usage.total_cost_usd,
+                )
+            }
+            if request_usage is not None
+            else {},
+            additional_quotas_by_account={},
+            encryptor=self._encryptor,
+        )
+        return summaries[0] if summaries else None

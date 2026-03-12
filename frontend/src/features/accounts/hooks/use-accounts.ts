@@ -8,7 +8,9 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updateAccountTags,
 } from "@/features/accounts/api";
+import type { AccountTagsUpdateRequest } from "@/features/accounts/schemas";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
@@ -67,7 +69,19 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  const updateTagsMutation = useMutation({
+    mutationFn: ({ accountId, payload }: { accountId: string; payload: AccountTagsUpdateRequest }) =>
+      updateAccountTags(accountId, payload),
+    onSuccess: () => {
+      toast.success("Account tags updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Tag update failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, updateTagsMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

@@ -1,8 +1,10 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
   AccountImportResponseSchema,
+  AccountSummarySchema,
+  AccountTagsUpdateRequestSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -56,6 +58,13 @@ export function deleteAccount(accountId: string) {
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
     AccountActionResponseSchema,
   );
+}
+
+export function updateAccountTags(accountId: string, payload: unknown) {
+  const validated = AccountTagsUpdateRequestSchema.parse(payload);
+  return put(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/tags`, AccountSummarySchema, {
+    body: validated,
+  });
 }
 
 export function startOauth(payload: unknown) {

@@ -80,7 +80,9 @@ transcribe_router = APIRouter(
 _TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_accounts",
+    "no_tagged_accounts",
     "no_plan_support_for_model",
+    "no_tagged_plan_support_for_model",
     "additional_quota_data_unavailable",
     "no_additional_quota_eligible_accounts",
 }

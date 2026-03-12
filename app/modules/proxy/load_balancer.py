@@ -80,10 +80,12 @@ class LoadBalancer:
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        account_tags: list[str] | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
             additional_limit_name=additional_limit_name,
+            account_tags=account_tags,
         )
         if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
@@ -162,11 +164,15 @@ class LoadBalancer:
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        account_tags: list[str] | None = None,
     ) -> _SelectionInputs:
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
+            if account_tags:
+                accounts = await repos.accounts.list_accounts_by_any_tag(account_tags)
+            else:
+                accounts = all_accounts
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
-            accounts = all_accounts
             if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
                 accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:
@@ -180,8 +186,12 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
-                    error_message=f"No accounts with a plan supporting model '{model}'",
-                    error_code=NO_PLAN_SUPPORT_FOR_MODEL,
+                    error_message=(
+                        f"No tagged accounts with a plan supporting model '{model}'"
+                        if account_tags
+                        else f"No accounts with a plan supporting model '{model}'"
+                    ),
+                    error_code=("no_tagged_plan_support_for_model" if account_tags else NO_PLAN_SUPPORT_FOR_MODEL),
                 )
 
             if effective_limit_name:
@@ -204,6 +214,10 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    error_message=(
+                        f"No accounts matched API key tags: {', '.join(sorted(account_tags))}" if account_tags else None
+                    ),
+                    error_code=("no_tagged_accounts" if account_tags else None),
                 )
 
             latest_primary = await repos.usage.latest_by_account()

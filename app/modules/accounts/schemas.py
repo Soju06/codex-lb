@@ -60,6 +60,7 @@ class AccountSummary(DashboardModel):
     account_id: str
     email: str
     display_name: str
+    tags: list[str] = Field(default_factory=list)
     plan_type: str
     status: str
     usage: AccountUsage | None = None
@@ -99,6 +100,10 @@ class AccountReactivateResponse(DashboardModel):
 
 class AccountDeleteResponse(DashboardModel):
     status: str
+
+
+class AccountTagsUpdateRequest(DashboardModel):
+    tags: list[str] = Field(default_factory=list)
 
 
 class AccountTrendsResponse(DashboardModel):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Body, Depends, File, UploadFile
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
@@ -12,6 +12,8 @@ from app.modules.accounts.schemas import (
     AccountPauseResponse,
     AccountReactivateResponse,
     AccountsResponse,
+    AccountSummary,
+    AccountTagsUpdateRequest,
     AccountTrendsResponse,
 )
 from app.modules.accounts.service import InvalidAuthJsonError
@@ -87,3 +89,15 @@ async def delete_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountDeleteResponse(status="deleted")
+
+
+@router.put("/{account_id}/tags", response_model=AccountSummary)
+async def update_account_tags(
+    account_id: str,
+    payload: AccountTagsUpdateRequest = Body(...),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountSummary:
+    result = await context.service.update_account_tags(account_id, payload.tags)
+    if result is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return result

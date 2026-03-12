@@ -111,6 +111,17 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
       </div>
 
       {/* Actions */}
+      {account.tags.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1.5 border-t pt-3">
+          {account.tags.map((tag) => (
+            <span key={tag} className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {/* Actions */}
       <div className="mt-3 flex items-center gap-1.5 border-t pt-3">
         <Button
           type="button"

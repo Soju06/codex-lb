@@ -98,6 +98,7 @@ def _account_to_summary(
         account_id=account.id,
         email=account.email,
         display_name=account.email,
+        tags=sorted(tag.name for tag in account.tags),
         plan_type=plan_type,
         status=account.status.value,
         usage=AccountUsage(

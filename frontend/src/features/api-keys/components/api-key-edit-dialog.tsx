@@ -15,6 +15,7 @@ import {
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { TagInput } from "@/components/tag-input";
 import {
   Select,
   SelectContent,
@@ -71,6 +72,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   });
 
   const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
+  const [tags, setTags] = useState<string[]>(apiKey.tags || []);
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
@@ -83,6 +85,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const normalizedLimits = normalizeLimitRules(limitRules);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
+      tags,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
@@ -117,6 +120,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 </FormItem>
               )}
             />
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Tags</div>
+              <TagInput value={tags} onChange={setTags} disabled={busy} />
+            </div>
 
             <div className="space-y-1">
               <label className="text-sm font-medium">Allowed models</label>

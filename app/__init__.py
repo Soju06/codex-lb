@@ -1,4 +1,4 @@
-__version__ = "1.5.1"  # x-release-please-version
+__version__ = "1.5.2"  # x-release-please-version
 __all__ = ["app", "__version__"]
 
 

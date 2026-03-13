@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2](https://github.com/Soju06/codex-lb/compare/v1.5.1...v1.5.2) (2026-03-13)
+
+
+### Bug Fixes
+
+* **proxy:** close stream immediately after terminal SSE events ([#196](https://github.com/Soju06/codex-lb/issues/196)) ([dcf1ae3](https://github.com/Soju06/codex-lb/commit/dcf1ae3675346d75b571a29644c2722f776dc436))
+
 ## [1.5.1](https://github.com/Soju06/codex-lb/compare/v1.5.0...v1.5.1) (2026-03-13)
 
 

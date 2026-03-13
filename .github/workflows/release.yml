@@ -23,15 +23,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@v2.1.3
         with:
-          bun-version: "1.3.7"
+          bun-version: "1.3.10"
 
       - name: Install frontend dependencies
         run: cd frontend && bun install --frozen-lockfile
@@ -40,7 +40,7 @@ jobs:
         run: cd frontend && bun run build
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7.5.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -149,7 +149,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -199,7 +199,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}

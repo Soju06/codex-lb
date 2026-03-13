@@ -202,6 +202,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "flokosti96",
+      "name": "flokosti96",
+      "avatar_url": "https://avatars.githubusercontent.com/u/144428350?v=4",
+      "profile": "https://github.com/flokosti96",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

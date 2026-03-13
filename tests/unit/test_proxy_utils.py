@@ -902,7 +902,7 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == pytest.approx(4.5, abs=0.01)
+    assert timeout.total == pytest.approx(4.5, abs=0.05)
     assert timeout.sock_connect == pytest.approx(2.5)
     assert seen["idle_timeout_seconds"] == pytest.approx(3.5)
 

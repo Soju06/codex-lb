@@ -54,6 +54,7 @@ export const AccountSummarySchema = z.object({
   displayName: z.string(),
   planType: z.string(),
   status: z.string(),
+  tags: z.array(z.string()).default([]),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
@@ -83,6 +84,14 @@ export const AccountImportResponseSchema = z.object({
 
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
+});
+
+export const AccountTagsResponseSchema = z.object({
+  tags: z.array(z.string()).default([]),
+});
+
+export const AccountTagsUpdateRequestSchema = z.object({
+  tags: z.array(z.string()).default([]),
 });
 
 export const OauthStartRequestSchema = z.object({
@@ -151,6 +160,8 @@ export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
+export type AccountTagsResponse = z.infer<typeof AccountTagsResponseSchema>;
+export type AccountTagsUpdateRequest = z.infer<typeof AccountTagsUpdateRequestSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;

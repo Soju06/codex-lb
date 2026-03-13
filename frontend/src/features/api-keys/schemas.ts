@@ -34,6 +34,7 @@ export const ApiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
   keyPrefix: z.string(),
+  tags: z.array(z.string()).default([]),
   allowedModels: z.array(z.string()).nullable(),
   enforcedModel: z.string().nullable().default(null),
   enforcedReasoningEffort: z
@@ -50,6 +51,7 @@ export const ApiKeySchema = z.object({
 
 export const ApiKeyCreateRequestSchema = z.object({
   name: z.string().min(1).max(128),
+  tags: z.array(z.string()).optional(),
   allowedModels: z.array(z.string()).optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
@@ -67,6 +69,7 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
 
 export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
+  tags: z.array(z.string()).nullable().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z

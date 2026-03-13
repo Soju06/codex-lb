@@ -62,6 +62,7 @@ class AccountSummary(DashboardModel):
     display_name: str
     plan_type: str
     status: str
+    tags: list[str] = Field(default_factory=list)
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
@@ -99,6 +100,14 @@ class AccountReactivateResponse(DashboardModel):
 
 class AccountDeleteResponse(DashboardModel):
     status: str
+
+
+class AccountTagsResponse(DashboardModel):
+    tags: list[str] = Field(default_factory=list)
+
+
+class AccountTagsUpdateRequest(DashboardModel):
+    tags: list[str] = Field(default_factory=list)
 
 
 class AccountTrendsResponse(DashboardModel):

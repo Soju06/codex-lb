@@ -12,7 +12,9 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.usage.quota import apply_usage_quota
-from app.db.models import AccountStatus
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus, AccountTag
+from app.modules.proxy.load_balancer import _filter_accounts_for_tags
 
 pytestmark = pytest.mark.unit
 
@@ -25,6 +27,52 @@ def test_select_account_picks_lowest_used_percent():
     result = select_account(states)
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def test_filter_accounts_for_tags_uses_union_matching() -> None:
+    active = utcnow()
+    accounts = [
+        Account(
+            id="acc_paid",
+            chatgpt_account_id=None,
+            email="paid@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"a",
+            refresh_token_encrypted=b"r",
+            id_token_encrypted=b"i",
+            last_refresh=active,
+            status=AccountStatus.ACTIVE,
+            tag_links=[AccountTag(account_id="acc_paid", tag_name="paid")],
+        ),
+        Account(
+            id="acc_pro",
+            chatgpt_account_id=None,
+            email="pro@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"a",
+            refresh_token_encrypted=b"r",
+            id_token_encrypted=b"i",
+            last_refresh=active,
+            status=AccountStatus.ACTIVE,
+            tag_links=[AccountTag(account_id="acc_pro", tag_name="pro")],
+        ),
+        Account(
+            id="acc_free",
+            chatgpt_account_id=None,
+            email="free@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"a",
+            refresh_token_encrypted=b"r",
+            id_token_encrypted=b"i",
+            last_refresh=active,
+            status=AccountStatus.ACTIVE,
+            tag_links=[],
+        ),
+    ]
+
+    filtered = _filter_accounts_for_tags(accounts, ["paid", "pro"])
+
+    assert [account.id for account in filtered] == ["acc_paid", "acc_pro"]
 
 
 def test_select_account_prefers_earlier_secondary_reset_bucket():

@@ -431,6 +431,7 @@ class ProxyService:
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     routing_strategy=routing_strategy,
                     model=payload.model,
+                    account_tags=api_key.tags if api_key and api_key.tags else None,
                 )
                 account = selection.account
                 if not account:
@@ -655,6 +656,7 @@ class ProxyService:
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=None,
+                account_tags=api_key.tags if api_key and api_key.tags else None,
             )
             account = selection.account
             if not account:
@@ -1161,6 +1163,7 @@ class ProxyService:
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=model,
+                account_tags=api_key.tags if api_key and api_key.tags else None,
             )
         except ProxyResponseError as exc:
             if _is_proxy_budget_exhausted_error(exc):
@@ -2983,6 +2986,7 @@ class ProxyService:
                         prefer_earlier_reset_accounts=prefer_earlier_reset,
                         routing_strategy=routing_strategy,
                         model=payload.model,
+                        account_tags=api_key.tags if api_key and api_key.tags else None,
                     )
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
@@ -3895,6 +3899,7 @@ class ProxyService:
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        account_tags: Sequence[str] | None = None,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -3913,6 +3918,7 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,
+                    account_tags=account_tags,
                 )
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)

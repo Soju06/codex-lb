@@ -28,10 +28,12 @@ const EXPECTED_ENDPOINTS = [
   "GET /api/request-logs/options",
   // accounts
   "GET /api/accounts",
+  "GET /api/accounts/tags",
   "POST /api/accounts/import",
   "POST /api/accounts/:accountId/pause",
   "POST /api/accounts/:accountId/reactivate",
   "GET /api/accounts/:accountId/trends",
+  "PATCH /api/accounts/:accountId/tags",
   "DELETE /api/accounts/:accountId",
   // oauth
   "POST /api/oauth/start",

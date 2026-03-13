@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Clock } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -15,6 +16,7 @@ import {
 export type AccountUsagePanelProps = {
   account: AccountSummary;
   trends?: AccountTrendsResponse | null;
+  tagEditor?: ReactNode;
 };
 
 function QuotaRow({
@@ -122,7 +124,7 @@ function AdditionalQuotaRow({
   );
 }
 
-export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
+export function AccountUsagePanel({ account, trends, tagEditor }: AccountUsagePanelProps) {
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
   const requestUsage = account.requestUsage ?? null;
@@ -137,16 +139,19 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
         {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
         <QuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} />
       </div>
-      <div className="rounded-md border bg-background/60 px-3 py-2">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Request logs total</p>
-        {hasRequestUsage ? (
-          <p className="mt-1 text-xs tabular-nums text-muted-foreground">
-            {formatCompactNumber(requestUsage?.totalTokens)} tok | {formatCompactNumber(requestUsage?.cachedInputTokens)} cached |{" "}
-            {formatCompactNumber(requestUsage?.requestCount)} req | {formatCurrency(requestUsage?.totalCostUsd)}
-          </p>
-        ) : (
-          <p className="mt-1 text-xs text-muted-foreground">No request usage yet.</p>
-        )}
+      <div className={cn("grid gap-3", tagEditor ? "md:grid-cols-2" : "grid-cols-1")}>
+        <div className="rounded-md border bg-background/60 px-3 py-2">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Request logs total</p>
+          {hasRequestUsage ? (
+            <p className="mt-1 text-xs tabular-nums text-muted-foreground">
+              {formatCompactNumber(requestUsage?.totalTokens)} tok | {formatCompactNumber(requestUsage?.cachedInputTokens)} cached |{" "}
+              {formatCompactNumber(requestUsage?.requestCount)} req | {formatCurrency(requestUsage?.totalCostUsd)}
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-muted-foreground">No request usage yet.</p>
+          )}
+        </div>
+        {tagEditor}
       </div>
       {account.additionalQuotas.length > 0 ? (
         <div className="space-y-3">

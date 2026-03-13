@@ -15,6 +15,7 @@ from app.core.auth import (
 )
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.tags import normalize_tags
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
@@ -184,3 +185,9 @@ class AccountsService:
 
     async def delete_account(self, account_id: str) -> bool:
         return await self._repo.delete(account_id)
+
+    async def list_defined_tags(self) -> list[str]:
+        return await self._repo.list_defined_tags()
+
+    async def update_tags(self, account_id: str, tags: list[str]) -> list[str] | None:
+        return await self._repo.replace_tags(account_id, normalize_tags(tags))

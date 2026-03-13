@@ -3,6 +3,7 @@ import { User } from "lucide-react";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
+import { AccountTagsCard } from "@/features/accounts/components/account-tags-card";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
@@ -16,6 +17,7 @@ export type AccountDetailProps = {
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
+  onUpdateTags: (accountId: string, tags: string[]) => Promise<void>;
   onReauth: () => void;
 };
 
@@ -26,6 +28,7 @@ export function AccountDetail({
   onPause,
   onResume,
   onDelete,
+  onUpdateTags,
   onReauth,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
@@ -65,7 +68,18 @@ export function AccountDetail({
         ) : null}
       </div>
 
-      <AccountUsagePanel account={account} trends={trends} />
+      <AccountUsagePanel
+        account={account}
+        trends={trends}
+        tagEditor={(
+          <AccountTagsCard
+            accountId={account.accountId}
+            tags={account.tags}
+            disabled={busy}
+            onSave={onUpdateTags}
+          />
+        )}
+      />
       <AccountTokenInfo account={account} />
       <AccountActions
         account={account}

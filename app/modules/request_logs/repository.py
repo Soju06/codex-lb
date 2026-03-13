@@ -92,6 +92,8 @@ class RequestLogsRepository:
         reasoning_effort: str | None = None,
         service_tier: str | None = None,
         transport: str | None = None,
+        request_kind: str | None = None,
+        session_id_hash: str | None = None,
         api_key_id: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
@@ -100,6 +102,8 @@ class RequestLogsRepository:
             api_key_id=api_key_id,
             request_id=resolved_request_id,
             model=model,
+            request_kind=request_kind,
+            session_id_hash=session_id_hash,
             transport=transport,
             service_tier=service_tier,
             input_tokens=input_tokens,
@@ -133,6 +137,8 @@ class RequestLogsRepository:
         until: datetime | None = None,
         account_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
+        request_kinds: list[str] | None = None,
+        transports: list[str] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         include_success: bool = True,
@@ -146,6 +152,8 @@ class RequestLogsRepository:
             until=until,
             account_ids=account_ids,
             model_options=model_options,
+            request_kinds=request_kinds,
+            transports=transports,
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=include_success,
@@ -185,14 +193,18 @@ class RequestLogsRepository:
         until: datetime | None = None,
         account_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
+        request_kinds: list[str] | None = None,
+        transports: list[str] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
-    ) -> tuple[list[str], list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+    ) -> tuple[list[str], list[tuple[str, str | None]], list[str], list[str], list[tuple[str, str | None]]]:
         filters = self._build_filters(
             since=since,
             until=until,
             account_ids=account_ids,
             model_options=model_options,
+            request_kinds=request_kinds,
+            transports=transports,
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=True,
@@ -207,6 +219,8 @@ class RequestLogsRepository:
             .distinct()
             .order_by(RequestLog.model.asc(), RequestLog.reasoning_effort.asc())
         )
+        request_kind_stmt = select(RequestLog.request_kind).distinct().order_by(RequestLog.request_kind.asc())
+        transport_stmt = select(RequestLog.transport).distinct().order_by(RequestLog.transport.asc())
         status_stmt = (
             select(RequestLog.status, RequestLog.error_code)
             .distinct()
@@ -216,16 +230,22 @@ class RequestLogsRepository:
             clause = and_(*filters.conditions)
             account_stmt = account_stmt.where(clause)
             model_stmt = model_stmt.where(clause)
+            request_kind_stmt = request_kind_stmt.where(clause)
+            transport_stmt = transport_stmt.where(clause)
             status_stmt = status_stmt.where(clause)
 
         account_rows = await self._session.execute(account_stmt)
         model_rows = await self._session.execute(model_stmt)
+        request_kind_rows = await self._session.execute(request_kind_stmt)
+        transport_rows = await self._session.execute(transport_stmt)
         status_rows = await self._session.execute(status_stmt)
 
         account_ids = [row[0] for row in account_rows.all() if row[0]]
         model_options = [(row[0], row[1]) for row in model_rows.all() if row[0]]
+        request_kinds = [row[0] for row in request_kind_rows.all() if row[0]]
+        transports = [row[0] for row in transport_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
-        return account_ids, model_options, status_values
+        return account_ids, model_options, request_kinds, transports, status_values
 
     async def get_api_key_names_by_ids(self, api_key_ids: list[str]) -> dict[str, str]:
         unique_ids = sorted({key_id for key_id in api_key_ids if key_id})
@@ -242,6 +262,8 @@ class RequestLogsRepository:
         until: datetime | None = None,
         account_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
+        request_kinds: list[str] | None = None,
+        transports: list[str] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         include_success: bool = True,
@@ -256,6 +278,10 @@ class RequestLogsRepository:
             conditions.append(RequestLog.requested_at <= until)
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
+        if request_kinds:
+            conditions.append(RequestLog.request_kind.in_(request_kinds))
+        if transports:
+            conditions.append(RequestLog.transport.in_(transports))
 
         if model_options:
             pair_conditions = []

@@ -10,11 +10,15 @@ export type RequestFiltersProps = {
   filters: FilterState;
   accountOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
+  requestKindOptions: MultiSelectOption[];
+  transportOptions: MultiSelectOption[];
   statusOptions: MultiSelectOption[];
   onSearchChange: (value: string) => void;
   onTimeframeChange: (value: FilterState["timeframe"]) => void;
   onAccountChange: (values: string[]) => void;
   onModelChange: (values: string[]) => void;
+  onRequestKindChange: (values: string[]) => void;
+  onTransportChange: (values: string[]) => void;
   onStatusChange: (values: string[]) => void;
   onReset: () => void;
 };
@@ -23,11 +27,15 @@ export function RequestFilters({
   filters,
   accountOptions,
   modelOptions,
+  requestKindOptions,
+  transportOptions,
   statusOptions,
   onSearchChange,
   onTimeframeChange,
   onAccountChange,
   onModelChange,
+  onRequestKindChange,
+  onTransportChange,
   onStatusChange,
   onReset,
 }: RequestFiltersProps) {
@@ -59,6 +67,18 @@ export function RequestFilters({
           values={filters.modelOptions}
           options={modelOptions}
           onChange={onModelChange}
+        />
+        <MultiSelectFilter
+          label="Routes"
+          values={filters.requestKinds}
+          options={requestKindOptions}
+          onChange={onRequestKindChange}
+        />
+        <MultiSelectFilter
+          label="Transports"
+          values={filters.transports}
+          options={transportOptions}
+          onChange={onTransportChange}
         />
         <MultiSelectFilter
           label="Statuses"

@@ -193,6 +193,8 @@ export function createRequestLogEntry(overrides: Partial<RequestLogEntry> = {}):
     apiKeyName: "Primary Key",
     requestId: "req_1",
     model: "gpt-5.1",
+    requestKind: "responses",
+    sessionIdHash: null,
     transport: "http",
     serviceTier: null,
     status: "ok",
@@ -257,6 +259,8 @@ export function createRequestLogFilterOptions(
       { model: "gpt-5.1", reasoningEffort: null },
       { model: "gpt-5.1", reasoningEffort: "high" },
     ],
+    requestKinds: ["responses", "compact"],
+    transports: ["http", "websocket"],
     statuses: ["ok", "rate_limit", "quota"],
     ...overrides,
   });

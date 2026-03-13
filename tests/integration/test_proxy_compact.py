@@ -3,8 +3,8 @@ from __future__ import annotations
 import base64
 import json
 from datetime import timedelta, timezone
+from hashlib import sha256
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
@@ -18,9 +18,14 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
+from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+def _hash_session_id(value: str) -> str:
+    return f"sha256:{sha256(value.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -78,18 +83,14 @@ class _JsonSession:
         return self._response
 
 
-def _session_call_url(session: _JsonSession) -> str:
-    return cast(str, session.calls[0]["url"])
-
-
-def _session_call_json(session: _JsonSession) -> dict[str, object]:
-    return cast(dict[str, object], session.calls[0]["json"])
-
-
 @pytest.mark.asyncio
 async def test_proxy_compact_no_accounts(async_client):
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"session_id": "sid-compact-pass-through"},
+    )
     assert response.status_code == 503
     error = response.json()["error"]
     assert error["code"] == "no_accounts"
@@ -170,7 +171,11 @@ async def test_proxy_compact_success(async_client, monkeypatch):
         )
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"session_id": "sid-compact-pass-through"},
+    )
     assert response.status_code == 200
     assert response.json()["output"] == []
     assert seen["access_token"] == "access-token"
@@ -187,6 +192,7 @@ async def test_proxy_compact_success(async_client, monkeypatch):
 async def test_proxy_compact_success_preserves_compaction_payload(async_client, monkeypatch):
     email = "compact-pass-through@example.com"
     raw_account_id = "acc_compact_pass_through"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
     auth_json = _make_auth_json(raw_account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
@@ -207,7 +213,11 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     monkeypatch.setattr(proxy_client_module, "get_http_client", lambda: SimpleNamespace(session=session))
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"session_id": "sid-compact-pass-through"},
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -216,10 +226,24 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
         "encrypted_content": "enc_compact_summary_1",
         "summary_text": "condensed thread state",
     }
-    assert _session_call_url(session).endswith("/codex/responses/compact")
-    call_json = _session_call_json(session)
-    assert "stream" not in call_json
-    assert "store" not in call_json
+    call = session.calls[0]
+    url = call["url"]
+    compact_json = call["json"]
+    assert isinstance(url, str)
+    assert url.endswith("/codex/responses/compact")
+    assert isinstance(compact_json, dict)
+    assert "stream" not in compact_json
+    assert "store" not in compact_json
+
+    async with SessionLocal() as db_session:
+        logs_repo = RequestLogsRepository(db_session)
+        logs = await logs_repo.list_since(utcnow() - timedelta(minutes=5))
+
+    compact_logs = [log for log in logs if log.account_id == expected_account_id and log.request_id]
+    assert compact_logs
+    assert compact_logs[-1].transport == "http"
+    assert compact_logs[-1].request_kind == "compact"
+    assert compact_logs[-1].session_id_hash == _hash_session_id("sid-compact-pass-through")
 
 
 @pytest.mark.asyncio

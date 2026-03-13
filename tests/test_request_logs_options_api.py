@@ -48,6 +48,8 @@ async def test_request_logs_options_returns_distinct_accounts_and_models(async_c
             status="success",
             error_code=None,
             requested_at=now - timedelta(minutes=1),
+            request_kind="responses",
+            transport="http",
         )
         await logs_repo.add_log(
             account_id="acc_opt_b",
@@ -60,6 +62,8 @@ async def test_request_logs_options_returns_distinct_accounts_and_models(async_c
             error_code="rate_limit_exceeded",
             error_message="Rate limit reached",
             requested_at=now,
+            request_kind="compact",
+            transport="websocket",
         )
 
     response = await async_client.get("/api/request-logs/options")
@@ -70,6 +74,8 @@ async def test_request_logs_options_returns_distinct_accounts_and_models(async_c
         {"model": "gpt-4o", "reasoningEffort": None},
         {"model": "gpt-5.1", "reasoningEffort": None},
     ]
+    assert payload["requestKinds"] == ["responses", "compact"]
+    assert payload["transports"] == ["http", "websocket"]
     assert payload["statuses"] == ["ok", "rate_limit"]
 
 
@@ -92,6 +98,8 @@ async def test_request_logs_options_ignores_status_self_filter(async_client, db_
             status="success",
             error_code=None,
             requested_at=now,
+            request_kind="responses",
+            transport="http",
         )
         await logs_repo.add_log(
             account_id="acc_opt_err",
@@ -103,6 +111,8 @@ async def test_request_logs_options_ignores_status_self_filter(async_client, db_
             status="error",
             error_code="rate_limit_exceeded",
             requested_at=now,
+            request_kind="compact",
+            transport="websocket",
         )
 
     response = await async_client.get("/api/request-logs/options?status=ok")
@@ -113,6 +123,8 @@ async def test_request_logs_options_ignores_status_self_filter(async_client, db_
         {"model": "gpt-4o", "reasoningEffort": None},
         {"model": "gpt-5.1", "reasoningEffort": None},
     ]
+    assert payload["requestKinds"] == ["responses", "compact"]
+    assert payload["transports"] == ["http", "websocket"]
     assert payload["statuses"] == ["ok", "rate_limit"]
 
 
@@ -135,6 +147,8 @@ async def test_request_logs_options_ignore_status_matches_unfiltered_response(as
             status="success",
             error_code=None,
             requested_at=now,
+            request_kind="responses",
+            transport="http",
         )
         await logs_repo.add_log(
             account_id="acc_opt_quota",
@@ -146,6 +160,8 @@ async def test_request_logs_options_ignore_status_matches_unfiltered_response(as
             status="error",
             error_code="insufficient_quota",
             requested_at=now,
+            request_kind="compact",
+            transport="websocket",
         )
 
     base = await async_client.get("/api/request-logs/options")
@@ -176,6 +192,8 @@ async def test_request_logs_options_respects_non_status_filters(async_client, db
             status="success",
             error_code=None,
             requested_at=now,
+            request_kind="responses",
+            transport="http",
         )
         await logs_repo.add_log(
             account_id="acc_scope_a",
@@ -187,6 +205,8 @@ async def test_request_logs_options_respects_non_status_filters(async_client, db
             status="error",
             error_code="rate_limit_exceeded",
             requested_at=now,
+            request_kind="compact",
+            transport="websocket",
         )
         await logs_repo.add_log(
             account_id="acc_scope_b",
@@ -198,12 +218,16 @@ async def test_request_logs_options_respects_non_status_filters(async_client, db
             status="error",
             error_code="insufficient_quota",
             requested_at=old,
+            request_kind="transcription",
+            transport="http",
         )
 
     scoped = await async_client.get(
         "/api/request-logs/options"
         "?accountId=acc_scope_a"
         "&modelOption=gpt-5.1:::"
+        "&requestKind=compact"
+        "&transport=websocket"
         f"&since={(now - timedelta(hours=1)).isoformat()}"
     )
 
@@ -211,4 +235,6 @@ async def test_request_logs_options_respects_non_status_filters(async_client, db
     payload = scoped.json()
     assert payload["accountIds"] == ["acc_scope_a"]
     assert payload["modelOptions"] == [{"model": "gpt-5.1", "reasoningEffort": None}]
-    assert payload["statuses"] == ["ok", "rate_limit"]
+    assert payload["requestKinds"] == ["compact"]
+    assert payload["transports"] == ["websocket"]
+    assert payload["statuses"] == ["rate_limit"]

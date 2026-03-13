@@ -42,6 +42,8 @@ async def list_request_logs(
     offset: int = Query(0, ge=0),
     search: str | None = Query(default=None),
     account_id: list[str] | None = Query(default=None, alias="accountId"),
+    request_kind: list[str] | None = Query(default=None, alias="requestKind"),
+    transport: list[str] | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
@@ -62,6 +64,8 @@ async def list_request_logs(
         until=until,
         account_ids=account_id,
         model_options=parsed_options,
+        request_kinds=request_kind,
+        transports=transport,
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
@@ -77,6 +81,8 @@ async def list_request_logs(
 async def list_request_log_filter_options(
     status: list[str] | None = Query(default=None),
     account_id: list[str] | None = Query(default=None, alias="accountId"),
+    request_kind: list[str] | None = Query(default=None, alias="requestKind"),
+    transport: list[str] | None = Query(default=None),
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
@@ -94,6 +100,8 @@ async def list_request_log_filter_options(
         until=until,
         account_ids=account_id,
         model_options=parsed_options,
+        request_kinds=request_kind,
+        transports=transport,
         models=model,
         reasoning_efforts=reasoning_effort,
     )
@@ -103,5 +111,7 @@ async def list_request_log_filter_options(
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options
         ],
+        request_kinds=options.request_kinds,
+        transports=options.transports,
         statuses=options.statuses,
     )

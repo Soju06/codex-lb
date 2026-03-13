@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from hashlib import sha256
 from types import SimpleNamespace
 from typing import cast
 
@@ -13,6 +14,10 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 
 pytestmark = pytest.mark.integration
+
+
+def _hash_session_id(value: str) -> str:
+    return f"sha256:{sha256(value.encode('utf-8')).hexdigest()[:12]}"
 
 
 class _FakeUpstreamMessage:
@@ -223,6 +228,8 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["model"] == "gpt-5.4"
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
+    assert log["request_kind"] == "responses"
+    assert log["session_id_hash"] == _hash_session_id("thread-ws-1")
     assert log["status"] == "success"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5

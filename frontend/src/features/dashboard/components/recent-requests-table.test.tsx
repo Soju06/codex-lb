@@ -40,6 +40,8 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Alpha",
             requestId: "req-1",
             model: "gpt-5.1",
+            requestKind: "compact",
+            sessionIdHash: "sha256:abc123def456",
             serviceTier: "priority",
             transport: "websocket",
             status: "rate_limit",
@@ -58,6 +60,8 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("Primary Account")).toBeInTheDocument();
     expect(screen.getByText("Key Alpha")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.1 (high, priority)")).toBeInTheDocument();
+    expect(screen.getByText("Compact")).toBeInTheDocument();
+    expect(screen.getByText("sha256:abc123def456")).toBeInTheDocument();
     expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
 
@@ -86,6 +90,8 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             requestId: "req-legacy",
             model: "gpt-5.1",
+            requestKind: null,
+            sessionIdHash: null,
             serviceTier: null,
             transport: null,
             status: "ok",

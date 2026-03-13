@@ -87,6 +87,8 @@ export const RequestLogSchema = z.object({
   apiKeyName: z.string().nullable(),
   requestId: z.string(),
   model: z.string(),
+  requestKind: z.string().nullable().optional().default(null),
+  sessionIdHash: z.string().nullable().optional().default(null),
   transport: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),
   status: z.string(),
@@ -113,6 +115,8 @@ export const RequestLogModelOptionSchema = z.object({
 export const RequestLogFilterOptionsSchema = z.object({
   accountIds: z.array(z.string()),
   modelOptions: z.array(RequestLogModelOptionSchema),
+  requestKinds: z.array(z.string()),
+  transports: z.array(z.string()),
   statuses: z.array(z.string()),
 });
 
@@ -121,6 +125,8 @@ export const FilterStateSchema = z.object({
   timeframe: z.enum(["all", "1h", "24h", "7d"]),
   accountIds: z.array(z.string()),
   modelOptions: z.array(z.string()),
+  requestKinds: z.array(z.string()),
+  transports: z.array(z.string()),
   statuses: z.array(z.string()),
   limit: z.number().int().positive(),
   offset: z.number().int().nonnegative(),

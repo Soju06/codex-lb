@@ -15,6 +15,8 @@ const DEFAULT_FILTER_STATE: FilterState = {
   timeframe: "all",
   accountIds: [],
   modelOptions: [],
+  requestKinds: [],
+  transports: [],
   statuses: [],
   limit: 25,
   offset: 0,
@@ -34,6 +36,8 @@ function parseFilterState(params: URLSearchParams): FilterState {
     timeframe: params.get("timeframe") ?? "all",
     accountIds: params.getAll("accountId"),
     modelOptions: params.getAll("modelOption"),
+    requestKinds: params.getAll("requestKind"),
+    transports: params.getAll("transport"),
     statuses: params.getAll("status"),
     limit: parseNumber(params.get("limit"), DEFAULT_FILTER_STATE.limit),
     offset: parseNumber(params.get("offset"), DEFAULT_FILTER_STATE.offset),
@@ -58,6 +62,12 @@ function writeFilterState(state: FilterState): URLSearchParams {
   }
   for (const value of state.modelOptions) {
     params.append("modelOption", value);
+  }
+  for (const value of state.requestKinds) {
+    params.append("requestKind", value);
+  }
+  for (const value of state.transports) {
+    params.append("transport", value);
   }
   for (const value of state.statuses) {
     params.append("status", value);
@@ -91,6 +101,8 @@ export function useRequestLogs() {
       limit: filters.limit,
       offset: filters.offset,
       accountIds: filters.accountIds,
+      requestKinds: filters.requestKinds,
+      transports: filters.transports,
       statuses: filters.statuses,
       modelOptions: filters.modelOptions,
       since,
@@ -102,8 +114,10 @@ export function useRequestLogs() {
       since,
       accountIds: filters.accountIds,
       modelOptions: filters.modelOptions,
+      requestKinds: filters.requestKinds,
+      transports: filters.transports,
     }),
-    [filters.accountIds, filters.modelOptions, since],
+    [filters.accountIds, filters.modelOptions, filters.requestKinds, filters.transports, since],
   );
 
   const logsQuery = useQuery({

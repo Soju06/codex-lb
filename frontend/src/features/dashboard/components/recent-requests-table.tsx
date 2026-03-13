@@ -44,6 +44,18 @@ const TRANSPORT_LABELS: Record<string, string> = {
   websocket: "WS",
 };
 
+const REQUEST_KIND_LABELS: Record<string, string> = {
+  responses: "Response",
+  compact: "Compact",
+  transcription: "Audio",
+};
+
+const REQUEST_KIND_CLASS_MAP: Record<string, string> = {
+  responses: "bg-violet-500/10 text-violet-700 border-violet-500/20 hover:bg-violet-500/15 dark:text-violet-300",
+  compact: "bg-amber-500/15 text-amber-700 border-amber-500/20 hover:bg-amber-500/20 dark:text-amber-300",
+  transcription: "bg-teal-500/15 text-teal-700 border-teal-500/20 hover:bg-teal-500/20 dark:text-teal-300",
+};
+
 const TRANSPORT_CLASS_MAP: Record<string, string> = {
   http: "bg-slate-500/10 text-slate-700 border-slate-500/20 hover:bg-slate-500/15 dark:text-slate-300",
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
@@ -107,13 +119,14 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="min-w-[1040px] table-fixed">
+        <Table className="min-w-[1180px] table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
+              <TableHead className="w-40 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Route</TableHead>
               <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
@@ -151,6 +164,29 @@ export function RecentRequestsTable({
                     <span className="font-mono text-xs">
                       {formatModelLabel(request.model, request.reasoningEffort, request.serviceTier)}
                     </span>
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {request.requestKind || request.sessionIdHash ? (
+                      <div className="space-y-1">
+                        {request.requestKind ? (
+                          <Badge
+                            variant="outline"
+                            className={
+                              REQUEST_KIND_CLASS_MAP[request.requestKind] ?? REQUEST_KIND_CLASS_MAP.responses
+                            }
+                          >
+                            {REQUEST_KIND_LABELS[request.requestKind] ?? request.requestKind}
+                          </Badge>
+                        ) : null}
+                        {request.sessionIdHash ? (
+                          <div className="truncate font-mono text-[11px] text-muted-foreground">
+                            {request.sessionIdHash}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">--</span>
+                    )}
                   </TableCell>
                   <TableCell className="align-top">
                     {request.transport ? (

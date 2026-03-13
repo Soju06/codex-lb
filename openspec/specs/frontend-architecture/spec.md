@@ -77,7 +77,7 @@ The Dashboard page SHALL display: summary metric cards (requests 7d, tokens, cos
 
 #### Scenario: Request log filtering
 
-- **WHEN** a user applies filters (search, timeframe, account, model, status) to the request logs table
+- **WHEN** a user applies filters (search, timeframe, account, model, route, transport, status) to the request logs table
 - **THEN** only the request logs query refetches from `/api/request-logs` with the applied filter parameters; the dashboard overview is NOT refetched
 
 #### Scenario: Request log pagination
@@ -106,6 +106,19 @@ The Dashboard recent requests table SHALL display each row's recorded request tr
 
 - **WHEN** `/api/request-logs` returns a request row with `transport = null`
 - **THEN** the recent requests table still renders the row and shows a neutral placeholder instead of breaking layout
+
+### Requirement: Request kind and session correlation are visible in the dashboard
+The Dashboard recent requests table SHALL render each row's recorded `requestKind` so operators can distinguish standard Responses traffic from compact traffic without leaving the UI. When `/api/request-logs` includes a `sessionIdHash`, the same row SHALL show that hashed value as a safe correlation key. The table SHALL remain renderable for legacy rows whose `requestKind` or `sessionIdHash` is missing.
+
+#### Scenario: Compact request row is visible in the dashboard
+- **WHEN** `/api/request-logs` returns a request row with `requestKind = "compact"` and `sessionIdHash = "sha256:abc123def456"`
+- **THEN** the recent requests table shows a visible compact request indicator for that row
+- **AND** the row shows the hashed session correlation value without exposing the raw `session_id`
+
+#### Scenario: Legacy request row without kind or session hash still renders
+- **WHEN** `/api/request-logs` returns a request row with `requestKind = null` and `sessionIdHash = null`
+- **THEN** the recent requests table still renders the row
+- **AND** it shows neutral placeholders instead of breaking layout
 
 ### Requirement: Accounts page
 
@@ -228,7 +241,7 @@ The backend API response schemas SHALL be optimized to eliminate over-fetching a
 #### Scenario: Filter options with statuses
 
 - **WHEN** the frontend fetches `GET /api/request-logs/options`
-- **THEN** the response includes `statuses` (list of available status values) alongside `account_ids` and `model_options`
+- **THEN** the response includes `statuses` (list of available status values) alongside `account_ids`, `model_options`, `request_kinds`, and `transports`
 
 ### Requirement: Frontend test infrastructure
 

@@ -71,4 +71,6 @@ Non-streaming request/response:
 - Post-deploy: monitor `no_accounts`, `upstream_unavailable`, compact retry attempts, and compact failure phases, especially on direct compact requests.
 - When tracing compact incidents, confirm that request logs and upstream logs show direct `/codex/responses/compact` usage without surrogate `/codex/responses` fallback.
 - Post-deploy: monitor `no_accounts`, `stream_incomplete`, and `upstream_unavailable`.
+- Use dashboard request logs to distinguish `responses` vs `compact` rows via `requestKind`, and use `sessionIdHash` as the safe thread-correlation key when verifying a compact call and its follow-up response stayed on the same Codex `session_id`.
+- In ChatGPT-authenticated Codex mode, treat returned `response.service_tier` as an advisory trace signal, not as authoritative proof that Fast routing was or was not applied end-to-end. An OpenAI collaborator clarified on 2026-03-10 that Fast is handled by Codex server-side routing in this mode, so a final `response.service_tier = "default"` does not by itself prove Fast was ignored: https://github.com/openai/codex/issues/14204#issuecomment-4033184620
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`

@@ -951,7 +951,14 @@ async def _stream_websocket_events(
         if not isinstance(payload, dict):
             continue
         normalized = _normalize_stream_event_payload(payload)
+        event_type = payload.get("type")
         yield format_sse_event(normalized)
+        if isinstance(event_type, str) and event_type in (
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+        ):
+            break
 
 
 async def _stream_responses_via_websocket(
@@ -1390,6 +1397,8 @@ async def stream_responses(
                     if event_type in ("response.completed", "response.failed", "response.incomplete"):
                         seen_terminal = True
                 yield event_block
+                if seen_terminal:
+                    break
 
     _maybe_log_upstream_request_start(
         kind="responses",
@@ -1423,6 +1432,8 @@ async def stream_responses(
                         if event_type in ("response.completed", "response.failed", "response.incomplete"):
                             seen_terminal = True
                     yield event_block
+                    if seen_terminal:
+                        break
             except aiohttp.WSServerHandshakeError as exc:
                 if not _should_fallback_to_http_after_websocket_handshake_error(transport_mode, exc):
                     error_payload = _error_payload_from_websocket_handshake_error(exc)

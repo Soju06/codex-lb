@@ -2971,17 +2971,10 @@ def _websocket_receive_timeout_for_pending_requests(
             error_message="Upstream stream idle timeout",
             fail_all_pending=True,
         )
-    if remaining_budget <= idle_timeout_seconds:
-        return _WebSocketReceiveTimeout(
-            timeout_seconds=remaining_budget,
-            error_code="upstream_request_timeout",
-            error_message="Proxy request budget exhausted",
-        )
     return _WebSocketReceiveTimeout(
-        timeout_seconds=idle_timeout_seconds,
-        error_code="stream_idle_timeout",
-        error_message="Upstream stream idle timeout",
-        fail_all_pending=True,
+        timeout_seconds=remaining_budget,
+        error_code="upstream_request_timeout",
+        error_message="Proxy request budget exhausted",
     )
 
 

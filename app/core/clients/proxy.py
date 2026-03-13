@@ -97,6 +97,13 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
 )
 _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({403, 404, 426})
 _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
+_WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
+    ("usage_not_included", "usage not included"),
+    ("insufficient_quota", "insufficient quota"),
+    ("quota_exceeded", "quota exceeded"),
+    ("usage_limit_reached", "usage limit reached"),
+    ("rate_limit_exceeded", "rate limit"),
+)
 
 logger = logging.getLogger(__name__)
 _STREAM_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
@@ -309,6 +316,53 @@ def _error_details_from_failed_event(payload: ResponseFailedEvent) -> tuple[str 
     code = error.get("code")
     message = error.get("message")
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
+
+
+def _extract_json_object_from_text(text: str) -> JsonValue | None:
+    if not text:
+        return None
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    return None
+
+
+def _infer_websocket_handshake_error_code(status: int | None, message: str) -> str:
+    lowered = message.lower()
+    for code, hint in _WEBSOCKET_HANDSHAKE_ERROR_HINTS:
+        if hint in lowered:
+            return code
+    if status == 401:
+        return "invalid_api_key"
+    if status == 404:
+        return "not_found"
+    if status == 429:
+        return "rate_limit_exceeded"
+    return "upstream_error"
+
+
+def _error_payload_from_websocket_handshake_error(exc: aiohttp.WSServerHandshakeError) -> OpenAIErrorEnvelope:
+    message = exc.message or str(exc)
+    extracted = _extract_json_object_from_text(message)
+    if extracted is not None:
+        error = parse_error_payload(extracted)
+        if error is not None:
+            return {"error": error.model_dump(exclude_none=True)}
+
+    code = _infer_websocket_handshake_error_code(exc.status, message)
+    if code == "invalid_api_key":
+        return openai_error(code, message, error_type="authentication_error")
+    if code == "not_found":
+        return openai_error(code, message, error_type="invalid_request_error")
+    if code == "rate_limit_exceeded":
+        return openai_error(code, message, error_type="rate_limit_error")
+    return openai_error(code, message)
 
 
 def _maybe_log_upstream_request_start(
@@ -1265,14 +1319,17 @@ async def stream_responses(
                     yield event_block
             except aiohttp.WSServerHandshakeError as exc:
                 if not _should_fallback_to_http_after_websocket_handshake_error(transport_mode, exc):
-                    payload = openai_error("upstream_error", str(exc))
+                    payload = _error_payload_from_websocket_handshake_error(exc)
+                    error_code, error_message = _error_details_from_envelope(payload)
                     status_code = exc.status
-                    error_code = "upstream_error"
-                    error_message = str(exc)
+                    if error_message is None:
+                        error_message = exc.message or str(exc)
+                    if error_code is None:
+                        error_code = "upstream_error"
                     if raise_for_status:
                         raise ProxyResponseError(exc.status, payload) from exc
                     yield format_sse_event(
-                        response_failed_event("upstream_error", str(exc), response_id=get_request_id())
+                        response_failed_event(error_code, error_message, response_id=get_request_id())
                     )
                     return
 

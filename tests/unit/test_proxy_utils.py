@@ -1296,6 +1296,60 @@ async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(
+            side_effect=proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_budget_timeout",
+        model="gpt-5.1",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=100.0,
+    )
+
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    sent_payload = json.loads(websocket_send.await_args.args[0])
+    assert sent_payload["status"] == 502
+    assert sent_payload["error"]["code"] == "upstream_request_timeout"
+    assert sent_payload["error"]["message"] == "Proxy request budget exhausted"
+    assert request_logs.calls[0]["request_id"] == "ws_req_budget_timeout"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+    assert request_logs.calls[0]["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -1454,6 +1508,68 @@ async def test_connect_proxy_websocket_surfaces_forced_refresh_transport_error(m
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_maps_handshake_budget_exhaustion_to_timeout_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_handshake_budget")
+    handle_connect_error = AsyncMock()
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket",
+        AsyncMock(
+            side_effect=proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_handle_websocket_connect_error", handle_connect_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_handshake_budget",
+        model="gpt-5.1",
+        service_tier="priority",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    handle_connect_error.assert_not_awaited()
+    sent_payload = json.loads(websocket_send.await_args.args[0])
+    assert sent_payload["status"] == 502
+    assert sent_payload["error"]["code"] == "upstream_request_timeout"
+    assert sent_payload["error"]["message"] == "Proxy request budget exhausted"
+    assert request_logs.calls[0]["request_id"] == "ws_req_handshake_budget"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_normalizes_payload_and_reserves_forwarded_tier(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -1528,7 +1644,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert normalized_payload["tools"] == [{"type": "web_search"}]
     assert normalized_payload["model"] == "gpt-5.2"
     assert normalized_payload["reasoning"] == {"effort": "high"}
-    assert "service_tier" not in normalized_payload
+    assert normalized_payload["service_tier"] == "priority"
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):

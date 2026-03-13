@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AccountImportBatchResponseSchema,
   AccountSummarySchema,
   ImportStateSchema,
   OAuthStateSchema,
@@ -103,5 +104,32 @@ describe("ImportStateSchema", () => {
         message: "Imported 1 account",
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("AccountImportBatchResponseSchema", () => {
+  it("parses imported and failed batch results", () => {
+    const parsed = AccountImportBatchResponseSchema.parse({
+      imported: [
+        {
+          filename: "auth-1.json",
+          accountId: "acc-1",
+          email: "user@example.com",
+          planType: "plus",
+          status: "active",
+          refreshedOnImport: true,
+        },
+      ],
+      failed: [
+        {
+          filename: "broken.json",
+          code: "invalid_auth_json",
+          message: "Invalid auth.json payload",
+        },
+      ],
+    });
+
+    expect(parsed.imported[0]?.refreshedOnImport).toBe(true);
+    expect(parsed.failed[0]?.code).toBe("invalid_auth_json");
   });
 });

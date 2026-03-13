@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
 TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
+TEST_DATABASE_URL = os.environ.get("CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}")
 
 os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
     "CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}"
@@ -22,13 +23,25 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 
 from app.db.models import Base  # noqa: E402
+from app.db.migrate import run_startup_migrations  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 
-@pytest_asyncio.fixture
-async def app_instance():
-    app = create_app()
+async def _reset_database_via_migrations() -> None:
+    async with engine.begin() as conn:
+
+        def _reset(sync_conn):
+            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+            Base.metadata.drop_all(sync_conn)
+
+        await conn.run_sync(_reset)
+
+    await run_startup_migrations(TEST_DATABASE_URL)
+
+
+async def _reset_database_raw() -> None:
     async with engine.begin() as conn:
 
         def _reset(sync_conn):
@@ -38,6 +51,12 @@ async def app_instance():
             Base.metadata.create_all(sync_conn)
 
         await conn.run_sync(_reset)
+
+
+@pytest_asyncio.fixture
+async def app_instance():
+    app = create_app()
+    await _reset_database_via_migrations()
     return app
 
 
@@ -49,15 +68,13 @@ async def dispose_engine():
 
 @pytest_asyncio.fixture
 async def db_setup():
-    async with engine.begin() as conn:
+    await _reset_database_via_migrations()
+    return True
 
-        def _reset(sync_conn):
-            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
-            Base.metadata.drop_all(sync_conn)
-            Base.metadata.create_all(sync_conn)
 
-        await conn.run_sync(_reset)
+@pytest_asyncio.fixture
+async def raw_db_setup():
+    await _reset_database_raw()
     return True
 
 

@@ -14,6 +14,7 @@ describe("DashboardSettingsSchema", () => {
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
       importWithoutOverwrite: true,
+      httpProxyUrl: "http://proxy.example:8080",
       totpRequiredOnLogin: true,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
@@ -24,6 +25,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.routingStrategy).toBe("round_robin");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.importWithoutOverwrite).toBe(true);
+    expect(parsed.httpProxyUrl).toBe("http://proxy.example:8080");
     expect(parsed.apiKeyAuthEnabled).toBe(true);
   });
 });
@@ -37,6 +39,7 @@ describe("SettingsUpdateRequestSchema", () => {
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 120,
       importWithoutOverwrite: true,
+      httpProxyUrl: "https://proxy.example:8443",
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
     });
@@ -45,6 +48,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.upstreamStreamTransport).toBe("websocket");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("usage_weighted");
+    expect(parsed.httpProxyUrl).toBe("https://proxy.example:8443");
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
   });
@@ -57,6 +61,7 @@ describe("SettingsUpdateRequestSchema", () => {
 
     expect(parsed.upstreamStreamTransport).toBeUndefined();
     expect(parsed.importWithoutOverwrite).toBeUndefined();
+    expect(parsed.httpProxyUrl).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBeUndefined();

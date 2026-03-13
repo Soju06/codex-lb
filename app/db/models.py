@@ -185,6 +185,7 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    http_proxy_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     totp_required_on_login: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

@@ -131,13 +131,20 @@ describe("formatters", () => {
     expect(
       formatAccessTokenLabel({
         access: { expiresAt: "1970-01-01T00:00:00.000Z" },
+        refresh: { state: "stored" },
       }),
-    ).toBe("Expired");
+    ).toBe("Expired (refresh available)");
     expect(
       formatAccessTokenLabel({
         access: { expiresAt: future },
       }),
     ).toBe("Valid (in 2h)");
+    expect(
+      formatAccessTokenLabel({
+        access: { expiresAt: null },
+        refresh: { state: "stored" },
+      }),
+    ).toBe("Refreshable");
 
     expect(
       formatRefreshTokenLabel({

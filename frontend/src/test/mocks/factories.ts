@@ -1,4 +1,7 @@
 import {
+  AccountImportBatchResponseSchema,
+  AccountImportFailureSchema,
+  AccountImportResponseSchema,
   AccountSummarySchema,
   AccountTrendsResponseSchema,
   OauthStartResponseSchema,
@@ -6,6 +9,9 @@ import {
   OauthCompleteResponseSchema,
 } from "@/features/accounts/schemas";
 import type {
+  AccountImportBatchResponse,
+  AccountImportFailure,
+  AccountImportResponse,
   AccountSummary,
   AccountTrendsResponse,
   OauthStartResponse,
@@ -40,6 +46,9 @@ export type DashboardAuthSession = AuthSession;
 export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
 
 export type {
+  AccountImportBatchResponse,
+  AccountImportFailure,
+  AccountImportResponse,
   AccountSummary,
   AccountTrendsResponse,
   DashboardOverview,
@@ -96,6 +105,41 @@ export function createDefaultAccounts(): AccountSummary[] {
       },
     }),
   ];
+}
+
+export function createAccountImportResponse(
+  overrides: Partial<AccountImportResponse> = {},
+): AccountImportResponse {
+  return AccountImportResponseSchema.parse({
+    filename: "auth.json",
+    accountId: "acc_imported_1",
+    email: "imported-1@example.com",
+    planType: "plus",
+    status: "active",
+    refreshedOnImport: false,
+    ...overrides,
+  });
+}
+
+export function createAccountImportFailure(
+  overrides: Partial<AccountImportFailure> = {},
+): AccountImportFailure {
+  return AccountImportFailureSchema.parse({
+    filename: "broken.json",
+    code: "invalid_auth_json",
+    message: "Invalid auth.json payload",
+    ...overrides,
+  });
+}
+
+export function createAccountImportBatchResponse(
+  overrides: Partial<AccountImportBatchResponse> = {},
+): AccountImportBatchResponse {
+  return AccountImportBatchResponseSchema.parse({
+    imported: [createAccountImportResponse()],
+    failed: [],
+    ...overrides,
+  });
 }
 
 function createTrendPoints(baseValue: number, count = 28): Array<{ t: string; v: number }> {
@@ -282,6 +326,7 @@ export function createDashboardSettings(overrides: Partial<DashboardSettings> = 
     routingStrategy: "usage_weighted",
     openaiCacheAffinityMaxAgeSeconds: 300,
     importWithoutOverwrite: false,
+    httpProxyUrl: null,
     totpRequiredOnLogin: false,
     totpConfigured: true,
     apiKeyAuthEnabled: true,

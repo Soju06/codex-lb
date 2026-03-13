@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Route } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -21,9 +21,14 @@ export type RoutingSettingsProps = {
 };
 
 export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
-  const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
-    String(settings.openaiCacheAffinityMaxAgeSeconds),
-  );
+  const [httpProxyUrl, setHttpProxyUrl] = useState(settings.httpProxyUrl ?? "");
+
+  useEffect(() => {
+    setHttpProxyUrl(settings.httpProxyUrl ?? "");
+  }, [settings.httpProxyUrl]);
+    const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
+        String(settings.openaiCacheAffinityMaxAgeSeconds),
+    );
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
@@ -32,6 +37,13 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+    const trimmedHttpProxyUrl = httpProxyUrl.trim();
+    const savedHttpProxyUrl = settings.httpProxyUrl ?? "";
+    const proxyDirty = trimmedHttpProxyUrl !== savedHttpProxyUrl;
+
+    const handleProxySave = () => {
+        save({ httpProxyUrl: trimmedHttpProxyUrl.length > 0 ? trimmedHttpProxyUrl : null });
+    };
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -117,40 +129,76 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             />
           </div>
 
-          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-medium">Prompt-cache affinity TTL</p>
+            <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <p className="text-sm font-medium">Prompt-cache affinity TTL</p>
+                    <p className="text-xs text-muted-foreground">
+                        Keep OpenAI-style prompt-cache mappings warm for a bounded number of seconds.
+                    </p>
+                </div>
+                <div className="flex items-center gap-2">
+                    <Input
+                        type="number"
+                        min={1}
+                        step={1}
+                        inputMode="numeric"
+                        value={cacheAffinityTtl}
+                        disabled={busy}
+                        onChange={(event) => setCacheAffinityTtl(event.target.value)}
+                        onKeyDown={(event) => {
+                            if (event.key === "Enter" && cacheAffinityTtlChanged) {
+                                void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl });
+                            }
+                        }}
+                        className="h-8 w-28 text-xs"
+                    />
+                    <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs"
+                        disabled={busy || !cacheAffinityTtlChanged}
+                        onClick={() => void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl })}
+                    >
+                        Save TTL
+                    </Button>
+          <div className="flex items-center justify-between gap-4 p-3">
+            <div className="max-w-sm">
+              <p className="text-sm font-medium">HTTP proxy</p>
               <p className="text-xs text-muted-foreground">
-                Keep OpenAI-style prompt-cache mappings warm for a bounded number of seconds.
+                Route outgoing backend requests through an HTTP or HTTPS proxy.
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <form
+              className="flex w-full max-w-md items-center gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                handleProxySave();
+              }}
+            >
               <Input
-                type="number"
-                min={1}
-                step={1}
-                inputMode="numeric"
-                value={cacheAffinityTtl}
+                type="url"
+                value={httpProxyUrl}
                 disabled={busy}
-                onChange={(event) => setCacheAffinityTtl(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && cacheAffinityTtlChanged) {
-                    void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl });
-                  }
-                }}
-                className="h-8 w-28 text-xs"
+                placeholder="http://127.0.0.1:8080"
+                onChange={(event) => setHttpProxyUrl(event.target.value)}
               />
+              <Button type="submit" size="sm" disabled={busy || !proxyDirty}>
+                Save
+              </Button>
               <Button
                 type="button"
                 size="sm"
-                variant="outline"
-                className="h-8 text-xs"
-                disabled={busy || !cacheAffinityTtlChanged}
-                onClick={() => void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl })}
+                variant="ghost"
+                disabled={busy || (!settings.httpProxyUrl && !httpProxyUrl)}
+                onClick={() => {
+                  setHttpProxyUrl("");
+                  save({ httpProxyUrl: null });
+                }}
               >
-                Save TTL
+                Clear
               </Button>
-            </div>
+            </form>
           </div>
         </div>
       </div>

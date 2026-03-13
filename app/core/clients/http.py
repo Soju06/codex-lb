@@ -5,8 +5,10 @@ from dataclasses import dataclass
 import aiohttp
 from aiohttp_retry import RetryClient
 
+from app.core.config.proxy import normalize_http_proxy_url
 from app.core.config.settings import get_settings
-
+from app.core.config.settings_cache import get_settings_cache
+from app.core.config.settings import get_settings
 
 @dataclass(slots=True)
 class HttpClient:
@@ -59,3 +61,22 @@ def get_http_client() -> HttpClient:
     if _http_client is None:
         raise RuntimeError("HTTP client not initialized")
     return _http_client
+
+
+async def get_http_proxy_url() -> str | None:
+    env_proxy = normalize_http_proxy_url(get_settings().http_proxy_url)
+    if env_proxy:
+        return env_proxy
+
+    try:
+        settings_row = await get_settings_cache().get()
+    except Exception:
+        return None
+    return normalize_http_proxy_url(getattr(settings_row, "http_proxy_url", None))
+
+
+async def get_http_proxy_request_kwargs() -> dict[str, str]:
+    proxy = await get_http_proxy_url()
+    if not proxy:
+        return {}
+    return {"proxy": proxy}

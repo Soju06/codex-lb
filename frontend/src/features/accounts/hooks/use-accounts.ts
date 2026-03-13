@@ -3,12 +3,14 @@ import { toast } from "sonner";
 
 import {
   deleteAccount,
+  downloadAccountsAuthArchive,
   getAccountTrends,
-  importAccount,
+  importAccounts,
   listAccounts,
   pauseAccount,
   reactivateAccount,
 } from "@/features/accounts/api";
+import { downloadBlob } from "@/lib/download";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
@@ -24,13 +26,40 @@ export function useAccountMutations() {
   const queryClient = useQueryClient();
 
   const importMutation = useMutation({
-    mutationFn: importAccount,
-    onSuccess: () => {
-      toast.success("Account imported");
-      invalidateAccountRelatedQueries(queryClient);
+    mutationFn: importAccounts,
+    onSuccess: (result) => {
+      const importedCount = result.imported.length;
+      const failedCount = result.failed.length;
+
+      if (importedCount > 0) {
+        invalidateAccountRelatedQueries(queryClient);
+      }
+
+      if (failedCount === 0) {
+        toast.success(importedCount === 1 ? "Imported 1 account" : `Imported ${importedCount} accounts`);
+        return;
+      }
+
+      if (importedCount === 0) {
+        toast.error(failedCount === 1 ? "Import failed for 1 file" : `Import failed for ${failedCount} files`);
+        return;
+      }
+
+      toast.success(`Imported ${importedCount} account${importedCount === 1 ? "" : "s"}, ${failedCount} failed`);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
+    },
+  });
+
+  const exportAuthArchiveMutation = useMutation({
+    mutationFn: downloadAccountsAuthArchive,
+    onSuccess: ({ blob, filename }) => {
+      downloadBlob(blob, filename ?? "auth-export.zip");
+      toast.success("Downloaded auth archive");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Download failed");
     },
   });
 
@@ -67,7 +96,7 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  return { importMutation, exportAuthArchiveMutation, pauseMutation, resumeMutation, deleteMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

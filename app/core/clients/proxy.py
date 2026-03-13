@@ -22,6 +22,7 @@ from multidict import CIMultiDict
 
 from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
+from app.core.clients.http import get_http_proxy_request_kwargs
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import CompactResponsePayload
@@ -1327,6 +1328,7 @@ async def stream_responses(
     error_code: str | None = None
     error_message: str | None = None
     client_session = session or get_http_client().session
+    proxy_kwargs = await get_http_proxy_request_kwargs()
     payload_dict = payload.to_payload()
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
@@ -1373,6 +1375,7 @@ async def stream_responses(
             json=payload_dict,
             headers=current_headers,
             timeout=current_timeout,
+            **proxy_kwargs,
         ) as resp:
             status_code = resp.status
             if resp.status >= 400:
@@ -1709,7 +1712,8 @@ class _CompactCommandTransport:
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-        payload_dict = self.payload.to_payload()
+        proxy_kwargs = await get_http_proxy_request_kwargs()
+    payload_dict = self.payload.to_payload()
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
@@ -1757,16 +1761,17 @@ class _CompactCommandTransport:
         )
         try:
             async with self.session.post(
-                url,
-                json=payload_dict,
-                headers=upstream_headers,
-                timeout=timeout,
-            ) as resp:
-                status_code = resp.status
-                if resp.status >= 400:
-                    error_payload = await _error_payload_from_response(resp)
-                    error_code, error_message = _error_details_from_envelope(error_payload)
-                    failure_phase = "status"
+            url,
+            json=payload_dict,
+            headers=upstream_headers,
+            timeout=timeout,
+            **proxy_kwargs,
+        ) as resp:
+            status_code = resp.status
+            if resp.status >= 400:
+                error_payload = await _error_payload_from_response(resp)
+                error_code, error_message = _error_details_from_envelope(error_payload)
+                failure_phase = "status"
                     failure_detail = error_message
                     retryable_same_contract = _is_retryable_compact_status(resp.status)
                     raise ProxyResponseError(
@@ -1921,6 +1926,7 @@ async def transcribe_audio(
         form.add_field("prompt", prompt)
 
     client_session = session or get_http_client().session
+    proxy_kwargs = await get_http_proxy_request_kwargs()
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None
@@ -1947,6 +1953,7 @@ async def transcribe_audio(
             data=form,
             headers=upstream_headers,
             timeout=timeout,
+            **proxy_kwargs,
         ) as resp:
             status_code = resp.status
             if resp.status >= 400:

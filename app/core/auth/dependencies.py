@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import secrets
 
 from fastapi import Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.clients.usage import UsageFetchError, fetch_usage
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
 from app.db.session import get_background_session
@@ -34,8 +36,10 @@ def set_dashboard_error_format(request: Request) -> None:
 
 
 async def validate_proxy_api_key(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> ApiKeyData | None:
+    _validate_optional_proxy_key_header(request)
     authorization = None if credentials is None else f"Bearer {credentials.credentials}"
     return await validate_proxy_api_key_authorization(authorization)
 
@@ -124,3 +128,22 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     if not token:
         return None
     return token
+
+
+def _validate_optional_proxy_key_header(request: Request) -> None:
+    settings = get_settings()
+    if not settings.proxy_key_auth_enabled:
+        return
+
+    required_key = settings.proxy_key
+    if not required_key:
+        raise ProxyAuthError("X-Codex-Proxy-Key auth is enabled but no proxy key is configured")
+
+    provided = request.headers.get("X-Codex-Proxy-Key")
+    if not provided:
+        raise ProxyAuthError("Missing X-Codex-Proxy-Key header")
+    provided_key = provided.strip()
+    if not provided_key:
+        raise ProxyAuthError("Missing X-Codex-Proxy-Key header")
+    if not secrets.compare_digest(provided_key, required_key):
+        raise ProxyAuthError("Invalid X-Codex-Proxy-Key header")

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 
 import uvicorn
 
-from app.core.runtime_logging import build_log_config
+from app.core.logging import build_log_config, configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -24,13 +27,23 @@ def main() -> None:
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
+    log_level = configure_logging()
+    logger.info(
+        "Starting codex-lb host=%s port=%s ssl=%s log_level=%s access_log=%s",
+        args.host,
+        args.port,
+        bool(args.ssl_certfile and args.ssl_keyfile),
+        log_level,
+        False,
+    )
     uvicorn.run(
         "app.main:app",
         host=args.host,
         port=args.port,
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
-        log_config=build_log_config(),
+        access_log=False,
+        log_config=build_log_config(log_level),
     )
 
 

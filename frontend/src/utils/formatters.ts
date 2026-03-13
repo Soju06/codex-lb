@@ -247,8 +247,9 @@ export function truncateText(value: unknown, maxLen = 80): string {
 
 export function formatAccessTokenLabel(auth: AccountAuthStatus | null | undefined): string {
   const expiresAt = auth?.access?.expiresAt;
+  const refreshState = auth?.refresh?.state;
   if (!expiresAt) {
-    return "Missing";
+    return refreshState === "stored" ? "Refreshable" : "Missing";
   }
   const expiresDate = parseDate(expiresAt);
   if (!expiresDate) {
@@ -256,7 +257,7 @@ export function formatAccessTokenLabel(auth: AccountAuthStatus | null | undefine
   }
   const diffMs = expiresDate.getTime() - Date.now();
   if (diffMs <= 0) {
-    return "Expired";
+    return refreshState === "stored" ? "Expired (refresh available)" : "Expired";
   }
   return `Valid (${formatRelative(diffMs)})`;
 }

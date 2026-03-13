@@ -3,6 +3,9 @@ import { z } from "zod";
 
 import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
 import {
+  createAccountImportBatchResponse,
+  createAccountImportFailure,
+  createAccountImportResponse,
   createAccountSummary,
   createAccountTrends,
   createApiKey,
@@ -18,8 +21,10 @@ import {
   createOauthStatusResponse,
   createRequestLogFilterOptions,
   createRequestLogsResponse,
+  type AccountImportFailure,
   type AccountSummary,
   type ApiKey,
+  type AccountImportResponse,
   type DashboardAuthSession,
   type DashboardSettings,
   type RequestLogEntry,
@@ -64,6 +69,7 @@ const SettingsPayloadSchema = z.object({
   routingStrategy: z.enum(["usage_weighted", "round_robin"]).optional(),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   importWithoutOverwrite: z.boolean().optional(),
+  httpProxyUrl: z.string().url().nullable().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
@@ -233,6 +239,10 @@ function findApiKey(keyId: string): ApiKey | undefined {
   return state.apiKeys.find((item) => item.id === keyId);
 }
 
+function isUploadedFileLike(value: FormDataEntryValue): value is File {
+  return typeof value === "object" && value !== null && "name" in value;
+}
+
 export const handlers = [
   http.get("/health", () => {
     return HttpResponse.json({ status: "ok" });
@@ -267,20 +277,52 @@ export const handlers = [
     return HttpResponse.json({ accounts: state.accounts });
   }),
 
-  http.post("/api/accounts/import", async () => {
-    const sequence = state.accounts.length + 1;
-    const created = createAccountSummary({
-      accountId: `acc_imported_${sequence}`,
-      email: `imported-${sequence}@example.com`,
-      displayName: `imported-${sequence}@example.com`,
-      status: "active",
-    });
-    state.accounts = [...state.accounts, created];
-    return HttpResponse.json({
-      accountId: created.accountId,
-      email: created.email,
-      planType: created.planType,
-      status: created.status,
+  http.post("/api/accounts/import/batch", async ({ request }) => {
+    const formData = await request.formData();
+    const uploadedFiles = formData.getAll("auth_json").filter(isUploadedFileLike);
+
+    const imported: AccountImportResponse[] = [];
+    const failed: AccountImportFailure[] = [];
+
+    for (const file of uploadedFiles) {
+      if (file.name.toLowerCase().includes("invalid")) {
+        failed.push(
+          createAccountImportFailure({
+            filename: file.name,
+            message: "Invalid auth.json payload",
+          }),
+        );
+        continue;
+      }
+
+      const sequence = state.accounts.length + 1;
+      const created = createAccountSummary({
+        accountId: `acc_imported_${sequence}`,
+        email: `${file.name.replace(/\.json$/i, "")}@example.com`,
+        displayName: `${file.name.replace(/\.json$/i, "")}@example.com`,
+        status: "active",
+      });
+      state.accounts = [...state.accounts, created];
+      imported.push(
+        createAccountImportResponse({
+          filename: file.name,
+          accountId: created.accountId,
+          email: created.email,
+          planType: created.planType,
+          status: created.status,
+        }),
+      );
+    }
+
+    return HttpResponse.json(createAccountImportBatchResponse({ imported, failed }));
+  }),
+
+  http.get("/api/accounts/export", () => {
+    return new HttpResponse(new Uint8Array([80, 75, 3, 4]), {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": 'attachment; filename="auth-export-test.zip"',
+      },
     });
   }),
 

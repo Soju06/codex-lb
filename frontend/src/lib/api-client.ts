@@ -10,6 +10,12 @@ type RequestOptions = {
   credentials?: RequestCredentials;
 };
 
+export type BlobResponse = {
+  blob: Blob;
+  filename: string | null;
+  contentType: string | null;
+};
+
 const JSON_CONTENT_TYPE = "application/json";
 const EMPTY_RESPONSE_STATUS = new Set([204, 205]);
 
@@ -113,6 +119,29 @@ function parseApiErrorPayload(payload: unknown): {
   };
 }
 
+function parseFilenameFromContentDisposition(header: string | null): string | null {
+  if (!header) {
+    return null;
+  }
+
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const quotedMatch = header.match(/filename=\"([^\"]+)\"/i);
+  if (quotedMatch?.[1]) {
+    return quotedMatch[1];
+  }
+
+  const bareMatch = header.match(/filename=([^;]+)/i);
+  return bareMatch?.[1]?.trim() ?? null;
+}
+
 async function request(
   method: HttpMethod,
   url: string,
@@ -195,12 +224,67 @@ async function request<T>(
   return parsed.data;
 }
 
+async function requestBlob(method: HttpMethod, url: string, options?: RequestOptions): Promise<BlobResponse> {
+  const requestBody = buildRequestBody(options?.body);
+  const headers = new Headers(options?.headers);
+  if (requestBody.contentType && !headers.has("Content-Type")) {
+    headers.set("Content-Type", requestBody.contentType);
+  }
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "application/octet-stream, application/zip;q=0.9, */*;q=0.8");
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method,
+      body: requestBody.body,
+      headers,
+      signal: options?.signal,
+      credentials: options?.credentials ?? "same-origin",
+    });
+  } catch (error) {
+    throw new ApiError({
+      status: 0,
+      code: "network_error",
+      message: error instanceof Error ? error.message : "Network request failed",
+      details: error,
+    });
+  }
+
+  if (response.status === 401) {
+    unauthorizedHandler?.();
+  }
+
+  if (!response.ok) {
+    const payload = await readJsonPayload(response);
+    const parsedError = parseApiErrorPayload(payload);
+    throw new ApiError({
+      status: response.status,
+      code: parsedError.code,
+      message: parsedError.message,
+      details: parsedError.details,
+      payload,
+    });
+  }
+
+  return {
+    blob: await response.blob(),
+    filename: parseFilenameFromContentDisposition(response.headers.get("Content-Disposition")),
+    contentType: response.headers.get("Content-Type"),
+  };
+}
+
 export function get<T>(
   url: string,
   schema: ZodType<T>,
   options?: RequestOptions,
 ): Promise<T> {
   return request("GET", url, schema, options);
+}
+
+export function getBlob(url: string, options?: RequestOptions): Promise<BlobResponse> {
+  return requestBlob("GET", url, options);
 }
 
 export function post<T>(

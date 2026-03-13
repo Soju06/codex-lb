@@ -21,16 +21,19 @@ def test_main_passes_timestamped_log_config(monkeypatch):
 
     monkeypatch.setattr(sys, "argv", ["codex-lb"])
     monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+    monkeypatch.setenv("CODEX_LB_LOG_LEVEL", "debug")
 
     cli.main()
 
+    args = captured["args"]
+    assert args[0] == "app.main:app"
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
     log_config = kwargs["log_config"]
     assert isinstance(log_config, dict)
     formatters = log_config["formatters"]
-    assert formatters["default"]["fmt"].startswith("%(asctime)s ")
-    assert formatters["access"]["fmt"].startswith("%(asctime)s ")
+    assert formatters["standard"]["format"].startswith("%(asctime)s ")
+    assert log_config["loggers"]["uvicorn.access"]["level"] == "WARNING"
 
 
 def test_utc_default_formatter_formats_without_converter_binding_error():

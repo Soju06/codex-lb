@@ -541,7 +541,7 @@ async def run_startup_migrations(database_url: str) -> MigrationRunResult:
     return await to_thread.run_sync(
         lambda: run_upgrade(
             database_url,
-            "head",
+            "heads",
             bootstrap_legacy=True,
             auto_remap_legacy_revisions=auto_remap,
         ),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,9 +34,12 @@ from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_c
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    logger.info("Application startup: initializing settings caches, database, HTTP client, and schedulers")
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
@@ -46,11 +50,13 @@ async def lifespan(_: FastAPI):
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     await usage_scheduler.start()
     await model_scheduler.start()
+    logger.info("Application startup complete")
     await sticky_session_cleanup_scheduler.start()
 
     try:
         yield
     finally:
+        logger.info("Application shutdown: stopping schedulers and closing resources")
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await usage_scheduler.stop()
@@ -58,6 +64,7 @@ async def lifespan(_: FastAPI):
             await close_http_client()
         finally:
             await close_db()
+        logger.info("Application shutdown complete")
 
 
 def create_app() -> FastAPI:
@@ -92,10 +99,12 @@ def create_app() -> FastAPI:
     app.include_router(health_api.router)
 
     static_dir = Path(__file__).parent / "static"
+    static_dir.mkdir(parents=True, exist_ok=True)
     index_html = static_dir / "index.html"
     static_root = static_dir.resolve()
     frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
     excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
+    logger.debug("Created FastAPI application and registered API routers")
 
     def _is_static_asset_path(path: str) -> bool:
         if path.startswith("assets/"):

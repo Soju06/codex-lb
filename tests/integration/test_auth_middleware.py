@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -153,6 +154,20 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
     valid = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
     assert valid.status_code == 200
 
+    only_proxy_header = await async_client.get("/v1/models", headers={"X-Codex-Proxy-Key": created.key})
+    assert only_proxy_header.status_code == 401
+    assert only_proxy_header.json()["error"]["code"] == "invalid_api_key"
+
+    invalid_bearer_with_proxy_header = await async_client.get(
+        "/v1/models",
+        headers={
+            "Authorization": "Bearer invalid-key",
+            "X-Codex-Proxy-Key": created.key,
+        },
+    )
+    assert invalid_bearer_with_proxy_header.status_code == 401
+    assert invalid_bearer_with_proxy_header.json()["error"]["code"] == "invalid_api_key"
+
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         row = await repo.get_by_id(created.id)
@@ -188,6 +203,97 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
     over_limit = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
     assert over_limit.status_code == 429
     assert over_limit.json()["error"]["code"] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_optional_proxy_key_header_is_additional_guard(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name="proxy-key-guard",
+                allowed_models=None,
+                expires_at=None,
+            )
+        )
+
+    monkeypatch.setattr(
+        "app.core.auth.dependencies.get_settings",
+        lambda: SimpleNamespace(proxy_key_auth_enabled=True, proxy_key="proxy-shared-secret"),
+    )
+
+    missing_proxy_key = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
+    assert missing_proxy_key.status_code == 401
+    assert missing_proxy_key.json()["error"]["code"] == "invalid_api_key"
+
+    invalid_proxy_key = await async_client.get(
+        "/v1/models",
+        headers={
+            "Authorization": f"Bearer {created.key}",
+            "X-Codex-Proxy-Key": "wrong-secret",
+        },
+    )
+    assert invalid_proxy_key.status_code == 401
+    assert invalid_proxy_key.json()["error"]["code"] == "invalid_api_key"
+
+    valid_proxy_key = await async_client.get(
+        "/v1/models",
+        headers={
+            "Authorization": f"Bearer {created.key}",
+            "X-Codex-Proxy-Key": "proxy-shared-secret",
+        },
+    )
+    assert valid_proxy_key.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_optional_proxy_key_header_enabled_without_config_fails(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name="proxy-key-misconfig",
+                allowed_models=None,
+                expires_at=None,
+            )
+        )
+
+    monkeypatch.setattr(
+        "app.core.auth.dependencies.get_settings",
+        lambda: SimpleNamespace(proxy_key_auth_enabled=True, proxy_key=None),
+    )
+
+    misconfigured = await async_client.get(
+        "/v1/models",
+        headers={
+            "Authorization": f"Bearer {created.key}",
+            "X-Codex-Proxy-Key": "any",
+        },
+    )
+    assert misconfigured.status_code == 401
+    assert misconfigured.json()["error"]["code"] == "invalid_api_key"
 
 
 @pytest.mark.asyncio

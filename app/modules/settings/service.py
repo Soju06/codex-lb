@@ -13,6 +13,7 @@ class DashboardSettingsData:
     routing_strategy: str
     openai_cache_affinity_max_age_seconds: int
     import_without_overwrite: bool
+    http_proxy_url: str | None
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
@@ -26,6 +27,7 @@ class DashboardSettingsUpdateData:
     routing_strategy: str
     openai_cache_affinity_max_age_seconds: int
     import_without_overwrite: bool
+    http_proxy_url: str | None
     totp_required_on_login: bool
     api_key_auth_enabled: bool
 
@@ -43,6 +45,7 @@ class SettingsService:
             routing_strategy=row.routing_strategy,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             import_without_overwrite=row.import_without_overwrite,
+            http_proxy_url=row.http_proxy_url,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
@@ -59,6 +62,7 @@ class SettingsService:
             routing_strategy=payload.routing_strategy,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
             import_without_overwrite=payload.import_without_overwrite,
+            http_proxy_url=payload.http_proxy_url,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
         )
@@ -69,6 +73,7 @@ class SettingsService:
             routing_strategy=row.routing_strategy,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             import_without_overwrite=row.import_without_overwrite,
+            http_proxy_url=row.http_proxy_url,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,

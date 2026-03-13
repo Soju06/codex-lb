@@ -62,7 +62,6 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
 
     websocket = await connect_responses_websocket(
         {
-            "openai-beta": "responses_websockets=2026-02-06",
             "session_id": "session-1",
             "User-Agent": "Codex CLI Test",
             "Origin": "https://chatgpt.com",
@@ -88,6 +87,40 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert additional_headers["session_id"] == "session-1"
     assert "User-Agent" not in additional_headers
     assert "Origin" not in additional_headers
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_appends_required_beta_header(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    await connect_responses_websocket(
+        {"OpenAI-Beta": "assistants=v2"},
+        "access-token",
+        None,
+    )
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    additional_headers = cast(dict[str, str], kwargs["additional_headers"])
+    assert additional_headers["OpenAI-Beta"] == "assistants=v2, responses_websockets=2026-02-06"
 
 
 @pytest.mark.asyncio

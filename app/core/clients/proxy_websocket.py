@@ -28,6 +28,7 @@ _WEBSOCKET_HOP_BY_HOP_HEADERS = {
     "sec-websocket-version",
     "upgrade",
 }
+_RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
 
 
 @dataclass(slots=True)
@@ -100,7 +101,17 @@ def _build_upstream_websocket_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
         headers["chatgpt-account-id"] = account_id
+    _ensure_responses_websocket_beta_header(headers)
     return headers
+
+
+def _ensure_responses_websocket_beta_header(headers: dict[str, str]) -> None:
+    header_key = next((key for key in headers if key.lower() == "openai-beta"), "openai-beta")
+    current_value = headers.get(header_key, "")
+    beta_tokens = [token.strip() for token in current_value.split(",") if token.strip()]
+    if _RESPONSES_WEBSOCKET_BETA_HEADER.lower() not in {token.lower() for token in beta_tokens}:
+        beta_tokens.append(_RESPONSES_WEBSOCKET_BETA_HEADER)
+    headers[header_key] = ", ".join(beta_tokens)
 
 
 def _pop_header_case_insensitive(headers: dict[str, str], name: str) -> str | None:

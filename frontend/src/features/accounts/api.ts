@@ -1,8 +1,10 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, patch, post } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
   AccountImportResponseSchema,
+  AccountTagsResponseSchema,
+  AccountTagsUpdateRequestSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -48,6 +50,19 @@ export function getAccountTrends(accountId: string) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
     AccountTrendsResponseSchema,
+  );
+}
+
+export function listAccountTags() {
+  return get(`${ACCOUNTS_BASE_PATH}/tags`, AccountTagsResponseSchema);
+}
+
+export function updateAccountTags(accountId: string, payload: unknown) {
+  const validated = AccountTagsUpdateRequestSchema.parse(payload);
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/tags`,
+    AccountTagsResponseSchema,
+    { body: validated },
   );
 }
 

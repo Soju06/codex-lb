@@ -12,6 +12,8 @@ from app.modules.accounts.schemas import (
     AccountPauseResponse,
     AccountReactivateResponse,
     AccountsResponse,
+    AccountTagsResponse,
+    AccountTagsUpdateRequest,
     AccountTrendsResponse,
 )
 from app.modules.accounts.service import InvalidAuthJsonError
@@ -29,6 +31,13 @@ async def list_accounts(
 ) -> AccountsResponse:
     accounts = await context.service.list_accounts()
     return AccountsResponse(accounts=accounts)
+
+
+@router.get("/tags", response_model=AccountTagsResponse)
+async def list_account_tags(
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountTagsResponse:
+    return AccountTagsResponse(tags=await context.service.list_defined_tags())
 
 
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)
@@ -87,3 +96,15 @@ async def delete_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountDeleteResponse(status="deleted")
+
+
+@router.patch("/{account_id}/tags", response_model=AccountTagsResponse)
+async def update_account_tags(
+    account_id: str,
+    payload: AccountTagsUpdateRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountTagsResponse:
+    tags = await context.service.update_tags(account_id, payload.tags)
+    if tags is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountTagsResponse(tags=tags)

@@ -81,11 +81,13 @@ class LoadBalancer:
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        account_tags: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
             additional_limit_name=additional_limit_name,
+            account_tags=account_tags,
         )
         excluded_ids = set(exclude_account_ids or ())
         if excluded_ids and selection_inputs.accounts:
@@ -173,15 +175,27 @@ class LoadBalancer:
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        account_tags: Collection[str] | None = None,
     ) -> _SelectionInputs:
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = all_accounts
+            if account_tags:
+                accounts = _filter_accounts_for_tags(accounts, account_tags)
+                if not accounts:
+                    return _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                        error_message="No accounts match the API key tags",
+                        error_code="no_accounts",
+                    )
+            pool_accounts = accounts
             if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
                 accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:
-                if not all_accounts:
+                if not pool_accounts:
                     return _SelectionInputs(
                         accounts=[],
                         latest_primary={},
@@ -582,6 +596,17 @@ def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
 def _clone_account(account: Account) -> Account:
     data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
     return Account(**data)
+
+
+def _filter_accounts_for_tags(accounts: Iterable[Account], tags: Collection[str]) -> list[Account]:
+    tag_set = {tag.strip().lower() for tag in tags if tag.strip()}
+    if not tag_set:
+        return list(accounts)
+    return [
+        account
+        for account in accounts
+        if any(link.tag_name in tag_set for link in account.tag_links)
+    ]
 
 
 def _clone_usage_history(entry: UsageHistory) -> UsageHistory:

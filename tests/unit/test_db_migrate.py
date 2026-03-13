@@ -9,6 +9,7 @@ import pytest
 from alembic.util.exc import CommandError
 from sqlalchemy import create_engine, inspect, text
 
+from app.db.alembic.helpers import dispatch_by_dialect, named_enum
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
 from app.db.migrate import (
@@ -499,3 +500,32 @@ def test_max_revision_id_length_exceeds_alembic_default(tmp_path: Path) -> None:
     config = _build_alembic_config(_db_url(db_path))
 
     assert _max_revision_id_length(config) > 32
+
+
+def test_named_enum_uses_postgresql_native_type_for_postgresql() -> None:
+    connection = _FakeConnection(dialect_name="postgresql")
+
+    enum_type = named_enum(connection, "a", "b", name="demo_enum")  # type: ignore[arg-type]
+
+    assert type(enum_type).__module__.startswith("sqlalchemy.dialects.postgresql")
+
+
+def test_named_enum_uses_generic_sqlalchemy_enum_for_sqlite() -> None:
+    connection = _FakeConnection(dialect_name="sqlite")
+
+    enum_type = named_enum(connection, "a", "b", name="demo_enum")  # type: ignore[arg-type]
+
+    assert not type(enum_type).__module__.startswith("sqlalchemy.dialects.postgresql")
+
+
+def test_dispatch_by_dialect_routes_to_matching_handler() -> None:
+    connection = _FakeConnection(dialect_name="sqlite")
+
+    result = dispatch_by_dialect(
+        connection,  # type: ignore[arg-type]
+        sqlite=lambda _: "sqlite",
+        postgresql=lambda _: "postgresql",
+        default=lambda _: "default",
+    )
+
+    assert result == "sqlite"

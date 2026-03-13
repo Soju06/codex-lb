@@ -65,6 +65,7 @@ export function createAccountSummary(overrides: Partial<AccountSummary> = {}): A
     displayName: "primary@example.com",
     planType: "plus",
     status: "active",
+    tags: [],
     usage: {
       primaryRemainingPercent: 82,
       secondaryRemainingPercent: 67,
@@ -329,6 +330,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
     id: "key_1",
     name: "Default key",
     keyPrefix: "sk-test",
+    tags: [],
     allowedModels: ["gpt-5.1"],
     expiresAt: offsetIso(30 * 24 * 60),
     isActive: true,

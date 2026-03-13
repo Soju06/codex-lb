@@ -74,6 +74,13 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    tag_links: Mapped[list["AccountTag"]] = relationship(
+        "AccountTag",
+        back_populates="account",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
 
 class UsageHistory(Base):
     __tablename__ = "usage_history"
@@ -235,6 +242,68 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    tag_links: Mapped[list["ApiKeyTag"]] = relationship(
+        "ApiKeyTag",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    account_links: Mapped[list["AccountTag"]] = relationship(
+        "AccountTag",
+        back_populates="tag",
+        lazy="selectin",
+    )
+    api_key_links: Mapped[list["ApiKeyTag"]] = relationship(
+        "ApiKeyTag",
+        back_populates="tag",
+        lazy="selectin",
+    )
+
+
+class AccountTag(Base):
+    __tablename__ = "account_tags"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tag_name: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("tags.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    account: Mapped[Account] = relationship("Account", back_populates="tag_links")
+    tag: Mapped[Tag] = relationship("Tag", back_populates="account_links")
+
+
+class ApiKeyTag(Base):
+    __tablename__ = "api_key_tags"
+
+    api_key_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tag_name: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("tags.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    api_key: Mapped[ApiKey] = relationship("ApiKey", back_populates="tag_links")
+    tag: Mapped[Tag] = relationship("Tag", back_populates="api_key_links")
 
 
 class LimitType(str, Enum):
@@ -362,12 +431,14 @@ Index(
     UsageHistory.id.desc(),
 )
 Index("idx_accounts_email", Account.email)
+Index("idx_account_tags_tag_name", AccountTag.tag_name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index("idx_api_key_tags_tag_name", ApiKeyTag.tag_name)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)

@@ -88,6 +88,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
         "/api/api-keys/",
         json={
             "name": "dev-key",
+            "tags": ["paid", "pro"],
             "allowedModels": [],
             "limits": [
                 {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
@@ -97,6 +98,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert create.status_code == 200
     payload = create.json()
     assert payload["name"] == "dev-key"
+    assert payload["tags"] == ["paid", "pro"]
     assert payload["key"].startswith("sk-clb-")
     assert len(payload["limits"]) == 1
     assert payload["limits"][0]["limitType"] == "total_tokens"
@@ -117,12 +119,14 @@ async def test_api_keys_crud_and_regenerate(async_client):
         f"/api/api-keys/{key_id}",
         json={
             "name": "prod-key",
+            "tags": ["enterprise"],
             "isActive": False,
         },
     )
     assert updated.status_code == 200
     updated_payload = updated.json()
     assert updated_payload["name"] == "prod-key"
+    assert updated_payload["tags"] == ["enterprise"]
     assert updated_payload["isActive"] is False
 
     regenerated = await async_client.post(f"/api/api-keys/{key_id}/regenerate")

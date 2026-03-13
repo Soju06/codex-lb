@@ -13,11 +13,13 @@ from app.core.utils.time import utcnow
 from app.db.models import (
     ApiKey,
     ApiKeyLimit,
+    ApiKeyTag,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     LimitType,
     LimitWindow,
     RequestLog,
+    Tag,
 )
 
 
@@ -70,20 +72,36 @@ class ApiKeysRepository:
     async def create(self, row: ApiKey) -> ApiKey:
         self._session.add(row)
         await self._session.commit()
-        await self._session.refresh(row)
-        return row
+        created = await self.get_by_id(row.id)
+        if created is None:
+            raise RuntimeError(f"Created API key missing after commit: {row.id}")
+        return created
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
-        return await self._session.get(ApiKey, key_id)
+        result = await self._session.execute(
+            select(ApiKey)
+            .options(selectinload(ApiKey.limits), selectinload(ApiKey.tag_links))
+            .execution_options(populate_existing=True)
+            .where(ApiKey.id == key_id)
+        )
+        return result.scalar_one_or_none()
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         result = await self._session.execute(
-            select(ApiKey).options(selectinload(ApiKey.limits)).where(ApiKey.key_hash == key_hash)
+            select(ApiKey)
+            .options(selectinload(ApiKey.limits), selectinload(ApiKey.tag_links))
+            .execution_options(populate_existing=True)
+            .where(ApiKey.key_hash == key_hash)
         )
         return result.scalar_one_or_none()
 
     async def list_all(self) -> list[ApiKey]:
-        result = await self._session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
+        result = await self._session.execute(
+            select(ApiKey)
+            .options(selectinload(ApiKey.limits), selectinload(ApiKey.tag_links))
+            .execution_options(populate_existing=True)
+            .order_by(ApiKey.created_at.desc())
+        )
         return list(result.scalars().unique().all())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
@@ -202,8 +220,7 @@ class ApiKeysRepository:
             assert isinstance(key_prefix, str)
             row.key_prefix = key_prefix
         await self._session.commit()
-        await self._session.refresh(row)
-        return row
+        return await self.get_by_id(key_id)
 
     async def delete(self, key_id: str) -> bool:
         row = await self.get_by_id(key_id)
@@ -241,6 +258,38 @@ class ApiKeysRepository:
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
+
+    async def replace_tags(self, key_id: str, tags: list[str]) -> list[str] | None:
+        row = await self.get_by_id(key_id)
+        if row is None:
+            return None
+
+        existing_links = {link.tag_name: link for link in row.tag_links}
+        desired_tags = set(tags)
+
+        if desired_tags:
+            existing_tags = set(
+                (
+                    await self._session.execute(select(Tag.name).where(Tag.name.in_(desired_tags)))
+                ).scalars().all()
+            )
+            for missing_tag in desired_tags - existing_tags:
+                self._session.add(Tag(name=missing_tag))
+
+        for tag_name, link in existing_links.items():
+            if tag_name not in desired_tags:
+                await self._session.delete(link)
+
+        for tag_name in tags:
+            if tag_name in existing_links:
+                continue
+            self._session.add(ApiKeyTag(api_key_id=key_id, tag_name=tag_name))
+
+        await self._session.commit()
+        refreshed = await self.get_by_id(key_id)
+        if refreshed is None:
+            return None
+        return sorted(link.tag_name for link in refreshed.tag_links)
 
     async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]:
         existing = await self.get_limits_by_key(key_id)

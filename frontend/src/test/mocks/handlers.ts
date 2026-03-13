@@ -36,6 +36,7 @@ const OauthStartPayloadSchema = z.object({
 
 const ApiKeyCreatePayloadSchema = z.object({
   name: z.string().optional(),
+  tags: z.array(z.string()).optional(),
 }).passthrough();
 
 const FirewallIpCreatePayloadSchema = z.object({
@@ -44,6 +45,7 @@ const FirewallIpCreatePayloadSchema = z.object({
 
 const ApiKeyUpdatePayloadSchema = z.object({
   name: z.string().optional(),
+  tags: z.array(z.string()).nullable().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   isActive: z.boolean().optional(),
   resetUsage: z.boolean().optional(),
@@ -267,6 +269,13 @@ export const handlers = [
     return HttpResponse.json({ accounts: state.accounts });
   }),
 
+  http.get("/api/accounts/tags", () => {
+    const tags = [...new Set(state.accounts.flatMap((account) => account.tags ?? []))].sort((left, right) =>
+      left.localeCompare(right),
+    );
+    return HttpResponse.json({ tags });
+  }),
+
   http.post("/api/accounts/import", async () => {
     const sequence = state.accounts.length + 1;
     const created = createAccountSummary({
@@ -320,6 +329,21 @@ export const handlers = [
       );
     }
     return HttpResponse.json(createAccountTrends(accountId));
+  }),
+
+  http.patch("/api/accounts/:accountId/tags", async ({ params, request }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    const payload = await parseJsonBody(request, z.object({ tags: z.array(z.string()).default([]) }));
+    const tags = payload?.tags ?? [];
+    account.tags = [...new Set(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+    return HttpResponse.json({ tags: account.tags });
   }),
 
   http.delete("/api/accounts/:accountId", ({ params }) => {
@@ -558,6 +582,7 @@ export const handlers = [
       ...createApiKey({
         id: `key_${sequence}`,
         name: payload?.name ?? `API Key ${sequence}`,
+        tags: Array.isArray(payload?.tags) ? payload.tags : [],
       }),
       key: `sk-test-generated-${sequence}`,
     });
@@ -579,6 +604,7 @@ export const handlers = [
     // Build override with converted limits (create format → response format)
     const overrides: Partial<ApiKey> = {
       ...(payload.name !== undefined ? { name: payload.name } : {}),
+      ...(payload.tags !== undefined ? { tags: payload.tags ?? [] } : {}),
       ...(payload.allowedModels !== undefined ? { allowedModels: payload.allowedModels } : {}),
       ...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
     };

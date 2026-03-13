@@ -1,4 +1,5 @@
-import { Suspense, lazy, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
@@ -18,6 +19,7 @@ const OauthDialog = lazy(() =>
 );
 
 export function AccountsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     accountsQuery,
     importMutation,
@@ -27,13 +29,19 @@ export function AccountsPage() {
   } = useAccounts();
   const oauth = useOauth();
 
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
+  const selectedAccountId = searchParams.get("selected");
+
+  const handleSelectAccount = useCallback((accountId: string) => {
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set("selected", accountId);
+    setSearchParams(nextSearchParams);
+  }, [searchParams, setSearchParams]);
 
   const resolvedSelectedAccountId = useMemo(() => {
     if (accounts.length === 0) {
@@ -85,7 +93,7 @@ export function AccountsPage() {
             <AccountList
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
-              onSelect={setSelectedAccountId}
+              onSelect={handleSelectAccount}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
             />

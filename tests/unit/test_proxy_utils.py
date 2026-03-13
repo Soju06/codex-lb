@@ -803,6 +803,7 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
         image_inline_fetch_enabled = True
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
 
     inline_ran = False
     recorded: dict[str, float | None] = {}
@@ -858,6 +859,8 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        upstream_stream_transport = "http"
 
     seen: dict[str, object] = {}
 
@@ -914,6 +917,7 @@ async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatc
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
+        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -948,6 +952,7 @@ async def test_stream_responses_maps_connect_timeout_to_upstream_unavailable(mon
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
+        upstream_stream_transport = "http"
 
     class _ConnectTimeoutSseSession:
         def post(
@@ -993,6 +998,7 @@ async def test_stream_responses_uses_native_websocket_upstream_for_codex_headers
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "auto"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -1082,6 +1088,7 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -1487,7 +1494,7 @@ async def test_stream_responses_auto_transport_uses_bootstrap_model_preference_w
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_legacy_settings_without_transport_field_keep_http_default(monkeypatch):
+async def test_stream_responses_http_transport_keeps_http(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -1497,6 +1504,7 @@ async def test_stream_responses_legacy_settings_without_transport_field_keep_htt
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 75.0
         log_upstream_request_summary = False
+        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(
@@ -1630,6 +1638,7 @@ async def test_stream_responses_uses_websocket_upstream_when_forced(monkeypatch)
         log_upstream_request_payload = False
         log_upstream_request_summary = False
         proxy_request_budget_seconds = 75.0
+        upstream_stream_transport = "websocket"
         upstream_websocket_mode = "force"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
@@ -1829,6 +1838,7 @@ async def test_stream_responses_uses_websocket_upstream_in_auto_mode_for_preferr
         log_upstream_request_payload = False
         log_upstream_request_summary = False
         proxy_request_budget_seconds = 75.0
+        upstream_stream_transport = "auto"
         upstream_websocket_mode = "auto"
 
     snapshot = SimpleNamespace(
@@ -1885,6 +1895,7 @@ async def test_stream_responses_websocket_emits_incomplete_when_upstream_closes_
         log_upstream_request_payload = False
         log_upstream_request_summary = False
         proxy_request_budget_seconds = 75.0
+        upstream_stream_transport = "websocket"
         upstream_websocket_mode = "force"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())

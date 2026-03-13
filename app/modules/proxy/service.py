@@ -127,11 +127,10 @@ class _AffinityPolicy:
     max_age_seconds: int | None = None
 
 
-def _resolve_upstream_stream_transport(settings: object) -> str | None:
-    configured = getattr(settings, "upstream_stream_transport", None)
-    if configured in {"default", "auto", "http", "websocket"}:
-        return None if configured == "default" else configured
-    return None
+def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | None:
+    if upstream_stream_transport == "default":
+        return None
+    return upstream_stream_transport
 
 
 class ProxyService:
@@ -557,8 +556,8 @@ class ProxyService:
         runtime_settings = get_settings()
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_threads_enabled = bool(getattr(settings, "sticky_threads_enabled", False))
-        openai_cache_affinity_max_age_seconds = int(getattr(settings, "openai_cache_affinity_max_age_seconds", 300))
+        sticky_threads_enabled = settings.sticky_threads_enabled
+        openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
         routing_strategy = _routing_strategy(settings)
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
@@ -1819,7 +1818,7 @@ class ProxyService:
         settings = await get_settings_cache().get()
         deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        upstream_stream_transport = _resolve_upstream_stream_transport(settings)
+        upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,

@@ -91,6 +91,7 @@ def _install_proxy_settings_cache(
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
+        upstream_stream_transport="auto",
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
@@ -108,7 +109,7 @@ async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_
 
     seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
@@ -222,7 +223,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
     seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen.append(account_id)
         if account_id == acc_a.id:
             yield (
@@ -276,7 +277,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
 
     stream_seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
@@ -361,7 +362,7 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
 
     stream_seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_session"}}\n\n'
 
@@ -457,7 +458,7 @@ async def test_proxy_codex_session_id_compact_first_pins_followup_stream_without
 
     stream_seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_compact_first"}}\n\n'
 
@@ -537,7 +538,7 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
     stream_seen: list[str] = []
     fail_pinned = {"enabled": False}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
         if account_id == upstream_acc_a and fail_pinned["enabled"]:
             yield (
@@ -597,7 +598,7 @@ async def test_v1_session_id_does_not_pin_routing_without_sticky_threads(async_c
 
     stream_seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_v1_session"}}\n\n'
 
@@ -682,7 +683,7 @@ async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_s
 
     stream_seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_v1_cache"}}\n\n'
 
@@ -770,7 +771,7 @@ async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_clien
 
     stream_seen: list[str] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_v1_cache_expire"}}\n\n'
 

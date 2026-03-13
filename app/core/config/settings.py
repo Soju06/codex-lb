@@ -57,9 +57,9 @@ class Settings(BaseSettings):
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = False
-    proxy_request_budget_seconds: float = Field(default=75.0, gt=0)
+    proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
-    stream_idle_timeout_seconds: float = 45.0
+    stream_idle_timeout_seconds: float = 300.0
     max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"

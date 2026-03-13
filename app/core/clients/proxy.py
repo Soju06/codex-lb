@@ -12,7 +12,6 @@ import os
 import socket
 import time
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any, AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, cast
 from urllib.parse import ParseResult, urlparse, urlunparse
 
@@ -752,24 +751,12 @@ def _to_websocket_upstream_url(url: str) -> str:
     return urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 
-def _configured_stream_transport(settings: object) -> str:
-    missing = object()
-    explicit_override = getattr(settings, "upstream_stream_transport_override", missing)
-    if explicit_override in {"http", "websocket", "auto"}:
-        return cast(str, explicit_override)
-    configured = getattr(settings, "upstream_stream_transport", missing)
-    if configured in {"http", "websocket", "auto"}:
-        return cast(str, configured)
-    if configured == "default":
-        return "auto"
-    legacy = getattr(settings, "upstream_websocket_mode", None)
-    if legacy == "force":
-        return "websocket"
-    if legacy == "auto":
-        return "auto"
-    if configured is missing and explicit_override is missing:
-        return "legacy_http_default"
-    return "auto"
+def _configured_stream_transport(
+    *,
+    transport: str,
+    transport_override: str | None = None,
+) -> str:
+    return transport_override if transport_override is not None else transport
 
 
 def _has_native_codex_transport_headers(headers: Mapping[str, str]) -> bool:
@@ -780,16 +767,20 @@ def _has_native_codex_transport_headers(headers: Mapping[str, str]) -> bool:
     return any(key in normalized for key in _NATIVE_CODEX_STREAM_HEADER_KEYS)
 
 
-def _resolve_stream_transport(settings: object, model: str | None, headers: Mapping[str, str]) -> str:
-    configured = _configured_stream_transport(settings)
+def _resolve_stream_transport(
+    *,
+    transport: str,
+    transport_override: str | None,
+    model: str | None,
+    headers: Mapping[str, str],
+) -> str:
+    configured = _configured_stream_transport(transport=transport, transport_override=transport_override)
     if configured == "websocket":
         return "websocket"
     if configured == "http":
         return "http"
     if _has_native_codex_transport_headers(headers):
         return "websocket"
-    if configured == "legacy_http_default":
-        return "http"
 
     registry = get_model_registry()
     prefers_websockets = getattr(registry, "prefers_websockets", None)
@@ -1318,7 +1309,7 @@ async def stream_responses(
     # response headers or the first SSE event. ProxyService stream attempts clamp
     # this further by installing per-attempt overrides from the remaining budget.
     request_total_timeout = _effective_stream_timeout(
-        getattr(settings, "proxy_request_budget_seconds", 75.0),
+        settings.proxy_request_budget_seconds,
         "total",
     )
     effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
@@ -1336,16 +1327,16 @@ async def stream_responses(
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
-    stream_settings = (
-        SimpleNamespace(
-            upstream_stream_transport=settings.upstream_stream_transport,
-            upstream_stream_transport_override=upstream_stream_transport_override,
-        )
-        if upstream_stream_transport_override is not None
-        else settings
+    transport_mode = _configured_stream_transport(
+        transport=settings.upstream_stream_transport,
+        transport_override=upstream_stream_transport_override,
     )
-    transport_mode = _configured_stream_transport(stream_settings)
-    transport = _resolve_stream_transport(stream_settings, payload.model, headers)
+    transport = _resolve_stream_transport(
+        transport=settings.upstream_stream_transport,
+        transport_override=upstream_stream_transport_override,
+        model=payload.model,
+        headers=headers,
+    )
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
         method = "GET"
@@ -1418,9 +1409,7 @@ async def stream_responses(
                     url=url,
                     headers=upstream_headers,
                     client_session=client_session,
-                    effective_total_timeout=(
-                        remaining_request_timeout or getattr(settings, "proxy_request_budget_seconds", 75.0)
-                    ),
+                    effective_total_timeout=(remaining_request_timeout or settings.proxy_request_budget_seconds),
                     effective_connect_timeout=effective_connect_timeout,
                     effective_idle_timeout=effective_idle_timeout,
                     max_event_bytes=settings.max_sse_event_bytes,
@@ -1707,9 +1696,7 @@ class _CompactCommandTransport:
             accept="application/json",
         )
         pre_request_started_at = time.monotonic()
-        compact_timeout_seconds = _effective_compact_total_timeout(
-            getattr(settings, "upstream_compact_timeout_seconds", None)
-        )
+        compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
         payload_dict = self.payload.to_payload()
         if settings.image_inline_fetch_enabled:
@@ -1896,7 +1883,7 @@ async def transcribe_audio(
             upstream_headers.pop(header_name, None)
 
     effective_total_timeout = _effective_transcribe_total_timeout(
-        getattr(settings, "transcription_request_budget_seconds", 120.0),
+        settings.transcription_request_budget_seconds,
     )
     effective_connect_timeout = _effective_transcribe_connect_timeout(settings.upstream_connect_timeout_seconds)
     timeout = aiohttp.ClientTimeout(

@@ -112,8 +112,14 @@ describe("buildRemainingItems", () => {
       "primary",
     );
 
-    expect(items[0].label).toBe(`dup@example.com (${formatCompactAccountId(duplicateA, 5, 4)})`);
-    expect(items[1].label).toBe(`dup@example.com (${formatCompactAccountId(duplicateB, 5, 4)})`);
+    expect(items[0].label).toBe("dup@example.com");
+    expect(items[0].labelSuffix).toBe(` (${formatCompactAccountId(duplicateA, 5, 4)})`);
+    expect(items[0].isEmail).toBe(true);
+    expect(items[1].label).toBe("dup@example.com");
+    expect(items[1].labelSuffix).toBe(` (${formatCompactAccountId(duplicateB, 5, 4)})`);
+    expect(items[1].isEmail).toBe(true);
     expect(items[2].label).toBe("unique@example.com");
+    expect(items[2].labelSuffix).toBe("");
+    expect(items[2].isEmail).toBe(true);
   });
 });

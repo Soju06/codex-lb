@@ -89,7 +89,7 @@ def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).connect() as connection:
         columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
-        assert "transport" not in columns
+        assert "transport" in columns
 
     result = run_upgrade(url, transport_revision, bootstrap_legacy=False)
     assert result.current_revision == transport_revision

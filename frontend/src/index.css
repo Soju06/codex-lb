@@ -199,6 +199,17 @@
   z-index: 0;
 }
 
+/* Privacy email blur — padding lets the blur feather naturally instead of
+   being hard-clipped by overflow:hidden on parent containers (e.g. truncate).
+   Negative margin cancels out the extra space so layout stays unchanged. */
+.privacy-blur {
+  filter: blur(5px);
+  user-select: none;
+  pointer-events: none;
+  padding: 4px 8px;
+  margin: -4px -8px;
+}
+
 /* Card hover lift */
 .card-hover {
   transition: transform 0.2s ease, box-shadow 0.2s ease;

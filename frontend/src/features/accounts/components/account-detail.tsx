@@ -1,5 +1,7 @@
 import { User } from "lucide-react";
 
+import { isEmailLabel } from "@/components/blur-email";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
@@ -27,6 +29,7 @@ export function AccountDetail({
   onReauth,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
+  const blurred = usePrivacyStore((s) => s.blurred);
 
   if (!account) {
     return (
@@ -41,23 +44,23 @@ export function AccountDetail({
   }
 
   const title = account.displayName || account.email;
+  const titleIsEmail = isEmailLabel(title, account.email);
   const compactId = formatCompactAccountId(account.accountId);
   const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : null;
-  const heading = showAccountId && !emailSubtitle ? `${title} (${compactId})` : title;
-  const subtitle = showAccountId && emailSubtitle ? `${emailSubtitle} | ID ${compactId}` : emailSubtitle;
+  const idSuffix = showAccountId ? ` (${compactId})` : "";
 
   return (
     <div key={account.accountId} className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5">
       {/* Account header */}
       <div>
         <h2 className="text-base font-semibold">
-          {heading}
+          {titleIsEmail ? <><span className={blurred ? "privacy-blur" : ""}>{title}</span>{idSuffix}</> : <>{title}{!emailSubtitle ? idSuffix : ""}</>}
         </h2>
-        {subtitle ? (
+        {emailSubtitle ? (
           <p className="mt-0.5 text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            {subtitle}
+            <span className={blurred ? "privacy-blur" : ""}>{emailSubtitle}</span>{showAccountId ? ` | ID ${compactId}` : ""}
           </p>
         ) : null}
       </div>

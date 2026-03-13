@@ -9,7 +9,13 @@ from urllib.parse import urlparse, urlunparse
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.datastructures import Headers
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, InvalidHandshake, InvalidStatus
+from websockets.exceptions import (
+    ConnectionClosedError,
+    ConnectionClosedOK,
+    InvalidHandshake,
+    InvalidProxy,
+    InvalidStatus,
+)
 from websockets.typing import Origin
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
@@ -22,6 +28,7 @@ _WEBSOCKET_HOP_BY_HOP_HEADERS = {
     "accept",
     "connection",
     "content-type",
+    "cookie",
     "sec-websocket-extensions",
     "sec-websocket-key",
     "sec-websocket-protocol",
@@ -92,7 +99,7 @@ def _build_upstream_websocket_headers(
     access_token: str,
     account_id: str | None,
 ) -> dict[str, str]:
-    headers = dict(inbound)
+    headers = {key: value for key, value in inbound.items() if key.lower() != "cookie"}
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
@@ -174,6 +181,12 @@ async def connect_responses_websocket(
         ) from exc
     except InvalidHandshake as exc:
         message = str(exc) or "Invalid upstream websocket handshake"
+        raise ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", message, error_type="server_error"),
+        ) from exc
+    except InvalidProxy as exc:
+        message = str(exc) or "Invalid upstream websocket proxy configuration"
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", message, error_type="server_error"),

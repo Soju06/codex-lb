@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable
@@ -80,11 +81,21 @@ class LoadBalancer:
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        exclude_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
             additional_limit_name=additional_limit_name,
         )
+        excluded_ids = set(exclude_account_ids or ())
+        if excluded_ids and selection_inputs.accounts:
+            selection_inputs = _SelectionInputs(
+                accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],
+                latest_primary=selection_inputs.latest_primary,
+                latest_secondary=selection_inputs.latest_secondary,
+                error_message=selection_inputs.error_message,
+                error_code=selection_inputs.error_code,
+            )
         if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
                 account=None,

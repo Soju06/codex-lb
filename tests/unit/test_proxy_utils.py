@@ -804,7 +804,11 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(_JsonCompactResponse({"output": []}))
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_1"}}
+        )
+    )
 
     result = await proxy_module.compact_responses(
         payload,
@@ -819,7 +823,9 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     assert timeout.total == pytest.approx(6.5)
     assert timeout.sock_connect == pytest.approx(0.001)
     assert timeout.sock_read == pytest.approx(6.5)
-    assert result.model_extra == {"output": []}
+    dumped = result.model_dump(mode="json", exclude_none=True)
+    assert dumped["object"] == "response.compaction"
+    assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_1"
     assert recorded["started_at"] == 205.5
 
 
@@ -889,7 +895,11 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(_JsonCompactResponse({"output": []}))
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_2"}}
+        )
+    )
 
     result = await proxy_module.compact_responses(
         payload,
@@ -904,7 +914,9 @@ async def test_compact_responses_defaults_to_no_request_timeout(monkeypatch):
     assert timeout.total is None
     assert timeout.sock_connect == pytest.approx(2.0, abs=0.05)
     assert timeout.sock_read is None
-    assert result.model_extra == {"output": []}
+    dumped = result.model_dump(mode="json", exclude_none=True)
+    assert dumped["object"] == "response.compaction"
+    assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_2"
 
 
 def test_sticky_key_for_responses_request_uses_bounded_cache_affinity():

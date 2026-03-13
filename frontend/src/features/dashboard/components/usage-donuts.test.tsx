@@ -3,28 +3,17 @@ import { describe, expect, it } from "vitest";
 
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 
+/** Helper to build a minimal RemainingItem for tests. */
+function item(overrides: { accountId: string; label: string; value: number; remainingPercent: number; color: string }) {
+  return { ...overrides, labelSuffix: "", isEmail: true };
+}
+
 describe("UsageDonuts", () => {
   it("renders primary and secondary donut panels with legends", () => {
     render(
       <UsageDonuts
-        primaryItems={[
-          {
-            accountId: "acc-1",
-            label: "primary@example.com",
-            value: 120,
-            remainingPercent: 60,
-            color: "#7bb661",
-          },
-        ]}
-        secondaryItems={[
-          {
-            accountId: "acc-2",
-            label: "secondary@example.com",
-            value: 80,
-            remainingPercent: 40,
-            color: "#d9a441",
-          },
-        ]}
+        primaryItems={[item({ accountId: "acc-1", label: "primary@example.com", value: 120, remainingPercent: 60, color: "#7bb661" })]}
+        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
         primaryTotal={200}
         secondaryTotal={200}
         primaryWindowMinutes={300}
@@ -58,24 +47,8 @@ describe("UsageDonuts", () => {
   it("renders safe line only for the primary donut", () => {
     render(
       <UsageDonuts
-        primaryItems={[
-          {
-            accountId: "acc-1",
-            label: "primary@example.com",
-            value: 120,
-            remainingPercent: 60,
-            color: "#7bb661",
-          },
-        ]}
-        secondaryItems={[
-          {
-            accountId: "acc-2",
-            label: "secondary@example.com",
-            value: 80,
-            remainingPercent: 40,
-            color: "#d9a441",
-          },
-        ]}
+        primaryItems={[item({ accountId: "acc-1", label: "primary@example.com", value: 120, remainingPercent: 60, color: "#7bb661" })]}
+        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
         primaryTotal={200}
         secondaryTotal={200}
         primaryWindowMinutes={300}
@@ -90,24 +63,8 @@ describe("UsageDonuts", () => {
   it("renders safe line on both donuts when both have depletion", () => {
     render(
       <UsageDonuts
-        primaryItems={[
-          {
-            accountId: "acc-1",
-            label: "primary@example.com",
-            value: 120,
-            remainingPercent: 60,
-            color: "#7bb661",
-          },
-        ]}
-        secondaryItems={[
-          {
-            accountId: "acc-2",
-            label: "secondary@example.com",
-            value: 80,
-            remainingPercent: 40,
-            color: "#d9a441",
-          },
-        ]}
+        primaryItems={[item({ accountId: "acc-1", label: "primary@example.com", value: 120, remainingPercent: 60, color: "#7bb661" })]}
+        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
         primaryTotal={200}
         secondaryTotal={200}
         primaryWindowMinutes={300}
@@ -124,15 +81,7 @@ describe("UsageDonuts", () => {
     render(
       <UsageDonuts
         primaryItems={[]}
-        secondaryItems={[
-          {
-            accountId: "acc-1",
-            label: "weekly@example.com",
-            value: 80,
-            remainingPercent: 40,
-            color: "#d9a441",
-          },
-        ]}
+        secondaryItems={[item({ accountId: "acc-1", label: "weekly@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
         primaryTotal={0}
         secondaryTotal={200}
         primaryWindowMinutes={null}
@@ -143,5 +92,4 @@ describe("UsageDonuts", () => {
 
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
-
 });

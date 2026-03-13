@@ -50,7 +50,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
 from app.core.exceptions import AppError, ProxyAuthError, ProxyRateLimitError
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.models import OpenAIEvent, OpenAIResponsePayload
+from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
@@ -106,6 +106,7 @@ _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.ref
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
         "rate_limit_exceeded",
@@ -169,7 +170,7 @@ class ProxyService:
         openai_cache_affinity: bool = False,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
-    ) -> OpenAIResponsePayload:
+    ) -> CompactResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
@@ -181,7 +182,7 @@ class ProxyService:
         log_status = "error"
         log_error_code: str | None = None
         log_error_message: str | None = None
-        response: OpenAIResponsePayload | None = None
+        response: CompactResponsePayload | None = None
         request_service_tier: str | None = None
         actual_service_tier: str | None = None
 
@@ -234,7 +235,7 @@ class ProxyService:
                 _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
             request_service_tier = _service_tier_from_compact_payload(payload)
 
-            async def _call_compact(target: Account) -> OpenAIResponsePayload:
+            async def _call_compact(target: Account) -> CompactResponsePayload:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -259,64 +260,9 @@ class ProxyService:
                 finally:
                     pop_compact_timeout_overrides(timeout_tokens)
 
-            try:
-                response = await _call_compact(account)
-                actual_service_tier = _service_tier_from_response(response)
-                await self._load_balancer.record_success(account)
-                await self._settle_compact_api_key_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    response=response,
-                    request_service_tier=request_service_tier,
-                )
-                log_status = "success"
-                return response
-            except ProxyResponseError as exc:
-                if exc.status_code != 401:
-                    await self._settle_compact_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=request_service_tier,
-                    )
-                    await self._handle_proxy_error(account, exc)
-                    raise
-                try:
-                    remaining_budget = _remaining_budget_seconds(deadline)
-                    if remaining_budget <= 0:
-                        logger.warning(
-                            "Compact request budget exhausted before forced refresh retry request_id=%s account_id=%s",
-                            request_id,
-                            account.id,
-                        )
-                        _raise_proxy_budget_exhausted()
-                    account = await self._ensure_fresh_with_budget(
-                        account, force=True, timeout_seconds=remaining_budget
-                    )
-                except RefreshError as refresh_exc:
-                    if refresh_exc.is_permanent:
-                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                    await self._settle_compact_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=request_service_tier,
-                    )
-                    raise exc
-                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
-                    await self._settle_compact_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=request_service_tier,
-                    )
-                    logger.warning(
-                        "Compact forced refresh/connect failed request_id=%s account_id=%s",
-                        request_id,
-                        account.id,
-                        exc_info=True,
-                    )
-                    _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+            safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
+            refresh_retry_used = False
+            while True:
                 try:
                     response = await _call_compact(account)
                     actual_service_tier = _service_tier_from_response(response)
@@ -330,6 +276,60 @@ class ProxyService:
                     log_status = "success"
                     return response
                 except ProxyResponseError as exc:
+                    if exc.status_code == 401:
+                        if refresh_retry_used:
+                            await self._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            await self._handle_proxy_error(account, exc)
+                            raise
+                        try:
+                            remaining_budget = _remaining_budget_seconds(deadline)
+                            if remaining_budget <= 0:
+                                logger.warning(
+                                    "Compact request budget exhausted before forced refresh retry request_id=%s "
+                                    "account_id=%s",
+                                    request_id,
+                                    account.id,
+                                )
+                                _raise_proxy_budget_exhausted()
+                            account = await self._ensure_fresh_with_budget(
+                                account,
+                                force=True,
+                                timeout_seconds=remaining_budget,
+                            )
+                        except RefreshError as refresh_exc:
+                            if refresh_exc.is_permanent:
+                                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            await self._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            raise exc
+                        except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                            await self._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            logger.warning(
+                                "Compact forced refresh/connect failed request_id=%s account_id=%s",
+                                request_id,
+                                account.id,
+                                exc_info=True,
+                            )
+                            _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                        refresh_retry_used = True
+                        continue
+                    if exc.retryable_same_contract and safe_retry_budget > 0:
+                        safe_retry_budget -= 1
+                        continue
                     await self._settle_compact_api_key_usage(
                         api_key=api_key,
                         api_key_reservation=api_key_reservation,
@@ -1640,7 +1640,7 @@ class ProxyService:
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
-        response: OpenAIResponsePayload | None,
+        response: CompactResponsePayload | None,
         request_service_tier: str | None,
     ) -> None:
         if api_key is None or api_key_reservation is None:
@@ -3323,7 +3323,9 @@ def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str 
     return _normalize_service_tier_value(payload.model_extra.get("service_tier"))
 
 
-def _service_tier_from_response(response: OpenAIResponsePayload | None) -> str | None:
+def _service_tier_from_response(
+    response: OpenAIResponsePayload | CompactResponsePayload | None,
+) -> str | None:
     if response is None:
         return None
     extra = response.model_extra

@@ -121,7 +121,7 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
         <XAxis
           dataKey="t"
           tickFormatter={formatXTick}
-          tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
           tickLine={false}
           axisLine={false}
           minTickGap={50}
@@ -131,7 +131,7 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
           domain={[0, 100]}
           ticks={[0, 25, 50, 75, 100]}
           tickFormatter={(v: number) => `${v}%`}
-          tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
           tickLine={false}
           axisLine={false}
           width={38}

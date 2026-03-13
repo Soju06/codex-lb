@@ -63,14 +63,20 @@ export function DashboardPage() {
   }, [overview, logPage, isDark]);
 
   const accountOptions = useMemo(() => {
-    const labels = new Map<string, string>();
+    const entries = new Map<string, { label: string; isEmail: boolean }>();
     for (const account of overview?.accounts ?? []) {
-      labels.set(account.accountId, account.displayName || account.email || account.accountId);
+      const raw = account.displayName || account.email || account.accountId;
+      const isEmail = !!account.email && raw === account.email;
+      entries.set(account.accountId, { label: raw, isEmail });
     }
-    return (optionsQuery.data?.accountIds ?? []).map((accountId) => ({
-      value: accountId,
-      label: labels.get(accountId) ?? accountId,
-    }));
+    return (optionsQuery.data?.accountIds ?? []).map((accountId) => {
+      const entry = entries.get(accountId);
+      return {
+        value: accountId,
+        label: entry?.label ?? accountId,
+        isEmail: entry?.isEmail ?? false,
+      };
+    });
   }, [optionsQuery.data?.accountIds, overview?.accounts]);
 
   const modelOptions = useMemo(

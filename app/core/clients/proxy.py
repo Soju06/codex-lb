@@ -18,8 +18,12 @@ import aiohttp
 from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
-from app.core.openai.models import OpenAIResponsePayload
-from app.core.openai.parsing import parse_error_payload, parse_response_payload, parse_sse_event
+from app.core.openai.models import CompactResponsePayload
+from app.core.openai.parsing import (
+    parse_compact_response_payload,
+    parse_error_payload,
+    parse_sse_event,
+)
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import get_request_id
@@ -147,10 +151,25 @@ class ProxyResponseError(Exception):
     status_code: int
     payload: OpenAIErrorEnvelope
 
-    def __init__(self, status_code: int, payload: OpenAIErrorEnvelope) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: OpenAIErrorEnvelope,
+        *,
+        failure_phase: str | None = None,
+        retryable_same_contract: bool = False,
+        failure_detail: str | None = None,
+        failure_exception_type: str | None = None,
+        upstream_status_code: int | None = None,
+    ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
         self.payload = payload
+        self.failure_phase = failure_phase
+        self.retryable_same_contract = retryable_same_contract
+        self.failure_detail = failure_detail
+        self.failure_exception_type = failure_exception_type
+        self.upstream_status_code = upstream_status_code
 
 
 def _should_drop_inbound_header(name: str) -> bool:
@@ -304,6 +323,11 @@ def _maybe_log_upstream_request_complete(
     status_code: int | None,
     error_code: str | None,
     error_message: str | None,
+    failure_phase: str | None = None,
+    payload_object: str | None = None,
+    failure_detail: str | None = None,
+    failure_exception_type: str | None = None,
+    retryable_same_contract: bool | None = None,
 ) -> None:
     settings = get_settings()
     if not settings.log_upstream_request_summary:
@@ -319,7 +343,9 @@ def _maybe_log_upstream_request_complete(
         level,
         (
             "upstream_request_complete request_id=%s kind=%s method=POST target=%s "
-            "account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s"
+            "account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s "
+            "failure_phase=%s payload_object=%s failure_detail=%s failure_exception_type=%s "
+            "retryable_same_contract=%s"
         ),
         get_request_id(),
         kind,
@@ -329,6 +355,11 @@ def _maybe_log_upstream_request_complete(
         int((time.monotonic() - started_at) * 1000),
         error_code,
         error_message,
+        failure_phase,
+        payload_object,
+        failure_detail,
+        failure_exception_type,
+        retryable_same_contract,
     )
 
 
@@ -866,6 +897,9 @@ async def stream_responses(
     url = f"{upstream_base}/codex/responses"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id)
     pre_request_started_at = time.monotonic()
+    # Keep a default total timeout so direct callers cannot hang forever before
+    # response headers or the first SSE event. ProxyService stream attempts clamp
+    # this further by installing per-attempt overrides from the remaining budget.
     effective_total_timeout = _effective_stream_timeout(
         getattr(settings, "proxy_request_budget_seconds", 75.0),
         "total",
@@ -1110,110 +1144,199 @@ async def compact_responses(
     access_token: str,
     account_id: str | None,
     session: aiohttp.ClientSession | None = None,
-) -> OpenAIResponsePayload:
-    settings = get_settings()
-    upstream_base = settings.upstream_base_url.rstrip("/")
-    url = f"{upstream_base}/codex/responses/compact"
-    upstream_headers = _build_upstream_headers(
-        headers,
-        access_token,
-        account_id,
-        accept="application/json",
+) -> CompactResponsePayload:
+    transport = _CompactCommandTransport(
+        payload=payload,
+        headers=headers,
+        access_token=access_token,
+        account_id=account_id,
+        session=session or get_http_client().session,
     )
-    pre_request_started_at = time.monotonic()
-    compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
-    effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
+    return await transport.execute()
 
-    client_session = session or get_http_client().session
-    payload_dict = payload.to_payload()
-    if settings.image_inline_fetch_enabled:
-        payload_dict = await _inline_input_image_urls(
-            payload_dict,
-            _as_image_fetch_session(client_session),
-            effective_connect_timeout,
+
+def _is_retryable_compact_status(status_code: int) -> bool:
+    return status_code in {401, 502, 503, 504}
+
+
+@dataclass(slots=True)
+class _CompactCommandTransport:
+    payload: ResponsesCompactRequest
+    headers: Mapping[str, str]
+    access_token: str
+    account_id: str | None
+    session: aiohttp.ClientSession
+
+    async def execute(self) -> CompactResponsePayload:
+        settings = get_settings()
+        upstream_base = settings.upstream_base_url.rstrip("/")
+        url = f"{upstream_base}/codex/responses/compact"
+        upstream_headers = _build_upstream_headers(
+            self.headers,
+            self.access_token,
+            self.account_id,
+            accept="application/json",
         )
-    now = time.monotonic()
-    compact_timeout_seconds = _remaining_total_timeout(
-        compact_timeout_seconds,
-        pre_request_started_at,
-        now,
-    )
-    effective_connect_timeout = max(
-        0.001,
-        _remaining_total_timeout(effective_connect_timeout, pre_request_started_at, now) or effective_connect_timeout,
-    )
-    timeout = aiohttp.ClientTimeout(
-        total=compact_timeout_seconds,
-        sock_connect=effective_connect_timeout,
-        sock_read=compact_timeout_seconds,
-    )
-    started_at = time.monotonic()
-    status_code: int | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-    _maybe_log_upstream_request_start(
-        kind="responses_compact",
-        url=url,
-        headers=upstream_headers,
-        payload_summary=_summarize_json_payload(payload_dict),
-        payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
-        else None,
-    )
-    try:
-        async with client_session.post(
-            url,
-            json=payload_dict,
-            headers=upstream_headers,
-            timeout=timeout,
-        ) as resp:
-            status_code = resp.status
-            if resp.status >= 400:
-                error_payload = await _error_payload_from_response(resp)
-                error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(resp.status, error_payload)
-            try:
-                data = await resp.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                error_code = "upstream_unavailable"
-                error_message = str(exc)
-                raise ProxyResponseError(
-                    502,
-                    openai_error("upstream_unavailable", str(exc)),
-                ) from exc
-            except Exception as exc:
-                raise ProxyResponseError(
-                    502,
-                    openai_error("upstream_error", "Invalid JSON from upstream"),
-                ) from exc
-            parsed = parse_response_payload(data)
-            if parsed:
-                return parsed
-            raise ProxyResponseError(
-                502,
-                openai_error("upstream_error", "Unexpected upstream payload"),
+        pre_request_started_at = time.monotonic()
+        compact_timeout_seconds = _effective_compact_total_timeout(
+            getattr(settings, "upstream_compact_timeout_seconds", None)
+        )
+        effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
+        payload_dict = self.payload.to_payload()
+        if settings.image_inline_fetch_enabled:
+            payload_dict = await _inline_input_image_urls(
+                payload_dict,
+                _as_image_fetch_session(self.session),
+                effective_connect_timeout,
             )
-    except ProxyResponseError as exc:
-        if error_code is None and error_message is None:
-            error_code, error_message = _error_details_from_envelope(exc.payload)
-        raise
-    except aiohttp.ClientError as exc:
-        error_code = "upstream_unavailable"
-        error_message = str(exc)
-        raise ProxyResponseError(
-            502,
-            openai_error("upstream_unavailable", str(exc)),
-        ) from exc
-    finally:
-        _maybe_log_upstream_request_complete(
+        now = time.monotonic()
+        compact_timeout_seconds = _remaining_total_timeout(
+            compact_timeout_seconds,
+            pre_request_started_at,
+            now,
+        )
+        effective_connect_timeout = max(
+            0.001,
+            _remaining_total_timeout(
+                effective_connect_timeout,
+                pre_request_started_at,
+                now,
+            )
+            or effective_connect_timeout,
+        )
+        timeout = aiohttp.ClientTimeout(
+            total=compact_timeout_seconds,
+            sock_connect=effective_connect_timeout,
+            sock_read=compact_timeout_seconds,
+        )
+        started_at = time.monotonic()
+        status_code: int | None = None
+        error_code: str | None = None
+        error_message: str | None = None
+        failure_phase: str | None = None
+        payload_object: str | None = None
+        failure_detail: str | None = None
+        failure_exception_type: str | None = None
+        retryable_same_contract: bool | None = None
+        _maybe_log_upstream_request_start(
             kind="responses_compact",
             url=url,
             headers=upstream_headers,
-            started_at=started_at,
-            status_code=status_code,
-            error_code=error_code,
-            error_message=error_message,
+            payload_summary=_summarize_json_payload(payload_dict),
+            payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+            if settings.log_upstream_request_payload
+            else None,
         )
+        try:
+            async with self.session.post(
+                url,
+                json=payload_dict,
+                headers=upstream_headers,
+                timeout=timeout,
+            ) as resp:
+                status_code = resp.status
+                if resp.status >= 400:
+                    error_payload = await _error_payload_from_response(resp)
+                    error_code, error_message = _error_details_from_envelope(error_payload)
+                    failure_phase = "status"
+                    failure_detail = error_message
+                    retryable_same_contract = _is_retryable_compact_status(resp.status)
+                    raise ProxyResponseError(
+                        resp.status,
+                        error_payload,
+                        failure_phase=failure_phase,
+                        retryable_same_contract=retryable_same_contract,
+                        failure_detail=failure_detail,
+                        upstream_status_code=resp.status,
+                    )
+                try:
+                    data = await resp.json(content_type=None)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    message = str(exc) or "Request to upstream timed out"
+                    error_code = "upstream_unavailable"
+                    error_message = message
+                    failure_phase = "body_read"
+                    failure_detail = message
+                    failure_exception_type = type(exc).__name__
+                    retryable_same_contract = True
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_unavailable", message),
+                        failure_phase=failure_phase,
+                        retryable_same_contract=retryable_same_contract,
+                        failure_detail=failure_detail,
+                        failure_exception_type=failure_exception_type,
+                        upstream_status_code=resp.status,
+                    ) from exc
+                except Exception as exc:
+                    error_code = "upstream_error"
+                    error_message = "Invalid JSON from upstream"
+                    failure_phase = "parse"
+                    failure_detail = str(exc) or error_message
+                    failure_exception_type = type(exc).__name__
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_error", "Invalid JSON from upstream"),
+                        failure_phase=failure_phase,
+                        failure_detail=failure_detail,
+                        failure_exception_type=failure_exception_type,
+                        upstream_status_code=resp.status,
+                    ) from exc
+                parsed = parse_compact_response_payload(data)
+                if parsed:
+                    payload_object = parsed.object
+                    return parsed
+                error_code = "upstream_error"
+                error_message = "Unexpected upstream payload"
+                failure_phase = "parse"
+                failure_detail = f"payload_type={type(data).__name__}"
+                raise ProxyResponseError(
+                    502,
+                    openai_error("upstream_error", "Unexpected upstream payload"),
+                    failure_phase=failure_phase,
+                    failure_detail=failure_detail,
+                    upstream_status_code=resp.status,
+                )
+        except ProxyResponseError as exc:
+            if error_code is None and error_message is None:
+                error_code, error_message = _error_details_from_envelope(exc.payload)
+            failure_phase = failure_phase or exc.failure_phase
+            failure_detail = failure_detail or exc.failure_detail
+            failure_exception_type = failure_exception_type or exc.failure_exception_type
+            if retryable_same_contract is None:
+                retryable_same_contract = exc.retryable_same_contract
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            message = str(exc) or "Request to upstream timed out"
+            error_code = "upstream_unavailable"
+            error_message = message
+            failure_phase = "connect"
+            failure_detail = message
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", message),
+                failure_phase=failure_phase,
+                retryable_same_contract=retryable_same_contract,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+            ) from exc
+        finally:
+            _maybe_log_upstream_request_complete(
+                kind="responses_compact",
+                url=url,
+                headers=upstream_headers,
+                started_at=started_at,
+                status_code=status_code,
+                error_code=error_code,
+                error_message=error_message,
+                failure_phase=failure_phase,
+                payload_object=payload_object,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                retryable_same_contract=retryable_same_contract,
+            )
 
 
 async def transcribe_audio(

@@ -836,6 +836,37 @@ async def test_finalize_usage_reservation_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fail_usage_reservation_preserves_failed_request_record() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-fail-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    await service.fail_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=None,
+        output_tokens=None,
+        cached_input_tokens=None,
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 0
+    stored = await repo.get_usage_reservation(reservation.reservation_id)
+    assert stored is not None
+    assert stored.status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_release_after_finalize_is_noop() -> None:
     """Finalize 후 release 호출 시 quota 이중 반영 없음 (멱등성)."""
     repo = _FakeApiKeysRepository()

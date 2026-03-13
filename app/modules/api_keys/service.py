@@ -374,6 +374,13 @@ class ApiKeysService:
             raise ApiKeyInvalidError("API key has expired")
         return _to_api_key_data(refreshed)
 
+    async def get_key_by_id(self, key_id: str) -> ApiKeyData:
+        now = utcnow()
+        row = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
+        if row.expires_at is not None and row.expires_at < now:
+            raise ApiKeyInvalidError("API key has expired")
+        return _to_api_key_data(row)
+
     async def enforce_limits_for_request(
         self,
         key_id: str,

@@ -78,6 +78,27 @@ def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypa
     assert result.current_revision == base_revision
 
 
+def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path) -> None:
+    db_path = tmp_path / "request-logs-transport.db"
+    url = _db_url(db_path)
+    base_revision = OLD_TO_NEW_REVISION_MAP["000_base_schema"]
+    transport_revision = "20260310_000000_add_request_logs_transport"
+
+    run_upgrade(url, base_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+        assert "transport" in columns
+
+    result = run_upgrade(url, transport_revision, bootstrap_legacy=False)
+    assert result.current_revision == transport_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+        assert "transport" in columns
+
+
 def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
     db_path = tmp_path / "drift.db"
     url = _db_url(db_path)

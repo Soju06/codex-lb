@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.5.0](https://github.com/Soju06/codex-lb/compare/v1.4.1...v1.5.0) (2026-03-13)
+
+
+### Features
+
+* **frontend:** add privacy email blur toggle ([#180](https://github.com/Soju06/codex-lb/issues/180)) ([356edcb](https://github.com/Soju06/codex-lb/commit/356edcbb7f0624e71a10035315b71577c02e73d3))
+* **proxy:** add upstream websocket transport control ([#189](https://github.com/Soju06/codex-lb/issues/189)) ([fb6b6cf](https://github.com/Soju06/codex-lb/commit/fb6b6cf616319fc4b72b0200e31499c84cb5c34a))
+* **responses:** add websocket transport and request log tracing ([#169](https://github.com/Soju06/codex-lb/issues/169)) ([ceb1746](https://github.com/Soju06/codex-lb/commit/ceb17465d12186e19bff4e9ea984e482dd109f8b))
+
+
+### Bug Fixes
+
+* **proxy:** decouple stream duration from proxy request budget ([#187](https://github.com/Soju06/codex-lb/issues/187)) ([aa65e97](https://github.com/Soju06/codex-lb/commit/aa65e97d6f9f2c5014e4d032a7d81b3e8af8d618))
+* **proxy:** preserve dedicated responses compact contract ([#175](https://github.com/Soju06/codex-lb/issues/175)) ([7442743](https://github.com/Soju06/codex-lb/commit/7442743662c9a6889507d339adebf0388d9761e6))
+* **ui:** the label color in the trend does not show on dark mode ([#188](https://github.com/Soju06/codex-lb/issues/188)) ([8e62c4a](https://github.com/Soju06/codex-lb/commit/8e62c4ad724005df414cb7fa06becda00da8e807))
+
+
+### Documentation
+
+* add flokosti96 as a contributor for code, and test ([#192](https://github.com/Soju06/codex-lb/issues/192)) ([c2b105a](https://github.com/Soju06/codex-lb/commit/c2b105a3e545838e6b791692782c49f767e77647))
+
 ## [1.4.1](https://github.com/Soju06/codex-lb/compare/v1.4.0...v1.4.1) (2026-03-12)
 
 

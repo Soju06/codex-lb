@@ -244,6 +244,30 @@ def _build_upstream_headers(
     return headers
 
 
+_TRANSCRIBE_FORWARD_HEADER_PREFIXES = ("x-openai-", "x-codex-")
+
+
+def _build_upstream_transcribe_headers(
+    inbound: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+) -> dict[str, str]:
+    # Minimal header set matching Codex CLI ``/transcribe`` fingerprint.
+    # Omit Accept, x-request-id, and bulk-forwarded inbound headers to
+    # avoid upstream WAF rejection.
+    headers: dict[str, str] = {}
+    headers["Authorization"] = f"Bearer {access_token}"
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
+    for key, value in inbound.items():
+        lower = key.lower()
+        if lower == "user-agent":
+            headers[key] = value
+        elif lower.startswith(_TRANSCRIBE_FORWARD_HEADER_PREFIXES):
+            headers[key] = value
+    return headers
+
+
 def _build_upstream_websocket_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -1883,15 +1907,11 @@ async def transcribe_audio(
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/transcribe"
-    upstream_headers = _build_upstream_headers(
+    upstream_headers = _build_upstream_transcribe_headers(
         headers,
         access_token,
         account_id,
-        accept="application/json",
     )
-    for header_name in tuple(upstream_headers):
-        if header_name.lower() == "content-type":
-            upstream_headers.pop(header_name, None)
 
     effective_total_timeout = _effective_transcribe_total_timeout(
         settings.transcription_request_budget_seconds,

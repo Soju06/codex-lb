@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.3](https://github.com/Soju06/codex-lb/compare/v1.5.2...v1.5.3) (2026-03-13)
+
+
+### Bug Fixes
+
+* **proxy:** match Codex CLI header fingerprint for transcribe upstream requests ([#199](https://github.com/Soju06/codex-lb/issues/199)) ([2a89631](https://github.com/Soju06/codex-lb/commit/2a8963143515da25bf718ede913fac14dbd918ee))
+
+
+### Documentation
+
+* add huzky-v as a contributor for code, and bug ([#201](https://github.com/Soju06/codex-lb/issues/201)) ([d1410c6](https://github.com/Soju06/codex-lb/commit/d1410c60a99e8b36c2464412c0e1b5db50f01914))
+
 ## [1.5.2](https://github.com/Soju06/codex-lb/compare/v1.5.1...v1.5.2) (2026-03-13)
 
 

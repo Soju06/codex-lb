@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.4](https://github.com/Soju06/codex-lb/compare/v1.5.3...v1.5.4) (2026-03-13)
+
+
+### Bug Fixes
+
+* move the trend back to secondary instead of primary for free accounts ([#190](https://github.com/Soju06/codex-lb/issues/190)) ([944ea93](https://github.com/Soju06/codex-lb/commit/944ea93db600b004e1ff8df29397e47114af65b9))
+* the account page select param is not respected ([#198](https://github.com/Soju06/codex-lb/issues/198)) ([6036184](https://github.com/Soju06/codex-lb/commit/6036184af2696dadc157bc6590bcc9e95d183177))
+
 ## [1.5.3](https://github.com/Soju06/codex-lb/compare/v1.5.2...v1.5.3) (2026-03-13)
 
 

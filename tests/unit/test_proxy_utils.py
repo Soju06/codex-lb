@@ -1697,6 +1697,45 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     assert handle_args.args[2] == "rate_limit_exceeded"
     assert failed_upstream_control.reconnect_requested is True
 
+    record_success.reset_mock()
+    handle_stream_error.reset_mock()
+    incomplete_payload = {
+        "type": "response.incomplete",
+        "response": {
+            "id": "resp_ws_incomplete",
+            "status": "incomplete",
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        },
+    }
+    incomplete_event = parse_sse_event(f"data: {json.dumps(incomplete_payload)}\n\n")
+    assert incomplete_event is not None
+    incomplete_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_incomplete",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    incomplete_upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    await service._finalize_websocket_request_state(
+        incomplete_state,
+        account=account,
+        account_id_value=account.id,
+        event=incomplete_event,
+        event_type="response.incomplete",
+        payload=incomplete_payload,
+        api_key=None,
+        upstream_control=incomplete_upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    record_success.assert_not_awaited()
+    handle_stream_error.assert_not_awaited()
+    assert incomplete_upstream_control.reconnect_requested is False
+    assert request_logs.calls[-1]["status"] == "error"
+
 
 @pytest.mark.asyncio
 async def test_process_upstream_websocket_text_does_not_match_foreign_response_id_to_only_pending_request(

@@ -1315,8 +1315,9 @@ class ProxyService:
             error_message=error_message,
             error=error_payload,
         )
-        if event_type in {"response.failed", "error"}:
+        if event_type in {"response.failed", "response.incomplete", "error"}:
             settlement.record_success = False
+        if event_type in {"response.failed", "error"}:
             settlement.account_health_error = _should_penalize_stream_error(error_code)
         _release_websocket_response_create_gate(request_state, response_create_gate)
         await self._settle_stream_api_key_usage(

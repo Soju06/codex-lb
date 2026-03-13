@@ -1,11 +1,15 @@
 [project]
 name = "codex-lb"
-version = "1.2.0"
+version = "1.5.2"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Soju06", email = "qlskssk@gmail.com" }]
-maintainers = [{ name = "Soju06", email = "qlskssk@gmail.com" }]
+maintainers = [
+    { name = "Soju06", email = "qlskssk@gmail.com" },
+    { name = "choi138", email = "kidjustinchoi@gmail.com" },
+    { name = "aaiyer", email = "aaiyer0@proton.me" },
+]
 keywords = [
     "codex",
     "load-balancer",
@@ -48,6 +52,7 @@ dependencies = [
     "psycopg[binary]>=3.2.12",
     "segno>=1.6.6",
     "sqlalchemy>=2.0.45",
+    "websockets>=16.0",
     "zstandard>=0.25.0",
 ]
 

@@ -38,6 +38,29 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("Secondary remaining")).toBeInTheDocument();
   });
 
+  it("renders mapped label for the known gated additional quota limit", () => {
+    const account = createAccountSummary({
+      additionalQuotas: [
+        {
+          limitName: "codex_spark",
+          meteredFeature: "codex_bengalfox",
+          primaryWindow: {
+            usedPercent: 35,
+            resetAt: 1_762_400_000,
+            windowMinutes: 300,
+          },
+          secondaryWindow: null,
+        },
+      ],
+    });
+
+    render(<AccountUsagePanel account={account} trends={null} />);
+
+    expect(screen.getByText("Additional Quotas")).toBeInTheDocument();
+    expect(screen.getByText("GPT-5.3-Codex-Spark")).toBeInTheDocument();
+    expect(screen.getByText(/35% used/)).toBeInTheDocument();
+  });
+
   it("renders request log usage summary when available", () => {
     const account = createAccountSummary({
       requestUsage: {

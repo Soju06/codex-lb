@@ -9,8 +9,10 @@ describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
       importWithoutOverwrite: true,
       httpProxyUrl: "http://proxy.example:8080",
       totpRequiredOnLogin: true,
@@ -19,7 +21,9 @@ describe("DashboardSettingsSchema", () => {
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
+    expect(parsed.upstreamStreamTransport).toBe("default");
     expect(parsed.routingStrategy).toBe("round_robin");
+    expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.httpProxyUrl).toBe("http://proxy.example:8080");
     expect(parsed.apiKeyAuthEnabled).toBe(true);
@@ -30,14 +34,18 @@ describe("SettingsUpdateRequestSchema", () => {
   it("accepts required fields and optional updates", () => {
     const parsed = SettingsUpdateRequestSchema.parse({
       stickyThreadsEnabled: false,
+      upstreamStreamTransport: "websocket",
       preferEarlierResetAccounts: true,
       routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 120,
       importWithoutOverwrite: true,
       httpProxyUrl: "https://proxy.example:8443",
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
     });
 
+    expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
+    expect(parsed.upstreamStreamTransport).toBe("websocket");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.httpProxyUrl).toBe("https://proxy.example:8443");
@@ -51,10 +59,12 @@ describe("SettingsUpdateRequestSchema", () => {
       preferEarlierResetAccounts: true,
     });
 
+    expect(parsed.upstreamStreamTransport).toBeUndefined();
     expect(parsed.importWithoutOverwrite).toBeUndefined();
     expect(parsed.httpProxyUrl).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
+    expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBeUndefined();
   });
 
   it("rejects invalid types", () => {

@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.core.types import JsonValue
 from app.modules.proxy.types import (
+    AdditionalRateLimitData,
     CreditStatusDetailsData,
     RateLimitStatusDetailsData,
     RateLimitStatusPayloadData,
@@ -15,9 +16,9 @@ class RateLimitWindowSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     used_percent: int
-    limit_window_seconds: int
-    reset_after_seconds: int
-    reset_at: int
+    limit_window_seconds: int | None = None
+    reset_after_seconds: int | None = None
+    reset_at: int | None = None
 
     @classmethod
     def from_data(cls, data: RateLimitWindowSnapshotData) -> "RateLimitWindowSnapshot":
@@ -69,12 +70,33 @@ class CreditStatusDetails(BaseModel):
         )
 
 
+class AdditionalRateLimitStatus(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    quota_key: str | None = None
+    limit_name: str
+    display_label: str | None = None
+    metered_feature: str
+    rate_limit: RateLimitStatusDetails | None = None
+
+    @classmethod
+    def from_data(cls, data: AdditionalRateLimitData) -> "AdditionalRateLimitStatus":
+        return cls(
+            quota_key=data.quota_key,
+            limit_name=data.limit_name,
+            display_label=data.display_label,
+            metered_feature=data.metered_feature,
+            rate_limit=RateLimitStatusDetails.from_data(data.rate_limit) if data.rate_limit else None,
+        )
+
+
 class RateLimitStatusPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     plan_type: str
     rate_limit: RateLimitStatusDetails | None = None
     credits: CreditStatusDetails | None = None
+    additional_rate_limits: list[AdditionalRateLimitStatus] = []
 
     @classmethod
     def from_data(cls, data: RateLimitStatusPayloadData) -> "RateLimitStatusPayload":
@@ -82,6 +104,7 @@ class RateLimitStatusPayload(BaseModel):
             plan_type=data.plan_type,
             rate_limit=RateLimitStatusDetails.from_data(data.rate_limit) if data.rate_limit else None,
             credits=CreditStatusDetails.from_data(data.credits) if data.credits else None,
+            additional_rate_limits=[AdditionalRateLimitStatus.from_data(arl) for arl in data.additional_rate_limits],
         )
 
 

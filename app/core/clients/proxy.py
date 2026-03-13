@@ -2,23 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import contextvars
+import hashlib
 import ipaddress
 import json
 import logging
+import os
 import socket
 import time
 from dataclasses import dataclass
-from typing import AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, cast
+from typing import Any, AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, cast
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 import aiohttp
+from aiohttp import hdrs
+from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT
+from multidict import CIMultiDict
 
 from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
 from app.core.clients.http import get_http_proxy_request_kwargs
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
-from app.core.openai.models import OpenAIResponsePayload
-from app.core.openai.parsing import parse_error_payload, parse_response_payload, parse_sse_event
+from app.core.openai.model_registry import get_model_registry
+from app.core.openai.models import CompactResponsePayload
+from app.core.openai.parsing import (
+    parse_compact_response_payload,
+    parse_error_payload,
+    parse_sse_event,
+)
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import get_request_id
@@ -70,8 +82,67 @@ _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
         "x-request-id",
     }
 )
+_NATIVE_CODEX_ORIGINATORS = frozenset({"codex_cli_rs", "Codex Desktop"})
+_NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
+    {
+        "x-codex-turn-metadata",
+        "x-codex-beta-features",
+    }
+)
+_HOP_BY_HOP_HEADER_NAMES = frozenset(
+    {
+        "accept",
+        "connection",
+        "content-type",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({403, 404, 426})
+_WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
+_WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
+    ("usage_not_included", "usage not included"),
+    ("insufficient_quota", "insufficient quota"),
+    ("quota_exceeded", "quota exceeded"),
+    ("usage_limit_reached", "usage limit reached"),
+    ("rate_limit_exceeded", "rate limit"),
+)
 
 logger = logging.getLogger(__name__)
+_STREAM_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "stream_connect_timeout_override",
+    default=None,
+)
+_STREAM_IDLE_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "stream_idle_timeout_override",
+    default=None,
+)
+_STREAM_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "stream_total_timeout_override",
+    default=None,
+)
+_COMPACT_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "compact_connect_timeout_override",
+    default=None,
+)
+_COMPACT_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "compact_total_timeout_override",
+    default=None,
+)
+_TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "transcribe_connect_timeout_override",
+    default=None,
+)
+_TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "transcribe_total_timeout_override",
+    default=None,
+)
 
 
 class StreamIdleTimeoutError(Exception):
@@ -118,10 +189,25 @@ class ProxyResponseError(Exception):
     status_code: int
     payload: OpenAIErrorEnvelope
 
-    def __init__(self, status_code: int, payload: OpenAIErrorEnvelope) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: OpenAIErrorEnvelope,
+        *,
+        failure_phase: str | None = None,
+        retryable_same_contract: bool = False,
+        failure_detail: str | None = None,
+        failure_exception_type: str | None = None,
+        upstream_status_code: int | None = None,
+    ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
         self.payload = payload
+        self.failure_phase = failure_phase
+        self.retryable_same_contract = retryable_same_contract
+        self.failure_detail = failure_detail
+        self.failure_exception_type = failure_exception_type
+        self.upstream_status_code = upstream_status_code
 
 
 def _should_drop_inbound_header(name: str) -> bool:
@@ -154,6 +240,31 @@ def _build_upstream_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = accept
     headers["Content-Type"] = "application/json"
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
+    return headers
+
+
+def _build_upstream_websocket_headers(
+    inbound: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+) -> dict[str, str]:
+    connected_header_tokens: set[str] = set()
+    for key, value in inbound.items():
+        if key.lower() != "connection":
+            continue
+        connected_header_tokens.update(
+            token.strip().lower() for token in value.split(",") if isinstance(value, str) and token.strip()
+        )
+    blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
+    headers = {key: value for key, value in inbound.items() if key.lower() not in blocked_header_names}
+    lower_keys = {key.lower() for key in headers}
+    if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
+        request_id = get_request_id()
+        if request_id:
+            headers["x-request-id"] = request_id
+    headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
         headers["chatgpt-account-id"] = account_id
     return headers
@@ -229,11 +340,59 @@ def _error_details_from_failed_event(payload: ResponseFailedEvent) -> tuple[str 
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
 
 
+def _extract_json_object_from_text(text: str) -> JsonValue | None:
+    if not text:
+        return None
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    return None
+
+
+def _infer_websocket_handshake_error_code(status: int | None, message: str) -> str:
+    lowered = message.lower()
+    for code, hint in _WEBSOCKET_HANDSHAKE_ERROR_HINTS:
+        if hint in lowered:
+            return code
+    if status == 401:
+        return "invalid_api_key"
+    if status == 404:
+        return "not_found"
+    if status == 429:
+        return "rate_limit_exceeded"
+    return "upstream_error"
+
+
+def _error_payload_from_websocket_handshake_error(exc: aiohttp.WSServerHandshakeError) -> OpenAIErrorEnvelope:
+    message = exc.message or str(exc)
+    extracted = _extract_json_object_from_text(message)
+    if extracted is not None:
+        error = parse_error_payload(extracted)
+        if error is not None:
+            return {"error": error.model_dump(exclude_none=True)}
+
+    code = _infer_websocket_handshake_error_code(exc.status, message)
+    if code == "invalid_api_key":
+        return openai_error(code, message, error_type="authentication_error")
+    if code == "not_found":
+        return openai_error(code, message, error_type="invalid_request_error")
+    if code == "rate_limit_exceeded":
+        return openai_error(code, message, error_type="rate_limit_error")
+    return openai_error(code, message)
+
+
 def _maybe_log_upstream_request_start(
     *,
     kind: str,
     url: str,
     headers: Mapping[str, str],
+    method: str,
     payload_summary: str,
     payload_json: str | None = None,
 ) -> None:
@@ -248,9 +407,10 @@ def _maybe_log_upstream_request_start(
 
     if settings.log_upstream_request_summary:
         logger.info(
-            "upstream_request_start request_id=%s kind=%s method=POST target=%s account_id=%s headers=%s payload=%s",
+            "upstream_request_start request_id=%s kind=%s method=%s target=%s account_id=%s headers=%s payload=%s",
             request_id,
             kind,
+            method,
             target,
             account_id,
             header_keys,
@@ -271,10 +431,16 @@ def _maybe_log_upstream_request_complete(
     kind: str,
     url: str,
     headers: Mapping[str, str],
+    method: str,
     started_at: float,
     status_code: int | None,
     error_code: str | None,
     error_message: str | None,
+    failure_phase: str | None = None,
+    payload_object: str | None = None,
+    failure_detail: str | None = None,
+    failure_exception_type: str | None = None,
+    retryable_same_contract: bool | None = None,
 ) -> None:
     settings = get_settings()
     if not settings.log_upstream_request_summary:
@@ -289,17 +455,25 @@ def _maybe_log_upstream_request_complete(
     logger.log(
         level,
         (
-            "upstream_request_complete request_id=%s kind=%s method=POST target=%s "
-            "account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s"
+            "upstream_request_complete request_id=%s kind=%s method=%s target=%s "
+            "account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s "
+            "failure_phase=%s payload_object=%s failure_detail=%s failure_exception_type=%s "
+            "retryable_same_contract=%s"
         ),
         get_request_id(),
         kind,
+        method,
         _summarize_upstream_target(url),
         headers.get("chatgpt-account-id"),
         status_code,
         int((time.monotonic() - started_at) * 1000),
         error_code,
         error_message,
+        failure_phase,
+        payload_object,
+        failure_detail,
+        failure_exception_type,
+        retryable_same_contract,
     )
 
 
@@ -313,6 +487,54 @@ def _normalize_error_code(code: str | None, error_type: str | None) -> str:
         mapped = _ERROR_TYPE_CODE_MAP.get(normalized_type)
         return mapped or normalized_type
     return "upstream_error"
+
+
+def _effective_stream_timeout(configured_timeout_seconds: float, timeout_kind: str) -> float:
+    if timeout_kind == "connect":
+        override = _STREAM_CONNECT_TIMEOUT_OVERRIDE.get()
+    elif timeout_kind == "idle":
+        override = _STREAM_IDLE_TIMEOUT_OVERRIDE.get()
+    else:
+        override = _STREAM_TOTAL_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_compact_connect_timeout(configured_timeout_seconds: float) -> float:
+    override = _COMPACT_CONNECT_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_compact_total_timeout(configured_timeout_seconds: float | None) -> float | None:
+    override = _COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
+    if configured_timeout_seconds is None:
+        return None if override is None else max(0.001, override)
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_transcribe_connect_timeout(configured_timeout_seconds: float) -> float:
+    override = _TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _effective_transcribe_total_timeout(configured_timeout_seconds: float) -> float:
+    override = _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
+
+
+def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, now: float) -> float | None:
+    if timeout_seconds is None:
+        return None
+    return max(0.001, timeout_seconds - max(0.0, now - started_at))
 
 
 def _find_sse_separator(buffer: bytes | bytearray) -> tuple[int, int] | None:
@@ -340,17 +562,35 @@ async def _iter_sse_events(
     idle_timeout_seconds: float,
     max_event_bytes: int,
 ) -> AsyncIterator[str]:
+    async def _next_chunk() -> bytes:
+        return await iterator.__anext__()
+
+    async def _cancel_pending_chunk(task: asyncio.Task[bytes]) -> None:
+        if task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     buffer = bytearray()
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
 
     while True:
+        next_chunk = asyncio.create_task(_next_chunk())
         try:
-            chunk = await asyncio.wait_for(iterator.__anext__(), timeout=idle_timeout_seconds)
+            done, _ = await asyncio.wait({next_chunk}, timeout=idle_timeout_seconds)
+            if not done:
+                await _cancel_pending_chunk(next_chunk)
+                raise StreamIdleTimeoutError()
+            chunk = await next_chunk
         except StopAsyncIteration:
             break
-        except asyncio.TimeoutError as exc:
-            raise StreamIdleTimeoutError() from exc
+        except asyncio.CancelledError:
+            await _cancel_pending_chunk(next_chunk)
+            raise
 
         if not chunk:
             continue
@@ -490,6 +730,308 @@ def _normalize_sse_event_block(event_block: str) -> str:
     if terminator:
         return normalized + terminator
     return normalized
+
+
+def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    event_type = payload.get("type")
+    if isinstance(event_type, str) and event_type in _SSE_EVENT_TYPE_ALIASES:
+        normalized = dict(payload)
+        normalized["type"] = _SSE_EVENT_TYPE_ALIASES[event_type]
+        return normalized
+    return payload
+
+
+def _to_websocket_upstream_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        scheme = "wss"
+    elif parsed.scheme == "http":
+        scheme = "ws"
+    else:
+        scheme = parsed.scheme
+    return urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+def _configured_stream_transport(
+    *,
+    transport: str,
+    transport_override: str | None = None,
+) -> str:
+    return transport_override if transport_override is not None else transport
+
+
+def _has_native_codex_transport_headers(headers: Mapping[str, str]) -> bool:
+    normalized = {key.lower(): value for key, value in headers.items()}
+    originator = normalized.get("originator")
+    if isinstance(originator, str) and originator in _NATIVE_CODEX_ORIGINATORS:
+        return True
+    return any(key in normalized for key in _NATIVE_CODEX_STREAM_HEADER_KEYS)
+
+
+def _resolve_stream_transport(
+    *,
+    transport: str,
+    transport_override: str | None,
+    model: str | None,
+    headers: Mapping[str, str],
+) -> str:
+    configured = _configured_stream_transport(transport=transport, transport_override=transport_override)
+    if configured == "websocket":
+        return "websocket"
+    if configured == "http":
+        return "http"
+    if _has_native_codex_transport_headers(headers):
+        return "websocket"
+
+    registry = get_model_registry()
+    prefers_websockets = getattr(registry, "prefers_websockets", None)
+    if callable(prefers_websockets):
+        if prefers_websockets(model):
+            return "websocket"
+        return "http"
+
+    snapshot = registry.get_snapshot()
+    if snapshot is None or not isinstance(model, str):
+        return "http"
+    upstream_model = snapshot.models.get(model)
+    if upstream_model and upstream_model.prefer_websockets:
+        return "websocket"
+    return "http"
+
+
+def _should_fallback_to_http_after_websocket_handshake_error(
+    transport_mode: str,
+    exc: aiohttp.WSServerHandshakeError,
+) -> bool:
+    return transport_mode == "auto" and exc.status in _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES
+
+
+async def _open_upstream_websocket(
+    *,
+    session: aiohttp.ClientSession,
+    url: str,
+    headers: Mapping[str, str],
+    connect_timeout_seconds: float,
+    max_msg_size: int,
+) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
+    request = getattr(session, "request", None)
+    if not callable(request):
+        websocket_cm = session.ws_connect(
+            url,
+            headers=headers,
+            receive_timeout=None,
+            autoping=True,
+            autoclose=True,
+            max_msg_size=max_msg_size,
+        )
+        websocket = await asyncio.wait_for(websocket_cm.__aenter__(), timeout=connect_timeout_seconds)
+        return websocket_cm, websocket
+
+    request_headers = CIMultiDict(headers)
+    request_headers.setdefault(hdrs.UPGRADE, "websocket")
+    request_headers.setdefault(hdrs.CONNECTION, "Upgrade")
+    request_headers.setdefault(hdrs.SEC_WEBSOCKET_VERSION, "13")
+    sec_key = base64.b64encode(os.urandom(16)).decode()
+    request_headers[hdrs.SEC_WEBSOCKET_KEY] = sec_key
+
+    timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
+    resp = await request(
+        hdrs.METH_GET,
+        url,
+        headers=request_headers,
+        timeout=timeout,
+        read_until_eof=False,
+    )
+
+    async def _raise_handshake_error(message: str) -> None:
+        body_text = ""
+        try:
+            body_text = (await resp.text()).strip()
+        except Exception:
+            body_text = ""
+        raise aiohttp.WSServerHandshakeError(
+            resp.request_info,
+            resp.history,
+            message=body_text or message,
+            status=resp.status,
+            headers=resp.headers,
+        )
+
+    try:
+        if resp.status != 101:
+            await _raise_handshake_error("Invalid response status")
+
+        if resp.headers.get(hdrs.UPGRADE, "").lower() != "websocket":
+            await _raise_handshake_error("Invalid upgrade header")
+
+        if resp.headers.get(hdrs.CONNECTION, "").lower() != "upgrade":
+            await _raise_handshake_error("Invalid connection header")
+
+        response_key = resp.headers.get(hdrs.SEC_WEBSOCKET_ACCEPT, "")
+        expected_key = base64.b64encode(hashlib.sha1(sec_key.encode() + aiohttp.client.WS_KEY).digest()).decode()
+        if response_key != expected_key:
+            await _raise_handshake_error("Invalid challenge response")
+
+        conn = resp.connection
+        assert conn is not None
+        conn_proto = conn.protocol
+        assert conn_proto is not None
+        conn_proto.read_timeout = None
+
+        transport = conn.transport
+        assert transport is not None
+        reader = aiohttp.client.WebSocketDataQueue(conn_proto, 2**16, loop=session._loop)
+        conn_proto.set_parser(aiohttp.client.WebSocketReader(reader, max_msg_size), reader)
+        writer = aiohttp.client.WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
+    except BaseException:
+        resp.close()
+        raise
+
+    websocket = session._ws_response_class(
+        reader,
+        writer,
+        None,
+        resp,
+        DEFAULT_WS_CLIENT_TIMEOUT,
+        True,
+        True,
+        session._loop,
+        heartbeat=None,
+        compress=0,
+        client_notakeover=False,
+    )
+    return websocket, websocket
+
+
+async def _stream_websocket_events(
+    websocket: aiohttp.ClientWebSocketResponse,
+    *,
+    idle_timeout_seconds: float,
+    total_timeout_seconds: float | None,
+    max_event_bytes: int,
+) -> AsyncIterator[str]:
+    deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
+
+    while True:
+        timeout_seconds = idle_timeout_seconds
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            timeout_seconds = min(timeout_seconds, remaining)
+
+        try:
+            message = await asyncio.wait_for(websocket.receive(), timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            if deadline is not None and deadline - time.monotonic() <= 0:
+                raise
+            raise StreamIdleTimeoutError() from exc
+
+        if message.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED}:
+            break
+        if message.type == aiohttp.WSMsgType.ERROR:
+            exc = websocket.exception()
+            if exc is None and isinstance(message.data, BaseException):
+                exc = message.data
+            raise exc or aiohttp.ClientError("Upstream websocket error")
+        if message.type not in {aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY}:
+            continue
+
+        if message.type == aiohttp.WSMsgType.TEXT:
+            text = message.data
+        else:
+            text = message.data.decode("utf-8", errors="replace")
+        text_bytes = text.encode("utf-8")
+        if len(text_bytes) > max_event_bytes:
+            raise StreamEventTooLargeError(len(text_bytes), max_event_bytes)
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        normalized = _normalize_stream_event_payload(payload)
+        event_type = payload.get("type")
+        yield format_sse_event(normalized)
+        if isinstance(event_type, str) and event_type in (
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+        ):
+            break
+
+
+async def _stream_responses_via_websocket(
+    *,
+    payload_dict: JsonObject,
+    url: str,
+    headers: Mapping[str, str],
+    client_session: aiohttp.ClientSession,
+    effective_total_timeout: float,
+    effective_connect_timeout: float,
+    effective_idle_timeout: float,
+    max_event_bytes: int,
+    raise_for_status: bool,
+) -> AsyncIterator[str]:
+    websocket_url = _to_websocket_upstream_url(url)
+    request_started_at = time.monotonic()
+    request_payload = _build_websocket_response_create_payload(payload_dict)
+    websocket_cm: AsyncContextManager[aiohttp.ClientWebSocketResponse] | None = None
+    websocket: aiohttp.ClientWebSocketResponse | None = None
+    connect_timeout_seconds = min(
+        effective_connect_timeout,
+        _remaining_total_timeout(effective_total_timeout, request_started_at, time.monotonic())
+        or effective_connect_timeout,
+    )
+    websocket_cm, websocket = await _open_upstream_websocket(
+        session=client_session,
+        url=websocket_url,
+        headers=headers,
+        connect_timeout_seconds=connect_timeout_seconds,
+        max_msg_size=max_event_bytes,
+    )
+
+    try:
+        send_json = getattr(websocket, "send_json", None)
+        remaining_total_timeout = _remaining_total_timeout(
+            effective_total_timeout,
+            request_started_at,
+            time.monotonic(),
+        )
+        if callable(send_json):
+            await asyncio.wait_for(
+                cast(Any, send_json)(request_payload),
+                timeout=remaining_total_timeout,
+            )
+        else:
+            await asyncio.wait_for(
+                websocket.send_str(json.dumps(request_payload, ensure_ascii=True, separators=(",", ":"))),
+                timeout=remaining_total_timeout,
+            )
+        remaining_total_timeout = _remaining_total_timeout(
+            effective_total_timeout,
+            request_started_at,
+            time.monotonic(),
+        )
+        async for event in _stream_websocket_events(
+            websocket,
+            idle_timeout_seconds=effective_idle_timeout,
+            total_timeout_seconds=remaining_total_timeout,
+            max_event_bytes=max_event_bytes,
+        ):
+            yield event
+    finally:
+        if websocket_cm is not None:
+            await websocket_cm.__aexit__(None, None, None)
+
+
+def _build_websocket_response_create_payload(payload_dict: JsonObject) -> JsonObject:
+    request_payload: JsonObject = {
+        key: value for key, value in payload_dict.items() if key not in _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS
+    }
+    request_payload["type"] = "response.create"
+    return request_payload
 
 
 async def _inline_input_image_urls(
@@ -765,16 +1307,21 @@ async def stream_responses(
     base_url: str | None = None,
     raise_for_status: bool = False,
     session: aiohttp.ClientSession | None = None,
+    upstream_stream_transport_override: str | None = None,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/responses"
-    upstream_headers = _build_upstream_headers(headers, access_token, account_id)
-    timeout = aiohttp.ClientTimeout(
-        total=None,
-        sock_connect=settings.upstream_connect_timeout_seconds,
-        sock_read=None,
+    pre_request_started_at = time.monotonic()
+    # Keep a default total timeout so direct callers cannot hang forever before
+    # response headers or the first SSE event. ProxyService stream attempts clamp
+    # this further by installing per-attempt overrides from the remaining budget.
+    request_total_timeout = _effective_stream_timeout(
+        settings.proxy_request_budget_seconds,
+        "total",
     )
+    effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
+    effective_idle_timeout = _effective_stream_timeout(settings.stream_idle_timeout_seconds, "idle")
 
     seen_terminal = False
     status_code: int | None = None
@@ -787,24 +1334,47 @@ async def stream_responses(
         payload_dict = await _inline_input_image_urls(
             payload_dict,
             _as_image_fetch_session(client_session),
-            settings.upstream_connect_timeout_seconds,
+            effective_connect_timeout,
         )
-    started_at = time.monotonic()
-    _maybe_log_upstream_request_start(
-        kind="responses",
-        url=url,
-        headers=upstream_headers,
-        payload_summary=_summarize_json_payload(payload_dict),
-        payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
-        else None,
+    transport_mode = _configured_stream_transport(
+        transport=settings.upstream_stream_transport,
+        transport_override=upstream_stream_transport_override,
     )
-    try:
+    transport = _resolve_stream_transport(
+        transport=settings.upstream_stream_transport,
+        transport_override=upstream_stream_transport_override,
+        model=payload.model,
+        headers=headers,
+    )
+    if transport == "websocket":
+        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        method = "GET"
+    else:
+        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        method = "POST"
+    remaining_request_timeout = _remaining_total_timeout(
+        request_total_timeout,
+        pre_request_started_at,
+        time.monotonic(),
+    )
+    timeout = aiohttp.ClientTimeout(
+        total=remaining_request_timeout,
+        sock_connect=effective_connect_timeout,
+        sock_read=None,
+    )
+    started_at = time.monotonic()
+
+    async def _stream_via_http(
+        current_headers: Mapping[str, str],
+        current_timeout: aiohttp.ClientTimeout,
+    ) -> AsyncIterator[str]:
+        nonlocal status_code, error_code, error_message, seen_terminal
+
         async with client_session.post(
             url,
             json=payload_dict,
-            headers=upstream_headers,
-            timeout=timeout,
+            headers=current_headers,
+            timeout=current_timeout,
             **proxy_kwargs,
         ) as resp:
             status_code = resp.status
@@ -820,7 +1390,7 @@ async def stream_responses(
 
             async for event_block in _iter_sse_events(
                 resp,
-                settings.stream_idle_timeout_seconds,
+                effective_idle_timeout,
                 settings.max_sse_event_bytes,
             ):
                 event_block = _normalize_sse_event_block(event_block)
@@ -830,7 +1400,107 @@ async def stream_responses(
                     if event_type in ("response.completed", "response.failed", "response.incomplete"):
                         seen_terminal = True
                 yield event_block
-    except ProxyResponseError:
+                if seen_terminal:
+                    break
+
+    _maybe_log_upstream_request_start(
+        kind="responses",
+        url=url,
+        headers=upstream_headers,
+        method=method,
+        payload_summary=_summarize_json_payload(payload_dict),
+        payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+        if settings.log_upstream_request_payload
+        else None,
+    )
+    try:
+        if transport == "websocket":
+            try:
+                async for event_block in _stream_responses_via_websocket(
+                    payload_dict=payload_dict,
+                    url=url,
+                    headers=upstream_headers,
+                    client_session=client_session,
+                    effective_total_timeout=(remaining_request_timeout or settings.proxy_request_budget_seconds),
+                    effective_connect_timeout=effective_connect_timeout,
+                    effective_idle_timeout=effective_idle_timeout,
+                    max_event_bytes=settings.max_sse_event_bytes,
+                    raise_for_status=raise_for_status,
+                ):
+                    if status_code is None:
+                        status_code = 101
+                    event = parse_sse_event(event_block)
+                    if event:
+                        event_type = event.type
+                        if event_type in ("response.completed", "response.failed", "response.incomplete"):
+                            seen_terminal = True
+                    yield event_block
+                    if seen_terminal:
+                        break
+            except aiohttp.WSServerHandshakeError as exc:
+                if not _should_fallback_to_http_after_websocket_handshake_error(transport_mode, exc):
+                    error_payload = _error_payload_from_websocket_handshake_error(exc)
+                    error_code, error_message = _error_details_from_envelope(error_payload)
+                    status_code = exc.status
+                    if error_message is None:
+                        error_message = exc.message or str(exc)
+                    if error_code is None:
+                        error_code = "upstream_error"
+                    if raise_for_status:
+                        raise ProxyResponseError(exc.status, error_payload) from exc
+                    yield format_sse_event(
+                        response_failed_event(error_code, error_message, response_id=get_request_id())
+                    )
+                    return
+
+                logger.warning(
+                    "upstream_websocket_handshake_rejected request_id=%s status=%s target=%s retrying_transport=http",
+                    get_request_id(),
+                    exc.status,
+                    _summarize_upstream_target(url),
+                )
+                _maybe_log_upstream_request_complete(
+                    kind="responses",
+                    url=url,
+                    headers=upstream_headers,
+                    method=method,
+                    started_at=started_at,
+                    status_code=exc.status,
+                    error_code="upstream_websocket_handshake_rejected",
+                    error_message=str(exc),
+                )
+
+                transport = "http"
+                upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+                method = "POST"
+                remaining_request_timeout = _remaining_total_timeout(
+                    request_total_timeout,
+                    pre_request_started_at,
+                    time.monotonic(),
+                )
+                timeout = aiohttp.ClientTimeout(
+                    total=remaining_request_timeout,
+                    sock_connect=effective_connect_timeout,
+                    sock_read=None,
+                )
+                started_at = time.monotonic()
+                _maybe_log_upstream_request_start(
+                    kind="responses",
+                    url=url,
+                    headers=upstream_headers,
+                    method=method,
+                    payload_summary=_summarize_json_payload(payload_dict),
+                    payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+                    if settings.log_upstream_request_payload
+                    else None,
+                )
+                async for event_block in _stream_via_http(upstream_headers, timeout):
+                    yield event_block
+        else:
+            async for event_block in _stream_via_http(upstream_headers, timeout):
+                yield event_block
+    except ProxyResponseError as exc:
+        status_code = exc.status_code
         raise
     except StreamIdleTimeoutError:
         error_code = "stream_idle_timeout"
@@ -863,6 +1533,24 @@ async def stream_responses(
         return
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError as exc:
+        if isinstance(exc, aiohttp.ClientError):
+            error_code = "upstream_unavailable"
+            error_message = str(exc) or "Request to upstream timed out"
+            yield format_sse_event(
+                response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+            )
+            return
+        error_code = "upstream_request_timeout"
+        error_message = "Proxy request budget exhausted"
+        yield format_sse_event(
+            response_failed_event(
+                "upstream_request_timeout",
+                "Proxy request budget exhausted",
+                response_id=get_request_id(),
+            ),
+        )
+        return
     except Exception as exc:
         error_code = "upstream_error"
         error_message = str(exc)
@@ -884,11 +1572,102 @@ async def stream_responses(
             kind="responses",
             url=url,
             headers=upstream_headers,
+            method=method,
             started_at=started_at,
             status_code=status_code,
             error_code=error_code,
             error_message=error_message,
         )
+
+
+def push_stream_timeout_overrides(
+    *,
+    connect_timeout_seconds: float | None = None,
+    idle_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+]:
+    previous = (
+        _STREAM_CONNECT_TIMEOUT_OVERRIDE.get(),
+        _STREAM_IDLE_TIMEOUT_OVERRIDE.get(),
+        _STREAM_TOTAL_TIMEOUT_OVERRIDE.get(),
+    )
+    _STREAM_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds)
+    _STREAM_IDLE_TIMEOUT_OVERRIDE.set(idle_timeout_seconds)
+    _STREAM_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds)
+    return previous
+
+
+def pop_stream_timeout_overrides(
+    tokens: tuple[
+        float | None,
+        float | None,
+        float | None,
+    ],
+) -> None:
+    connect_timeout, idle_timeout, total_timeout = tokens
+    _STREAM_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout)
+    _STREAM_IDLE_TIMEOUT_OVERRIDE.set(idle_timeout)
+    _STREAM_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout)
+
+
+@contextlib.contextmanager
+def override_stream_timeouts(
+    *,
+    connect_timeout_seconds: float | None = None,
+    idle_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+):
+    tokens = push_stream_timeout_overrides(
+        connect_timeout_seconds=connect_timeout_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+    try:
+        yield
+    finally:
+        pop_stream_timeout_overrides(tokens)
+
+
+def push_compact_timeout_overrides(
+    *,
+    connect_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+) -> tuple[contextvars.Token[float | None], contextvars.Token[float | None]]:
+    return (
+        _COMPACT_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds),
+        _COMPACT_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds),
+    )
+
+
+def pop_compact_timeout_overrides(
+    tokens: tuple[contextvars.Token[float | None], contextvars.Token[float | None]],
+) -> None:
+    connect_token, total_token = tokens
+    _COMPACT_CONNECT_TIMEOUT_OVERRIDE.reset(connect_token)
+    _COMPACT_TOTAL_TIMEOUT_OVERRIDE.reset(total_token)
+
+
+def push_transcribe_timeout_overrides(
+    *,
+    connect_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+) -> tuple[contextvars.Token[float | None], contextvars.Token[float | None]]:
+    return (
+        _TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds),
+        _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds),
+    )
+
+
+def pop_transcribe_timeout_overrides(
+    tokens: tuple[contextvars.Token[float | None], contextvars.Token[float | None]],
+) -> None:
+    connect_token, total_token = tokens
+    _TRANSCRIBE_CONNECT_TIMEOUT_OVERRIDE.reset(connect_token)
+    _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE.reset(total_token)
 
 
 async def compact_responses(
@@ -897,46 +1676,91 @@ async def compact_responses(
     access_token: str,
     account_id: str | None,
     session: aiohttp.ClientSession | None = None,
-) -> OpenAIResponsePayload:
-    settings = get_settings()
-    upstream_base = settings.upstream_base_url.rstrip("/")
-    url = f"{upstream_base}/codex/responses/compact"
-    upstream_headers = _build_upstream_headers(
-        headers,
-        access_token,
-        account_id,
-        accept="application/json",
+) -> CompactResponsePayload:
+    transport = _CompactCommandTransport(
+        payload=payload,
+        headers=headers,
+        access_token=access_token,
+        account_id=account_id,
+        session=session or get_http_client().session,
     )
-    timeout = aiohttp.ClientTimeout(
-        total=60,
-        sock_connect=settings.upstream_connect_timeout_seconds,
-        sock_read=60,
-    )
+    return await transport.execute()
 
-    client_session = session or get_http_client().session
-    proxy_kwargs = await get_http_proxy_request_kwargs()
-    payload_dict = payload.to_payload()
-    if settings.image_inline_fetch_enabled:
-        payload_dict = await _inline_input_image_urls(
-            payload_dict,
-            _as_image_fetch_session(client_session),
-            settings.upstream_connect_timeout_seconds,
+
+def _is_retryable_compact_status(status_code: int) -> bool:
+    return status_code in {401, 502, 503, 504}
+
+
+@dataclass(slots=True)
+class _CompactCommandTransport:
+    payload: ResponsesCompactRequest
+    headers: Mapping[str, str]
+    access_token: str
+    account_id: str | None
+    session: aiohttp.ClientSession
+
+    async def execute(self) -> CompactResponsePayload:
+        settings = get_settings()
+        upstream_base = settings.upstream_base_url.rstrip("/")
+        url = f"{upstream_base}/codex/responses/compact"
+        upstream_headers = _build_upstream_headers(
+            self.headers,
+            self.access_token,
+            self.account_id,
+            accept="application/json",
         )
-    started_at = time.monotonic()
-    status_code: int | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-    _maybe_log_upstream_request_start(
-        kind="responses_compact",
-        url=url,
-        headers=upstream_headers,
-        payload_summary=_summarize_json_payload(payload_dict),
-        payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
-        else None,
-    )
-    try:
-        async with client_session.post(
+        pre_request_started_at = time.monotonic()
+        compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
+        effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
+        proxy_kwargs = await get_http_proxy_request_kwargs()
+    payload_dict = self.payload.to_payload()
+        if settings.image_inline_fetch_enabled:
+            payload_dict = await _inline_input_image_urls(
+                payload_dict,
+                _as_image_fetch_session(self.session),
+                effective_connect_timeout,
+            )
+        now = time.monotonic()
+        compact_timeout_seconds = _remaining_total_timeout(
+            compact_timeout_seconds,
+            pre_request_started_at,
+            now,
+        )
+        effective_connect_timeout = max(
+            0.001,
+            _remaining_total_timeout(
+                effective_connect_timeout,
+                pre_request_started_at,
+                now,
+            )
+            or effective_connect_timeout,
+        )
+        timeout = aiohttp.ClientTimeout(
+            total=compact_timeout_seconds,
+            sock_connect=effective_connect_timeout,
+            sock_read=compact_timeout_seconds,
+        )
+        started_at = time.monotonic()
+        status_code: int | None = None
+        error_code: str | None = None
+        error_message: str | None = None
+        failure_phase: str | None = None
+        payload_object: str | None = None
+        failure_detail: str | None = None
+        failure_exception_type: str | None = None
+        retryable_same_contract: bool | None = None
+        _maybe_log_upstream_request_start(
+            kind="responses_compact",
+            url=url,
+            headers=upstream_headers,
+            method="POST",
+            payload_summary=_summarize_json_payload(payload_dict),
+            payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+            if settings.log_upstream_request_payload
+            else None,
+        )
+        try:
+            async with self.session.post(
             url,
             json=payload_dict,
             headers=upstream_headers,
@@ -947,42 +1771,106 @@ async def compact_responses(
             if resp.status >= 400:
                 error_payload = await _error_payload_from_response(resp)
                 error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(resp.status, error_payload)
-            try:
-                data = await resp.json(content_type=None)
-            except Exception as exc:
+                failure_phase = "status"
+                    failure_detail = error_message
+                    retryable_same_contract = _is_retryable_compact_status(resp.status)
+                    raise ProxyResponseError(
+                        resp.status,
+                        error_payload,
+                        failure_phase=failure_phase,
+                        retryable_same_contract=retryable_same_contract,
+                        failure_detail=failure_detail,
+                        upstream_status_code=resp.status,
+                    )
+                try:
+                    data = await resp.json(content_type=None)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    message = str(exc) or "Request to upstream timed out"
+                    error_code = "upstream_unavailable"
+                    error_message = message
+                    failure_phase = "body_read"
+                    failure_detail = message
+                    failure_exception_type = type(exc).__name__
+                    retryable_same_contract = True
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_unavailable", message),
+                        failure_phase=failure_phase,
+                        retryable_same_contract=retryable_same_contract,
+                        failure_detail=failure_detail,
+                        failure_exception_type=failure_exception_type,
+                        upstream_status_code=resp.status,
+                    ) from exc
+                except Exception as exc:
+                    error_code = "upstream_error"
+                    error_message = "Invalid JSON from upstream"
+                    failure_phase = "parse"
+                    failure_detail = str(exc) or error_message
+                    failure_exception_type = type(exc).__name__
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_error", "Invalid JSON from upstream"),
+                        failure_phase=failure_phase,
+                        failure_detail=failure_detail,
+                        failure_exception_type=failure_exception_type,
+                        upstream_status_code=resp.status,
+                    ) from exc
+                parsed = parse_compact_response_payload(data)
+                if parsed:
+                    payload_object = parsed.object
+                    return parsed
+                error_code = "upstream_error"
+                error_message = "Unexpected upstream payload"
+                failure_phase = "parse"
+                failure_detail = f"payload_type={type(data).__name__}"
                 raise ProxyResponseError(
                     502,
-                    openai_error("upstream_error", "Invalid JSON from upstream"),
-                ) from exc
-            parsed = parse_response_payload(data)
-            if parsed:
-                return parsed
+                    openai_error("upstream_error", "Unexpected upstream payload"),
+                    failure_phase=failure_phase,
+                    failure_detail=failure_detail,
+                    upstream_status_code=resp.status,
+                )
+        except ProxyResponseError as exc:
+            if error_code is None and error_message is None:
+                error_code, error_message = _error_details_from_envelope(exc.payload)
+            failure_phase = failure_phase or exc.failure_phase
+            failure_detail = failure_detail or exc.failure_detail
+            failure_exception_type = failure_exception_type or exc.failure_exception_type
+            if retryable_same_contract is None:
+                retryable_same_contract = exc.retryable_same_contract
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            message = str(exc) or "Request to upstream timed out"
+            error_code = "upstream_unavailable"
+            error_message = message
+            failure_phase = "connect"
+            failure_detail = message
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
             raise ProxyResponseError(
                 502,
-                openai_error("upstream_error", "Unexpected upstream payload"),
+                openai_error("upstream_unavailable", message),
+                failure_phase=failure_phase,
+                retryable_same_contract=retryable_same_contract,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+            ) from exc
+        finally:
+            _maybe_log_upstream_request_complete(
+                kind="responses_compact",
+                url=url,
+                headers=upstream_headers,
+                method="POST",
+                started_at=started_at,
+                status_code=status_code,
+                error_code=error_code,
+                error_message=error_message,
+                failure_phase=failure_phase,
+                payload_object=payload_object,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                retryable_same_contract=retryable_same_contract,
             )
-    except ProxyResponseError as exc:
-        if error_code is None and error_message is None:
-            error_code, error_message = _error_details_from_envelope(exc.payload)
-        raise
-    except aiohttp.ClientError as exc:
-        error_code = "upstream_unavailable"
-        error_message = str(exc)
-        raise ProxyResponseError(
-            502,
-            openai_error("upstream_unavailable", str(exc)),
-        ) from exc
-    finally:
-        _maybe_log_upstream_request_complete(
-            kind="responses_compact",
-            url=url,
-            headers=upstream_headers,
-            started_at=started_at,
-            status_code=status_code,
-            error_code=error_code,
-            error_message=error_message,
-        )
 
 
 async def transcribe_audio(
@@ -1010,10 +1898,14 @@ async def transcribe_audio(
         if header_name.lower() == "content-type":
             upstream_headers.pop(header_name, None)
 
+    effective_total_timeout = _effective_transcribe_total_timeout(
+        settings.transcription_request_budget_seconds,
+    )
+    effective_connect_timeout = _effective_transcribe_connect_timeout(settings.upstream_connect_timeout_seconds)
     timeout = aiohttp.ClientTimeout(
-        total=120,
-        sock_connect=settings.upstream_connect_timeout_seconds,
-        sock_read=120,
+        total=effective_total_timeout,
+        sock_connect=effective_connect_timeout,
+        sock_read=effective_total_timeout,
     )
 
     normalized_filename = filename.strip() if filename else ""
@@ -1049,6 +1941,7 @@ async def transcribe_audio(
         kind="transcribe",
         url=url,
         headers=upstream_headers,
+        method="POST",
         payload_summary=json.dumps(metadata, ensure_ascii=True, separators=(",", ":")),
         payload_json=json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
         if settings.log_upstream_request_payload
@@ -1107,6 +2000,7 @@ async def transcribe_audio(
             kind="transcribe",
             url=url,
             headers=upstream_headers,
+            method="POST",
             started_at=started_at,
             status_code=status_code,
             error_code=error_code,

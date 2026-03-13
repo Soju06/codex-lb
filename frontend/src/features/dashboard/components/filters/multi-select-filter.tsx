@@ -11,10 +11,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 
 export type MultiSelectOption = {
   value: string;
   label: string;
+  /** When true the label text gets CSS-blurred in privacy mode. */
+  isEmail?: boolean;
 };
 
 type RenderedOption = MultiSelectOption & {
@@ -29,6 +32,7 @@ export type MultiSelectFilterProps = {
 };
 
 export function MultiSelectFilter({ label, values, options, onChange }: MultiSelectFilterProps) {
+  const blurred = usePrivacyStore((s) => s.blurred);
   const renderedOptions = useMemo<RenderedOption[]>(() => {
     const byValue = new Map<string, RenderedOption>();
     for (const option of options) {
@@ -46,11 +50,6 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
     return [...byValue.values()];
   }, [options, values]);
 
-  const labelByValue = useMemo(() => {
-    const pairs = renderedOptions.map((option) => [option.value, option.label] as const);
-    return new Map<string, string>(pairs);
-  }, [renderedOptions]);
-
   const toggleValue = (value: string) => {
     if (values.includes(value)) {
       onChange(values.filter((entry) => entry !== value));
@@ -67,7 +66,12 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
     values.length === 0
       ? label
       : values.length === 1
-        ? labelByValue.get(values[0]) ?? values[0]
+        ? (() => {
+            const opt = renderedOptions.find((o) => o.value === values[0]);
+            const text = opt?.label ?? values[0];
+            const shouldBlur = blurred && opt?.isEmail;
+            return shouldBlur ? <span className="privacy-blur">{text}</span> : text;
+          })()
         : `${label} (${values.length})`;
 
   return (
@@ -92,7 +96,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
               onSelect={(e) => e.preventDefault()}
             >
               <span className="flex min-w-0 flex-1 items-center gap-2">
-                <span className="truncate">{option.label}</span>
+                <span className={blurred && option.isEmail ? "truncate privacy-blur" : "truncate"}>{option.label}</span>
                 {option.isStale ? (
                   <Badge variant="secondary" className="text-[10px]">
                     Stale

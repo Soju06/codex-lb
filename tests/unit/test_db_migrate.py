@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from app.db.migrate import (
 )
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
+from app.modules.usage.additional_quota_keys import clear_additional_quota_registry_cache
 
 
 def _db_url(path: Path) -> str:
@@ -74,6 +76,27 @@ def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypa
     base_revision = OLD_TO_NEW_REVISION_MAP["000_base_schema"]
     result = run_upgrade(url, base_revision, bootstrap_legacy=False)
     assert result.current_revision == base_revision
+
+
+def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path) -> None:
+    db_path = tmp_path / "request-logs-transport.db"
+    url = _db_url(db_path)
+    base_revision = OLD_TO_NEW_REVISION_MAP["000_base_schema"]
+    transport_revision = "20260310_000000_add_request_logs_transport"
+
+    run_upgrade(url, base_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+        assert "transport" in columns
+
+    result = run_upgrade(url, transport_revision, bootstrap_legacy=False)
+    assert result.current_revision == transport_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+        assert "transport" in columns
 
 
 def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
@@ -195,6 +218,160 @@ def test_run_upgrade_repairs_branched_legacy_revision_ids_with_parallel_head(tmp
 
     result = run_upgrade(url, "head", bootstrap_legacy=False)
     assert result.current_revision == inspect_migration_state(url).head_revision
+
+
+def test_run_upgrade_backfills_additional_usage_quota_key_from_configured_registry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "quota-registry.db"
+    url = _db_url(db_path)
+    registry_path = tmp_path / "additional_quota_registry.json"
+    registry_path.write_text(
+        json.dumps(
+            [
+                {
+                    "quota_key": "spark_enterprise",
+                    "display_label": "Spark Enterprise",
+                    "limit_name_aliases": ["codex_other"],
+                    "metered_feature_aliases": ["codex_bengalfox"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry_path))
+    clear_additional_quota_registry_cache()
+
+    run_upgrade(url, "20260309_000000_add_additional_usage_history", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    recorded_at = datetime.now(timezone.utc)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO accounts (
+                    id,
+                    email,
+                    plan_type,
+                    access_token_encrypted,
+                    refresh_token_encrypted,
+                    id_token_encrypted,
+                    last_refresh,
+                    status,
+                    deactivation_reason,
+                    chatgpt_account_id,
+                    reset_at
+                ) VALUES (
+                    :id,
+                    :email,
+                    :plan_type,
+                    :access_token_encrypted,
+                    :refresh_token_encrypted,
+                    :id_token_encrypted,
+                    :last_refresh,
+                    :status,
+                    :deactivation_reason,
+                    :chatgpt_account_id,
+                    :reset_at
+                )
+                """
+            ),
+            {
+                "id": "acc_registry",
+                "email": "registry@example.com",
+                "plan_type": "plus",
+                "access_token_encrypted": b"access",
+                "refresh_token_encrypted": b"refresh",
+                "id_token_encrypted": b"id",
+                "last_refresh": recorded_at,
+                "status": "active",
+                "deactivation_reason": None,
+                "chatgpt_account_id": None,
+                "reset_at": None,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO additional_usage_history (
+                    account_id,
+                    limit_name,
+                    metered_feature,
+                    window,
+                    used_percent,
+                    reset_at,
+                    window_minutes,
+                    recorded_at
+                ) VALUES (
+                    :account_id,
+                    :limit_name,
+                    :metered_feature,
+                    :window,
+                    :used_percent,
+                    :reset_at,
+                    :window_minutes,
+                    :recorded_at
+                )
+                """
+            ),
+            {
+                "account_id": "acc_registry",
+                "limit_name": "codex_other",
+                "metered_feature": "codex_bengalfox",
+                "window": "primary",
+                "used_percent": 12.5,
+                "reset_at": None,
+                "window_minutes": 60,
+                "recorded_at": recorded_at,
+            },
+        )
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        quota_key = connection.execute(text("SELECT quota_key FROM additional_usage_history")).scalar_one()
+
+    assert quota_key == "spark_enterprise"
+    clear_additional_quota_registry_cache()
+
+
+def test_run_upgrade_rejects_duplicate_additional_quota_aliases_in_registry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "quota-registry-invalid.db"
+    url = _db_url(db_path)
+    registry_path = tmp_path / "additional_quota_registry.json"
+    registry_path.write_text(
+        json.dumps(
+            [
+                {
+                    "quota_key": "spark_enterprise",
+                    "display_label": "Spark Enterprise",
+                    "limit_name_aliases": ["codex_other"],
+                },
+                {
+                    "quota_key": "spark_enterprise_backup",
+                    "display_label": "Spark Enterprise Backup",
+                    "limit_name_aliases": ["codex_other"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry_path))
+    clear_additional_quota_registry_cache()
+
+    run_upgrade(url, "20260309_000000_add_additional_usage_history", bootstrap_legacy=False)
+
+    with pytest.raises(ValueError, match="duplicate additional quota alias"):
+        run_upgrade(url, "head", bootstrap_legacy=False)
+
+    clear_additional_quota_registry_cache()
 
 
 def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) -> None:

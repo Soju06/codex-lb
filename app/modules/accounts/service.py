@@ -5,6 +5,7 @@ import json
 import zipfile
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import cast
 
 from pydantic import ValidationError
 
@@ -28,13 +29,16 @@ from app.modules.accounts.repository import AccountIdentityConflictError, Accoun
 from app.modules.accounts.schemas import (
     AccountImportBatchResponse,
     AccountImportFailure,
+    AccountAdditionalQuota,
+    AccountAdditionalWindow,
     AccountImportResponse,
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
 )
-from app.modules.usage.repository import UsageRepository
-from app.modules.usage.updater import UsageUpdater
+from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 from app.core.auth.refresh import RefreshError, TokenRefreshResult, refresh_access_token
 
 _SPARKLINE_DAYS = 7
@@ -63,10 +67,12 @@ class AccountsService:
         self,
         repo: AccountsRepository,
         usage_repo: UsageRepository | None = None,
+        additional_usage_repo: AdditionalUsageRepository | AdditionalUsageRepositoryPort | None = None,
     ) -> None:
         self._repo = repo
         self._usage_repo = usage_repo
-        self._usage_updater = UsageUpdater(usage_repo, repo) if usage_repo else None
+        self._additional_usage_repo = additional_usage_repo
+        self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
         self._auth_manager = AuthManager(repo)
 
@@ -74,11 +80,11 @@ class AccountsService:
         accounts = await self._repo.list_accounts()
         if not accounts:
             return []
+        account_ids = [account.id for account in accounts]
+        account_id_set = set(account_ids)
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
-        request_usage_rows = await self._repo.list_request_usage_summary_by_account(
-            [account.id for account in accounts]
-        )
+        request_usage_rows = await self._repo.list_request_usage_summary_by_account(account_ids)
         request_usage_by_account = {
             account_id: AccountRequestUsage(
                 request_count=row.request_count,
@@ -88,12 +94,51 @@ class AccountsService:
             )
             for account_id, row in request_usage_rows.items()
         }
+        additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] = {}
+        additional_usage_repo = cast(AdditionalUsageRepository | None, self._additional_usage_repo)
+        if additional_usage_repo:
+            quota_keys = await additional_usage_repo.list_quota_keys(account_ids=account_ids)
+            for quota_key in quota_keys:
+                primary_entries = await additional_usage_repo.latest_by_account(quota_key, "primary")
+                secondary_entries = await additional_usage_repo.latest_by_account(quota_key, "secondary")
+                for account_id in (set(primary_entries) | set(secondary_entries)) & account_id_set:
+                    primary_entry = primary_entries.get(account_id)
+                    secondary_entry = secondary_entries.get(account_id)
+                    reference_entry = primary_entry or secondary_entry
+                    if reference_entry is None:
+                        continue
+                    additional_quotas_by_account.setdefault(account_id, []).append(
+                        AccountAdditionalQuota(
+                            quota_key=quota_key,
+                            limit_name=reference_entry.limit_name,
+                            metered_feature=reference_entry.metered_feature,
+                            display_label=get_additional_display_label_for_quota_key(quota_key)
+                            or reference_entry.limit_name,
+                            primary_window=AccountAdditionalWindow(
+                                used_percent=primary_entry.used_percent,
+                                reset_at=primary_entry.reset_at,
+                                window_minutes=primary_entry.window_minutes,
+                            )
+                            if primary_entry is not None
+                            else None,
+                            secondary_window=AccountAdditionalWindow(
+                                used_percent=secondary_entry.used_percent,
+                                reset_at=secondary_entry.reset_at,
+                                window_minutes=secondary_entry.window_minutes,
+                            )
+                            if secondary_entry is not None
+                            else None,
+                        )
+                    )
+        for account_quota_list in additional_quotas_by_account.values():
+            account_quota_list.sort(key=lambda quota: quota.display_label or quota.quota_key or quota.limit_name)
 
         return build_account_summaries(
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
             request_usage_by_account=request_usage_by_account,
+            additional_quotas_by_account=additional_quotas_by_account,
             encryptor=self._encryptor,
         )
 

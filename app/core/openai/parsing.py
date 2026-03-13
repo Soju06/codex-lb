@@ -2,13 +2,20 @@ from __future__ import annotations
 
 from pydantic import TypeAdapter, ValidationError
 
-from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, OpenAIEvent, OpenAIResponsePayload
+from app.core.openai.models import (
+    CompactResponsePayload,
+    OpenAIError,
+    OpenAIErrorEnvelope,
+    OpenAIEvent,
+    OpenAIResponsePayload,
+)
 from app.core.types import JsonValue
 from app.core.utils.sse import parse_sse_data_json
 
 _EVENT_ADAPTER = TypeAdapter(OpenAIEvent)
 _ERROR_ADAPTER = TypeAdapter(OpenAIErrorEnvelope)
 _RESPONSE_ADAPTER = TypeAdapter(OpenAIResponsePayload)
+_COMPACT_RESPONSE_ADAPTER = TypeAdapter(CompactResponsePayload)
 
 
 def parse_sse_event(line: str) -> OpenAIEvent | None:
@@ -36,5 +43,14 @@ def parse_response_payload(payload: JsonValue) -> OpenAIResponsePayload | None:
         return None
     try:
         return _RESPONSE_ADAPTER.validate_python(payload)
+    except ValidationError:
+        return None
+
+
+def parse_compact_response_payload(payload: JsonValue) -> CompactResponsePayload | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return _COMPACT_RESPONSE_ADAPTER.validate_python(payload)
     except ValidationError:
         return None

@@ -40,15 +40,19 @@ async def validate_proxy_api_key(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> ApiKeyData | None:
     _validate_optional_proxy_key_header(request)
+    authorization = None if credentials is None else f"Bearer {credentials.credentials}"
+    return await validate_proxy_api_key_authorization(authorization)
 
+
+async def validate_proxy_api_key_authorization(authorization: str | None) -> ApiKeyData | None:
     settings = await get_settings_cache().get()
     if not settings.api_key_auth_enabled:
         return None
 
-    if not credentials:
+    token = _extract_bearer_token(authorization)
+    if not token:
         raise ProxyAuthError("Missing API key in Authorization header")
 
-    token = credentials.credentials
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         try:

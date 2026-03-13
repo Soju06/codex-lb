@@ -87,7 +87,33 @@ model_provider = "codex-lb"
 name = "OpenAI"  # required — enables remote /responses/compact
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
+supports_websockets = true
 ```
+
+Optional: enable native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling:
+
+```bash
+export CODEX_LB_UPSTREAM_STREAM_TRANSPORT=websocket
+```
+
+`auto` is the default and uses native WebSockets for native Codex headers or models that prefer them.
+You can also switch this in the dashboard under Settings -> Routing -> Upstream stream transport.
+
+Note: Codex itself does not currently expose a stable documented `wire_api = "websocket"` provider mode.
+If you want to experiment on the Codex side, the current CLI exposes under-development feature flags:
+
+```toml
+[features]
+responses_websockets = true
+# or
+responses_websockets_v2 = true
+```
+
+These flags are experimental and do not replace `wire_api = "responses"`.
+
+If upstream websocket handshakes must use environment proxies in your deployment, set
+`CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=true`. By default websocket handshakes connect directly to
+match Codex CLI's native transport.
 
 **With [API key auth](#api-key-authentication):**
 
@@ -97,12 +123,29 @@ name = "OpenAI"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
+supports_websockets = true
 ```
 
 ```bash
 export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
 codex
 ```
+
+**Verify WebSocket transport**
+
+Use a one-off debug run:
+
+```bash
+RUST_LOG=debug codex exec "Reply with OK only."
+```
+
+Healthy websocket signals:
+
+- CLI logs contain `connecting to websocket` and `successfully connected to websocket`
+- `codex-lb` logs show `WebSocket /backend-api/codex/responses`
+- `codex-lb` logs do **not** show fallback `POST /backend-api/codex/responses` for the same run
+
+If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket upgrades.
 
 **Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
 old sessions won't appear until you re-tag them:
@@ -303,6 +346,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="http://hextra.us"><img src="https://avatars.githubusercontent.com/u/88663250?v=4?s=100" width="100px;" alt="Quang Do"/><br /><sub><b>Quang Do</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=quangdo126" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=quangdo126" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/aaiyer"><img src="https://avatars.githubusercontent.com/u/426027?v=4?s=100" width="100px;" alt="Anand Aiyer"/><br /><sub><b>Anand Aiyer</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/issues?q=author%3Aaaiyer" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aaiyer" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aaiyer" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/defin85"><img src="https://avatars.githubusercontent.com/u/31535407?v=4?s=100" width="100px;" alt="defin85"/><br /><sub><b>defin85</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=defin85" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Adefin85" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=defin85" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://linktree.huzky.dev/"><img src="https://avatars.githubusercontent.com/u/194083329?v=4?s=100" width="100px;" alt="Jacky Fong"/><br /><sub><b>Jacky Fong</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=huzky-v" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/flokosti96"><img src="https://avatars.githubusercontent.com/u/144428350?v=4?s=100" width="100px;" alt="flokosti96"/><br /><sub><b>flokosti96</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=flokosti96" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=flokosti96" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

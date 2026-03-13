@@ -1,6 +1,8 @@
 import { Inbox } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { isEmailLabel } from "@/components/blur-email";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +39,16 @@ const STATUS_CLASS_MAP: Record<string, string> = {
   error: "bg-zinc-500/15 text-zinc-700 border-zinc-500/20 hover:bg-zinc-500/20 dark:text-zinc-400",
 };
 
+const TRANSPORT_LABELS: Record<string, string> = {
+  http: "HTTP",
+  websocket: "WS",
+};
+
+const TRANSPORT_CLASS_MAP: Record<string, string> = {
+  http: "bg-slate-500/10 text-slate-700 border-slate-500/20 hover:bg-slate-500/15 dark:text-slate-300",
+  websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
+};
+
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
@@ -59,6 +71,7 @@ export function RecentRequestsTable({
   onOffsetChange,
 }: RecentRequestsTableProps) {
   const [viewingError, setViewingError] = useState<string | null>(null);
+  const blurred = usePrivacyStore((s) => s.blurred);
 
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
@@ -66,6 +79,18 @@ export function RecentRequestsTable({
       index.set(account.accountId, account.displayName || account.email || account.accountId);
     }
     return index;
+  }, [accounts]);
+
+  /** Account IDs whose label is an email. */
+  const emailLabelIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const account of accounts) {
+      const label = account.displayName || account.email;
+      if (isEmailLabel(label, account.email)) {
+        ids.add(account.accountId);
+      }
+    }
+    return ids;
   }, [accounts]);
 
   if (requests.length === 0) {
@@ -82,13 +107,14 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="min-w-[960px] table-fixed">
+        <Table className="min-w-[1040px] table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
+              <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
@@ -99,6 +125,7 @@ export function RecentRequestsTable({
             {requests.map((request) => {
               const time = formatTimeLong(request.requestedAt);
               const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
+              const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorMessage = request.errorMessage || request.errorCode || "-";
               const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
 
@@ -111,7 +138,11 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell>
                   <TableCell className="truncate align-top text-sm">
-                    {accountLabel}
+                    {isEmailLabel && blurred ? (
+                      <span className="privacy-blur">{accountLabel}</span>
+                    ) : (
+                      accountLabel
+                    )}
                   </TableCell>
                   <TableCell className="truncate align-top text-xs text-muted-foreground">
                     {request.apiKeyName || "--"}
@@ -120,6 +151,18 @@ export function RecentRequestsTable({
                     <span className="font-mono text-xs">
                       {formatModelLabel(request.model, request.reasoningEffort, request.serviceTier)}
                     </span>
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {request.transport ? (
+                      <Badge
+                        variant="outline"
+                        className={TRANSPORT_CLASS_MAP[request.transport] ?? TRANSPORT_CLASS_MAP.http}
+                      >
+                        {TRANSPORT_LABELS[request.transport] ?? request.transport}
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">--</span>
+                    )}
                   </TableCell>
                   <TableCell className="align-top">
                     <Badge

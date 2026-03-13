@@ -10,6 +10,7 @@ import {
 } from "recharts";
 
 import { useChartColors } from "@/hooks/use-chart-colors";
+import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import type { UsageTrendPoint } from "@/features/accounts/schemas";
 
 type MergedPoint = {
@@ -90,6 +91,7 @@ export type AccountTrendChartProps = {
 
 export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps) {
   const chartColors = useChartColors();
+  const reducedMotion = useReducedMotion();
   const c1 = chartColors[0];
   const c2 = chartColors[1];
   const data = useMemo(() => mergePoints(primary, secondary), [primary, secondary]);
@@ -119,7 +121,7 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
         <XAxis
           dataKey="t"
           tickFormatter={formatXTick}
-          tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
           tickLine={false}
           axisLine={false}
           minTickGap={50}
@@ -129,7 +131,7 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
           domain={[0, 100]}
           ticks={[0, 25, 50, 75, 100]}
           tickFormatter={(v: number) => `${v}%`}
-          tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
           tickLine={false}
           axisLine={false}
           width={38}
@@ -146,7 +148,7 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
           fill="url(#trend-primary)"
           dot={false}
           activeDot={{ r: 3, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
-          isAnimationActive
+          isAnimationActive={!reducedMotion}
           animationDuration={500}
         />
         <Area
@@ -157,7 +159,7 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
           fill="url(#trend-secondary)"
           dot={false}
           activeDot={{ r: 3, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
-          isAnimationActive
+          isAnimationActive={!reducedMotion}
           animationDuration={500}
           animationBegin={100}
         />

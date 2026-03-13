@@ -9,6 +9,7 @@ import {
   formatCurrency,
   formatPercentNullable,
   formatQuotaResetLabel,
+  formatWindowLabel,
 } from "@/utils/formatters";
 
 export type AccountUsagePanelProps = {
@@ -60,6 +61,67 @@ function QuotaRow({
   );
 }
 
+const ADDITIONAL_LIMIT_LABELS: Record<string, string> = {
+  codex_spark: "GPT-5.3-Codex-Spark",
+  codex_other: "GPT-5.3-Codex-Spark",
+  "gpt-5.3-codex-spark": "GPT-5.3-Codex-Spark",
+};
+
+function formatAdditionalLimitName(limitName: string, quotaKey?: string | null): string {
+  const normalizedQuotaKey = quotaKey?.trim().toLowerCase();
+  if (normalizedQuotaKey && ADDITIONAL_LIMIT_LABELS[normalizedQuotaKey]) {
+    return ADDITIONAL_LIMIT_LABELS[normalizedQuotaKey];
+  }
+  const normalized = limitName.trim().toLowerCase();
+  return ADDITIONAL_LIMIT_LABELS[normalized] ?? limitName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function formatResetCountdown(resetAt: number | null): string | null {
+  if (resetAt === null) return null;
+  const diffMs = resetAt * 1000 - Date.now();
+  if (diffMs <= 0) return "Resetting...";
+  if (diffMs >= 3600000) return `Resets in ${Math.floor(diffMs / 3600000)}h ${Math.floor((diffMs % 3600000) / 60000)}m`;
+  return `Resets in ${Math.floor(diffMs / 60000)}m`;
+}
+
+function AdditionalQuotaRow({
+  label,
+  usedPercent,
+  resetAt,
+}: {
+  label: string;
+  usedPercent: number;
+  resetAt: number | null;
+}) {
+  const clamped = Math.max(0, Math.min(100, usedPercent));
+  const countdown = formatResetCountdown(resetAt);
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="tabular-nums font-medium">{Math.round(usedPercent)}% used</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-muted">
+        <div
+          className={cn(
+            "h-full rounded-full transition-all",
+            clamped > 95
+              ? "bg-red-500"
+              : clamped > 80
+                ? "bg-orange-500"
+                : clamped > 60
+                  ? "bg-amber-500"
+                  : "bg-green-500",
+          )}
+          style={{ width: `${clamped}%` }}
+        />
+      </div>
+      {countdown ? <p className="text-[11px] text-muted-foreground">{countdown}</p> : null}
+    </div>
+  );
+}
+
 export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
@@ -86,6 +148,34 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
           <p className="mt-1 text-xs text-muted-foreground">No request usage yet.</p>
         )}
       </div>
+      {account.additionalQuotas.length > 0 ? (
+        <div className="space-y-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Additional Quotas
+          </p>
+          {account.additionalQuotas.map((quota) => (
+            <div key={quota.quotaKey ?? quota.limitName} className="rounded-md border bg-background/60 px-3 py-2 space-y-2">
+              <p className="text-xs font-medium">
+                {quota.displayLabel ?? formatAdditionalLimitName(quota.limitName, quota.quotaKey)}
+              </p>
+              {quota.primaryWindow != null ? (
+                <AdditionalQuotaRow
+                  label={formatWindowLabel("primary", quota.primaryWindow.windowMinutes ?? null)}
+                  usedPercent={quota.primaryWindow.usedPercent}
+                  resetAt={quota.primaryWindow.resetAt ?? null}
+                />
+              ) : null}
+              {quota.secondaryWindow != null ? (
+                <AdditionalQuotaRow
+                  label={formatWindowLabel("secondary", quota.secondaryWindow.windowMinutes ?? null)}
+                  usedPercent={quota.secondaryWindow.usedPercent}
+                  resetAt={quota.secondaryWindow.resetAt ?? null}
+                />
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
       {hasTrends && (
         <div className="pt-3">
           <div className="mb-2 flex items-center justify-between">

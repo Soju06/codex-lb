@@ -27,9 +27,18 @@ class CreditsPayload(BaseModel):
     balance: str | None = None
 
 
+class AdditionalRateLimitPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    limit_name: str
+    metered_feature: str
+    rate_limit: RateLimitPayload | None = None
+
+
 class UsagePayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     plan_type: str | None = None
     rate_limit: RateLimitPayload | None = None
     credits: CreditsPayload | None = None
+    additional_rate_limits: list[AdditionalRateLimitPayload] | None = None

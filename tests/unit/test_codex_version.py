@@ -32,10 +32,11 @@ async def test_fetches_version_from_github():
     resp = _mock_response(json_data={"name": "1.2.3", "tag_name": "rust-v1.2.3"})
     session = _mock_session(resp)
 
-    with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
+    with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session) as client_session_cls:
         version = await cache.get_version()
 
     assert version == "1.2.3"
+    assert client_session_cls.call_args.kwargs["trust_env"] is True
 
 
 @pytest.mark.asyncio

@@ -76,8 +76,10 @@ async def get_settings(
     settings = await context.service.get_settings()
     return DashboardSettingsResponse(
         sticky_threads_enabled=settings.sticky_threads_enabled,
+        upstream_stream_transport=settings.upstream_stream_transport,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
         routing_strategy=settings.routing_strategy,
+        openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         import_without_overwrite=settings.import_without_overwrite,
         http_proxy_url=settings.http_proxy_url,
         totp_required_on_login=settings.totp_required_on_login,
@@ -101,8 +103,14 @@ async def update_settings(
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=payload.sticky_threads_enabled,
+                upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
                 prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
+                openai_cache_affinity_max_age_seconds=(
+                    payload.openai_cache_affinity_max_age_seconds
+                    if payload.openai_cache_affinity_max_age_seconds is not None
+                    else current.openai_cache_affinity_max_age_seconds
+                ),
                 import_without_overwrite=(
                     payload.import_without_overwrite
                     if payload.import_without_overwrite is not None
@@ -127,8 +135,10 @@ async def update_settings(
     await get_settings_cache().invalidate()
     return DashboardSettingsResponse(
         sticky_threads_enabled=updated.sticky_threads_enabled,
+        upstream_stream_transport=updated.upstream_stream_transport,
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
         routing_strategy=updated.routing_strategy,
+        openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
         import_without_overwrite=updated.import_without_overwrite,
         http_proxy_url=updated.http_proxy_url,
         totp_required_on_login=updated.totp_required_on_login,

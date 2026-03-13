@@ -42,7 +42,11 @@ frontend/coverage/
 certs/
 
 .codex-lb/
+.sisyphus/
 
 .specstory/
 
 .agents/hooks/state/
+.venv
+
+.omx/

@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config.settings import get_settings
 from app.db.models import DashboardSettings
 
 _SETTINGS_ID = 1
@@ -21,8 +22,10 @@ class SettingsRepository:
         row = DashboardSettings(
             id=_SETTINGS_ID,
             sticky_threads_enabled=False,
+            upstream_stream_transport="default",
             prefer_earlier_reset_accounts=False,
             routing_strategy="usage_weighted",
+            openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             import_without_overwrite=False,
             http_proxy_url=None,
             totp_required_on_login=False,
@@ -47,8 +50,10 @@ class SettingsRepository:
         self,
         *,
         sticky_threads_enabled: bool | None = None,
+        upstream_stream_transport: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
         routing_strategy: str | None = None,
+        openai_cache_affinity_max_age_seconds: int | None = None,
         import_without_overwrite: bool | None = None,
         http_proxy_url: str | None | object = _UNSET,
         totp_required_on_login: bool | None = None,
@@ -57,10 +62,14 @@ class SettingsRepository:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
             settings.sticky_threads_enabled = sticky_threads_enabled
+        if upstream_stream_transport is not None:
+            settings.upstream_stream_transport = upstream_stream_transport
         if prefer_earlier_reset_accounts is not None:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
         if routing_strategy is not None:
             settings.routing_strategy = routing_strategy
+        if openai_cache_affinity_max_age_seconds is not None:
+            settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
         if import_without_overwrite is not None:
             settings.import_without_overwrite = import_without_overwrite
         if http_proxy_url is not _UNSET:

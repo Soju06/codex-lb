@@ -29,7 +29,10 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
+from app.modules.sticky_sessions import api as sticky_sessions_api
+from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
 from app.modules.usage import api as usage_api
+from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +42,22 @@ async def lifespan(_: FastAPI):
     logger.info("Application startup: initializing settings caches, database, HTTP client, and schedulers")
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
+    reload_additional_quota_registry()
     await init_db()
     await init_http_client()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()
+    sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     await usage_scheduler.start()
     await model_scheduler.start()
     logger.info("Application startup complete")
+    await sticky_session_cleanup_scheduler.start()
 
     try:
         yield
     finally:
         logger.info("Application shutdown: stopping schedulers and closing resources")
+        await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await usage_scheduler.stop()
         try:
@@ -74,7 +81,9 @@ def create_app() -> FastAPI:
     add_exception_handlers(app)
 
     app.include_router(proxy_api.router)
+    app.include_router(proxy_api.ws_router)
     app.include_router(proxy_api.v1_router)
+    app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
     app.include_router(proxy_api.usage_router)
     app.include_router(accounts_api.router)
@@ -85,6 +94,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)
     app.include_router(firewall_api.router)
+    app.include_router(sticky_sessions_api.router)
     app.include_router(api_keys_api.router)
     app.include_router(health_api.router)
 

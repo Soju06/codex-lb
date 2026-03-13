@@ -14,6 +14,8 @@ from app.db.models import Account, AccountStatus
 
 
 class AccountsRepositoryPort(Protocol):
+    async def get_by_id(self, account_id: str) -> Account | None: ...
+
     async def update_status(
         self,
         account_id: str,

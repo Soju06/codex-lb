@@ -10,7 +10,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -202,3 +202,109 @@ async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(asy
     assert rate_limit["primary_window"] is None
     assert rate_limit["secondary_window"]["used_percent"] == 80
     assert rate_limit["secondary_window"]["reset_at"] == 1735862400
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_additional_limit_reached_when_secondary_exhausted(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        additional_repo = AdditionalUsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_additional_secondary",
+                "additional-secondary@example.com",
+                chatgpt_account_id="workspace_additional_secondary",
+            )
+        )
+        await usage_repo.add_entry(
+            "acc_additional_secondary",
+            10.0,
+            window="primary",
+            reset_at=0,
+            window_minutes=300,
+        )
+        await additional_repo.add_entry(
+            account_id="acc_additional_secondary",
+            limit_name="o-pro",
+            metered_feature="o_pro",
+            window="primary",
+            used_percent=40.0,
+            reset_at=0,
+            window_minutes=300,
+        )
+        await additional_repo.add_entry(
+            account_id="acc_additional_secondary",
+            limit_name="o-pro",
+            metered_feature="o_pro",
+            window="secondary",
+            used_percent=100.0,
+            reset_at=0,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_additional_secondary",
+        },
+    )
+    assert response.status_code == 200
+
+    additional_limit = response.json()["additional_rate_limits"][0]["rate_limit"]
+    assert additional_limit["allowed"] is False
+    assert additional_limit["limit_reached"] is True
+    assert additional_limit["primary_window"]["used_percent"] == 40
+    assert additional_limit["secondary_window"]["used_percent"] == 100
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_additional_limit_supports_secondary_only(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        additional_repo = AdditionalUsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_additional_secondary_only",
+                "additional-secondary-only@example.com",
+                chatgpt_account_id="workspace_additional_secondary_only",
+            )
+        )
+        await usage_repo.add_entry(
+            "acc_additional_secondary_only",
+            20.0,
+            window="primary",
+            reset_at=0,
+            window_minutes=300,
+        )
+        await additional_repo.add_entry(
+            account_id="acc_additional_secondary_only",
+            limit_name="deep-research",
+            metered_feature="deep_research",
+            window="secondary",
+            used_percent=65.0,
+            reset_at=1735862400,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_additional_secondary_only",
+        },
+    )
+    assert response.status_code == 200
+
+    additional_limit = response.json()["additional_rate_limits"][0]
+    assert additional_limit["limit_name"] == "deep-research"
+    assert additional_limit["metered_feature"] == "deep_research"
+    assert additional_limit["rate_limit"]["allowed"] is True
+    assert additional_limit["rate_limit"]["limit_reached"] is False
+    assert additional_limit["rate_limit"]["primary_window"] is None
+    assert additional_limit["rate_limit"]["secondary_window"]["used_percent"] == 65
+    assert additional_limit["rate_limit"]["secondary_window"]["reset_at"] == 1735862400

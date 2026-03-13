@@ -157,7 +157,7 @@ Before forwarding Responses payloads upstream, the service MUST remove `safety_i
 - **THEN** the mapped Responses payload forwarded upstream excludes `safety_identifier`
 
 ### Requirement: Strip known unsupported advisory parameters before upstream forwarding
-Before forwarding Responses payloads upstream, the service MUST remove known unsupported advisory parameters that upstream rejects with `unknown_parameter`. At minimum, the service MUST strip `prompt_cache_retention` and `temperature` from normalized payloads for both standard and compact Responses endpoints.
+Before forwarding Responses payloads upstream, the service MUST remove known unsupported advisory parameters that upstream rejects with `unknown_parameter`. At minimum, the service MUST strip `prompt_cache_retention` and `temperature` from normalized payloads for both standard and compact Responses endpoints, and MUST preserve `prompt_cache_key`.
 
 #### Scenario: prompt_cache_retention provided
 - **WHEN** a client sends a valid Responses request that includes `prompt_cache_retention`
@@ -170,6 +170,35 @@ Before forwarding Responses payloads upstream, the service MUST remove known uns
 #### Scenario: unrelated extra field provided
 - **WHEN** a client sends a valid request with an unrelated extra field not in the unsupported list
 - **THEN** the service preserves that field in forwarded payload
+
+### Requirement: Use prompt_cache_key as OpenAI cache affinity
+For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as a bounded upstream account affinity key for prompt-cache correctness. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
+
+#### Scenario: recent /v1 responses request reuses prompt-cache affinity
+- **WHEN** a client sends repeated `/v1/responses` requests with the same non-empty `prompt_cache_key` while `sticky_threads_enabled` is disabled
+- **AND** the previous mapping is still within the configured freshness window
+- **THEN** the service selects the same upstream account for those requests
+
+#### Scenario: recent /v1 compact request reuses prompt-cache affinity
+- **WHEN** a client sends `/v1/responses/compact` after `/v1/responses` with the same non-empty `prompt_cache_key` while `sticky_threads_enabled` is disabled
+- **AND** the previous mapping is still within the configured freshness window
+- **THEN** the compact request reuses the previously selected upstream account
+
+#### Scenario: expired prompt-cache affinity rebalances
+- **WHEN** a client sends a later OpenAI-style request with the same non-empty `prompt_cache_key`
+- **AND** the stored mapping is older than the configured freshness window
+- **THEN** the service ignores the stale mapping, re-runs account selection, and stores a fresh mapping for the chosen account
+
+#### Scenario: dashboard prompt-cache affinity TTL is applied
+- **WHEN** an operator updates the dashboard prompt-cache affinity TTL
+- **THEN** subsequent OpenAI-style prompt-cache affinity decisions use the new freshness window
+
+### Requirement: Normalize prompt cache aliases for upstream compatibility
+Before forwarding Responses payloads upstream, the service MUST normalize OpenAI-compatible camelCase prompt cache controls so codex-lb applies compatibility behavior consistently. The service MUST forward `promptCacheKey` as `prompt_cache_key`, and MUST treat `promptCacheRetention` the same as `prompt_cache_retention` for stripping behavior.
+
+#### Scenario: camelCase prompt cache fields provided
+- **WHEN** a client sends `promptCacheKey` or `promptCacheRetention` on a valid Responses request
+- **THEN** the service forwards `prompt_cache_key` with the same value and does not forward `prompt_cache_retention`
 
 ### Requirement: Sanitize unsupported interleaved and legacy chat input fields
 Before forwarding Responses requests upstream, the service MUST remove unsupported interleaved reasoning and legacy chat fields from `input` items and content parts. The service MUST strip `reasoning_content`, `reasoning_details`, `tool_calls`, and `function_call` fields when they appear in `input` structures, and MUST remove unsupported reasoning-only content parts that are not accepted by upstream.
@@ -235,3 +264,130 @@ When a backend Codex Responses or compact request includes a non-empty `session_
 #### Scenario: Compact retry uses refreshed provider account identity
 - **WHEN** a pinned backend Codex compact request gets a `401` from upstream, refreshes the selected account, and retries
 - **THEN** the retry forwards the refreshed account's `chatgpt-account-id` header instead of reusing the pre-refresh account header
+
+### Requirement: Compact requests preserve upstream compaction semantics
+The service MUST not impose a dedicated compact request total or read timeout for `/responses/compact` requests. To preserve provider-owned remote compaction semantics, the service MUST fulfill `/backend-api/codex/responses/compact` and `/v1/responses/compact` by calling the upstream ChatGPT Codex `/codex/responses/compact` endpoint directly and returning the upstream JSON payload as the canonical next context window without converting it into a standard buffered Responses result. The service MUST preserve provider-owned compact payload contents without pruning, reordering, or rewriting returned context items beyond generic JSON serialization. While using this direct compact transport, the service MUST preserve compact account-selection semantics, `session_id` affinity, `prompt_cache_key` affinity, `401` refresh-and-retry behavior, API key settlement, and HTTP request logging. The service MUST reject `store=true` as a client payload error, and it MUST omit `store` from the direct upstream compact request instead of forwarding `store=false`. If direct upstream compact execution fails before a valid compact JSON payload is accepted, the service MUST keep the request inside the compact contract. It MUST NOT silently substitute `/codex/responses`, reconstruct compact output from streamed Responses events, or synthesize a compact window locally. The service MAY perform a bounded retry only against `/codex/responses/compact` when the failure occurs in a provably safe transport phase before a valid compact JSON payload is accepted.
+
+#### Scenario: Compact request returns raw upstream compaction payload
+- **WHEN** a compact request succeeds and the upstream `/codex/responses/compact` response contains `object: "response.compaction"`
+- **THEN** the service returns that JSON payload without rewriting it into `object: "response"`
+
+#### Scenario: Compact request preserves provider-owned compaction summary
+- **WHEN** the upstream compact response includes nested compaction fields such as `compaction_summary.encrypted_content`
+- **THEN** the service returns those nested fields unchanged in the final JSON response
+
+#### Scenario: Compact response includes retained items and encrypted compaction state
+- **WHEN** the upstream compact response returns a window that includes retained context items plus provider-owned compaction state such as encrypted content
+- **THEN** the service returns that window unchanged to the client
+
+#### Scenario: Compact response object shape differs from normal Responses
+- **WHEN** the upstream compact response uses a provider-owned compact object shape instead of a standard `object: "response"` payload
+- **THEN** the service returns that compact object shape unchanged instead of coercing it into a normal Responses payload
+
+#### Scenario: Direct compact request omits store
+- **WHEN** a client sends `/backend-api/codex/responses/compact` or `/v1/responses/compact` without a `store` field
+- **THEN** the direct upstream `/codex/responses/compact` request omits `store`
+
+#### Scenario: Direct compact request sets store true
+- **WHEN** a client sends `/backend-api/codex/responses/compact` or `/v1/responses/compact` with `store=true`
+- **THEN** the service returns a 4xx OpenAI invalid payload error
+- **AND** it does not forward any `store` field upstream
+
+#### Scenario: Direct compact upstream returns an error envelope
+- **WHEN** the upstream direct compact request returns a non-2xx OpenAI-format error payload
+- **THEN** the service propagates the corresponding HTTP status and error envelope to the client
+
+#### Scenario: Direct compact transport fails before response body is available
+- **WHEN** the upstream `/codex/responses/compact` call times out, disconnects, or otherwise fails before yielding a valid compact JSON payload
+- **THEN** the service may retry only `/codex/responses/compact` within a bounded retry budget
+- **AND** it does not attempt a surrogate `/codex/responses` request
+
+#### Scenario: Direct compact transport gets a safe retryable upstream failure
+- **WHEN** the upstream `/codex/responses/compact` call fails with `401`, `502`, `503`, or `504` before a valid compact JSON payload is accepted
+- **THEN** the service may retry only `/codex/responses/compact`
+- **AND** it preserves the request's established compact routing and affinity semantics except for refreshed provider identity on `401`
+- **AND** it does not call `/codex/responses`
+
+#### Scenario: Direct compact response payload is invalid
+- **WHEN** the upstream `/codex/responses/compact` call returns a non-error payload that is not valid compact JSON for pass-through
+- **THEN** the service returns an upstream error to the client
+- **AND** it does not retry via `/codex/responses`
+- **AND** it does not synthesize or reconstruct a replacement compact window
+
+#### Scenario: Compact request uses no timeout by default
+- **WHEN** `/responses/compact` is called and no compact timeout override is configured
+- **THEN** the service forwards the request without setting an upstream total or read timeout
+
+### Requirement: Persist request log transport for Responses requests
+The service MUST persist a stable `transport` value on `request_logs` for Responses proxy requests and MUST expose the same value through `/api/request-logs`. Requests accepted over HTTP on `/backend-api/codex/responses` or `/v1/responses` MUST persist `transport = "http"`. Requests accepted over WebSocket on those paths MUST persist `transport = "websocket"`.
+
+#### Scenario: HTTP Responses request logs http transport
+- **WHEN** a client completes a Responses request over HTTP on `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the persisted request log has `transport = "http"`
+- **AND** `/api/request-logs` returns that row with `transport = "http"`
+
+#### Scenario: WebSocket Responses request logs websocket transport
+- **WHEN** a client completes a Responses request over WebSocket on `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the persisted request log has `transport = "websocket"`
+- **AND** `/api/request-logs` returns that row with `transport = "websocket"`
+
+### Requirement: Emit opt-in safe service-tier trace logs
+When service-tier trace logging is enabled, the service MUST emit a diagnostic log entry for Responses requests that records `request_id`, request `kind`, `requested_service_tier`, and upstream `actual_service_tier`. The diagnostic log MUST NOT include prompt text, input content, or the full request payload.
+
+#### Scenario: Streaming request logs requested and actual service tiers
+- **WHEN** a streaming Responses request is sent with `service_tier: "priority"` and the upstream stream reports `response.service_tier: "default"`
+- **THEN** the service emits a diagnostic log entry containing `requested_service_tier=priority` and `actual_service_tier=default`
+
+#### Scenario: Compact request keeps actual tier empty when upstream omits it
+- **WHEN** a compact Responses request is sent with `service_tier: "priority"` and the upstream JSON response omits `service_tier`
+- **THEN** the service emits a diagnostic log entry containing `requested_service_tier=priority` and `actual_service_tier=None`
+
+### Requirement: Streaming Responses requests use a bounded retry budget
+When a streaming `/v1/responses` request encounters upstream instability, the proxy MUST enforce a configurable total request budget across selection, token refresh, and upstream stream attempts. The proxy MUST stop retrying once that budget is exhausted and MUST emit a stable `response.failed` event instead of waiting through repeated full upstream timeouts.
+
+#### Scenario: Request budget expires before another attempt
+- **WHEN** a streaming Responses request has consumed its configured request budget before the next retry attempt begins
+- **THEN** the proxy emits `response.failed` with a stable timeout code
+- **AND** the proxy does not start another upstream attempt
+
+#### Scenario: Stalled stream fails within the shorter idle window
+- **WHEN** the upstream opens a Responses stream but does not deliver events before the configured stream idle timeout elapses
+- **THEN** the proxy emits `response.failed` for the stalled stream within that idle timeout
+- **AND** the same client request does not consume multiple full idle windows retrying the same generic failure
+
+### Requirement: Streaming Responses retries are limited to account-recoverable failures
+The proxy MUST automatically retry streaming Responses requests only for failures that are recoverable by refreshing or rotating the selected account. The proxy MUST NOT automatically retry generic upstream failures such as stalled streams, upstream transport failures, or unspecified server errors.
+
+#### Scenario: Account-specific rate limit triggers a retry
+- **WHEN** the first upstream streaming event fails with an account-specific rate-limit or quota error that can be resolved by selecting another account
+- **THEN** the proxy updates account state for that account
+- **AND** the proxy may retry the request on another eligible account while budget remains
+
+#### Scenario: Generic upstream failure does not trigger retry
+- **WHEN** the first upstream streaming event fails with `stream_idle_timeout`, `upstream_unavailable`, or another generic upstream error
+- **THEN** the proxy forwards that failure to the client
+- **AND** the proxy does not automatically retry the same client request
+
+### Requirement: Compact request-path latency is bounded without changing default CLI timeout parity
+When `/responses/compact` performs account selection, token refresh, or upstream connection setup, the proxy MUST enforce a configurable request-path budget for those pre-response phases. The proxy MUST preserve the existing default compact behavior of not imposing an upstream read timeout unless an operator explicitly configures one.
+
+#### Scenario: Compact request budget expires before upstream response handling begins
+- **WHEN** a compact request exhausts its configured request-path budget during account selection, token refresh, or upstream connection setup
+- **THEN** the proxy returns `502` with OpenAI-format error code `upstream_unavailable`
+- **AND** it does not begin another retry attempt
+
+#### Scenario: Default compact read path remains unbounded
+- **WHEN** `/responses/compact` is called without an explicit compact read-timeout override
+- **THEN** the proxy may still bound selection, refresh, and connect work
+- **AND** it MUST NOT add a default upstream read timeout beyond the existing compact contract
+
+### Requirement: Gated model selection failures expose stable proxy error codes
+When account selection fails for an explicitly mapped gated model, the proxy MUST return a stable OpenAI-format error code that distinguishes plan support failures, stale additional-quota data, and zero eligible accounts. The canonical routed `quota_key` MUST drive those checks even if raw upstream `limit_name` aliases change.
+
+#### Scenario: Missing fresh additional quota data returns a specific code
+- **WHEN** a compact or streaming Responses request targets a mapped gated model and the latest persisted additional-usage snapshot for its canonical `quota_key` is unavailable or stale
+- **THEN** the proxy returns an OpenAI-format error envelope with a stable code for unavailable additional quota data
+
+#### Scenario: No eligible accounts returns a specific code
+- **WHEN** a compact or streaming Responses request targets a mapped gated model and the canonical `quota_key` has fresh persisted data but no eligible accounts
+- **THEN** the proxy returns an OpenAI-format error envelope with a stable code for zero eligible additional-quota accounts

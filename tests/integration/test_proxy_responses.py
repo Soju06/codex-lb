@@ -46,7 +46,7 @@ def _extract_first_event(lines: list[str]) -> dict:
 
 @pytest.mark.asyncio
 async def test_proxy_responses_no_accounts(async_client):
-    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
     request_id = "req_stream_123"
     async with async_client.stream(
         "POST",
@@ -63,6 +63,25 @@ async def test_proxy_responses_no_accounts(async_client):
     assert event["response"]["status"] == "failed"
     assert event["response"]["id"] == request_id
     assert event["response"]["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_stream_surfaces_additional_quota_data_unavailable(async_client):
+    email = "gated-unavailable@example.com"
+    raw_account_id = "acc_gated_unavailable"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    payload = {"model": "gpt-5.3-codex-spark", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "additional_quota_data_unavailable"
 
 
 @pytest.mark.asyncio
@@ -221,6 +240,50 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         log = result.scalars().first()
         assert log is not None
         assert log.request_id == request_id
+        assert log.transport == "http"
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_forwards_native_codex_headers(async_client, monkeypatch):
+    email = "stream-headers@example.com"
+    raw_account_id = "acc_stream_headers"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_headers: dict[str, str] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, access_token, account_id, base_url, raise_for_status
+        seen_headers.update(headers)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+    native_headers = {
+        "originator": "Codex Desktop",
+        "session_id": "sid-native",
+        "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"none"}',
+        "x-codex-beta-features": "js_repl,multi_agent",
+        "x-request-id": "req_native_headers_123",
+    }
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers=native_headers,
+    ) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    assert seen_headers["originator"] == native_headers["originator"]
+    assert seen_headers["session_id"] == native_headers["session_id"]
+    assert seen_headers["x-codex-turn-metadata"] == native_headers["x-codex-turn-metadata"]
+    assert seen_headers["x-codex-beta-features"] == native_headers["x-codex-beta-features"]
+    assert seen_headers["x-request-id"] == native_headers["x-request-id"]
 
 
 @pytest.mark.asyncio

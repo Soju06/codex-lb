@@ -1,10 +1,11 @@
 import { z } from "zod";
 
-import { AccountSummarySchema, AccountUsageSchema } from "@/features/accounts/schemas";
+import { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema } from "@/features/accounts/schemas";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
-export { AccountSummarySchema, AccountUsageSchema };
+export { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema };
 export type { AccountSummary };
+export type { AccountAdditionalQuota as AdditionalQuota } from "@/features/accounts/schemas";
 
 export const UsageHistoryItemSchema = z.object({
   accountId: z.string(),
@@ -52,6 +53,15 @@ export const MetricsTrendsSchema = z.object({
   errorRate: z.array(TrendPointSchema),
 });
 
+export const DepletionSchema = z.object({
+  risk: z.number(),
+  riskLevel: z.enum(["safe", "warning", "danger", "critical"]),
+  burnRate: z.number(),
+  safeUsagePercent: z.number(),
+  projectedExhaustionAt: z.string().datetime({ offset: true }).nullable().optional(),
+  secondsUntilExhaustion: z.number().nullable().optional(),
+});
+
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.string().datetime({ offset: true }).nullable(),
   accounts: z.array(AccountSummarySchema),
@@ -66,6 +76,9 @@ export const DashboardOverviewSchema = z.object({
     secondary: UsageWindowSchema.nullable(),
   }),
   trends: MetricsTrendsSchema,
+  additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
+  depletionPrimary: DepletionSchema.nullable().optional(),
+  depletionSecondary: DepletionSchema.nullable().optional(),
 });
 
 export const RequestLogSchema = z.object({
@@ -74,6 +87,7 @@ export const RequestLogSchema = z.object({
   apiKeyName: z.string().nullable(),
   requestId: z.string(),
   model: z.string(),
+  transport: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),
   status: z.string(),
   errorCode: z.string().nullable(),
@@ -121,3 +135,4 @@ export type RequestLog = z.infer<typeof RequestLogSchema>;
 export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;
+export type Depletion = z.infer<typeof DepletionSchema>;

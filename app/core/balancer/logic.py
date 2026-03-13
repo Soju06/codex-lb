@@ -85,6 +85,14 @@ def select_account(
             if state.last_error_at and current - state.last_error_at < backoff:
                 in_error_backoff.append(state)
                 continue
+            # Error backoff expired — reset error state so recovery is
+            # not penalised by stale counts. The account has already
+            # been held back for the full backoff period; letting it
+            # re-enter the pool with a clean slate avoids the problem
+            # where a previously-high error_count causes an immediate
+            # return to maximum backoff on the very next transient error.
+            state.error_count = 0
+            state.last_error_at = None
         available.append(state)
 
     if not available:

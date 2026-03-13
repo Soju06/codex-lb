@@ -25,6 +25,7 @@ import {
   startTotpSetup,
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessage } from "@/utils/errors";
 
@@ -167,15 +168,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
             checked={settings.totpRequiredOnLogin}
             disabled={lock}
             onCheckedChange={(checked) =>
-              void onSave({
-                stickyThreadsEnabled: settings.stickyThreadsEnabled,
-                preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-                routingStrategy: settings.routingStrategy,
-                importWithoutOverwrite: settings.importWithoutOverwrite,
-                httpProxyUrl: settings.httpProxyUrl,
-                totpRequiredOnLogin: checked,
-                apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
-              })
+              void onSave(buildSettingsUpdateRequest(settings, { totpRequiredOnLogin: checked }))
             }
           />
         </div>

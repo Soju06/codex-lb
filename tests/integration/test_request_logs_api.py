@@ -56,6 +56,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
             status="success",
             error_code=None,
             requested_at=now - timedelta(minutes=1),
+            transport="http",
         )
         await logs_repo.add_log(
             account_id="acc_logs",
@@ -69,6 +70,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
             error_message="Rate limit reached",
             requested_at=now,
             api_key_id="key_logs_1",
+            transport="websocket",
         )
 
     response = await async_client.get("/api/request-logs?limit=2")
@@ -84,9 +86,11 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
     assert latest["errorMessage"] == "Rate limit reached"
+    assert latest["transport"] == "websocket"
 
     older = payload[1]
     assert older["status"] == "ok"
     assert older["apiKeyName"] is None
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None
+    assert older["transport"] == "http"

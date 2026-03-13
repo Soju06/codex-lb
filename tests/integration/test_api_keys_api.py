@@ -579,7 +579,7 @@ async def test_api_key_update_accepts_uppercase_enforced_reasoning(async_client)
 
 
 @pytest.mark.asyncio
-async def test_stream_usage_prefers_actual_response_service_tier(async_client, monkeypatch):
+async def test_stream_usage_logs_actual_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -654,7 +654,7 @@ async def test_stream_usage_prefers_actual_response_service_tier(async_client, m
 
 
 @pytest.mark.asyncio
-async def test_stream_usage_reads_actual_service_tier_from_response_created(async_client, monkeypatch):
+async def test_stream_usage_logs_actual_service_tier_when_response_created_echoes_default(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -817,10 +817,12 @@ async def test_api_key_limit_applies_to_compact_responses(async_client, monkeypa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
-async def test_compact_cost_limit_uses_request_service_tier_when_response_omits_echo(
+@pytest.mark.parametrize("requested_service_tier", ["priority", "fast"])
+async def test_compact_cost_limit_uses_canonical_request_service_tier_when_response_omits_echo(
     async_client,
     monkeypatch,
     endpoint,
+    requested_service_tier,
 ):
     enable = await async_client.put(
         "/api/settings",
@@ -873,7 +875,7 @@ async def test_compact_cost_limit_uses_request_service_tier_when_response_omits_
         "model": "gpt-5.4",
         "instructions": "hi",
         "input": [],
-        "service_tier": "priority",
+        "service_tier": requested_service_tier,
     }
 
     first = await async_client.post(

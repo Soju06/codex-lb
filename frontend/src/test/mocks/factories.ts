@@ -209,6 +209,22 @@ export function createDashboardOverview(overrides: Partial<DashboardOverview> = 
       cost: createTrendPoints(0.065),
       errorRate: createTrendPoints(0.03),
     },
+    depletionPrimary: {
+      risk: 0.55,
+      riskLevel: "warning" as const,
+      burnRate: 1.1,
+      safeUsagePercent: 72.0,
+      projectedExhaustionAt: null,
+      secondsUntilExhaustion: null,
+    },
+    depletionSecondary: {
+      risk: 0.65,
+      riskLevel: "warning" as const,
+      burnRate: 1.4,
+      safeUsagePercent: 58.0,
+      projectedExhaustionAt: null,
+      secondsUntilExhaustion: null,
+    },
     ...overrides,
   };
   return DashboardOverviewSchema.parse(response);
@@ -221,6 +237,7 @@ export function createRequestLogEntry(overrides: Partial<RequestLogEntry> = {}):
     apiKeyName: "Primary Key",
     requestId: "req_1",
     model: "gpt-5.1",
+    transport: "http",
     serviceTier: null,
     status: "ok",
     errorCode: null,
@@ -304,8 +321,10 @@ export function createDashboardAuthSession(
 export function createDashboardSettings(overrides: Partial<DashboardSettings> = {}): DashboardSettings {
   return DashboardSettingsSchema.parse({
     stickyThreadsEnabled: true,
+    upstreamStreamTransport: "default",
     preferEarlierResetAccounts: false,
     routingStrategy: "usage_weighted",
+    openaiCacheAffinityMaxAgeSeconds: 300,
     importWithoutOverwrite: false,
     httpProxyUrl: null,
     totpRequiredOnLogin: false,

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import Integer, cast, func, literal_column, select
+from sqlalchemy import Integer, cast, delete, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
-from app.db.models import UsageHistory
+from app.db.models import AdditionalUsageHistory, UsageHistory
+from app.modules.usage.additional_quota_keys import (
+    AdditionalQuotaQueryScope,
+    canonicalize_additional_quota_key,
+    get_additional_quota_query_scope,
+)
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
 
@@ -22,9 +28,65 @@ def _window_clause(window: str | None):
     return UsageHistory.window == window
 
 
+def _resolve_additional_quota_key(
+    *,
+    quota_key: str | None = None,
+    limit_name: str | None = None,
+    metered_feature: str | None = None,
+) -> str | None:
+    candidate_limit_name = quota_key if quota_key is not None else limit_name
+    if candidate_limit_name is None and metered_feature is None:
+        return None
+    return canonicalize_additional_quota_key(
+        quota_key=quota_key,
+        limit_name=candidate_limit_name,
+        metered_feature=metered_feature,
+    )
+
+
+def _resolve_additional_quota_query_scope(
+    *,
+    quota_key: str | None = None,
+    limit_name: str | None = None,
+    metered_feature: str | None = None,
+) -> AdditionalQuotaQueryScope | None:
+    return get_additional_quota_query_scope(
+        quota_key=quota_key,
+        limit_name=limit_name,
+        metered_feature=metered_feature,
+    )
+
+
+def _additional_quota_match_clause(scope: AdditionalQuotaQueryScope):
+    clauses = [AdditionalUsageHistory.quota_key.in_(tuple(scope.quota_key_match_values or {scope.quota_key}))]
+    if scope.limit_name_match_values:
+        clauses.append(func.lower(AdditionalUsageHistory.limit_name).in_(tuple(scope.limit_name_match_values)))
+    if scope.metered_feature_match_values:
+        clauses.append(
+            func.lower(AdditionalUsageHistory.metered_feature).in_(tuple(scope.metered_feature_match_values))
+        )
+    return or_(*clauses)
+
+
 class UsageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def latest_entry_for_account(
+        self,
+        account_id: str,
+        *,
+        window: str | None = None,
+    ) -> UsageHistory | None:
+        stmt = (
+            select(UsageHistory)
+            .where(UsageHistory.account_id == account_id)
+            .where(_window_clause(window))
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def add_entry(
         self,
@@ -115,6 +177,48 @@ class UsageRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
+    async def history_since(
+        self,
+        account_id: str,
+        window: str,
+        since: datetime,
+    ) -> list[UsageHistory]:
+        stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id == account_id,
+                _window_clause(window),
+                UsageHistory.recorded_at >= since,
+            )
+            .order_by(UsageHistory.recorded_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def bulk_history_since(
+        self,
+        account_ids: list[str],
+        window: str,
+        since: datetime,
+    ) -> dict[str, list[UsageHistory]]:
+        """Fetch usage history for multiple accounts in a single query."""
+        if not account_ids:
+            return {}
+        stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id.in_(account_ids),
+                _window_clause(window),
+                UsageHistory.recorded_at >= since,
+            )
+            .order_by(UsageHistory.account_id, UsageHistory.recorded_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        grouped: dict[str, list[UsageHistory]] = {}
+        for row in result.scalars().all():
+            grouped.setdefault(row.account_id, []).append(row)
+        return grouped
+
     async def trends_by_bucket(
         self,
         since: datetime,
@@ -171,3 +275,226 @@ class UsageRepository:
         result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None
+
+
+class AdditionalUsageRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add_entry(
+        self,
+        account_id: str,
+        limit_name: str,
+        metered_feature: str,
+        window: str,
+        used_percent: float,
+        reset_at: int | None = None,
+        window_minutes: int | None = None,
+        recorded_at: datetime | None = None,
+        quota_key: str | None = None,
+    ) -> None:
+        effective_quota_key = _resolve_additional_quota_key(
+            quota_key=quota_key,
+            limit_name=limit_name,
+            metered_feature=metered_feature,
+        )
+        if effective_quota_key is None:
+            raise ValueError("additional usage quota_key could not be determined")
+        entry = AdditionalUsageHistory(
+            account_id=account_id,
+            quota_key=effective_quota_key,
+            limit_name=limit_name,
+            metered_feature=metered_feature,
+            window=window,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            window_minutes=window_minutes,
+            recorded_at=recorded_at or utcnow(),
+        )
+        self._session.add(entry)
+        await self._session.commit()
+
+    async def delete_for_account(self, account_id: str) -> None:
+        stmt = delete(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == account_id)
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
+        scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
+        if scope is None:
+            raise ValueError("additional usage quota_key could not be determined")
+        stmt = delete(AdditionalUsageHistory).where(
+            AdditionalUsageHistory.account_id == account_id,
+            _additional_quota_match_clause(scope),
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
+        await self.delete_for_account_and_quota_key(account_id, limit_name)
+
+    async def delete_for_account_quota_key_window(
+        self,
+        account_id: str,
+        quota_key: str,
+        window: str,
+    ) -> None:
+        scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
+        if scope is None:
+            raise ValueError("additional usage quota_key could not be determined")
+        stmt = delete(AdditionalUsageHistory).where(
+            AdditionalUsageHistory.account_id == account_id,
+            _additional_quota_match_clause(scope),
+            AdditionalUsageHistory.window == window,
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def delete_for_account_limit_window(
+        self,
+        account_id: str,
+        limit_name: str,
+        window: str,
+    ) -> None:
+        await self.delete_for_account_quota_key_window(account_id, limit_name, window)
+
+    async def latest_by_account(
+        self,
+        quota_key: str | None = None,
+        window: str | None = None,
+        *,
+        limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
+        """Returns the most recent entry per account for a given canonical quota key + window."""
+        scope = _resolve_additional_quota_query_scope(
+            quota_key=quota_key,
+            limit_name=limit_name,
+        )
+        if scope is None or window is None:
+            raise ValueError("quota_key/limit_name and window are required")
+        conditions = [
+            _additional_quota_match_clause(scope),
+            AdditionalUsageHistory.window == window,
+        ]
+        if account_ids is not None:
+            conditions.append(AdditionalUsageHistory.account_id.in_(account_ids))
+        if since is not None:
+            conditions.append(AdditionalUsageHistory.recorded_at >= since)
+        subq = (
+            select(
+                AdditionalUsageHistory.id.label("usage_id"),
+                func.row_number()
+                .over(
+                    partition_by=AdditionalUsageHistory.account_id,
+                    order_by=(AdditionalUsageHistory.recorded_at.desc(), AdditionalUsageHistory.id.desc()),
+                )
+                .label("row_number"),
+            )
+            .where(*conditions)
+            .subquery()
+        )
+        stmt = (
+            select(AdditionalUsageHistory)
+            .join(subq, AdditionalUsageHistory.id == subq.c.usage_id)
+            .where(subq.c.row_number == 1)
+        )
+        result = await self._session.execute(stmt)
+        return {entry.account_id: entry for entry in result.scalars().all()}
+
+    async def latest_by_quota_key(
+        self,
+        quota_key: str,
+        window: str,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
+        return await self.latest_by_account(
+            quota_key=quota_key,
+            window=window,
+            account_ids=account_ids,
+            since=since,
+        )
+
+    async def list_quota_keys(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
+        stmt = select(
+            AdditionalUsageHistory.quota_key,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.metered_feature,
+        ).distinct()
+        if account_ids is not None:
+            stmt = stmt.where(AdditionalUsageHistory.account_id.in_(account_ids))
+        if since is not None:
+            stmt = stmt.where(AdditionalUsageHistory.recorded_at >= since)
+        result = await self._session.execute(stmt)
+        resolved_keys = {
+            resolved_key
+            for quota_key_value, limit_name_value, metered_feature_value in result.all()
+            if (
+                resolved_key := canonicalize_additional_quota_key(
+                    quota_key=quota_key_value,
+                    limit_name=limit_name_value,
+                    metered_feature=metered_feature_value,
+                )
+            )
+            is not None
+        }
+        return sorted(resolved_keys)
+
+    async def list_limit_names(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[str]:
+        return await self.list_quota_keys(account_ids=account_ids, since=since)
+
+    async def history_since(
+        self,
+        account_id: str,
+        quota_key: str | None = None,
+        window: str | None = None,
+        since: datetime | None = None,
+        *,
+        limit_name: str | None = None,
+    ) -> list[AdditionalUsageHistory]:
+        """Returns time-series entries for EWMA computation."""
+        scope = _resolve_additional_quota_query_scope(
+            quota_key=quota_key,
+            limit_name=limit_name,
+        )
+        if scope is None or window is None or since is None:
+            raise ValueError("account_id, quota_key/limit_name, window, and since are required")
+        stmt = (
+            select(AdditionalUsageHistory)
+            .where(
+                AdditionalUsageHistory.account_id == account_id,
+                _additional_quota_match_clause(scope),
+                AdditionalUsageHistory.window == window,
+                AdditionalUsageHistory.recorded_at >= since,
+            )
+            .order_by(AdditionalUsageHistory.recorded_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def latest_recorded_at_for_account(self, account_id: str) -> datetime | None:
+        """Return the most recent recorded_at for any additional usage entry of this account."""
+        stmt = select(func.max(AdditionalUsageHistory.recorded_at)).where(
+            AdditionalUsageHistory.account_id == account_id
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def latest_recorded_at(self) -> datetime | None:
+        """Return the most recent recorded_at across all additional usage entries."""
+        stmt = select(func.max(AdditionalUsageHistory.recorded_at))
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()

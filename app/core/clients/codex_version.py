@@ -61,7 +61,7 @@ class CodexVersionCache:
         try:
             timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
             proxy_kwargs = await get_http_proxy_request_kwargs()
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 headers = {"Accept": "application/vnd.github+json"}
                 async with session.get(_GITHUB_RELEASES_URL, headers=headers, **proxy_kwargs) as resp:
                     if resp.status != 200:

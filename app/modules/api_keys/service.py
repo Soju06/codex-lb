@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Protocol
 
+from app.core.tags import normalize_tags
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
@@ -60,6 +61,8 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def get_limits_by_key(self, key_id: str) -> list[ApiKeyLimit]: ...
 
     async def replace_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]: ...
+
+    async def replace_tags(self, key_id: str, tags: list[str]) -> list[str] | None: ...
 
     async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]: ...
 
@@ -166,7 +169,8 @@ class LimitRuleInput:
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreateData:
     name: str
-    allowed_models: list[str] | None
+    tags: list[str] | None = None
+    allowed_models: list[str] | None = None
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     expires_at: datetime | None = None
@@ -177,6 +181,8 @@ class ApiKeyCreateData:
 class ApiKeyUpdateData:
     name: str | None = None
     name_set: bool = False
+    tags: list[str] | None = None
+    tags_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
     enforced_model: str | None = None
@@ -197,13 +203,14 @@ class ApiKeyData:
     id: str
     name: str
     key_prefix: str
-    allowed_models: list[str] | None
-    enforced_model: str | None
-    enforced_reasoning_effort: str | None
-    expires_at: datetime | None
-    is_active: bool
-    created_at: datetime
-    last_used_at: datetime | None
+    tags: list[str] = field(default_factory=list)
+    allowed_models: list[str] | None = None
+    enforced_model: str | None = None
+    enforced_reasoning_effort: str | None = None
+    expires_at: datetime | None = None
+    is_active: bool = True
+    created_at: datetime = field(default_factory=utcnow)
+    last_used_at: datetime | None = None
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
 
@@ -235,6 +242,7 @@ class ApiKeysService:
     async def create_key(self, payload: ApiKeyCreateData) -> ApiKeyCreatedData:
         now = utcnow()
         plain_key = _generate_plain_key()
+        normalized_tags = normalize_tags(payload.tags)
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
@@ -253,6 +261,12 @@ class ApiKeysService:
             last_used_at=None,
         )
         created = await self._repository.create(row)
+
+        if normalized_tags:
+            await self._repository.replace_tags(created.id, normalized_tags)
+            created = await self._repository.get_by_id(created.id)
+            if created is None:
+                raise ValueError("Failed to create API key")
 
         if payload.limits:
             limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
@@ -273,6 +287,7 @@ class ApiKeysService:
         ]
 
     async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
+        normalized_tags = normalize_tags(payload.tags) if payload.tags_set else None
         if payload.allowed_models_set:
             allowed_models = _normalize_allowed_models(payload.allowed_models)
         else:
@@ -315,6 +330,11 @@ class ApiKeysService:
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
+        if payload.tags_set:
+            replaced_tags = await self._repository.replace_tags(key_id, normalized_tags or [])
+            if replaced_tags is None:
+                raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+
         if payload.limits_set:
             now = utcnow()
             existing_limits = await self._repository.get_limits_by_key(key_id)
@@ -333,7 +353,7 @@ class ApiKeysService:
             limit_rows = _build_reset_limit_rows(key_id=key_id, now=now, existing_limits=existing_limits)
             await self._repository.upsert_limits(key_id, limit_rows)
 
-        if payload.limits_set or payload.reset_usage:
+        if payload.tags_set or payload.limits_set or payload.reset_usage:
             row = await self._repository.get_by_id(key_id)
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
@@ -825,6 +845,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         id=data.id,
         name=data.name,
         key_prefix=data.key_prefix,
+        tags=data.tags,
         allowed_models=data.allowed_models,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
@@ -844,6 +865,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         id=row.id,
         name=row.name,
         key_prefix=row.key_prefix,
+        tags=sorted(link.tag_name for link in row.tag_links),
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),

@@ -237,6 +237,48 @@ async def test_load_balancer_treats_weekly_only_primary_as_quota_window(db_setup
 
 
 @pytest.mark.asyncio
+async def test_load_balancer_filters_pool_by_api_key_tags(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+
+    paid_account = Account(
+        id="acc_paid",
+        email="paid@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("paid-access"),
+        refresh_token_encrypted=encryptor.encrypt("paid-refresh"),
+        id_token_encrypted=encryptor.encrypt("paid-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    free_account = Account(
+        id="acc_free",
+        email="free@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("free-access"),
+        refresh_token_encrypted=encryptor.encrypt("free-refresh"),
+        id_token_encrypted=encryptor.encrypt("free-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(paid_account)
+        await accounts_repo.upsert(free_account)
+        replaced = await accounts_repo.replace_tags(paid_account.id, ["paid"])
+        assert replaced == ["paid"]
+
+        balancer = LoadBalancer(_repo_factory)
+        selection = await balancer.select_account(account_tags=["paid"])
+
+        assert selection.account is not None
+        assert selection.account.id == paid_account.id
+
+
+@pytest.mark.asyncio
 async def test_load_balancer_select_account_uses_cached_rows_for_detached_accounts(db_setup):
     encryptor = TokenEncryptor()
     now = utcnow()

@@ -5,13 +5,16 @@ import {
   deleteAccount,
   getAccountTrends,
   importAccount,
+  listAccountTags,
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updateAccountTags,
 } from "@/features/accounts/api";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+  void queryClient.invalidateQueries({ queryKey: ["accounts", "tags"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
 }
 
@@ -67,7 +70,19 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  const updateTagsMutation = useMutation({
+    mutationFn: ({ accountId, tags }: { accountId: string; tags: string[] }) =>
+      updateAccountTags(accountId, { tags }),
+    onSuccess: () => {
+      toast.success("Account tags updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Tag update failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, updateTagsMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {
@@ -93,4 +108,13 @@ export function useAccounts() {
   const mutations = useAccountMutations();
 
   return { accountsQuery, ...mutations };
+}
+
+export function useAccountTags() {
+  return useQuery({
+    queryKey: ["accounts", "tags"],
+    queryFn: listAccountTags,
+    staleTime: 5 * 60_000,
+    select: (data) => data.tags,
+  });
 }

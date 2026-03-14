@@ -14,6 +14,7 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     displayName: overrides.displayName ?? overrides.email,
     planType: overrides.planType ?? "plus",
     status: overrides.status ?? "active",
+    tags: overrides.tags ?? [],
     usage: overrides.usage ?? null,
     resetAtPrimary: overrides.resetAtPrimary ?? null,
     resetAtSecondary: overrides.resetAtSecondary ?? null,

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.core.utils.time import utcnow
-from app.db.models import ApiKey, ApiKeyLimit, LimitType
+from app.db.models import ApiKey, ApiKeyLimit, ApiKeyTag, LimitType
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyUsageSummary,
@@ -20,6 +20,7 @@ from app.modules.api_keys.service import (
     ApiKeyRateLimitExceededError,
     ApiKeysRepositoryProtocol,
     ApiKeysService,
+    ApiKeyUpdateData,
     LimitRuleInput,
 )
 
@@ -30,24 +31,28 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
     def __init__(self) -> None:
         self.rows: dict[str, ApiKey] = {}
         self._limits: dict[str, list[ApiKeyLimit]] = {}
+        self._tags: dict[str, list[str]] = {}
         self._limit_id_seq = 0
         self._reservations: dict[str, UsageReservationData] = {}
 
     async def create(self, row: ApiKey) -> ApiKey:
         self.rows[row.id] = row
         row.limits = []
+        row.tag_links = []
         return row
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
         row = self.rows.get(key_id)
         if row is not None:
             row.limits = self._limits.get(key_id, [])
+            row.tag_links = [ApiKeyTag(api_key_id=key_id, tag_name=tag) for tag in self._tags.get(key_id, [])]
         return row
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         for row in self.rows.values():
             if row.key_hash == key_hash:
                 row.limits = self._limits.get(row.id, [])
+                row.tag_links = [ApiKeyTag(api_key_id=row.id, tag_name=tag) for tag in self._tags.get(row.id, [])]
                 return row
         return None
 
@@ -55,6 +60,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         result = sorted(self.rows.values(), key=lambda row: row.created_at, reverse=True)
         for row in result:
             row.limits = self._limits.get(row.id, [])
+            row.tag_links = [ApiKeyTag(api_key_id=row.id, tag_name=tag) for tag in self._tags.get(row.id, [])]
         return result
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
@@ -90,6 +96,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
                 continue
             setattr(row, field, value)
         row.limits = self._limits.get(key_id, [])
+        row.tag_links = [ApiKeyTag(api_key_id=key_id, tag_name=tag) for tag in self._tags.get(key_id, [])]
         return row
 
     async def delete(self, key_id: str) -> bool:
@@ -97,6 +104,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             return False
         self.rows.pop(key_id)
         self._limits.pop(key_id, None)
+        self._tags.pop(key_id, None)
         return True
 
     async def update_last_used(self, key_id: str) -> None:
@@ -123,6 +131,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         if row is not None:
             row.limits = self._limits[key_id]
         return self._limits[key_id]
+
+    async def replace_tags(self, key_id: str, tags: list[str]) -> list[str] | None:
+        row = self.rows.get(key_id)
+        if row is None:
+            return None
+        self._tags[key_id] = list(tags)
+        row.tag_links = [ApiKeyTag(api_key_id=key_id, tag_name=tag) for tag in tags]
+        return list(tags)
 
     async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]:
         existing = self._limits.get(key_id, [])
@@ -386,6 +402,29 @@ async def test_create_key_stores_hash_and_prefix() -> None:
     assert stored is not None
     assert stored.key_hash != created.key
     assert stored.key_prefix == created.key[:15]
+
+
+@pytest.mark.asyncio
+async def test_create_and_update_key_normalizes_tags() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="tagged-key",
+            tags=["Paid", "pro", "paid"],
+        )
+    )
+    assert created.tags == ["paid", "pro"]
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            tags=["Enterprise", "enterprise"],
+            tags_set=True,
+        ),
+    )
+    assert updated.tags == ["enterprise"]
 
 
 @pytest.mark.asyncio

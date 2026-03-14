@@ -3,6 +3,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
+import { TagMultiSelect } from "@/components/tag-multi-select";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,6 +26,7 @@ import {
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
+import { useAccountTags } from "@/features/accounts/hooks/use-accounts";
 import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
 
@@ -71,6 +73,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   });
 
   const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
+  const [selectedTags, setSelectedTags] = useState<string[]>(apiKey.tags || []);
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
@@ -78,11 +81,13 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState<string>(
     apiKey.enforcedReasoningEffort || "none",
   );
+  const { data: availableTags = [], isLoading: tagsLoading } = useAccountTags();
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(limitRules);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
+      tags: selectedTags.length > 0 ? selectedTags : null,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
@@ -117,6 +122,20 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 </FormItem>
               )}
             />
+
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Tags</label>
+              <TagMultiSelect
+                value={selectedTags}
+                onChange={setSelectedTags}
+                options={availableTags}
+                placeholder="All accounts"
+                loading={tagsLoading}
+                disabled={busy}
+                clearLabel="All accounts"
+                searchPlaceholder="Search tags..."
+              />
+            </div>
 
             <div className="space-y-1">
               <label className="text-sm font-medium">Allowed models</label>

@@ -33,6 +33,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         id=row.id,
         name=row.name,
         key_prefix=row.key_prefix,
+        tags=row.tags,
         allowed_models=row.allowed_models,
         enforced_model=row.enforced_model,
         enforced_reasoning_effort=row.enforced_reasoning_effort,
@@ -106,6 +107,7 @@ async def create_api_key(
         created = await context.service.create_key(
             ApiKeyCreateData(
                 name=payload.name,
+                tags=payload.tags,
                 allowed_models=payload.allowed_models,
                 enforced_model=payload.enforced_model,
                 enforced_reasoning_effort=payload.enforced_reasoning_effort,
@@ -144,6 +146,8 @@ async def update_api_key(
     update = ApiKeyUpdateData(
         name=payload.name,
         name_set="name" in fields,
+        tags=payload.tags,
+        tags_set="tags" in fields,
         allowed_models=payload.allowed_models,
         allowed_models_set="allowed_models" in fields,
         enforced_model=payload.enforced_model,

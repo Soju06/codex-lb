@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildDashboardView,
   buildDepletionView,
   buildRemainingItems,
 } from "@/features/dashboard/utils";
 import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
+import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
@@ -121,5 +123,36 @@ describe("buildRemainingItems", () => {
     expect(items[2].label).toBe("unique@example.com");
     expect(items[2].labelSuffix).toBe("");
     expect(items[2].isEmail).toBe(true);
+  });
+});
+
+describe("buildDashboardView", () => {
+  it("adds plus-burn stat between cost and error rate", () => {
+    const overview = createDashboardOverview();
+    const logs = createDefaultRequestLogs();
+
+    const view = buildDashboardView(overview, logs);
+
+    expect(view.stats[2].label).toBe("Cost (7d)");
+    expect(view.stats[3].label).toBe("Plus Burn (5h/7d)");
+    expect(view.stats[3].value).toBe("0.7 / 0.8");
+    expect(view.stats[3].meta).toBe("Primary 0.7 acc/5h · Secondary 0.8 acc/7d");
+    expect(view.stats[3].trend.length).toBeGreaterThan(0);
+    expect(view.stats[4].label).toBe("Error rate");
+  });
+
+  it("falls back to placeholders when depletion data is missing", () => {
+    const overview = createDashboardOverview({
+      depletionPrimary: null,
+      depletionSecondary: null,
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.label).toBe("Plus Burn (5h/7d)");
+    expect(burn.value).toBe("-- / --");
+    expect(burn.meta).toBe("Primary -- acc/5h · Secondary -- acc/7d");
+    expect(burn.trend).toEqual([]);
   });
 });

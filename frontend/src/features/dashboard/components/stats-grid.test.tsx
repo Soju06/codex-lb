@@ -1,5 +1,6 @@
+// @vitest-environment jsdom
 import { render, screen } from "@testing-library/react";
-import { Activity, AlertTriangle, Coins, DollarSign } from "lucide-react";
+import { Activity, AlertTriangle, Coins, DollarSign, Flame } from "lucide-react";
 import { describe, expect, it } from "vitest";
 
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
@@ -8,13 +9,14 @@ const EMPTY_TREND: { value: number }[] = [];
 const SAMPLE_TREND = [{ value: 1 }, { value: 2 }, { value: 3 }];
 
 describe("StatsGrid", () => {
-  it("renders four metric cards with values", () => {
+  it("renders five metric cards with values", () => {
     render(
       <StatsGrid
         stats={[
           { label: "Requests (7d)", value: "228", icon: Activity, trend: SAMPLE_TREND, trendColor: "#3b82f6" },
           { label: "Tokens (7d)", value: "45K", icon: Coins, trend: SAMPLE_TREND, trendColor: "#8b5cf6" },
           { label: "Cost (7d)", value: "$1.82", meta: "Avg/hr $0.01", icon: DollarSign, trend: SAMPLE_TREND, trendColor: "#10b981" },
+          { label: "Plus Burn (5h/7d)", value: "0.7 / 0.8", meta: "Primary 0.7 acc/5h · Secondary 0.8 acc/7d", icon: Flame, trend: SAMPLE_TREND, trendColor: "#ef4444" },
           { label: "Error rate", value: "2.8%", meta: "Top: rate_limit_exceeded", icon: AlertTriangle, trend: SAMPLE_TREND, trendColor: "#f59e0b" },
         ]}
       />,
@@ -26,6 +28,8 @@ describe("StatsGrid", () => {
     expect(screen.getByText("45K")).toBeInTheDocument();
     expect(screen.getByText("Cost (7d)")).toBeInTheDocument();
     expect(screen.getByText("Avg/hr $0.01")).toBeInTheDocument();
+    expect(screen.getByText("Plus Burn (5h/7d)")).toBeInTheDocument();
+    expect(screen.getByText("Primary 0.7 acc/5h · Secondary 0.8 acc/7d")).toBeInTheDocument();
     expect(screen.getByText("Error rate")).toBeInTheDocument();
     expect(screen.getByText("Top: rate_limit_exceeded")).toBeInTheDocument();
   });

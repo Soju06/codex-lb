@@ -95,20 +95,63 @@ async def test_v1_responses_rejects_input_file_id(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_previous_response_id(async_client):
+async def test_v1_responses_unknown_previous_response_id_errors(async_client):
     payload = {
         "model": "gpt-5.2",
         "previous_response_id": "resp_abc123",
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Continue."}],
-            }
-        ],
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue."}]}],
     }
     resp = await async_client.post("/v1/responses", json=payload)
     assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "invalid_request_error"
+    error = resp.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "previous_response_id"
+    assert error["message"] == "Unknown previous_response_id"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_replays_previous_response_after_restart(async_client, app_instance, monkeypatch):
+    await _import_account(async_client, "acc_prev_response", "prev-response@example.com")
+
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
+        seen_inputs.append(payload.input)
+        if len(seen_inputs) == 1:
+            yield (
+                'data: {"type":"response.output_item.done","output_index":0,'
+                '"item":{"id":"msg_prev","type":"message","role":"assistant",'
+                '"content":[{"type":"output_text","text":"Prior answer"}]}}\n\n'
+            )
+            yield _completed_event("resp_prev")
+            return
+        yield _completed_event("resp_followup")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    first = await async_client.post("/v1/responses", json={"model": "gpt-5.2", "input": "Hello"})
+    assert first.status_code == 200
+
+    if hasattr(app_instance.state, "proxy_service"):
+        delattr(app_instance.state, "proxy_service")
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.2",
+            "previous_response_id": "resp_prev",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}],
+        },
+    )
+    assert second.status_code == 200
+    assert seen_inputs == [
+        [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "Prior answer"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
+        ],
+    ]
 
 
 @pytest.mark.asyncio

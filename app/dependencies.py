@@ -20,6 +20,7 @@ from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallService
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.response_snapshots_repository import ResponseSnapshotsRepository
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -153,6 +154,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
+            response_snapshots=ResponseSnapshotsRepository(session),
         )
 
 

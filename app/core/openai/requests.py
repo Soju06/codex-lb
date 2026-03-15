@@ -366,13 +366,6 @@ class ResponsesRequest(BaseModel):
             raise ValueError("store must be false")
         return False if value is None else value
 
-    @field_validator("previous_response_id")
-    @classmethod
-    def _reject_previous_response_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        raise ValueError("previous_response_id is not supported")
-
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:

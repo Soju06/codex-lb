@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -58,6 +59,30 @@ def _make_account(account_id: str, email: str, plan_type: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_run_startup_migrations_creates_response_snapshots_table(db_setup):
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        def _inspect_tables(sync_session):
+            inspector = sa.inspect(sync_session.connection())
+            return inspector.get_columns("response_snapshots")
+
+        columns = await session.run_sync(_inspect_tables)
+
+    column_names = {str(column["name"]) for column in columns}
+    assert {
+        "response_id",
+        "parent_response_id",
+        "account_id",
+        "model",
+        "input_items_json",
+        "response_json",
+        "created_at",
+    }.issubset(column_names)
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 ## Purpose and Scope
 
-This capability implements OpenAI-compatible behavior for `POST /v1/responses`, including request validation, streaming events, non-streaming aggregation, and OpenAI-style error envelopes. The scope is limited to what the ChatGPT upstream can provide; unsupported features are explicitly rejected.
+This capability implements OpenAI-compatible behavior for `POST /v1/responses`, including request validation, streaming events, non-streaming aggregation, durable `previous_response_id` replay, and OpenAI-style error envelopes. The scope is limited to what the ChatGPT upstream can provide; unsupported features are explicitly rejected unless the proxy can emulate them locally.
 
 See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
@@ -18,7 +18,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - Upstream limitations determine available modalities, tool output, and overflow handling.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.
-- `previous_response_id` and `truncation` are rejected.
+- `previous_response_id` is implemented as a proxy-local feature backed by durable response snapshots; `truncation` is still rejected.
 - `/v1/responses/compact` keeps a final-JSON contract and preserves the raw upstream `/codex/responses/compact` payload shape as the canonical next context window instead of rewriting it through buffered `/codex/responses` streaming.
 - Compact transport failures fail closed with respect to semantics: no surrogate `/codex/responses` fallback and no local compact-window reconstruction.
 - Compact transport may use bounded same-contract retries only for safe pre-body transport failures and `401 -> refresh -> retry`.
@@ -41,6 +41,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - **Upstream error / no accounts:** Non-streaming responses return an OpenAI error envelope with 5xx status.
 - **Compact upstream transport/client failure:** Retry only inside `/codex/responses/compact` when the failure is safely retryable; otherwise return an explicit upstream error without surrogate fallback.
 - **Invalid request payloads:** Return 4xx with `invalid_request_error`.
+- **Unknown `previous_response_id`:** Return 4xx with `invalid_request_error` and `param=previous_response_id`.
 
 ## Error Envelope Mapping (Reference)
 

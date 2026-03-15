@@ -78,6 +78,13 @@ def openai_invalid_payload_error(param: str | None = None) -> OpenAIErrorEnvelop
     return error
 
 
+def openai_invalid_request_error(message: str, *, param: str | None = None) -> OpenAIErrorEnvelope:
+    error = openai_error("invalid_request_error", message, error_type="invalid_request_error")
+    if param:
+        error["error"]["param"] = param
+    return error
+
+
 def normalize_responses_request_payload(
     payload: dict[str, JsonValue],
     *,

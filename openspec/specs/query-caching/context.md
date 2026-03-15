@@ -1,6 +1,6 @@
 ## Overview
 
-The query-caching capability is broader than cache TTLs. It also owns the database query shapes that sit on hot request and dashboard paths, especially when SQLite is the default backend.
+The query-caching capability is broader than cache TTLs. It also owns the database query shapes that sit on hot request and dashboard paths, especially for the PostgreSQL-backed runtime used by codex-lb.
 
 ## Decisions
 

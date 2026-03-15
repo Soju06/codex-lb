@@ -1,0 +1,4 @@
+- [x] Update database backend specs and migration specs for Neon-first runtime behavior.
+- [x] Change runtime settings and DB session startup to require PostgreSQL URLs and a dedicated migration URL.
+- [x] Update Alembic environment, compose, and env templates to use Neon PostgreSQL only.
+- [x] Update tests and docs to stop assuming SQLite defaults in runtime bootstrap.

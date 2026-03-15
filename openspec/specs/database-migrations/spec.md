@@ -94,18 +94,20 @@ The migration chain SHALL be idempotent for fresh databases and partially migrat
 - **THEN** schema state remains stable
 - **AND** the current Alembic revision remains `head`
 
-### Requirement: Automatic SQLite pre-migration backup
+### Requirement: Startup migration uses the resolved migration DSN
 
-The system SHALL create a SQLite backup before applying startup migrations when an upgrade is needed.
+The system SHALL run startup migrations, revision inspection, and schema drift checks against the resolved migration DSN.
 
-#### Scenario: Startup detects pending migration on SQLite
+#### Scenario: Dedicated migration DSN configured
 
-- **GIVEN** the configured database is a SQLite file
-- **AND** startup migration is enabled
-- **AND** migration state indicates upgrade is required
-- **WHEN** startup migration begins
-- **THEN** the system creates a pre-migration backup file
-- **AND** enforces configured retention on backup files
+- **WHEN** `CODEX_LB_DATABASE_MIGRATION_URL` is set
+- **THEN** startup migrations, drift checks, and Alembic CLI defaults use that DSN
+- **AND** runtime ORM sessions continue using `CODEX_LB_DATABASE_URL`
+
+#### Scenario: Dedicated migration DSN omitted
+
+- **WHEN** `CODEX_LB_DATABASE_MIGRATION_URL` is unset
+- **THEN** startup migration flow uses `CODEX_LB_DATABASE_URL`
 
 ### Requirement: Migration policy and drift guard in CI
 

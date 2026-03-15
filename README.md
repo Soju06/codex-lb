@@ -51,9 +51,13 @@ docker volume create codex-lb-data
 docker run -d --name codex-lb \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
+  -e CODEX_LB_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@EP-POOLER.REGION.aws.neon.tech/codex_lb?sslmode=require \
+  -e CODEX_LB_DATABASE_MIGRATION_URL=postgresql+asyncpg://USER:PASSWORD@EP-DIRECT.REGION.aws.neon.tech/codex_lb?sslmode=require \
   ghcr.io/soju06/codex-lb:latest
 
 # or uvx
+CODEX_LB_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@EP-POOLER.REGION.aws.neon.tech/codex_lb?sslmode=require \
+CODEX_LB_DATABASE_MIGRATION_URL=postgresql+asyncpg://USER:PASSWORD@EP-DIRECT.REGION.aws.neon.tech/codex_lb?sslmode=require \
 uvx codex-lb
 ```
 
@@ -289,16 +293,16 @@ Authorization: Bearer sk-clb-...
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
 Dashboard auth is configured in Settings.
-SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
+Neon PostgreSQL is required for runtime persistence. Set `CODEX_LB_DATABASE_URL` to the pooled Neon DSN and `CODEX_LB_DATABASE_MIGRATION_URL` to the direct Neon DSN used by Alembic/startup migrations.
 
 ## Data
 
-| Environment | Path |
-|-------------|------|
+| Environment | Local files |
+|-------------|-------------|
 | Local / uvx | `~/.codex-lb/` |
 | Docker | `/var/lib/codex-lb/` |
 
-Backup this directory to preserve your data.
+These local paths primarily store the encryption key and other local runtime files. Application data lives in Neon PostgreSQL, so backup and recovery must include your Neon database, not just the local directory.
 
 ## Development
 

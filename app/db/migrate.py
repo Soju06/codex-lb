@@ -564,7 +564,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--db-url",
         default=None,
-        help="Database URL to migrate. Defaults to CODEX_LB_DATABASE_URL from settings.",
+        help="Database URL to migrate. Defaults to CODEX_LB_DATABASE_MIGRATION_URL or CODEX_LB_DATABASE_URL from settings.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -594,7 +594,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    database_url = args.db_url or get_settings().database_url
+    settings = get_settings()
+    database_url = args.db_url or settings.database_migration_url or settings.database_url
 
     if args.command == "upgrade":
         result = run_upgrade(

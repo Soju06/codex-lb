@@ -2,63 +2,44 @@
 
 ## Purpose
 
-Define supported database backends and default backend behavior for codex-lb persistence.
+Define supported database backends and required runtime database behavior for codex-lb persistence.
 
 ## Requirements
 
-### Requirement: SQLite remains the default backend
-The service MUST default `CODEX_LB_DATABASE_URL` to a SQLite DSN when no explicit database URL is provided.
+### Requirement: PostgreSQL on Neon is the required runtime backend
+The service MUST require `CODEX_LB_DATABASE_URL` to be set to a PostgreSQL SQLAlchemy async DSN when the application starts.
 
 #### Scenario: No database URL configured
 - **WHEN** the service starts without `CODEX_LB_DATABASE_URL`
-- **THEN** it initializes and runs against the default SQLite database path
-
-### Requirement: PostgreSQL is supported as an optional backend
-The service MUST accept a PostgreSQL SQLAlchemy async DSN (`postgresql+asyncpg://...`) via `CODEX_LB_DATABASE_URL` and initialize SQLAlchemy session/engine wiring without requiring SQLite-specific paths.
+- **THEN** settings initialization fails with an explicit configuration error
 
 #### Scenario: PostgreSQL URL configured
 - **WHEN** `CODEX_LB_DATABASE_URL` is set to `postgresql+asyncpg://...`
-- **THEN** service startup uses PostgreSQL for ORM operations and migration execution
+- **THEN** service startup uses PostgreSQL for ORM operations
+- **AND** it does not perform SQLite-specific startup validation or file-path setup
 
-### Requirement: SQLite startup validation mode is configurable
-The service MUST support configurable startup validation for SQLite file databases via `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE`.
+### Requirement: Runtime migrations use a dedicated migration URL
+The service MUST accept a dedicated PostgreSQL DSN via `CODEX_LB_DATABASE_MIGRATION_URL` for Alembic and startup migration execution.
 
-#### Scenario: Default SQLite startup uses quick validation
-- **GIVEN** the configured database URL is a SQLite file
-- **AND** `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE` is unset
-- **WHEN** the service starts
-- **THEN** it runs `PRAGMA quick_check`
-- **AND** it does not run `PRAGMA integrity_check`
+#### Scenario: Dedicated migration URL configured
+- **WHEN** `CODEX_LB_DATABASE_MIGRATION_URL` is set to `postgresql+asyncpg://...`
+- **THEN** startup migration and Alembic execution use that DSN
+- **AND** runtime ORM sessions still use `CODEX_LB_DATABASE_URL`
 
-#### Scenario: Full SQLite startup validation is explicitly enabled
-- **GIVEN** the configured database URL is a SQLite file
-- **AND** `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=full`
-- **WHEN** the service starts
-- **THEN** it runs `PRAGMA integrity_check`
+#### Scenario: Migration URL omitted
+- **WHEN** `CODEX_LB_DATABASE_MIGRATION_URL` is not set
+- **THEN** the service uses `CODEX_LB_DATABASE_URL` as the migration DSN
 
-#### Scenario: SQLite startup validation can be skipped
-- **GIVEN** the configured database URL is a SQLite file
-- **AND** `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=off`
-- **WHEN** the service starts
-- **THEN** it skips startup SQLite validation
+### Requirement: Test suite requires explicit PostgreSQL backend configuration
+The test bootstrap MUST allow callers to override runtime and migration DSNs via `CODEX_LB_TEST_DATABASE_URL` and `CODEX_LB_TEST_DATABASE_MIGRATION_URL` and MUST NOT silently default to SQLite.
 
-### Requirement: Test suite supports backend selection
-The test bootstrap MUST allow callers to override `CODEX_LB_DATABASE_URL` via environment and MUST default to SQLite when no override is provided.
-
-#### Scenario: CI sets PostgreSQL URL
-- **WHEN** CI sets `CODEX_LB_DATABASE_URL` to a PostgreSQL DSN
+#### Scenario: CI sets PostgreSQL URLs
+- **WHEN** CI sets `CODEX_LB_TEST_DATABASE_URL` and `CODEX_LB_TEST_DATABASE_MIGRATION_URL`
 - **THEN** tests run against PostgreSQL without modifying test code
 
-#### Scenario: Local test run without URL override
-- **WHEN** tests are run without setting `CODEX_LB_DATABASE_URL`
-- **THEN** tests run against a temporary SQLite database
-
-### Requirement: CI validates both default and optional backends
-CI MUST keep SQLite-backed tests as the default path and MUST run an additional PostgreSQL-backed test job.
-
-#### Scenario: CI workflow execution
-- **WHEN** CI runs on push or pull request
-- **THEN** at least one pytest job runs with SQLite and another pytest job runs with PostgreSQL
+#### Scenario: Test run without URL override
+- **WHEN** tests are run without `CODEX_LB_TEST_DATABASE_URL`
+- **THEN** test bootstrap fails with an explicit configuration error
 
 ### Requirement: ORM enums persist schema string values
 ORM enum columns backed by named PostgreSQL enums MUST persist the lowercase string values defined by the schema and migrations, not Python enum member names.

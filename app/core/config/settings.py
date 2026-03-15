@@ -5,7 +5,7 @@ from ipaddress import ip_network
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -31,7 +31,6 @@ def _default_oauth_callback_host() -> str:
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
-DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
 
 
@@ -43,14 +42,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+    database_url: str = Field(min_length=1)
+    database_migration_url: str | None = None
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
     database_migrate_on_startup: bool = True
-    database_sqlite_pre_migrate_backup_enabled: bool = True
-    database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
-    database_sqlite_startup_check_mode: Literal["quick", "full", "off"] = "quick"
     database_alembic_auto_remap_enabled: bool = True
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
@@ -97,15 +94,21 @@ class Settings(BaseSettings):
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
 
-    @field_validator("database_url")
+    @field_validator("database_url", "database_migration_url")
     @classmethod
-    def _expand_database_url(cls, value: str) -> str:
-        for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
-            if value.startswith(prefix):
-                path = value[len(prefix) :]
-                if path.startswith("~"):
-                    return f"{prefix}{Path(path).expanduser()}"
+    def _normalize_database_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("database url must not be empty")
         return value
+
+    @model_validator(mode="after")
+    def _finalize_database_urls(self) -> Settings:
+        if self.database_migration_url is None:
+            self.database_migration_url = self.database_url
+        return self
 
     @field_validator("encryption_key_file", mode="before")
     @classmethod
@@ -171,4 +174,9 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.database_migrate_on_startup and not settings.database_migration_url:
+        raise RuntimeError(
+            "CODEX_LB_DATABASE_MIGRATION_URL is required when database migrations on startup are enabled"
+        )
+    return settings

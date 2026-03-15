@@ -13,7 +13,7 @@ from app.core.usage.pricing import (
     calculate_cost_from_usage,
     get_pricing_for_model,
 )
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import (
     _UNSET,
@@ -234,6 +234,7 @@ class ApiKeysService:
 
     async def create_key(self, payload: ApiKeyCreateData) -> ApiKeyCreatedData:
         now = utcnow()
+        expires_at = _normalize_expires_at(payload.expires_at)
         plain_key = _generate_plain_key()
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
         enforced_model = _normalize_model_slug(payload.enforced_model)
@@ -247,7 +248,7 @@ class ApiKeysService:
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
-            expires_at=payload.expires_at,
+            expires_at=expires_at,
             is_active=True,
             created_at=now,
             last_used_at=None,
@@ -273,6 +274,7 @@ class ApiKeysService:
         ]
 
     async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
+        expires_at = _normalize_expires_at(payload.expires_at) if payload.expires_at_set else None
         if payload.allowed_models_set:
             allowed_models = _normalize_allowed_models(payload.allowed_models)
         else:
@@ -309,7 +311,7 @@ class ApiKeysService:
             allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
             enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
             enforced_reasoning_effort=(enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET),
-            expires_at=payload.expires_at if payload.expires_at_set else _UNSET,
+            expires_at=expires_at if payload.expires_at_set else _UNSET,
             is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
         )
         if row is None:
@@ -668,6 +670,12 @@ def _normalize_model_slug(value: str | None) -> str | None:
 
 
 _SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+
+
+def _normalize_expires_at(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return to_utc_naive(value)
 
 
 def _normalize_reasoning_effort(value: str | None) -> str | None:

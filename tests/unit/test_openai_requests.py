@@ -362,7 +362,18 @@ def test_responses_accepts_known_include_values():
     assert request.include == ["reasoning.encrypted_content", "web_search_call.action.sources"]
 
 
-def test_responses_rejects_conversation_previous_response_id():
+def test_responses_accepts_previous_response_id_without_conversation():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "previous_response_id": "resp_1",
+    }
+    request = ResponsesRequest.model_validate(payload)
+    assert request.previous_response_id == "resp_1"
+
+
+def test_responses_rejects_conversation_and_previous_response_id_together():
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
@@ -370,7 +381,7 @@ def test_responses_rejects_conversation_previous_response_id():
         "conversation": "conv_1",
         "previous_response_id": "resp_1",
     }
-    with pytest.raises(ValueError, match="previous_response_id is not supported"):
+    with pytest.raises(ValueError, match="Provide either 'conversation' or 'previous_response_id', not both"):
         ResponsesRequest.model_validate(payload)
 
 

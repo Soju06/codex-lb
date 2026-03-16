@@ -1,0 +1,15 @@
+services:
+  server:
+    image: ${CODEX_LB_IMAGE:-ghcr.io/soju06/codex-lb:latest}
+    env_file:
+      - .env.local
+    ports:
+      - "2455:2455"
+      - "1455:1455"
+    volumes:
+      - codex-lb-data:/var/lib/codex-lb
+    restart: unless-stopped
+
+volumes:
+  codex-lb-data:
+    name: codex-lb-data

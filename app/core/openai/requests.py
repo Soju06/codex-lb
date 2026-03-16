@@ -116,7 +116,7 @@ def _is_input_file_with_id(item: Mapping[str, JsonValue]) -> bool:
     return isinstance(file_id, str) and bool(file_id)
 
 
-def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+def sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     sanitized_input: list[JsonValue] = []
     for item in input_items:
         sanitized_item = _sanitize_interleaved_reasoning_input_item(item)
@@ -336,12 +336,12 @@ class ResponsesRequest(BaseModel):
             normalized = _normalize_input_text(value)
             if _has_input_file_id(normalized):
                 raise ValueError("input_file.file_id is not supported")
-            return _sanitize_input_items(normalized)
+            return sanitize_input_items(normalized)
         if is_json_list(value):
             input_items = cast(list[JsonValue], value)
             if _has_input_file_id(input_items):
                 raise ValueError("input_file.file_id is not supported")
-            return _sanitize_input_items(input_items)
+            return sanitize_input_items(input_items)
         raise ValueError("input must be a string or array")
 
     @field_validator("include")
@@ -365,13 +365,6 @@ class ResponsesRequest(BaseModel):
         if value is True:
             raise ValueError("store must be false")
         return False if value is None else value
-
-    @field_validator("previous_response_id")
-    @classmethod
-    def _reject_previous_response_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        raise ValueError("previous_response_id is not supported")
 
     @field_validator("tools")
     @classmethod
@@ -418,12 +411,12 @@ class ResponsesCompactRequest(BaseModel):
             normalized = _normalize_input_text(value)
             if _has_input_file_id(normalized):
                 raise ValueError("input_file.file_id is not supported")
-            return _sanitize_input_items(normalized)
+            return sanitize_input_items(normalized)
         if is_json_list(value):
             input_items = cast(list[JsonValue], value)
             if _has_input_file_id(input_items):
                 raise ValueError("input_file.file_id is not supported")
-            return _sanitize_input_items(input_items)
+            return sanitize_input_items(input_items)
         raise ValueError("input must be a string or array")
 
     @model_validator(mode="before")
@@ -478,7 +471,7 @@ def _sanitize_interleaved_reasoning_input(payload: dict[str, JsonValue]) -> None
     input_items = _json_list_or_none(input_value)
     if input_items is None:
         return
-    payload["input"] = _sanitize_input_items(input_items)
+    payload["input"] = sanitize_input_items(input_items)
 
 
 def _normalize_openai_compatible_aliases(payload: dict[str, JsonValue]) -> None:

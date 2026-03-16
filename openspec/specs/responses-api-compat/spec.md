@@ -16,7 +16,7 @@ The service MUST accept POST requests to `/v1/responses` with a JSON body and MU
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 ### Requirement: Support Responses input types and conversation constraints
-The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST reject `previous_response_id` with an OpenAI error envelope because upstream does not support it. The service MUST continue to reject requests that include both `conversation` and `previous_response_id`.
+The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. When the client supplies `previous_response_id`, the service MUST resolve that id from proxy-managed durable response snapshots scoped to the current requester, rebuild the prior conversation input/output history as explicit upstream input items, and continue to reject requests that include both `conversation` and `previous_response_id`.
 
 #### Scenario: String input
 - **WHEN** the client sends `input` as a string
@@ -26,13 +26,30 @@ The service MUST accept `input` as either a string or an array of input items. W
 - **WHEN** the client sends `input` as an array of input items
 - **THEN** the request is accepted and each item is forwarded in order
 
+#### Scenario: previous_response_id resolved from durable snapshots
+- **WHEN** the client provides `previous_response_id` that matches a persisted prior response snapshot for the current requester
+- **THEN** the service forwards the rebuilt prior input/output history before the current request input
+- **AND** it does not carry forward prior `instructions`
+
+#### Scenario: previous_response_id exists for another API key
+- **WHEN** the client provides `previous_response_id` that matches a persisted prior response snapshot owned by a different API key
+- **THEN** the service returns a 400 OpenAI invalid_request_error with `param` set to `previous_response_id`
+- **AND** the error message remains `Unknown previous_response_id`
+
 #### Scenario: conversation and previous_response_id conflict
 - **WHEN** the client provides both `conversation` and `previous_response_id`
 - **THEN** the service returns a 4xx response with an OpenAI error envelope indicating invalid parameters
 
-#### Scenario: previous_response_id provided
-- **WHEN** the client provides `previous_response_id`
-- **THEN** the service returns a 4xx response with an OpenAI error envelope indicating the unsupported parameter
+### Requirement: Prefer prior account continuity for resolved previous_response_id
+When a request resolves `previous_response_id`, the service MUST prefer the account that served the referenced response if that account is still eligible for the current request. If the stored account is unavailable, the service MUST fall back to the existing account-selection flow instead of failing solely because the preferred account cannot serve the request.
+
+#### Scenario: Preferred prior account remains eligible
+- **WHEN** the client sends `previous_response_id` that resolves to a snapshot whose account can still serve the current request
+- **THEN** the service routes the request to that account ahead of normal balancing
+
+#### Scenario: Preferred prior account unavailable
+- **WHEN** the client sends `previous_response_id` that resolves to a snapshot whose account can no longer serve the current request
+- **THEN** the service falls back to normal account selection without returning an error solely because the preferred account is unavailable
 
 ### Requirement: Reject input_file file_id in Responses
 The service MUST reject `input_file.file_id` in Responses input items and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".

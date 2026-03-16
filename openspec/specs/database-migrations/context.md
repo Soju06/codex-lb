@@ -42,8 +42,10 @@
 
 ## Operational Notes
 
+- Migration DSN resolution:
+  - startup and Alembic CLI use `CODEX_LB_DATABASE_MIGRATION_URL` when set, otherwise `CODEX_LB_DATABASE_URL`
 - Startup path:
-  - inspect state -> (optional SQLite backup) -> bootstrap legacy `schema_migrations` -> remap legacy Alembic IDs -> `upgrade head` -> schema drift check
+  - inspect state -> bootstrap legacy `schema_migrations` -> remap legacy Alembic IDs -> `upgrade head` -> schema drift check
 - CLI checks:
   - `codex-lb-db check` validates head count, revision naming/filename policy, and schema drift.
 - Emergency toggle:

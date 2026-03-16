@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -10,11 +8,14 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
-TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
+_runtime_db_url = os.environ.get("CODEX_LB_TEST_DATABASE_URL")
+if not _runtime_db_url:
+    raise RuntimeError("CODEX_LB_TEST_DATABASE_URL must be set for the test suite")
 
-os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
-    "CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}"
+os.environ["CODEX_LB_DATABASE_URL"] = _runtime_db_url
+os.environ["CODEX_LB_DATABASE_MIGRATION_URL"] = os.environ.get(
+    "CODEX_LB_TEST_DATABASE_MIGRATION_URL",
+    _runtime_db_url,
 )
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
@@ -70,8 +71,8 @@ async def async_client(app_instance):
 
 
 @pytest.fixture(autouse=True)
-def temp_key_file(monkeypatch):
-    key_path = TEST_DB_DIR / f"encryption-{uuid4().hex}.key"
+def temp_key_file(monkeypatch, tmp_path):
+    key_path = tmp_path / f"encryption-{uuid4().hex}.key"
     monkeypatch.setenv("CODEX_LB_ENCRYPTION_KEY_FILE", str(key_path))
     from app.core.config.settings import get_settings
 

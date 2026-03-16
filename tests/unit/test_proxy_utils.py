@@ -297,9 +297,46 @@ class _RequestLogsRecorder:
         self.calls.append(dict(kwargs))
 
 
+class _ResponseSnapshotsStub:
+    def __init__(self, snapshots: dict[str, object] | None = None) -> None:
+        self._snapshots = snapshots or {}
+        self.upserts: list[dict[str, object]] = []
+
+    async def get(self, response_id: str, *, api_key_id: str | None):
+        snapshot = self._snapshots.get(response_id)
+        if snapshot is None:
+            return None
+        snapshot_api_key_id = getattr(snapshot, "api_key_id", None)
+        if snapshot_api_key_id != api_key_id:
+            return None
+        return snapshot
+
+    async def upsert(self, **kwargs: object) -> object:
+        self.upserts.append(dict(kwargs))
+        snapshot = SimpleNamespace(
+            response_id=kwargs["response_id"],
+            parent_response_id=kwargs.get("parent_response_id"),
+            account_id=kwargs.get("account_id"),
+            api_key_id=kwargs.get("api_key_id"),
+            model=kwargs["model"],
+            input_items_json=json.dumps(kwargs["input_items"], separators=(",", ":")),
+            response_json=json.dumps(kwargs["response_payload"], separators=(",", ":")),
+        )
+        self._snapshots[str(kwargs["response_id"])] = snapshot
+        return snapshot
+
+
 class _RepoContext:
-    def __init__(self, request_logs: _RequestLogsRecorder) -> None:
-        self._repos = SimpleNamespace(request_logs=request_logs)
+    def __init__(
+        self,
+        request_logs: _RequestLogsRecorder,
+        *,
+        response_snapshots: _ResponseSnapshotsStub | None = None,
+    ) -> None:
+        self._repos = SimpleNamespace(
+            request_logs=request_logs,
+            response_snapshots=response_snapshots,
+        )
 
     async def __aenter__(self) -> object:
         return self._repos
@@ -308,9 +345,13 @@ class _RepoContext:
         return False
 
 
-def _repo_factory(request_logs: _RequestLogsRecorder):
+def _repo_factory(
+    request_logs: _RequestLogsRecorder,
+    *,
+    response_snapshots: _ResponseSnapshotsStub | None = None,
+):
     def factory() -> _RepoContext:
-        return _RepoContext(request_logs)
+        return _RepoContext(request_logs, response_snapshots=response_snapshots)
 
     return factory
 
@@ -2788,6 +2829,143 @@ async def test_connect_proxy_websocket_maps_handshake_budget_exhaustion_to_timeo
     assert sent_payload["error"]["message"] == "Proxy request budget exhausted"
     assert request_logs.calls[0]["request_id"] == "ws_req_handshake_budget"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_rebuilds_previous_response_history(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    response_snapshots = _ResponseSnapshotsStub(
+        {
+            "resp_prev": SimpleNamespace(
+                response_id="resp_prev",
+                parent_response_id=None,
+                account_id="acc_prev",
+                input_items_json=json.dumps(
+                    [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+                    separators=(",", ":"),
+                ),
+                response_json=json.dumps(
+                    {
+                        "id": "resp_prev",
+                        "output": [
+                            {
+                                "id": "msg_prev",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "Prior answer"}],
+                            }
+                        ],
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        }
+    )
+    service = proxy_service.ProxyService(_repo_factory(request_logs, response_snapshots=response_snapshots))
+
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=None))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        {
+            "type": "response.create",
+            "model": "gpt-5.2",
+            "previous_response_id": "resp_prev",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}],
+        },
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=None,
+    )
+
+    assert prepared.request_state.parent_response_id == "resp_prev"
+    assert prepared.request_state.preferred_account_id == "acc_prev"
+    assert prepared.request_state.current_input_items == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}
+    ]
+    assert json.loads(prepared.text_data)["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "Prior answer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_rejects_previous_response_from_other_api_key(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    response_snapshots = _ResponseSnapshotsStub(
+        {
+            "resp_prev_other_key": SimpleNamespace(
+                response_id="resp_prev_other_key",
+                parent_response_id=None,
+                account_id="acc_prev",
+                api_key_id="key_a",
+                input_items_json=json.dumps(
+                    [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+                    separators=(",", ":"),
+                ),
+                response_json=json.dumps(
+                    {
+                        "id": "resp_prev_other_key",
+                        "output": [
+                            {
+                                "id": "msg_prev",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "Prior answer"}],
+                            }
+                        ],
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        }
+    )
+    service = proxy_service.ProxyService(_repo_factory(request_logs, response_snapshots=response_snapshots))
+
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        service,
+        "_refresh_websocket_api_key_policy",
+        AsyncMock(
+            return_value=ApiKeyData(
+                id="key_b",
+                name="key-b",
+                key_prefix="sk-test",
+                allowed_models=None,
+                enforced_model=None,
+                enforced_reasoning_effort=None,
+                expires_at=None,
+                is_active=True,
+                created_at=utcnow(),
+                last_used_at=None,
+            )
+        ),
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._prepare_websocket_response_create_request(
+            {
+                "type": "response.create",
+                "model": "gpt-5.2",
+                "previous_response_id": "resp_prev_other_key",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}],
+            },
+            headers={},
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=300,
+            api_key=None,
+        )
+
+    error = _assert_proxy_response_error(exc_info.value)
+    assert error.status_code == 400
+    assert error.payload["error"]["param"] == "previous_response_id"
+    assert error.payload["error"]["message"] == "Unknown previous_response_id"
 
 
 @pytest.mark.asyncio

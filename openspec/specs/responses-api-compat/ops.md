@@ -49,8 +49,9 @@ This probe bypasses `codex-lb` selection and measures what the upstream returns 
 Run:
 
 ```bash
-set -a && source /home/egor/services/codex-lb-defin85/.env.local && set +a && cd /home/egor/services/codex-lb-defin85 && .venv/bin/python - <<'PY'
-import asyncio, json
+cd /home/egor/services/codex-lb-defin85 && .venv/bin/python - <<'PY'
+import asyncio, json, os
+from dotenv import dotenv_values
 from sqlalchemy import select
 
 from app.core.clients.http import close_http_client, init_http_client
@@ -60,6 +61,7 @@ from app.db.models import Account
 from app.db.session import SessionLocal
 
 EMAIL = "TARGET_EMAIL"
+os.environ.update({key: value for key, value in dotenv_values(".env.local").items() if value is not None})
 
 async def main():
     await init_http_client()
@@ -121,6 +123,9 @@ async def main():
 asyncio.run(main())
 PY
 ```
+
+Do not `source` `.env.local` directly in shell when URLs may include characters like `&`.
+Load it with `python-dotenv` or quote those values first.
 
 Expected useful output:
 

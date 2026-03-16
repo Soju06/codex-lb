@@ -1,6 +1,5 @@
 import { Clock, ExternalLink, Play, RotateCcw } from "lucide-react";
 
-import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
@@ -77,7 +76,6 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
 
   const title = account.displayName || account.email;
-  const titleIsEmail = isEmailLabel(title, account.email);
   const compactId = formatCompactAccountId(account.accountId);
   const emailSubtitle =
     account.displayName && account.displayName !== account.email
@@ -91,7 +89,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold leading-tight">
-            {titleIsEmail && blurred
+            {blurred
               ? <><span className="privacy-blur">{title}</span>{!emailSubtitle ? idSuffix : ""}</>
               : <>{title}{!emailSubtitle ? idSuffix : ""}</>}
           </p>
@@ -106,8 +104,8 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
 
       {/* Quota bars */}
       <div className={cn("mt-3.5 grid gap-3", weeklyOnly ? "grid-cols-1" : "grid-cols-2")}>
-        {!weeklyOnly && <QuotaBar label="Primary" percent={primaryRemaining} resetLabel={primaryReset} />}
-        <QuotaBar label="Secondary" percent={secondaryRemaining} resetLabel={secondaryReset} />
+        {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
+        <QuotaBar label="Weekly" percent={secondaryRemaining} resetLabel={secondaryReset} />
       </div>
 
       {/* Actions */}

@@ -135,13 +135,13 @@ describe("buildDashboardView", () => {
 
     expect(view.stats[2].label).toBe("Cost (7d)");
     expect(view.stats[3].label).toBe("Plus Burn (5h/7d)");
-    expect(view.stats[3].value).toBe("0.7 / 0.8");
-    expect(view.stats[3].meta).toBe("Primary 0.7 acc/5h · Secondary 0.8 acc/7d");
+    expect(view.stats[3].value).toBe("0.7 / 1.2");
+    expect(view.stats[3].meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
     expect(view.stats[3].trend.length).toBeGreaterThan(0);
     expect(view.stats[4].label).toBe("Error rate");
   });
 
-  it("falls back to placeholders when depletion data is missing", () => {
+  it("falls back to usage equivalents when depletion data is missing", () => {
     const overview = createDashboardOverview({
       depletionPrimary: null,
       depletionSecondary: null,
@@ -151,8 +151,46 @@ describe("buildDashboardView", () => {
     const burn = view.stats[3];
 
     expect(burn.label).toBe("Plus Burn (5h/7d)");
-    expect(burn.value).toBe("-- / --");
-    expect(burn.meta).toBe("Primary -- acc/5h · Secondary -- acc/7d");
-    expect(burn.trend).toEqual([]);
+    expect(burn.value).toBe("0.7 / 1.2");
+    expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
+    expect(burn.trend.length).toBeGreaterThan(0);
+  });
+
+  it("uses usage-equivalent fallback when burn rate is zero", () => {
+    const overview = createDashboardOverview({
+      depletionSecondary: {
+        risk: 1,
+        riskLevel: "critical",
+        burnRate: 0,
+        safeUsagePercent: 98,
+        projectedExhaustionAt: null,
+        secondsUntilExhaustion: null,
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.7 / 1.2");
+    expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
+  });
+
+  it("caps burn-equivalent to available account count per window", () => {
+    const overview = createDashboardOverview({
+      depletionSecondary: {
+        risk: 1,
+        riskLevel: "critical",
+        burnRate: 999,
+        safeUsagePercent: 98,
+        projectedExhaustionAt: null,
+        secondsUntilExhaustion: null,
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.7 / 2.0");
+    expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 2.0 acc/7d");
   });
 });

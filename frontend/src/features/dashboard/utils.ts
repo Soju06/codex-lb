@@ -128,8 +128,56 @@ export function avgPerHour(cost7d: number, hours = 24 * 7): number {
   return cost7d / hours;
 }
 
-function isPositiveFinite(value: number | null | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0;
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+function windowUsedAccountEquivalents(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  let usedEquivalent = 0;
+  let includedAccounts = 0;
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
+      continue;
+    }
+
+    usedEquivalent += (100 - clampPercent(remainingPercent)) / 100;
+    includedAccounts += 1;
+  }
+
+  return includedAccounts > 0 ? usedEquivalent : null;
+}
+
+function windowIncludedAccountCount(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number {
+  let includedAccounts = 0;
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
+      continue;
+    }
+
+    includedAccounts += 1;
+  }
+
+  return includedAccounts;
 }
 
 function plusAccountsBurnEquivalent(
@@ -138,21 +186,36 @@ function plusAccountsBurnEquivalent(
 ): number | null {
   const summaryWindow = windowKey === "primary" ? overview.summary.primaryWindow : overview.summary.secondaryWindow;
   const depletion = windowKey === "primary" ? overview.depletionPrimary : overview.depletionSecondary;
+  const fallbackUsedEquivalent = windowUsedAccountEquivalents(overview, windowKey);
 
-  if (!summaryWindow || !depletion) {
-    return null;
+  if (!summaryWindow) {
+    return fallbackUsedEquivalent;
   }
 
   const remainingCredits = summaryWindow.remainingCredits;
-  const burnRate = depletion.burnRate;
+  const burnRate = depletion?.burnRate;
+  let burnEquivalent: number | null = null;
 
-  if (!isPositiveFinite(remainingCredits) || !isPositiveFinite(burnRate)) {
-    return null;
+  if (isFiniteNumber(remainingCredits) && remainingCredits >= 0 && isFiniteNumber(burnRate) && burnRate > 0) {
+    const plusCapacity = PLUS_DEFAULT_CAPACITY[windowKey];
+    const equivalent = (remainingCredits * burnRate) / plusCapacity;
+    if (isFiniteNumber(equivalent)) {
+      burnEquivalent = Math.max(0, equivalent);
+    }
   }
 
-  const plusCapacity = PLUS_DEFAULT_CAPACITY[windowKey];
-  const equivalent = (remainingCredits * burnRate) / plusCapacity;
-  return Number.isFinite(equivalent) ? Math.max(0, equivalent) : null;
+  if (burnEquivalent !== null) {
+    const maxEquivalent = windowIncludedAccountCount(overview, windowKey);
+    if (maxEquivalent > 0) {
+      burnEquivalent = Math.min(burnEquivalent, maxEquivalent);
+    }
+  }
+
+  if (windowKey === "secondary" && isFiniteNumber(fallbackUsedEquivalent)) {
+    return burnEquivalent === null ? fallbackUsedEquivalent : Math.max(burnEquivalent, fallbackUsedEquivalent);
+  }
+
+  return burnEquivalent ?? fallbackUsedEquivalent;
 }
 
 function formatBurnEquivalent(value: number | null): string {

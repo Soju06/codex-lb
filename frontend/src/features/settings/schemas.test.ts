@@ -26,6 +26,21 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
   });
+
+  it("parses legacy settings payload and applies defaults for missing routing fields", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: false,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.routingStrategy).toBe("usage_weighted");
+    expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
+  });
 });
 
 describe("SettingsUpdateRequestSchema", () => {

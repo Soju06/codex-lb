@@ -351,7 +351,7 @@ class UsageUpdater:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
         # This is a special case that if the account type is free (or probably go)
-        # The 7d stat is in primary window instead of secondary window 
+        # The 7d stat is in primary window instead of secondary window
         # (that is widely defined as 7d in the ui)
         # This will cause the account usage trend is "primary" instead of "secondary"
         if primary and primary.limit_window_seconds == 604800:

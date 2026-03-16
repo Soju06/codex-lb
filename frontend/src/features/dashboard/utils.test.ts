@@ -134,7 +134,7 @@ describe("buildDashboardView", () => {
     const view = buildDashboardView(overview, logs);
 
     expect(view.stats[2].label).toBe("Cost (7d)");
-    expect(view.stats[3].label).toBe("Plus Burn (5h/7d)");
+    expect(view.stats[3].label).toBe("Account burn rate (5h/7d)");
     expect(view.stats[3].value).toBe("0.7 / 1.2");
     expect(view.stats[3].meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
     expect(view.stats[3].trend.length).toBeGreaterThan(0);
@@ -150,7 +150,7 @@ describe("buildDashboardView", () => {
     const view = buildDashboardView(overview, createDefaultRequestLogs());
     const burn = view.stats[3];
 
-    expect(burn.label).toBe("Plus Burn (5h/7d)");
+    expect(burn.label).toBe("Account burn rate (5h/7d)");
     expect(burn.value).toBe("0.7 / 1.2");
     expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
     expect(burn.trend.length).toBeGreaterThan(0);

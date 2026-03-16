@@ -314,7 +314,7 @@ export function buildDashboardView(
 
   if (showAccountBurnrate) {
     stats.push({
-      label: `Plus Burn (${primaryBurnLabel}/${secondaryBurnLabel})`,
+      label: `Account burn rate (${primaryBurnLabel}/${secondaryBurnLabel})`,
       value: `${formatBurnEquivalent(primaryBurnEquivalent)} / ${formatBurnEquivalent(secondaryBurnEquivalent)}`,
       meta: `Primary ${formatBurnEquivalent(primaryBurnEquivalent)} acc/${primaryBurnLabel} · Secondary ${formatBurnEquivalent(secondaryBurnEquivalent)} acc/${secondaryBurnLabel}`,
       icon: Flame,

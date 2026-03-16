@@ -60,8 +60,8 @@ export function AppearanceSettings() {
 
           <div className="flex items-center justify-between p-3">
             <div>
-              <p className="text-sm font-medium">Account Burnrate</p>
-              <p className="text-xs text-muted-foreground">Show the plus burnrate card on the dashboard.</p>
+              <p className="text-sm font-medium">Account burn rate</p>
+              <p className="text-xs text-muted-foreground">Show the account burn rate card on the dashboard.</p>
             </div>
             <Switch checked={accountBurnrateEnabled} onCheckedChange={setAccountBurnrateEnabled} />
           </div>

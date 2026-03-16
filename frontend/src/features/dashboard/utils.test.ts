@@ -6,7 +6,7 @@ import {
   buildRemainingItems,
 } from "@/features/dashboard/utils";
 import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
-import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
+import { createAccountSummary, createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
@@ -154,6 +154,42 @@ describe("buildDashboardView", () => {
     expect(burn.value).toBe("0.7 / 1.2");
     expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
     expect(burn.trend.length).toBeGreaterThan(0);
+  });
+
+  it("projects burn rate to full 7d window when reset is still in the future", () => {
+    const now = Date.now();
+    const overview = createDashboardOverview({
+      accounts: [
+        createAccountSummary({
+          accountId: "acc-idle",
+          email: "idle@example.com",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 100,
+          },
+          resetAtSecondary: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+        createAccountSummary({
+          accountId: "acc-hot",
+          email: "hot@example.com",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 16,
+          },
+          resetAtSecondary: new Date(now + 74 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+      depletionPrimary: null,
+      depletionSecondary: null,
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.0 / 1.5");
+    expect(burn.meta).toBe("Primary 0.0 acc/5h · Secondary 1.5 acc/7d");
   });
 
   it("uses usage-equivalent fallback when burn rate is zero", () => {

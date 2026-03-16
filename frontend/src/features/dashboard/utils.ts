@@ -177,6 +177,46 @@ function windowUsedAccountEquivalents(
   return includedAccounts > 0 ? usedEquivalent : null;
 }
 
+function windowProjectedAccountEquivalents(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  let projectedEquivalent = 0;
+  let includedAccounts = 0;
+  const nowMs = Date.now();
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+    const resetAt = windowKey === "primary" ? account.resetAtPrimary : account.resetAtSecondary;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent) || windowMinutes <= 0) {
+      continue;
+    }
+
+    const usedEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    let projected = usedEquivalent;
+
+    if (resetAt) {
+      const resetAtMs = Date.parse(resetAt);
+      if (Number.isFinite(resetAtMs)) {
+        const windowSeconds = windowMinutes * 60;
+        const secondsUntilReset = Math.max(0, (resetAtMs - nowMs) / 1000);
+        const elapsedSeconds = Math.max(0, windowSeconds - secondsUntilReset);
+        if (elapsedSeconds > 0) {
+          projected = usedEquivalent * (windowSeconds / elapsedSeconds);
+        }
+      }
+    }
+
+    projectedEquivalent += projected;
+    includedAccounts += 1;
+  }
+
+  return includedAccounts > 0 ? projectedEquivalent : null;
+}
+
 function windowIncludedAccountCount(
   overview: DashboardOverview,
   windowKey: "primary" | "secondary",
@@ -204,10 +244,11 @@ function plusAccountsBurnEquivalent(
 ): number | null {
   const summaryWindow = windowKey === "primary" ? overview.summary.primaryWindow : overview.summary.secondaryWindow;
   const depletion = windowKey === "primary" ? overview.depletionPrimary : overview.depletionSecondary;
+  const fallbackProjectedEquivalent = windowProjectedAccountEquivalents(overview, windowKey);
   const fallbackUsedEquivalent = windowUsedAccountEquivalents(overview, windowKey);
 
   if (!summaryWindow) {
-    return fallbackUsedEquivalent;
+    return fallbackProjectedEquivalent ?? fallbackUsedEquivalent;
   }
 
   const remainingCredits = summaryWindow.remainingCredits;
@@ -229,11 +270,16 @@ function plusAccountsBurnEquivalent(
     }
   }
 
-  if (windowKey === "secondary" && isFiniteNumber(fallbackUsedEquivalent)) {
-    return burnEquivalent === null ? fallbackUsedEquivalent : Math.max(burnEquivalent, fallbackUsedEquivalent);
+  if (windowKey === "secondary") {
+    if (isFiniteNumber(fallbackProjectedEquivalent)) {
+      return burnEquivalent === null ? fallbackProjectedEquivalent : Math.max(burnEquivalent, fallbackProjectedEquivalent);
+    }
+    if (isFiniteNumber(fallbackUsedEquivalent)) {
+      return burnEquivalent === null ? fallbackUsedEquivalent : Math.max(burnEquivalent, fallbackUsedEquivalent);
+    }
   }
 
-  return burnEquivalent ?? fallbackUsedEquivalent;
+  return burnEquivalent ?? fallbackProjectedEquivalent ?? fallbackUsedEquivalent;
 }
 
 function formatBurnEquivalent(value: number | null): string {

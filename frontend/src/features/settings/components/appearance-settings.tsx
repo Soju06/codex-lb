@@ -1,5 +1,7 @@
 import { Monitor, Moon, Palette, Sun } from "lucide-react";
 
+import { Switch } from "@/components/ui/switch";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
 import { cn } from "@/lib/utils";
 
@@ -12,6 +14,8 @@ const THEME_OPTIONS: { value: ThemePreference; label: string; icon: typeof Sun }
 export function AppearanceSettings() {
   const preference = useThemeStore((s) => s.preference);
   const setTheme = useThemeStore((s) => s.setTheme);
+  const accountBurnrateEnabled = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
+  const setAccountBurnrateEnabled = useDashboardPreferencesStore((s) => s.setAccountBurnrateEnabled);
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -28,28 +32,38 @@ export function AppearanceSettings() {
           </div>
         </div>
 
-        <div className="flex items-center justify-between rounded-lg border p-3">
-          <div>
-            <p className="text-sm font-medium">Theme</p>
-            <p className="text-xs text-muted-foreground">Select your preferred color scheme.</p>
+        <div className="divide-y rounded-lg border">
+          <div className="flex items-center justify-between p-3">
+            <div>
+              <p className="text-sm font-medium">Theme</p>
+              <p className="text-xs text-muted-foreground">Select your preferred color scheme.</p>
+            </div>
+            <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
+              {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setTheme(value)}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-200",
+                    preference === value
+                      ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
-            {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setTheme(value)}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-200",
-                  preference === value
-                    ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {label}
-              </button>
-            ))}
+
+          <div className="flex items-center justify-between p-3">
+            <div>
+              <p className="text-sm font-medium">Account Burnrate</p>
+              <p className="text-xs text-muted-foreground">Show the plus burnrate card on the dashboard.</p>
+            </div>
+            <Switch checked={accountBurnrateEnabled} onCheckedChange={setAccountBurnrateEnabled} />
           </div>
         </div>
       </div>

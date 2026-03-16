@@ -60,6 +60,24 @@ export type DashboardView = {
   safeLineSecondary: SafeLineView | null;
 };
 
+type DashboardViewOptions = {
+  isDark?: boolean;
+  showAccountBurnrate?: boolean;
+};
+
+function resolveDashboardViewOptions(optionsOrIsDark: DashboardViewOptions | boolean): Required<DashboardViewOptions> {
+  if (typeof optionsOrIsDark === "boolean") {
+    return {
+      isDark: optionsOrIsDark,
+      showAccountBurnrate: true,
+    };
+  }
+  return {
+    isDark: optionsOrIsDark.isDark ?? false,
+    showAccountBurnrate: optionsOrIsDark.showAccountBurnrate ?? true,
+  };
+}
+
 export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
   if (!depletion || depletion.riskLevel === "safe") return null;
   return { safePercent: depletion.safeUsagePercent, riskLevel: depletion.riskLevel };
@@ -248,8 +266,9 @@ function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
 export function buildDashboardView(
   overview: DashboardOverview,
   requestLogs: RequestLog[],
-  isDark = false,
+  optionsOrIsDark: DashboardViewOptions | boolean = false,
 ): DashboardView {
+  const { isDark, showAccountBurnrate } = resolveDashboardViewOptions(optionsOrIsDark);
   const primaryWindow = overview.windows.primary;
   const secondaryWindow = overview.windows.secondary;
   const metrics = overview.summary.metrics;
@@ -291,25 +310,29 @@ export function buildDashboardView(
       trend: trendPointsToValues(trends.cost),
       trendColor: TREND_COLORS[2],
     },
-    {
+  ];
+
+  if (showAccountBurnrate) {
+    stats.push({
       label: `Plus Burn (${primaryBurnLabel}/${secondaryBurnLabel})`,
       value: `${formatBurnEquivalent(primaryBurnEquivalent)} / ${formatBurnEquivalent(secondaryBurnEquivalent)}`,
       meta: `Primary ${formatBurnEquivalent(primaryBurnEquivalent)} acc/${primaryBurnLabel} · Secondary ${formatBurnEquivalent(secondaryBurnEquivalent)} acc/${secondaryBurnLabel}`,
       icon: Flame,
       trend: buildBurnTrend(trends.tokens, combinedBurnEquivalent),
       trendColor: TREND_COLORS[3],
-    },
-    {
-      label: "Error rate",
-      value: formatRate(metrics?.errorRate7d ?? null),
-      meta: metrics?.topError
-        ? `Top: ${metrics.topError}`
-        : `~${formatCompactNumber(Math.round((metrics?.errorRate7d ?? 0) * (metrics?.requests7d ?? 0)))} errors in 7d`,
-      icon: AlertTriangle,
-      trend: trendPointsToValues(trends.errorRate),
-      trendColor: TREND_COLORS[4],
-    },
-  ];
+    });
+  }
+
+  stats.push({
+    label: "Error rate",
+    value: formatRate(metrics?.errorRate7d ?? null),
+    meta: metrics?.topError
+      ? `Top: ${metrics.topError}`
+      : `~${formatCompactNumber(Math.round((metrics?.errorRate7d ?? 0) * (metrics?.requests7d ?? 0)))} errors in 7d`,
+    icon: AlertTriangle,
+    trend: trendPointsToValues(trends.errorRate),
+    trendColor: TREND_COLORS[4],
+  });
 
   return {
     stats,

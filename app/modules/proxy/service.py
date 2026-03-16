@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import AsyncIterator, Mapping, NoReturn
@@ -764,6 +765,9 @@ class ProxyService:
                             response_create_gate=response_create_gate,
                             proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                            filtered_headers=filtered_headers,
+                            prefer_earlier_reset=prefer_earlier_reset,
+                            routing_strategy=routing_strategy,
                         )
                     )
 
@@ -853,9 +857,18 @@ class ProxyService:
             request_model=responses_payload.model,
             request_service_tier=forwarded_service_tier,
         )
+        affinity_policy = _sticky_key_for_responses_request(
+            responses_payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
+            openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=sticky_threads_enabled,
+        )
+        text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
 
         return _PreparedWebSocketRequest(
-            text_data=json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":")),
+            text_data=text_data,
             request_state=_WebSocketRequestState(
                 request_id=f"ws_{uuid4().hex}",
                 model=responses_payload.model,
@@ -868,15 +881,13 @@ class ProxyService:
                 current_input_items=resolved_request.current_input_items,
                 awaiting_response_created=True,
                 api_key_id=refreshed_api_key.id if refreshed_api_key else None,
+                upstream_text_data=text_data,
+                affinity_key=affinity_policy.key,
+                affinity_kind=affinity_policy.kind,
+                affinity_reallocate_sticky=affinity_policy.reallocate_sticky,
+                affinity_max_age_seconds=affinity_policy.max_age_seconds,
             ),
-            affinity_policy=_sticky_key_for_responses_request(
-                responses_payload,
-                headers,
-                codex_session_affinity=codex_session_affinity,
-                openai_cache_affinity=openai_cache_affinity,
-                openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
-                sticky_threads_enabled=sticky_threads_enabled,
-            ),
+            affinity_policy=affinity_policy,
         )
 
     async def _connect_proxy_websocket(
@@ -1175,6 +1186,9 @@ class ProxyService:
         response_create_gate: asyncio.Semaphore,
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
+        filtered_headers: dict[str, str],
+        prefer_earlier_reset: bool,
+        routing_strategy: RoutingStrategy,
     ) -> None:
         try:
             while True:
@@ -1255,12 +1269,36 @@ class ProxyService:
                     async with client_send_lock:
                         await websocket.send_bytes(message.data)
                     continue
+                disconnect_message = _upstream_websocket_disconnect_message(message)
+                logger.warning(
+                    "Upstream websocket disconnected before terminal event account_id=%s request_id=%s kind=%s close_code=%s error=%s",
+                    account_id_value,
+                    get_request_id(),
+                    message.kind,
+                    message.close_code,
+                    message.error,
+                )
+                await self._handle_stream_error(account, {"message": disconnect_message}, "stream_incomplete")
+                retried = await self._retry_websocket_request_after_disconnect(
+                    disconnected_account=account,
+                    pending_requests=pending_requests,
+                    pending_lock=pending_lock,
+                    filtered_headers=filtered_headers,
+                    prefer_earlier_reset=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
+                    proxy_request_budget_seconds=proxy_request_budget_seconds,
+                    disconnect_event=message,
+                )
+                if retried is not None:
+                    account, upstream = retried
+                    account_id_value = account.id
+                    continue
                 await self._fail_pending_websocket_requests(
                     account_id_value=account_id_value,
                     pending_requests=pending_requests,
                     pending_lock=pending_lock,
                     error_code="stream_incomplete",
-                    error_message=_upstream_websocket_disconnect_message(message),
+                    error_message=disconnect_message,
                     api_key=api_key,
                     websocket=websocket,
                     client_send_lock=client_send_lock,
@@ -1276,6 +1314,115 @@ class ProxyService:
                 await websocket.close()
             except Exception:
                 logger.debug("Failed to close downstream websocket", exc_info=True)
+
+    async def _retry_websocket_request_after_disconnect(
+        self,
+        *,
+        disconnected_account: Account,
+        pending_requests: deque[_WebSocketRequestState],
+        pending_lock: anyio.Lock,
+        filtered_headers: dict[str, str],
+        prefer_earlier_reset: bool,
+        routing_strategy: RoutingStrategy,
+        proxy_request_budget_seconds: float,
+        disconnect_event: UpstreamWebSocketMessage,
+    ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
+        async with pending_lock:
+            retry_candidates = [
+                request_state for request_state in pending_requests if _is_retryable_websocket_request_state(request_state)
+            ]
+            if len(retry_candidates) != 1 or len(pending_requests) != 1:
+                return None
+            request_state = retry_candidates[0]
+            request_state.websocket_retry_count += 1
+
+        logger.warning(
+            "Retrying websocket request after upstream disconnect request_id=%s failed_account_id=%s kind=%s close_code=%s error=%s retry_count=%s",
+            request_state.request_id,
+            disconnected_account.id,
+            disconnect_event.kind,
+            disconnect_event.close_code,
+            disconnect_event.error,
+            request_state.websocket_retry_count,
+        )
+
+        deadline = request_state.started_at + proxy_request_budget_seconds
+        try:
+            selection = await self._select_account_with_budget(
+                deadline,
+                request_id=request_state.request_id,
+                kind="websocket",
+                sticky_key=request_state.affinity_key,
+                sticky_kind=request_state.affinity_kind,
+                reallocate_sticky=request_state.affinity_reallocate_sticky,
+                sticky_max_age_seconds=request_state.affinity_max_age_seconds,
+                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                routing_strategy=routing_strategy,
+                model=request_state.model,
+                preferred_account_id=request_state.preferred_account_id,
+                exclude_account_ids={disconnected_account.id},
+            )
+        except Exception:
+            logger.warning(
+                "Failed to select retry account after websocket disconnect request_id=%s failed_account_id=%s",
+                request_state.request_id,
+                disconnected_account.id,
+                exc_info=True,
+            )
+            return None
+
+        retry_account = selection.account
+        if retry_account is None:
+            logger.warning(
+                "No retry account available after websocket disconnect request_id=%s failed_account_id=%s error=%s",
+                request_state.request_id,
+                disconnected_account.id,
+                selection.error_message,
+            )
+            return None
+
+        retry_upstream: UpstreamResponsesWebSocket | None = None
+        try:
+            remaining_budget = _remaining_budget_seconds(deadline)
+            if remaining_budget <= 0:
+                return None
+            retry_account = await self._ensure_fresh_with_budget(retry_account, timeout_seconds=remaining_budget)
+            remaining_budget = _remaining_budget_seconds(deadline)
+            if remaining_budget <= 0:
+                return None
+            retry_upstream = await self._open_upstream_websocket_with_budget(
+                retry_account,
+                filtered_headers,
+                timeout_seconds=remaining_budget,
+            )
+            if request_state.upstream_text_data is not None:
+                await retry_upstream.send_text(request_state.upstream_text_data)
+            elif request_state.upstream_bytes_data is not None:
+                await retry_upstream.send_bytes(request_state.upstream_bytes_data)
+            else:
+                await retry_upstream.close()
+                return None
+        except Exception:
+            logger.warning(
+                "Websocket retry failed request_id=%s failed_account_id=%s retry_account_id=%s",
+                request_state.request_id,
+                disconnected_account.id,
+                retry_account.id,
+                exc_info=True,
+            )
+            await self._load_balancer.record_error(retry_account)
+            if retry_upstream is not None:
+                with contextlib.suppress(Exception):
+                    await retry_upstream.close()
+            return None
+
+        logger.info(
+            "Retried websocket request request_id=%s failed_account_id=%s retry_account_id=%s",
+            request_state.request_id,
+            disconnected_account.id,
+            retry_account.id,
+        )
+        return retry_account, retry_upstream
 
     async def _process_upstream_websocket_text(
         self,
@@ -2791,6 +2938,7 @@ class ProxyService:
         model: str | None = None,
         additional_limit_name: str | None = None,
         preferred_account_id: str | None = None,
+        exclude_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -2810,6 +2958,7 @@ class ProxyService:
                     model=model,
                     additional_limit_name=additional_limit_name,
                     preferred_account_id=preferred_account_id,
+                    exclude_account_ids=exclude_account_ids,
                 )
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
@@ -3028,6 +3177,13 @@ class _WebSocketRequestState:
     output_items: dict[int, dict[str, JsonValue]] = field(default_factory=dict)
     awaiting_response_created: bool = False
     api_key_id: str | None = None
+    upstream_text_data: str | None = None
+    upstream_bytes_data: bytes | None = None
+    affinity_key: str | None = None
+    affinity_kind: StickySessionKind | None = None
+    affinity_reallocate_sticky: bool = False
+    affinity_max_age_seconds: int | None = None
+    websocket_retry_count: int = 0
 
 
 @dataclass(slots=True)
@@ -3233,6 +3389,14 @@ def _pop_terminal_websocket_request_state(
     if response_id is None and len(pending_requests) == 1:
         return pending_requests.popleft()
     return None
+
+
+def _is_retryable_websocket_request_state(request_state: _WebSocketRequestState) -> bool:
+    if request_state.response_id is not None:
+        return False
+    if request_state.websocket_retry_count >= 1:
+        return False
+    return request_state.upstream_text_data is not None or request_state.upstream_bytes_data is not None
 
 
 def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) -> str:

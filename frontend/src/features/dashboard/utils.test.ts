@@ -192,6 +192,44 @@ describe("buildDashboardView", () => {
     expect(burn.meta).toBe("Primary 0.0 acc/5h · Secondary 1.5 acc/7d");
   });
 
+  it("counts quota_exceeded secondary accounts as fully burned and caps to account count", () => {
+    const now = Date.now();
+    const overview = createDashboardOverview({
+      accounts: [
+        createAccountSummary({
+          accountId: "acc-quota",
+          email: "quota@example.com",
+          status: "quota_exceeded",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 100,
+          },
+          resetAtSecondary: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+        createAccountSummary({
+          accountId: "acc-hot",
+          email: "hot@example.com",
+          status: "active",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 16,
+          },
+          resetAtSecondary: new Date(now + 74 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+      depletionPrimary: null,
+      depletionSecondary: null,
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.0 / 2.0");
+    expect(burn.meta).toBe("Primary 0.0 acc/5h · Secondary 2.0 acc/7d");
+  });
+
   it("uses usage-equivalent fallback when burn rate is zero", () => {
     const overview = createDashboardOverview({
       depletionSecondary: {

@@ -170,7 +170,12 @@ function windowUsedAccountEquivalents(
       continue;
     }
 
-    usedEquivalent += (100 - clampPercent(remainingPercent)) / 100;
+    let accountEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    if (windowKey === "secondary" && account.status === "quota_exceeded") {
+      accountEquivalent = Math.max(accountEquivalent, 1);
+    }
+
+    usedEquivalent += accountEquivalent;
     includedAccounts += 1;
   }
 
@@ -210,6 +215,10 @@ function windowProjectedAccountEquivalents(
       }
     }
 
+    if (windowKey === "secondary" && account.status === "quota_exceeded") {
+      projected = Math.max(projected, 1);
+    }
+
     projectedEquivalent += projected;
     includedAccounts += 1;
   }
@@ -238,14 +247,30 @@ function windowIncludedAccountCount(
   return includedAccounts;
 }
 
+function clampBurnEquivalent(value: number | null, maxEquivalent: number): number | null {
+  if (!isFiniteNumber(value)) {
+    return null;
+  }
+
+  const clamped = Math.max(0, value);
+  if (maxEquivalent <= 0) {
+    return clamped;
+  }
+  return Math.min(clamped, maxEquivalent);
+}
+
 function plusAccountsBurnEquivalent(
   overview: DashboardOverview,
   windowKey: "primary" | "secondary",
 ): number | null {
   const summaryWindow = windowKey === "primary" ? overview.summary.primaryWindow : overview.summary.secondaryWindow;
   const depletion = windowKey === "primary" ? overview.depletionPrimary : overview.depletionSecondary;
-  const fallbackProjectedEquivalent = windowProjectedAccountEquivalents(overview, windowKey);
-  const fallbackUsedEquivalent = windowUsedAccountEquivalents(overview, windowKey);
+  const maxEquivalent = windowIncludedAccountCount(overview, windowKey);
+  const fallbackProjectedEquivalent = clampBurnEquivalent(
+    windowProjectedAccountEquivalents(overview, windowKey),
+    maxEquivalent,
+  );
+  const fallbackUsedEquivalent = clampBurnEquivalent(windowUsedAccountEquivalents(overview, windowKey), maxEquivalent);
 
   if (!summaryWindow) {
     return fallbackProjectedEquivalent ?? fallbackUsedEquivalent;
@@ -263,19 +288,20 @@ function plusAccountsBurnEquivalent(
     }
   }
 
-  if (burnEquivalent !== null) {
-    const maxEquivalent = windowIncludedAccountCount(overview, windowKey);
-    if (maxEquivalent > 0) {
-      burnEquivalent = Math.min(burnEquivalent, maxEquivalent);
-    }
-  }
+  burnEquivalent = clampBurnEquivalent(burnEquivalent, maxEquivalent);
 
   if (windowKey === "secondary") {
     if (isFiniteNumber(fallbackProjectedEquivalent)) {
-      return burnEquivalent === null ? fallbackProjectedEquivalent : Math.max(burnEquivalent, fallbackProjectedEquivalent);
+      return clampBurnEquivalent(
+        burnEquivalent === null ? fallbackProjectedEquivalent : Math.max(burnEquivalent, fallbackProjectedEquivalent),
+        maxEquivalent,
+      );
     }
     if (isFiniteNumber(fallbackUsedEquivalent)) {
-      return burnEquivalent === null ? fallbackUsedEquivalent : Math.max(burnEquivalent, fallbackUsedEquivalent);
+      return clampBurnEquivalent(
+        burnEquivalent === null ? fallbackUsedEquivalent : Math.max(burnEquivalent, fallbackUsedEquivalent),
+        maxEquivalent,
+      );
     }
   }
 

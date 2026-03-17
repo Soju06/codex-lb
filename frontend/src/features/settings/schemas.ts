@@ -5,10 +5,10 @@ export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", 
 
 export const DashboardSettingsSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
-  upstreamStreamTransport: UpstreamStreamTransportSchema,
+  upstreamStreamTransport: UpstreamStreamTransportSchema.optional().default("default"),
   preferEarlierResetAccounts: z.boolean(),
-  routingStrategy: RoutingStrategySchema,
-  openaiCacheAffinityMaxAgeSeconds: z.number().int().positive(),
+  routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
+  openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional().default(300),
   importWithoutOverwrite: z.boolean(),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),

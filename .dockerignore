@@ -22,3 +22,7 @@ htmlcov/
 refs/
 docs/
 tests/
+
+# Explicit frontend excludes to keep Docker context small
+frontend/node_modules/
+**/node_modules/

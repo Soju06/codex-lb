@@ -1,6 +1,8 @@
 import { Monitor, Moon, Palette, Sun } from "lucide-react";
 
+import { Switch } from "@/components/ui/switch";
 import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
 import { useTimeFormatStore, type TimeFormatPreference } from "@/hooks/use-time-format";
 import { cn } from "@/lib/utils";
@@ -29,6 +31,8 @@ export function AppearanceSettings() {
   const setTimeFormat = useTimeFormatStore((s) => s.setTimeFormat);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const setQuotaDisplay = useAccountQuotaDisplayStore((s) => s.setQuotaDisplay);
+  const accountBurnrateEnabled = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
+  const setAccountBurnrateEnabled = useDashboardPreferencesStore((s) => s.setAccountBurnrateEnabled);
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -121,6 +125,14 @@ export function AppearanceSettings() {
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">Account burn projection</p>
+              <p className="text-xs text-muted-foreground">Show the account-equivalent projection card on the dashboard.</p>
+            </div>
+            <Switch checked={accountBurnrateEnabled} onCheckedChange={setAccountBurnrateEnabled} />
           </div>
         </div>
       </div>

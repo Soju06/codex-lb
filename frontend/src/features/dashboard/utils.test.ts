@@ -870,4 +870,81 @@ describe("buildDashboardView", () => {
     expect(view.primaryUsageItems[0]?.remainingPercent).toBe(90);
     expect(overview.summary.primaryWindow.capacityCredits).toBe(225);
   });
+
+  it("adds account burn rate from per-account window consumption", () => {
+    const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "acc-1",
+          email: "one@example.com",
+          usage: {
+            primaryRemainingPercent: 50,
+            secondaryRemainingPercent: 25,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: 10080,
+        }),
+        account({
+          accountId: "acc-2",
+          email: "two@example.com",
+          usage: {
+            primaryRemainingPercent: 80,
+            secondaryRemainingPercent: 100,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: 10080,
+        }),
+      ],
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const burn = view.stats[3];
+
+    expect(burn.label).toBe("Account burn projection (5h/7d)");
+    expect(burn.value).toBe("0.7 / 0.8");
+    expect(burn.meta).toBe("Projected account-equivalents: 0.7/5h · 0.8/7d");
+    expect(view.stats[4]?.label).toBe("Error rate (7d)");
+  });
+
+  it("can hide the account burn rate card", () => {
+    const overview = createDashboardOverview();
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), {
+      isDark: false,
+      showAccountBurnrate: false,
+    });
+
+    expect(view.stats.map((stat) => stat.label)).not.toContain("Account burn projection (5h/7d)");
+    expect(view.stats).toHaveLength(4);
+  });
+
+  it("counts quota-exceeded secondary windows as fully burned", () => {
+    const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "acc-1",
+          email: "one@example.com",
+          status: "quota_exceeded",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 80,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: 10080,
+        }),
+      ],
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.0 / 1.0");
+    expect(burn.meta).toBe("Projected account-equivalents: 0.0/5h · 1.0/7d");
+  });
 });

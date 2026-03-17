@@ -7,6 +7,7 @@ const ACCENT_STYLES = [
   "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
   "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
   "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
 ];
 
 export type StatsGridProps = {
@@ -14,8 +15,10 @@ export type StatsGridProps = {
 };
 
 export function StatsGrid({ stats }: StatsGridProps) {
+  const columnsClass = stats.length >= 5 ? "xl:grid-cols-5" : "xl:grid-cols-4";
+
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className={cn("grid gap-3 sm:grid-cols-2", columnsClass)}>
       {stats.map((stat, index) => {
         const Icon = stat.icon;
         const accent = ACCENT_STYLES[index % ACCENT_STYLES.length];

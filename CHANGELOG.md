@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.1](https://github.com/Soju06/codex-lb/compare/v1.6.0...v1.6.1) (2026-03-18)
+
+
+### Bug Fixes
+
+* clarify account quota labels and dashboard masking ([#215](https://github.com/Soju06/codex-lb/issues/215)) ([ec00fa8](https://github.com/Soju06/codex-lb/commit/ec00fa84071976a5b6484bb819975dbd1ff5d4f2))
+* **dashboard:** cap primary donut remaining by secondary absolute credits ([#222](https://github.com/Soju06/codex-lb/issues/222)) ([d0e286a](https://github.com/Soju06/codex-lb/commit/d0e286af931e1d7bbe7c62583857c34ae611b57d))
+* **proxy:** add transient 500 retry with same-account affinity and failover ([#225](https://github.com/Soju06/codex-lb/issues/225)) ([c1ed531](https://github.com/Soju06/codex-lb/commit/c1ed531a3d58003e00ca5dff562bc761ef93fc48))
+* **proxy:** preserve sticky sessions during temporary account unavailability ([#226](https://github.com/Soju06/codex-lb/issues/226)) ([68b3bc0](https://github.com/Soju06/codex-lb/commit/68b3bc08a24fbb5914776a689996950ce29f502f))
+
+
+### Documentation
+
+* add minpeter as a contributor for code, and test ([#223](https://github.com/Soju06/codex-lb/issues/223)) ([3b2c1d4](https://github.com/Soju06/codex-lb/commit/3b2c1d406d2aaff5e9b941d89169dfad8f5e4002))
+
 ## [1.6.0](https://github.com/Soju06/codex-lb/compare/v1.5.3...v1.6.0) (2026-03-18)
 
 

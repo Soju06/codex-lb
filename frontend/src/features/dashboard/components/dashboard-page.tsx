@@ -15,6 +15,7 @@ import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore } from "@/hooks/use-theme";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import { formatModelLabel, formatSlug } from "@/utils/formatters";
@@ -25,6 +26,7 @@ export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
+  const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const dashboardQuery = useDashboard();
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
   const { resumeMutation } = useAccountMutations();
@@ -59,8 +61,11 @@ export function DashboardPage() {
     if (!overview || !logPage) {
       return null;
     }
-    return buildDashboardView(overview, logPage.requests, isDark);
-  }, [overview, logPage, isDark]);
+    return buildDashboardView(overview, logPage.requests, {
+      isDark,
+      showAccountBurnrate,
+    });
+  }, [overview, logPage, isDark, showAccountBurnrate]);
 
   const accountOptions = useMemo(() => {
     const entries = new Map<string, { label: string; isEmail: boolean }>();

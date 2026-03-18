@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildDashboardView,
   buildDepletionView,
   buildRemainingItems,
 } from "@/features/dashboard/utils";
 import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
+import { createAccountSummary, createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
@@ -121,5 +123,148 @@ describe("buildRemainingItems", () => {
     expect(items[2].label).toBe("unique@example.com");
     expect(items[2].labelSuffix).toBe("");
     expect(items[2].isEmail).toBe(true);
+  });
+});
+
+describe("buildDashboardView", () => {
+  it("adds plus-burn stat between cost and error rate", () => {
+    const overview = createDashboardOverview();
+    const logs = createDefaultRequestLogs();
+
+    const view = buildDashboardView(overview, logs);
+
+    expect(view.stats[2].label).toBe("Cost (7d)");
+    expect(view.stats[3].label).toBe("Account burn rate (5h/7d)");
+    expect(view.stats[3].value).toBe("0.7 / 1.2");
+    expect(view.stats[3].meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
+    expect(view.stats[3].trend.length).toBeGreaterThan(0);
+    expect(view.stats[4].label).toBe("Error rate");
+  });
+
+  it("falls back to usage equivalents when depletion data is missing", () => {
+    const overview = createDashboardOverview({
+      depletionPrimary: null,
+      depletionSecondary: null,
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.label).toBe("Account burn rate (5h/7d)");
+    expect(burn.value).toBe("0.7 / 1.2");
+    expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
+    expect(burn.trend.length).toBeGreaterThan(0);
+  });
+
+  it("projects burn rate to full 7d window when reset is still in the future", () => {
+    const now = Date.now();
+    const overview = createDashboardOverview({
+      accounts: [
+        createAccountSummary({
+          accountId: "acc-idle",
+          email: "idle@example.com",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 100,
+          },
+          resetAtSecondary: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+        createAccountSummary({
+          accountId: "acc-hot",
+          email: "hot@example.com",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 16,
+          },
+          resetAtSecondary: new Date(now + 74 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+      depletionPrimary: null,
+      depletionSecondary: null,
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.0 / 1.5");
+    expect(burn.meta).toBe("Primary 0.0 acc/5h · Secondary 1.5 acc/7d");
+  });
+
+  it("counts quota_exceeded secondary accounts as fully burned and caps to account count", () => {
+    const now = Date.now();
+    const overview = createDashboardOverview({
+      accounts: [
+        createAccountSummary({
+          accountId: "acc-quota",
+          email: "quota@example.com",
+          status: "quota_exceeded",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 100,
+          },
+          resetAtSecondary: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+        createAccountSummary({
+          accountId: "acc-hot",
+          email: "hot@example.com",
+          status: "active",
+          usage: {
+            primaryRemainingPercent: 100,
+            secondaryRemainingPercent: 16,
+          },
+          resetAtSecondary: new Date(now + 74 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+      depletionPrimary: null,
+      depletionSecondary: null,
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.0 / 2.0");
+    expect(burn.meta).toBe("Primary 0.0 acc/5h · Secondary 2.0 acc/7d");
+  });
+
+  it("uses usage-equivalent fallback when burn rate is zero", () => {
+    const overview = createDashboardOverview({
+      depletionSecondary: {
+        risk: 1,
+        riskLevel: "critical",
+        burnRate: 0,
+        safeUsagePercent: 98,
+        projectedExhaustionAt: null,
+        secondsUntilExhaustion: null,
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.7 / 1.2");
+    expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
+  });
+
+  it("caps burn-equivalent to available account count per window", () => {
+    const overview = createDashboardOverview({
+      depletionSecondary: {
+        risk: 1,
+        riskLevel: "critical",
+        burnRate: 999,
+        safeUsagePercent: 98,
+        projectedExhaustionAt: null,
+        secondsUntilExhaustion: null,
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.7 / 2.0");
+    expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 2.0 acc/7d");
   });
 });

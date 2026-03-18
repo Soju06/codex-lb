@@ -8,13 +8,14 @@ Covers:
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.balancer import AccountState, select_account
 from app.db.models import AccountStatus, StickySessionKind
-from app.modules.proxy.load_balancer import _STICKY_GRACE_PERIOD_SECONDS
+from app.modules.proxy.load_balancer import _RECOVERABLE_STATUSES, _STICKY_GRACE_PERIOD_SECONDS
 
 pytestmark = pytest.mark.unit
 
@@ -88,8 +89,9 @@ async def _select_with_stickiness(
                     await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                 return pinned_result
             if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
+                grace_copy = replace(pinned)
                 grace_result = select_account(
-                    [pinned],
+                    [grace_copy],
                     now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
                     routing_strategy="usage_weighted",
                     allow_backoff_fallback=False,
@@ -100,6 +102,8 @@ async def _select_with_stickiness(
                     return grace_result
             if reallocate_sticky:
                 await sticky_repo.delete(sticky_key, kind=sticky_kind)
+            elif pinned.status not in _RECOVERABLE_STATUSES:
+                pass
             else:
                 persist_fallback = False
         else:
@@ -373,3 +377,76 @@ async def test_grace_period_skipped_when_no_reset_at():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.upsert.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# PR review issue 1: permanently down accounts must rebind sticky session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_paused_pinned_account_persists_fallback():
+    """PAUSED is permanent — the fallback MUST be persisted so the sticky
+    session is rebound instead of pointing at a dead account forever."""
+    acc_a = AccountState("a", AccountStatus.PAUSED)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _select_with_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_deactivated_pinned_account_persists_fallback():
+    """DEACTIVATED is permanent — same rebind behaviour as PAUSED."""
+    acc_a = AccountState("a", AccountStatus.DEACTIVATED, deactivation_reason="token expired")
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _select_with_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+# ---------------------------------------------------------------------------
+# PR review issue 2: grace period must not mutate original state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grace_period_does_not_mutate_original_state():
+    """The grace-period select_account call must operate on a copy so the
+    original AccountState (synced to DB later) is not prematurely flipped
+    to ACTIVE."""
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 5)  # within grace window
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    original_status = acc_a.status
+    original_reset_at = acc_a.reset_at
+
+    await _select_with_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert acc_a.status == original_status
+    assert acc_a.reset_at == original_reset_at

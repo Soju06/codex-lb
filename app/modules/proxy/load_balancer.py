@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable
 
@@ -35,6 +35,13 @@ from app.modules.usage.additional_quota_keys import canonicalize_additional_quot
 logger = logging.getLogger(__name__)
 
 _STICKY_GRACE_PERIOD_SECONDS = 10.0
+_RECOVERABLE_STATUSES = frozenset(
+    {
+        AccountStatus.ACTIVE,
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
+    }
+)
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -381,13 +388,13 @@ class LoadBalancer:
                 # Grace period: if the pinned account is rate-limited with a
                 # known reset time within a short window, retry selection
                 # with a small time advance to preserve prompt cache.
-                # Only applies when apply_usage_quota kept the status as
-                # RATE_LIMITED (i.e. runtime_reset is valid and in the
-                # future); accounts reset to ACTIVE-with-cooldown are
-                # excluded to avoid bypassing error-handling cooldowns.
+                # A shallow copy is used so the time-advanced selection does
+                # not mutate the original state (which is later synced to DB
+                # by _sync_state for all accounts).
                 if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
+                    grace_copy = replace(pinned)
                     grace_result = select_account(
-                        [pinned],
+                        [grace_copy],
                         now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
@@ -399,6 +406,8 @@ class LoadBalancer:
                         return grace_result
                 if reallocate_sticky:
                     await sticky_repo.delete(sticky_key, kind=sticky_kind)
+                elif pinned.status not in _RECOVERABLE_STATUSES:
+                    pass
                 else:
                     persist_fallback = False
             else:

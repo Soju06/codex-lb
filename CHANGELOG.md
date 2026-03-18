@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0](https://github.com/Soju06/codex-lb/compare/v1.5.3...v1.6.0) (2026-03-18)
+
+
+### Features
+
+* **proxy:** improve token cache affinity for codex and v1/responses endpoints ([#220](https://github.com/Soju06/codex-lb/issues/220)) ([dfc3aa7](https://github.com/Soju06/codex-lb/commit/dfc3aa714e0ec8ae4b6443abc262795875926320))
+
+
+### Bug Fixes
+
+* move the trend back to secondary instead of primary for free accounts ([#190](https://github.com/Soju06/codex-lb/issues/190)) ([944ea93](https://github.com/Soju06/codex-lb/commit/944ea93db600b004e1ff8df29397e47114af65b9))
+* the account page select param is not respected ([#198](https://github.com/Soju06/codex-lb/issues/198)) ([6036184](https://github.com/Soju06/codex-lb/commit/6036184af2696dadc157bc6590bcc9e95d183177))
+
 ## [1.5.3](https://github.com/Soju06/codex-lb/compare/v1.5.2...v1.5.3) (2026-03-13)
 
 

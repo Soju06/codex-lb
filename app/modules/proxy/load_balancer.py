@@ -407,9 +407,18 @@ class LoadBalancer:
                 if reallocate_sticky:
                     await sticky_repo.delete(sticky_key, kind=sticky_kind)
                 elif pinned.status not in _RECOVERABLE_STATUSES:
+                    # Permanently down (PAUSED/DEACTIVATED) — let the
+                    # fallback be persisted to rebind the mapping.
                     pass
-                else:
+                elif sticky_max_age_seconds is not None:
+                    # TTL-based kind (PROMPT_CACHE): preserve the original
+                    # mapping so the next request returns to the warm-cache
+                    # account once it recovers.  The TTL will naturally
+                    # expire the mapping if recovery takes too long.
                     persist_fallback = False
+                # else: durable kind without TTL (CODEX_SESSION) — persist
+                # fallback so the session sticks to one account during
+                # the outage instead of bouncing across random fallbacks.
             else:
                 await sticky_repo.delete(sticky_key, kind=sticky_kind)
 

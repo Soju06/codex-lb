@@ -104,7 +104,7 @@ async def _select_with_stickiness(
                 await sticky_repo.delete(sticky_key, kind=sticky_kind)
             elif pinned.status not in _RECOVERABLE_STATUSES:
                 pass
-            else:
+            elif sticky_max_age_seconds is not None:
                 persist_fallback = False
         else:
             await sticky_repo.delete(sticky_key, kind=sticky_kind)
@@ -450,3 +450,27 @@ async def test_grace_period_does_not_mutate_original_state():
 
     assert acc_a.status == original_status
     assert acc_a.reset_at == original_reset_at
+
+
+@pytest.mark.asyncio
+async def test_codex_session_persists_fallback_during_outage():
+    """CODEX_SESSION is durable (no TTL). When the pinned account is
+    temporarily down, the fallback MUST be persisted so the session
+    sticks to one account instead of bouncing across random fallbacks."""
+    now = time.time()
+    acc_a = _rate_limited("a", cooldown_until=now + 60)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _select_with_stickiness(
+        [acc_a, acc_b],
+        "session_123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION)

@@ -1892,6 +1892,7 @@ class ProxyService:
         settled = False
         any_attempt_logged = False
         settlement = _StreamSettlement()
+        last_transient_exc: ProxyResponseError | None = None
         try:
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -1958,6 +1959,11 @@ class ProxyService:
                     return
                 account = selection.account
                 if not account:
+                    # If a prior attempt stored a transient 500 and the caller
+                    # expects HTTP error propagation, re-raise the original error
+                    # instead of returning a generic no_accounts event.
+                    if propagate_http_errors and last_transient_exc is not None:
+                        raise last_transient_exc
                     no_accounts_msg = selection.error_message or "No active accounts available"
                     error_code = selection.error_code or "no_accounts"
                     event = response_failed_event(
@@ -2126,6 +2132,9 @@ class ProxyService:
                             # Record remaining errors so total equals transient_retries,
                             # meeting the load balancer backoff threshold (error_count >= 3).
                             await self._load_balancer.record_errors(account, transient_retries - 1)
+                            # Preserve last ProxyResponseError for propagate_http_errors path.
+                            if isinstance(tex, ProxyResponseError):
+                                last_transient_exc = tex
                             break  # outer loop: select different account
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)
@@ -2312,6 +2321,10 @@ class ProxyService:
                     )
                     yield format_sse_event(event)
                     return
+            # When HTTP error propagation is enabled and the last failure was
+            # a transient 500, re-raise to preserve the upstream status/payload.
+            if propagate_http_errors and last_transient_exc is not None:
+                raise last_transient_exc
             retries_exhausted_msg = "No available accounts after retries"
             event = response_failed_event(
                 "no_accounts",

@@ -381,6 +381,36 @@ async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_clie
     assert error.get("code") != "no_accounts", "Client received generic no_accounts instead of actual error"
 
 
+@pytest.mark.asyncio
+async def test_v1_responses_non_streaming_500_preserves_http_status(async_client, monkeypatch):
+    """Non-streaming /v1/responses uses propagate_http_errors=True.
+    After exhausting transient retries, the HTTP 500 status must be preserved
+    (not swallowed into a generic SSE error)."""
+    await _import_account(async_client, "acc_prop_500", "prop500@example.com")
+
+    call_count = 0
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        raise ProxyResponseError(
+            500,
+            openai_error("server_error", "An error occurred while processing your request."),
+            failure_phase="status",
+        )
+        yield ""  # make it a generator  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": "hi"}
+    response = await async_client.post("/v1/responses", json=payload)
+    # Must preserve the upstream 500, not 503/502
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "server_error"
+    # Should have retried on same account before giving up
+    assert call_count == 3
+
+
 # ===========================================================================
 # Compact — HTTP 500 retry
 # ===========================================================================

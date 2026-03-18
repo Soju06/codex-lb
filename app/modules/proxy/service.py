@@ -201,6 +201,7 @@ class ProxyService:
             openai_cache_affinity=openai_cache_affinity,
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
+            api_key=api_key,
         )
         routing_strategy = _routing_strategy(settings)
         try:
@@ -843,6 +844,7 @@ class ProxyService:
                 openai_cache_affinity=openai_cache_affinity,
                 openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                 sticky_threads_enabled=sticky_threads_enabled,
+                api_key=api_key,
             ),
         )
 
@@ -1826,6 +1828,7 @@ class ProxyService:
             openai_cache_affinity=openai_cache_affinity,
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
+            api_key=api_key,
         )
         routing_strategy = _routing_strategy(settings)
         max_attempts = 3
@@ -3243,6 +3246,58 @@ def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCo
     return None
 
 
+def _derive_prompt_cache_key(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    api_key: ApiKeyData | None,
+) -> str:
+    """Derive a stable, session-scoped prompt_cache_key when the client does not provide one.
+
+    The generated key is scoped to (api-key, instructions-prefix, first-user-input) so that:
+    - Parallel sessions from the same API key get *different* keys (different first input).
+    - Successive turns within one session get the *same* key (first input stays constant).
+    - Different API keys never collide.
+    """
+    parts: list[str] = []
+
+    if api_key is not None:
+        parts.append(api_key.id[:12])
+
+    instructions = getattr(payload, "instructions", None)
+    if isinstance(instructions, str) and instructions:
+        parts.append(sha256(instructions[:512].encode()).hexdigest()[:12])
+
+    first_user_text = _extract_first_user_input(payload)
+    if first_user_text:
+        parts.append(sha256(first_user_text[:512].encode()).hexdigest()[:12])
+
+    return "-".join(parts) if parts else uuid4().hex[:24]
+
+
+def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    """Return a text representation of the first user input item for cache key derivation."""
+    input_value = getattr(payload, "input", None)
+    if isinstance(input_value, str):
+        return input_value[:512]
+    if not isinstance(input_value, list):
+        return None
+    for item in input_value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role == "user":
+            content = item.get("content")
+            if isinstance(content, str):
+                return content[:512]
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        text = part.get("text")
+                        if isinstance(text, str):
+                            return text[:512]
+            return json.dumps(item, sort_keys=True, ensure_ascii=False)[:512]
+    return None
+
+
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
     value = _prompt_cache_key_from_request_model(payload)
     if not value:
@@ -3268,6 +3323,7 @@ def _sticky_key_for_responses_request(
     openai_cache_affinity: bool,
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
+    api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
@@ -3276,15 +3332,19 @@ def _sticky_key_for_responses_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
+    cache_key = _sticky_key_from_payload(payload)
+    if cache_key is None and openai_cache_affinity:
+        cache_key = _derive_prompt_cache_key(payload, api_key)
+        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
-            key=_sticky_key_from_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
         )
     if sticky_threads_enabled:
         return _AffinityPolicy(
-            key=_sticky_key_from_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
         )
@@ -3307,6 +3367,7 @@ def _sticky_key_for_compact_request(
     openai_cache_affinity: bool,
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
+    api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
@@ -3315,15 +3376,19 @@ def _sticky_key_for_compact_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
+    cache_key = _sticky_key_from_compact_payload(payload)
+    if cache_key is None and openai_cache_affinity:
+        cache_key = _derive_prompt_cache_key(payload, api_key)
+        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
-            key=_sticky_key_from_compact_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
         )
     if sticky_threads_enabled:
         return _AffinityPolicy(
-            key=_sticky_key_from_compact_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
         )

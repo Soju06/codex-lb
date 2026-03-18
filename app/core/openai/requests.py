@@ -410,6 +410,7 @@ class ResponsesCompactRequest(BaseModel):
     input: JsonValue
     reasoning: ResponsesReasoning | None = None
     store: bool = False
+    prompt_cache_key: str | None = None
 
     @field_validator("input")
     @classmethod

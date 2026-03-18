@@ -123,7 +123,9 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _stream_responses(request, payload, context, api_key, codex_session_affinity=True)
+    return await _stream_responses(
+        request, payload, context, api_key, codex_session_affinity=True, openai_cache_affinity=True
+    )
 
 
 @ws_router.websocket("/responses")
@@ -140,7 +142,7 @@ async def responses_websocket(
         websocket,
         websocket.headers,
         codex_session_affinity=True,
-        openai_cache_affinity=False,
+        openai_cache_affinity=True,
         api_key=api_key,
     )
 
@@ -522,7 +524,9 @@ async def responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    return await _compact_responses(request, payload, context, api_key, codex_session_affinity=True)
+    return await _compact_responses(
+        request, payload, context, api_key, codex_session_affinity=True, openai_cache_affinity=True
+    )
 
 
 @v1_router.post("/responses/compact", response_model=CompactResponseResult)

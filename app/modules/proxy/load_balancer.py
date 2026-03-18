@@ -349,16 +349,6 @@ class LoadBalancer:
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
 
-        if reallocate_sticky:
-            chosen = select_account(
-                states,
-                prefer_earlier_reset=prefer_earlier_reset_accounts,
-                routing_strategy=routing_strategy,
-            )
-            if chosen.account is not None and chosen.account.account_id in account_map:
-                await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
-            return chosen
-
         existing = await sticky_repo.get_account_id(
             sticky_key,
             kind=sticky_kind,
@@ -366,9 +356,7 @@ class LoadBalancer:
         )
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
-            if pinned is None:
-                await sticky_repo.delete(sticky_key, kind=sticky_kind)
-            else:
+            if pinned is not None:
                 pinned_result = select_account(
                     [pinned],
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -376,9 +364,13 @@ class LoadBalancer:
                     allow_backoff_fallback=False,
                 )
                 if pinned_result.account is not None:
-                    if sticky_max_age_seconds is not None:
+                    if not reallocate_sticky and sticky_max_age_seconds is not None:
                         await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                     return pinned_result
+                if reallocate_sticky:
+                    await sticky_repo.delete(sticky_key, kind=sticky_kind)
+            else:
+                await sticky_repo.delete(sticky_key, kind=sticky_kind)
 
         chosen = select_account(
             states,

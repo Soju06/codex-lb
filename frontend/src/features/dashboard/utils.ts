@@ -219,7 +219,9 @@ export function buildDashboardView(
 
   return {
     stats,
-    primaryUsageItems: applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems),
+    primaryUsageItems: secondaryWindow
+      ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
+      : rawPrimaryItems,
     secondaryUsageItems,
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),

@@ -191,6 +191,22 @@ describe("applySecondaryConstraint", () => {
     expect(primary[0].value).toBe(200);
     expect(primary[0].remainingPercent).toBe(90);
   });
+
+  it("caps to zero when secondary items are all zero-valued", () => {
+    const primary = [
+      remainingItem({ accountId: "acc-1", value: 200, remainingPercent: 90 }),
+      remainingItem({ accountId: "acc-2", value: 150, remainingPercent: 60 }),
+    ];
+    const secondary = [
+      remainingItem({ accountId: "acc-1", value: 0, remainingPercent: 0 }),
+      remainingItem({ accountId: "acc-2", value: 0, remainingPercent: 0 }),
+    ];
+
+    const result = applySecondaryConstraint(primary, secondary);
+
+    expect(result[0].value).toBe(0);
+    expect(result[1].value).toBe(0);
+  });
 });
 
 describe("buildRemainingItems", () => {

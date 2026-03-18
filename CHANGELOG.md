@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.6.1](https://github.com/Soju06/codex-lb/compare/v1.6.0...v1.6.1) (2026-03-18)
+
+
+### Bug Fixes
+
+* clarify account quota labels and dashboard masking ([#215](https://github.com/Soju06/codex-lb/issues/215)) ([ec00fa8](https://github.com/Soju06/codex-lb/commit/ec00fa84071976a5b6484bb819975dbd1ff5d4f2))
+* **dashboard:** cap primary donut remaining by secondary absolute credits ([#222](https://github.com/Soju06/codex-lb/issues/222)) ([d0e286a](https://github.com/Soju06/codex-lb/commit/d0e286af931e1d7bbe7c62583857c34ae611b57d))
+* **proxy:** add transient 500 retry with same-account affinity and failover ([#225](https://github.com/Soju06/codex-lb/issues/225)) ([c1ed531](https://github.com/Soju06/codex-lb/commit/c1ed531a3d58003e00ca5dff562bc761ef93fc48))
+* **proxy:** preserve sticky sessions during temporary account unavailability ([#226](https://github.com/Soju06/codex-lb/issues/226)) ([68b3bc0](https://github.com/Soju06/codex-lb/commit/68b3bc08a24fbb5914776a689996950ce29f502f))
+
+
+### Documentation
+
+* add minpeter as a contributor for code, and test ([#223](https://github.com/Soju06/codex-lb/issues/223)) ([3b2c1d4](https://github.com/Soju06/codex-lb/commit/3b2c1d406d2aaff5e9b941d89169dfad8f5e4002))
+
+## [1.6.0](https://github.com/Soju06/codex-lb/compare/v1.5.3...v1.6.0) (2026-03-18)
+
+
+### Features
+
+* **proxy:** improve token cache affinity for codex and v1/responses endpoints ([#220](https://github.com/Soju06/codex-lb/issues/220)) ([dfc3aa7](https://github.com/Soju06/codex-lb/commit/dfc3aa714e0ec8ae4b6443abc262795875926320))
+
+
+### Bug Fixes
+
+* move the trend back to secondary instead of primary for free accounts ([#190](https://github.com/Soju06/codex-lb/issues/190)) ([944ea93](https://github.com/Soju06/codex-lb/commit/944ea93db600b004e1ff8df29397e47114af65b9))
+* the account page select param is not respected ([#198](https://github.com/Soju06/codex-lb/issues/198)) ([6036184](https://github.com/Soju06/codex-lb/commit/6036184af2696dadc157bc6590bcc9e95d183177))
+
+## [1.5.3](https://github.com/Soju06/codex-lb/compare/v1.5.2...v1.5.3) (2026-03-13)
+
+
+### Bug Fixes
+
+* **proxy:** match Codex CLI header fingerprint for transcribe upstream requests ([#199](https://github.com/Soju06/codex-lb/issues/199)) ([2a89631](https://github.com/Soju06/codex-lb/commit/2a8963143515da25bf718ede913fac14dbd918ee))
+
+
+### Documentation
+
+* add huzky-v as a contributor for code, and bug ([#201](https://github.com/Soju06/codex-lb/issues/201)) ([d1410c6](https://github.com/Soju06/codex-lb/commit/d1410c60a99e8b36c2464412c0e1b5db50f01914))
+
+## [1.5.2](https://github.com/Soju06/codex-lb/compare/v1.5.1...v1.5.2) (2026-03-13)
+
+
+### Bug Fixes
+
+* **proxy:** close stream immediately after terminal SSE events ([#196](https://github.com/Soju06/codex-lb/issues/196)) ([dcf1ae3](https://github.com/Soju06/codex-lb/commit/dcf1ae3675346d75b571a29644c2722f776dc436))
+
 ## [1.5.1](https://github.com/Soju06/codex-lb/compare/v1.5.0...v1.5.1) (2026-03-13)
 
 

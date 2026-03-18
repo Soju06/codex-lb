@@ -56,6 +56,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
+from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import Account, DashboardSettings, StickySessionKind, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
@@ -121,6 +122,9 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
         *PERMANENT_FAILURE_CODES.keys(),
     }
 )
+_TRANSIENT_RETRY_CODES = frozenset({"server_error"})
+_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES = 3
+_COMPACT_MAX_ACCOUNT_ATTEMPTS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,45 +210,10 @@ class ProxyService:
             openai_cache_affinity=openai_cache_affinity,
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
+            api_key=api_key,
         )
         routing_strategy = _routing_strategy(settings)
         try:
-            selection = await self._select_account_with_budget(
-                deadline,
-                request_id=request_id,
-                kind="compact",
-                sticky_key=affinity.key,
-                sticky_kind=affinity.kind,
-                reallocate_sticky=affinity.reallocate_sticky,
-                sticky_max_age_seconds=affinity.max_age_seconds,
-                prefer_earlier_reset_accounts=prefer_earlier_reset,
-                routing_strategy=routing_strategy,
-                model=payload.model,
-            )
-            account = selection.account
-            if not account:
-                log_error_code = selection.error_code or "no_accounts"
-                log_error_message = selection.error_message or "No active accounts available"
-                raise ProxyResponseError(
-                    503,
-                    openai_error(log_error_code, log_error_message),
-                )
-            account_id_value = account.id
-            remaining_budget = _remaining_budget_seconds(deadline)
-            if remaining_budget <= 0:
-                logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
-                _raise_proxy_budget_exhausted()
-            try:
-                account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                logger.warning(
-                    "Compact refresh/connect failed request_id=%s account_id=%s",
-                    request_id,
-                    account.id,
-                    exc_info=True,
-                )
-                _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
-            request_service_tier = _service_tier_from_compact_payload(payload)
 
             async def _call_compact(target: Account) -> CompactResponsePayload:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
@@ -271,84 +240,173 @@ class ProxyService:
                 finally:
                     pop_compact_timeout_overrides(timeout_tokens)
 
-            safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
-            refresh_retry_used = False
-            while True:
-                try:
-                    response = await _call_compact(account)
-                    actual_service_tier = _service_tier_from_response(response)
-                    await self._load_balancer.record_success(account)
-                    await self._settle_compact_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=response,
-                        request_service_tier=request_service_tier,
+            last_exc: ProxyResponseError | None = None
+            for _account_attempt in range(_COMPACT_MAX_ACCOUNT_ATTEMPTS):
+                selection = await self._select_account_with_budget(
+                    deadline,
+                    request_id=request_id,
+                    kind="compact",
+                    sticky_key=affinity.key,
+                    sticky_kind=affinity.kind,
+                    reallocate_sticky=affinity.reallocate_sticky,
+                    sticky_max_age_seconds=affinity.max_age_seconds,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
+                    model=payload.model,
+                )
+                account = selection.account
+                if not account:
+                    log_error_code = selection.error_code or "no_accounts"
+                    log_error_message = selection.error_message or "No active accounts available"
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(log_error_code, log_error_message),
                     )
-                    log_status = "success"
-                    return response
-                except ProxyResponseError as exc:
-                    if exc.status_code == 401:
-                        if refresh_retry_used:
-                            await self._settle_compact_api_key_usage(
-                                api_key=api_key,
-                                api_key_reservation=api_key_reservation,
-                                response=None,
-                                request_service_tier=request_service_tier,
-                            )
-                            await self._handle_proxy_error(account, exc)
-                            raise
-                        try:
-                            remaining_budget = _remaining_budget_seconds(deadline)
-                            if remaining_budget <= 0:
+                account_id_value = account.id
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
+                    _raise_proxy_budget_exhausted()
+                try:
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "Compact refresh/connect failed request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                request_service_tier = _service_tier_from_compact_payload(payload)
+
+                safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
+                transient_retries = 0
+                refresh_retry_used = False
+                transient_exhausted = False
+                while True:
+                    try:
+                        response = await _call_compact(account)
+                        actual_service_tier = _service_tier_from_response(response)
+                        await self._load_balancer.record_success(account)
+                        await self._settle_compact_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            response=response,
+                            request_service_tier=request_service_tier,
+                        )
+                        log_status = "success"
+                        return response
+                    except ProxyResponseError as exc:
+                        if exc.status_code == 401:
+                            if refresh_retry_used:
+                                await self._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                await self._handle_proxy_error(account, exc)
+                                raise
+                            try:
+                                remaining_budget = _remaining_budget_seconds(deadline)
+                                if remaining_budget <= 0:
+                                    logger.warning(
+                                        "Compact request budget exhausted before forced refresh retry request_id=%s "
+                                        "account_id=%s",
+                                        request_id,
+                                        account.id,
+                                    )
+                                    _raise_proxy_budget_exhausted()
+                                account = await self._ensure_fresh_with_budget(
+                                    account,
+                                    force=True,
+                                    timeout_seconds=remaining_budget,
+                                )
+                            except RefreshError as refresh_exc:
+                                if refresh_exc.is_permanent:
+                                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                                await self._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                raise exc
+                            except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                                await self._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
                                 logger.warning(
-                                    "Compact request budget exhausted before forced refresh retry request_id=%s "
-                                    "account_id=%s",
+                                    "Compact forced refresh/connect failed request_id=%s account_id=%s",
                                     request_id,
                                     account.id,
+                                    exc_info=True,
                                 )
-                                _raise_proxy_budget_exhausted()
-                            account = await self._ensure_fresh_with_budget(
-                                account,
-                                force=True,
-                                timeout_seconds=remaining_budget,
-                            )
-                        except RefreshError as refresh_exc:
-                            if refresh_exc.is_permanent:
-                                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                            await self._settle_compact_api_key_usage(
-                                api_key=api_key,
-                                api_key_reservation=api_key_reservation,
-                                response=None,
-                                request_service_tier=request_service_tier,
-                            )
-                            raise exc
-                        except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
-                            await self._settle_compact_api_key_usage(
-                                api_key=api_key,
-                                api_key_reservation=api_key_reservation,
-                                response=None,
-                                request_service_tier=request_service_tier,
-                            )
+                                _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                            refresh_retry_used = True
+                            continue
+                        if exc.status_code == 500:
+                            transient_retries += 1
+                            if (
+                                transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES
+                                and _remaining_budget_seconds(deadline) > 0
+                            ):
+                                delay = backoff_seconds(transient_retries)
+                                logger.info(
+                                    "Transient compact error, retrying same account "
+                                    "request_id=%s account_id=%s retry=%s/%s delay=%.2fs",
+                                    request_id,
+                                    account.id,
+                                    transient_retries,
+                                    _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES,
+                                    delay,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            # Exhausted same-account transient retries — penalize and failover
                             logger.warning(
-                                "Compact forced refresh/connect failed request_id=%s account_id=%s",
+                                "Compact transient retries exhausted for account "
+                                "request_id=%s account_id=%s retries=%s code=server_error",
                                 request_id,
                                 account.id,
-                                exc_info=True,
+                                transient_retries,
                             )
-                            _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
-                        refresh_retry_used = True
-                        continue
-                    if exc.retryable_same_contract and safe_retry_budget > 0:
-                        safe_retry_budget -= 1
-                        continue
-                    await self._settle_compact_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=request_service_tier,
-                    )
-                    await self._handle_proxy_error(account, exc)
-                    raise
+                            await self._handle_proxy_error(account, exc)
+                            # Record remaining errors so total equals transient_retries,
+                            # meeting the load balancer backoff threshold (error_count >= 3).
+                            await self._load_balancer.record_errors(account, transient_retries - 1)
+                            last_exc = exc
+                            transient_exhausted = True
+                            break  # break inner loop → outer loop tries different account
+                        if exc.retryable_same_contract and safe_retry_budget > 0:
+                            safe_retry_budget -= 1
+                            continue
+                        await self._settle_compact_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            response=None,
+                            request_service_tier=request_service_tier,
+                        )
+                        await self._handle_proxy_error(account, exc)
+                        raise
+                if transient_exhausted:
+                    continue  # outer loop: try different account
+            # All account attempts exhausted — raise last error
+            await self._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                response=None,
+                request_service_tier=request_service_tier,
+            )
+            if last_exc is not None:
+                raise last_exc
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "All account attempts exhausted"),
+            )
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -855,6 +913,7 @@ class ProxyService:
                 openai_cache_affinity=openai_cache_affinity,
                 openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                 sticky_threads_enabled=sticky_threads_enabled,
+                api_key=api_key,
             ),
         )
 
@@ -1498,6 +1557,8 @@ class ProxyService:
             error_code=error_code,
             error_message=error_message,
             reasoning_effort=request_state.reasoning_effort,
+            request_kind=request_state.request_kind,
+            session_id_hash=request_state.session_id_hash,
             transport=_REQUEST_TRANSPORT_WEBSOCKET,
             service_tier=request_state.service_tier,
         )
@@ -1842,6 +1903,7 @@ class ProxyService:
             openai_cache_affinity=openai_cache_affinity,
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
+            api_key=api_key,
         )
         session_id_hash = _session_id_hash_from_headers(headers)
         routing_strategy = _routing_strategy(settings)
@@ -1849,6 +1911,7 @@ class ProxyService:
         settled = False
         any_attempt_logged = False
         settlement = _StreamSettlement()
+        last_transient_exc: ProxyResponseError | None = None
         try:
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -1919,6 +1982,11 @@ class ProxyService:
                     return
                 account = selection.account
                 if not account:
+                    # If a prior attempt stored a transient 500 and the caller
+                    # expects HTTP error propagation, re-raise the original error
+                    # instead of returning a generic no_accounts event.
+                    if propagate_http_errors and last_transient_exc is not None:
+                        raise last_transient_exc
                     no_accounts_msg = selection.error_message or "No active accounts available"
                     error_code = selection.error_code or "no_accounts"
                     event = response_failed_event(
@@ -2030,40 +2098,95 @@ class ProxyService:
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
-                    stream_timeout_tokens = _push_stream_attempt_timeout_overrides(effective_attempt_timeout)
-                    try:
-                        async for line in self._stream_once(
-                            account,
-                            payload,
-                            headers,
-                            request_id,
-                            attempt < max_attempts - 1,
-                            api_key=api_key,
-                            settlement=settlement,
-                            suppress_text_done_events=suppress_text_done_events,
-                            upstream_stream_transport=upstream_stream_transport,
-                            request_transport=request_transport,
-                            request_kind=_REQUEST_KIND_RESPONSES,
-                            session_id_hash=session_id_hash,
-                        ):
-                            yield line
-                    finally:
-                        pop_stream_timeout_overrides(stream_timeout_tokens)
-                    if settlement.account_health_error:
-                        await self._handle_stream_error(
-                            account,
-                            _stream_settlement_error_payload(settlement),
-                            settlement.error_code or "upstream_error",
+                    transient_retries = 0
+                    allow_retry_flag = attempt < max_attempts - 1
+                    while True:
+                        stream_timeout_tokens = _push_stream_attempt_timeout_overrides(
+                            _remaining_budget_seconds(deadline),
                         )
-                    elif settlement.record_success:
-                        await self._load_balancer.record_success(account)
-                    settled = await self._settle_stream_api_key_usage(
-                        api_key,
-                        api_key_reservation,
-                        settlement,
-                        request_id,
-                    )
-                    return
+                        try:
+                            settlement = _StreamSettlement()
+                            async for line in self._stream_once(
+                                account,
+                                payload,
+                                headers,
+                                request_id,
+                                allow_retry_flag,
+                                allow_transient_retry=(
+                                    transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1 or allow_retry_flag
+                                ),
+                                api_key=api_key,
+                                settlement=settlement,
+                                suppress_text_done_events=suppress_text_done_events,
+                                upstream_stream_transport=upstream_stream_transport,
+                                request_transport=request_transport,
+                                request_kind=_REQUEST_KIND_RESPONSES,
+                                session_id_hash=session_id_hash,
+                            ):
+                                yield line
+                        except (_TransientStreamError, ProxyResponseError) as tex:
+                            # For ProxyResponseError, only intercept HTTP 500; re-raise others
+                            if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
+                                raise
+                            transient_retries += 1
+                            error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
+                            error_payload: UpstreamError = (
+                                tex.error
+                                if isinstance(tex, _TransientStreamError)
+                                else _upstream_error_from_openai(_parse_openai_error(tex.payload))
+                            )
+                            if (
+                                transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES
+                                and _remaining_budget_seconds(deadline) > 0
+                            ):
+                                delay = backoff_seconds(transient_retries)
+                                logger.info(
+                                    "Transient stream error, retrying same account "
+                                    "request_id=%s account_id=%s retry=%s/%s delay=%.2fs code=%s",
+                                    request_id,
+                                    account.id,
+                                    transient_retries,
+                                    _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES,
+                                    delay,
+                                    error_code,
+                                )
+                                await asyncio.sleep(delay)
+                                continue  # inner loop: retry same account
+                            # Exhausted same-account retries — penalize and failover
+                            logger.warning(
+                                "Transient retries exhausted for account "
+                                "request_id=%s account_id=%s retries=%s code=%s",
+                                request_id,
+                                account.id,
+                                transient_retries,
+                                error_code,
+                            )
+                            await self._handle_stream_error(account, error_payload, error_code)
+                            # Record remaining errors so total equals transient_retries,
+                            # meeting the load balancer backoff threshold (error_count >= 3).
+                            await self._load_balancer.record_errors(account, transient_retries - 1)
+                            # Preserve last ProxyResponseError for propagate_http_errors path.
+                            if isinstance(tex, ProxyResponseError):
+                                last_transient_exc = tex
+                            break  # outer loop: select different account
+                        finally:
+                            pop_stream_timeout_overrides(stream_timeout_tokens)
+                        if settlement.account_health_error:
+                            await self._handle_stream_error(
+                                account,
+                                _stream_settlement_error_payload(settlement),
+                                settlement.error_code or "upstream_error",
+                            )
+                        elif settlement.record_success:
+                            await self._load_balancer.record_success(account)
+                        settled = await self._settle_stream_api_key_usage(
+                            api_key,
+                            api_key_reservation,
+                            settlement,
+                            request_id,
+                        )
+                        return
+                    continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
                     await self._handle_stream_error(account, exc.error, exc.code)
                     continue
@@ -2239,6 +2362,10 @@ class ProxyService:
                     )
                     yield format_sse_event(event)
                     return
+            # When HTTP error propagation is enabled and the last failure was
+            # a transient 500, re-raise to preserve the upstream status/payload.
+            if propagate_http_errors and last_transient_exc is not None:
+                raise last_transient_exc
             retries_exhausted_msg = "No available accounts after retries"
             event = response_failed_event(
                 "no_accounts",
@@ -2287,6 +2414,7 @@ class ProxyService:
         request_id: str,
         allow_retry: bool,
         *,
+        allow_transient_retry: bool = False,
         api_key: ApiKeyData | None,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
@@ -2359,6 +2487,8 @@ class ProxyService:
                 settlement.account_health_error = _should_penalize_stream_error(code)
                 if allow_retry and _should_retry_stream_error(code):
                     raise _RetryableStreamError(code, settlement.error)
+                if allow_transient_retry and code in _TRANSIENT_RETRY_CODES:
+                    raise _TransientStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
                     code,
                     settlement.error,
@@ -2831,6 +2961,15 @@ class _RetryableStreamError(Exception):
         self.error = error
 
 
+class _TransientStreamError(Exception):
+    """Transient upstream error (e.g. 500 server_error) — retry on same account first."""
+
+    def __init__(self, code: str, error: UpstreamError) -> None:
+        super().__init__(code)
+        self.code = code
+        self.error = error
+
+
 class _TerminalStreamError(Exception):
     def __init__(self, code: str, error: UpstreamError) -> None:
         super().__init__(code)
@@ -3026,17 +3165,10 @@ def _websocket_receive_timeout_for_pending_requests(
             error_message="Upstream stream idle timeout",
             fail_all_pending=True,
         )
-    if remaining_budget <= idle_timeout_seconds:
-        return _WebSocketReceiveTimeout(
-            timeout_seconds=remaining_budget,
-            error_code="upstream_request_timeout",
-            error_message="Proxy request budget exhausted",
-        )
     return _WebSocketReceiveTimeout(
-        timeout_seconds=idle_timeout_seconds,
-        error_code="stream_idle_timeout",
-        error_message="Upstream stream idle timeout",
-        fail_all_pending=True,
+        timeout_seconds=remaining_budget,
+        error_code="upstream_request_timeout",
+        error_message="Proxy request budget exhausted",
     )
 
 
@@ -3305,6 +3437,58 @@ def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCo
     return None
 
 
+def _derive_prompt_cache_key(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    api_key: ApiKeyData | None,
+) -> str:
+    """Derive a stable, session-scoped prompt_cache_key when the client does not provide one.
+
+    The generated key is scoped to (api-key, instructions-prefix, first-user-input) so that:
+    - Parallel sessions from the same API key get *different* keys (different first input).
+    - Successive turns within one session get the *same* key (first input stays constant).
+    - Different API keys never collide.
+    """
+    parts: list[str] = []
+
+    if api_key is not None:
+        parts.append(api_key.id[:12])
+
+    instructions = getattr(payload, "instructions", None)
+    if isinstance(instructions, str) and instructions:
+        parts.append(sha256(instructions[:512].encode()).hexdigest()[:12])
+
+    first_user_text = _extract_first_user_input(payload)
+    if first_user_text:
+        parts.append(sha256(first_user_text[:512].encode()).hexdigest()[:12])
+
+    return "-".join(parts) if parts else uuid4().hex[:24]
+
+
+def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    """Return a text representation of the first user input item for cache key derivation."""
+    input_value = getattr(payload, "input", None)
+    if isinstance(input_value, str):
+        return input_value[:512]
+    if not isinstance(input_value, list):
+        return None
+    for item in input_value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role == "user":
+            content = item.get("content")
+            if isinstance(content, str):
+                return content[:512]
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        text = part.get("text")
+                        if isinstance(text, str):
+                            return text[:512]
+            return json.dumps(item, sort_keys=True, ensure_ascii=False)[:512]
+    return None
+
+
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
     value = _prompt_cache_key_from_request_model(payload)
     if not value:
@@ -3337,6 +3521,7 @@ def _sticky_key_for_responses_request(
     openai_cache_affinity: bool,
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
+    api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
@@ -3345,15 +3530,19 @@ def _sticky_key_for_responses_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
+    cache_key = _sticky_key_from_payload(payload)
+    if cache_key is None and openai_cache_affinity:
+        cache_key = _derive_prompt_cache_key(payload, api_key)
+        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
-            key=_sticky_key_from_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
         )
     if sticky_threads_enabled:
         return _AffinityPolicy(
-            key=_sticky_key_from_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
         )
@@ -3376,6 +3565,7 @@ def _sticky_key_for_compact_request(
     openai_cache_affinity: bool,
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
+    api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
@@ -3384,15 +3574,19 @@ def _sticky_key_for_compact_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
+    cache_key = _sticky_key_from_compact_payload(payload)
+    if cache_key is None and openai_cache_affinity:
+        cache_key = _derive_prompt_cache_key(payload, api_key)
+        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
-            key=_sticky_key_from_compact_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
         )
     if sticky_threads_enabled:
         return _AffinityPolicy(
-            key=_sticky_key_from_compact_payload(payload),
+            key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
         )

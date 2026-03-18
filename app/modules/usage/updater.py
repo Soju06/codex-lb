@@ -350,6 +350,13 @@ class UsageUpdater:
         if primary is None and secondary is None:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
+        # This is a special case that if the account type is free (or probably go)
+        # The 7d stat is in primary window instead of secondary window
+        # (that is widely defined as 7d in the ui)
+        # This will cause the account usage trend is "primary" instead of "secondary"
+        if primary and primary.limit_window_seconds == 604800:
+            secondary = rate_limit.primary_window
+            primary = None
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         usage_written = False
 

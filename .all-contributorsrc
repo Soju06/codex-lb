@@ -200,7 +200,8 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/194083329?v=4",
       "profile": "https://linktree.huzky.dev/",
       "contributions": [
-        "code"
+        "code",
+        "bug"
       ]
     },
     {
@@ -208,6 +209,16 @@
       "name": "flokosti96",
       "avatar_url": "https://avatars.githubusercontent.com/u/144428350?v=4",
       "profile": "https://github.com/flokosti96",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "minpeter",
+      "name": "Woonggi Min",
+      "avatar_url": "https://avatars.githubusercontent.com/u/62207008?v=4",
+      "profile": "https://github.com/minpeter",
       "contributions": [
         "code",
         "test"

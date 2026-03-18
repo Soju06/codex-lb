@@ -55,6 +55,7 @@ class StickySessionCleanupScheduler:
                     settings_repo = SettingsRepository(session)
                     sticky_repo = StickySessionsRepository(session)
                     settings = await settings_repo.get_or_create()
+
                     cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
                     deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                     if deleted_count > 0:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable
 
@@ -25,7 +25,7 @@ from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
-from app.db.models import Account, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -33,6 +33,15 @@ from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 logger = logging.getLogger(__name__)
+
+_STICKY_GRACE_PERIOD_SECONDS = 10.0
+_RECOVERABLE_STATUSES = frozenset(
+    {
+        AccountStatus.ACTIVE,
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
+    }
+)
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -349,26 +358,23 @@ class LoadBalancer:
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
 
-        if reallocate_sticky:
-            chosen = select_account(
-                states,
-                prefer_earlier_reset=prefer_earlier_reset_accounts,
-                routing_strategy=routing_strategy,
-            )
-            if chosen.account is not None and chosen.account.account_id in account_map:
-                await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
-            return chosen
-
         existing = await sticky_repo.get_account_id(
             sticky_key,
             kind=sticky_kind,
             max_age_seconds=sticky_max_age_seconds,
         )
+
+        # When the pinned account is temporarily unavailable (rate-limited,
+        # error backoff) but still in the pool, pick a fallback WITHOUT
+        # overwriting the sticky mapping so the next request returns to the
+        # original account — and its warm OpenAI prompt cache — once it
+        # recovers.  Only reallocate_sticky=True opts in to permanent
+        # reassignment.
+        persist_fallback = True
+
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
-            if pinned is None:
-                await sticky_repo.delete(sticky_key, kind=sticky_kind)
-            else:
+            if pinned is not None:
                 pinned_result = select_account(
                     [pinned],
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -376,16 +382,52 @@ class LoadBalancer:
                     allow_backoff_fallback=False,
                 )
                 if pinned_result.account is not None:
-                    if sticky_max_age_seconds is not None:
+                    if not reallocate_sticky and sticky_max_age_seconds is not None:
                         await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                     return pinned_result
+                # Grace period: if the pinned account is rate-limited with a
+                # known reset time within a short window, retry selection
+                # with a small time advance to preserve prompt cache.
+                # A shallow copy is used so the time-advanced selection does
+                # not mutate the original state (which is later synced to DB
+                # by _sync_state for all accounts).
+                if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
+                    grace_copy = replace(pinned)
+                    grace_result = select_account(
+                        [grace_copy],
+                        now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        allow_backoff_fallback=False,
+                    )
+                    if grace_result.account is not None:
+                        if sticky_max_age_seconds is not None:
+                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
+                        return grace_result
+                if reallocate_sticky:
+                    await sticky_repo.delete(sticky_key, kind=sticky_kind)
+                elif pinned.status not in _RECOVERABLE_STATUSES:
+                    # Permanently down (PAUSED/DEACTIVATED) — let the
+                    # fallback be persisted to rebind the mapping.
+                    pass
+                elif sticky_max_age_seconds is not None:
+                    # TTL-based kind (PROMPT_CACHE): preserve the original
+                    # mapping so the next request returns to the warm-cache
+                    # account once it recovers.  The TTL will naturally
+                    # expire the mapping if recovery takes too long.
+                    persist_fallback = False
+                # else: durable kind without TTL (CODEX_SESSION) — persist
+                # fallback so the session sticks to one account during
+                # the outage instead of bouncing across random fallbacks.
+            else:
+                await sticky_repo.delete(sticky_key, kind=sticky_kind)
 
         chosen = select_account(
             states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
         )
-        if chosen.account is not None and chosen.account.account_id in account_map:
+        if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
         return chosen
 
@@ -411,9 +453,15 @@ class LoadBalancer:
                 await self._sync_state(repos.accounts, account, state)
 
     async def record_error(self, account: Account) -> None:
+        await self.record_errors(account, 1)
+
+    async def record_errors(self, account: Account, count: int) -> None:
+        """Record *count* transient errors in a single lock acquisition."""
+        if count < 1:
+            return
         async with self._runtime_lock:
             state = self._state_for(account)
-            state.error_count += 1
+            state.error_count += count
             state.last_error_at = time.time()
             async with self._repo_factory() as repos:
                 await self._sync_state(repos.accounts, account, state)

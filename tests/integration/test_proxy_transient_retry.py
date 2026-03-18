@@ -339,6 +339,48 @@ async def test_stream_non_server_error_not_retried_as_transient(async_client, mo
     assert call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_client, monkeypatch):
+    """rate_limit_exceeded on the final outer attempt must yield the real error event,
+    not a generic no_accounts message. Regression test for allow_retry flag separation.
+
+    Needs 3 accounts so each outer attempt (max_attempts=3) reaches _stream_once:
+    - Attempt 0: account A → rate_limit → mark A RATE_LIMITED → continue
+    - Attempt 1: account B → rate_limit → mark B RATE_LIMITED → continue
+    - Attempt 2 (last): account C → rate_limit → allow_retry=False →
+      error event yielded to client → _TerminalStreamError → return
+    """
+    await _import_account(async_client, "acc_rl_a", "rla@example.com")
+    await _import_account(async_client, "acc_rl_b", "rlb@example.com")
+    await _import_account(async_client, "acc_rl_c", "rlc@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "rate_limit_exceeded",
+                        "message": "slow down",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    # The last event the client sees should contain the actual rate_limit error
+    last_event = events[-1] if events else {}
+    error = last_event.get("response", {}).get("error", {})
+    assert error.get("code") != "no_accounts", "Client received generic no_accounts instead of actual error"
+
+
 # ===========================================================================
 # Compact — HTTP 500 retry
 # ===========================================================================

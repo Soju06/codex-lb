@@ -2074,7 +2074,10 @@ class ProxyService:
                                 payload,
                                 headers,
                                 request_id,
-                                allow_retry_flag or transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1,
+                                allow_retry_flag,
+                                allow_transient_retry=(
+                                    transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1 or allow_retry_flag
+                                ),
                                 api_key=api_key,
                                 settlement=settlement,
                                 suppress_text_done_events=suppress_text_done_events,
@@ -2355,6 +2358,7 @@ class ProxyService:
         request_id: str,
         allow_retry: bool,
         *,
+        allow_transient_retry: bool = False,
         api_key: ApiKeyData | None,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
@@ -2425,7 +2429,7 @@ class ProxyService:
                 settlement.account_health_error = _should_penalize_stream_error(code)
                 if allow_retry and _should_retry_stream_error(code):
                     raise _RetryableStreamError(code, settlement.error)
-                if allow_retry and code in _TRANSIENT_RETRY_CODES:
+                if allow_transient_retry and code in _TRANSIENT_RETRY_CODES:
                     raise _TransientStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
                     code,

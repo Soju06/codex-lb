@@ -103,12 +103,13 @@ class StickySessionsRepository:
         return int(result.scalar_one())
 
     async def purge_prompt_cache_before(self, cutoff: datetime) -> int:
-        result = await self._session.execute(
-            delete(StickySession)
-            .where(StickySession.kind == StickySessionKind.PROMPT_CACHE)
-            .where(StickySession.updated_at < to_utc_naive(cutoff))
-            .returning(StickySession.key)
-        )
+        return await self.purge_before(cutoff, kind=StickySessionKind.PROMPT_CACHE)
+
+    async def purge_before(self, cutoff: datetime, *, kind: StickySessionKind | None = None) -> int:
+        stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
+        if kind is not None:
+            stmt = stmt.where(StickySession.kind == kind)
+        result = await self._session.execute(stmt.returning(StickySession.key))
         deleted = len(result.scalars().all())
         await self._session.commit()
         return deleted

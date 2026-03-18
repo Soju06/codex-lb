@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     openai_cache_affinity_max_age_seconds: int = Field(default=300, gt=0)
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
+    sticky_session_stale_threshold_seconds: int = Field(default=86400, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
     log_proxy_request_shape: bool = False

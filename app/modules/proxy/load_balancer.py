@@ -25,7 +25,7 @@ from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
-from app.db.models import Account, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -33,6 +33,8 @@ from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 logger = logging.getLogger(__name__)
+
+_STICKY_GRACE_PERIOD_SECONDS = 10.0
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -354,6 +356,15 @@ class LoadBalancer:
             kind=sticky_kind,
             max_age_seconds=sticky_max_age_seconds,
         )
+
+        # When the pinned account is temporarily unavailable (rate-limited,
+        # error backoff) but still in the pool, pick a fallback WITHOUT
+        # overwriting the sticky mapping so the next request returns to the
+        # original account — and its warm OpenAI prompt cache — once it
+        # recovers.  Only reallocate_sticky=True opts in to permanent
+        # reassignment.
+        persist_fallback = True
+
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
@@ -367,8 +378,29 @@ class LoadBalancer:
                     if not reallocate_sticky and sticky_max_age_seconds is not None:
                         await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                     return pinned_result
+                # Grace period: if the pinned account is rate-limited with a
+                # known reset time within a short window, retry selection
+                # with a small time advance to preserve prompt cache.
+                # Only applies when apply_usage_quota kept the status as
+                # RATE_LIMITED (i.e. runtime_reset is valid and in the
+                # future); accounts reset to ACTIVE-with-cooldown are
+                # excluded to avoid bypassing error-handling cooldowns.
+                if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
+                    grace_result = select_account(
+                        [pinned],
+                        now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        allow_backoff_fallback=False,
+                    )
+                    if grace_result.account is not None:
+                        if sticky_max_age_seconds is not None:
+                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
+                        return grace_result
                 if reallocate_sticky:
                     await sticky_repo.delete(sticky_key, kind=sticky_kind)
+                else:
+                    persist_fallback = False
             else:
                 await sticky_repo.delete(sticky_key, kind=sticky_kind)
 
@@ -377,7 +409,7 @@ class LoadBalancer:
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
         )
-        if chosen.account is not None and chosen.account.account_id in account_map:
+        if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
         return chosen
 

@@ -1709,7 +1709,7 @@ async def compact_responses(
 
 
 def _is_retryable_compact_status(status_code: int) -> bool:
-    return status_code in {401, 502, 503, 504}
+    return status_code in {401, 500, 502, 503, 504}
 
 
 @dataclass(slots=True)

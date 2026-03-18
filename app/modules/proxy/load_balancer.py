@@ -403,9 +403,15 @@ class LoadBalancer:
                 await self._sync_state(repos.accounts, account, state)
 
     async def record_error(self, account: Account) -> None:
+        await self.record_errors(account, 1)
+
+    async def record_errors(self, account: Account, count: int) -> None:
+        """Record *count* transient errors in a single lock acquisition."""
+        if count < 1:
+            return
         async with self._runtime_lock:
             state = self._state_for(account)
-            state.error_count += 1
+            state.error_count += count
             state.last_error_at = time.time()
             async with self._repo_factory() as repos:
                 await self._sync_state(repos.accounts, account, state)

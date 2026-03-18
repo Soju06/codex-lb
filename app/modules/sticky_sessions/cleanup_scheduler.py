@@ -8,7 +8,6 @@ from datetime import timedelta
 
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
-from app.db.models import StickySessionKind
 from app.db.session import get_background_session
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
@@ -57,20 +56,10 @@ class StickySessionCleanupScheduler:
                     sticky_repo = StickySessionsRepository(session)
                     settings = await settings_repo.get_or_create()
 
-                    prompt_cache_cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
-                    deleted_prompt = await sticky_repo.purge_prompt_cache_before(prompt_cache_cutoff)
-                    if deleted_prompt > 0:
-                        logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_prompt)
-
-                    stale_cutoff = utcnow() - timedelta(seconds=get_settings().sticky_session_stale_threshold_seconds)
-                    for kind in (StickySessionKind.STICKY_THREAD, StickySessionKind.CODEX_SESSION):
-                        deleted_stale = await sticky_repo.purge_before(stale_cutoff, kind=kind)
-                        if deleted_stale > 0:
-                            logger.info(
-                                "Purged stale %s sticky sessions deleted_count=%s",
-                                kind.value,
-                                deleted_stale,
-                            )
+                    cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+                    deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
+                    if deleted_count > 0:
+                        logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
             except Exception:
                 logger.exception("Sticky session cleanup loop failed")
 

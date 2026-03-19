@@ -1585,6 +1585,8 @@ class ProxyService:
                 502,
                 openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
             )
+        gate_acquired = False
+        request_enqueued = False
         async with session.pending_lock:
             if session.queued_request_count >= queue_limit:
                 _log_http_bridge_event(
@@ -1603,12 +1605,22 @@ class ProxyService:
                     ),
                 )
             session.queued_request_count += 1
-        await session.response_create_gate.acquire()
-        async with session.pending_lock:
-            session.pending_requests.append(request_state)
         try:
+            await session.response_create_gate.acquire()
+            gate_acquired = True
+            async with session.pending_lock:
+                session.pending_requests.append(request_state)
+            request_enqueued = True
             await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
+        except asyncio.CancelledError:
+            await self._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=gate_acquired,
+                request_enqueued=request_enqueued,
+            )
+            raise
         except Exception as exc:
             _log_http_bridge_event(
                 "send_failure",
@@ -1624,10 +1636,12 @@ class ProxyService:
             )
             if retried:
                 return
-            async with session.pending_lock:
-                if request_state in session.pending_requests:
-                    session.pending_requests.remove(request_state)
-                session.queued_request_count = max(0, session.queued_request_count - 1)
+            await self._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=gate_acquired,
+                request_enqueued=request_enqueued,
+            )
             await self._fail_pending_websocket_requests(
                 account_id_value=session.account.id,
                 pending_requests=deque([request_state]),
@@ -1646,6 +1660,21 @@ class ProxyService:
                 502,
                 openai_error("upstream_unavailable", str(exc) or "Upstream websocket closed"),
             ) from exc
+
+    async def _cleanup_http_bridge_submit_interruption(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        gate_acquired: bool,
+        request_enqueued: bool,
+    ) -> None:
+        async with session.pending_lock:
+            if request_enqueued and request_state in session.pending_requests:
+                session.pending_requests.remove(request_state)
+            session.queued_request_count = max(0, session.queued_request_count - 1)
+        if gate_acquired:
+            _release_websocket_response_create_gate(request_state, session.response_create_gate)
 
     async def _relay_http_bridge_upstream_messages(
         self,
@@ -1731,7 +1760,11 @@ class ProxyService:
             pending_count=1,
         )
         try:
-            await self._reconnect_http_bridge_session(session, request_state=request_state)
+            await self._reconnect_http_bridge_session(
+                session,
+                request_state=request_state,
+                restart_reader=True,
+            )
             await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
             return True
@@ -1775,10 +1808,20 @@ class ProxyService:
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState,
+        restart_reader: bool = False,
     ) -> None:
         old_account_id = session.account.id
+        old_upstream = session.upstream
+        old_reader = session.upstream_reader if restart_reader else None
+        if old_reader is not None:
+            old_reader.cancel()
+            if old_reader is not asyncio.current_task():
+                try:
+                    await old_reader
+                except asyncio.CancelledError:
+                    pass
         try:
-            await session.upstream.close()
+            await old_upstream.close()
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
 
@@ -1815,6 +1858,8 @@ class ProxyService:
         session.account = account
         session.upstream = upstream
         session.upstream_control = _WebSocketUpstreamControl()
+        if restart_reader:
+            session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(
             "reconnect",
             session.key,

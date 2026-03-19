@@ -1381,7 +1381,7 @@ class ProxyService:
 
     async def _http_bridge_pending_count(self, session: "_HTTPBridgeSession") -> int:
         async with session.pending_lock:
-            return len(session.pending_requests)
+            return max(len(session.pending_requests), session.queued_request_count)
 
     async def _get_or_create_http_bridge_session(
         self,
@@ -1990,6 +1990,7 @@ class ProxyService:
         session.headers = connect_headers
         session.upstream = upstream
         session.upstream_control = _WebSocketUpstreamControl()
+        session.closed = False
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))

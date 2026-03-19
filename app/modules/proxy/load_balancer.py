@@ -514,6 +514,10 @@ def _state_from_account(
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
+    credits_source = primary_entry or effective_secondary_entry
+    credits_has = credits_source.credits_has if credits_source else None
+    credits_unlimited = credits_source.credits_unlimited if credits_source else None
+    credits_balance = credits_source.credits_balance if credits_source else None
 
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
@@ -528,6 +532,9 @@ def _state_from_account(
         runtime_reset=effective_runtime_reset,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
 
     return AccountState(

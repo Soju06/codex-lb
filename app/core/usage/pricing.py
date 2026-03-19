@@ -80,6 +80,11 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         long_context_cached_input_per_1m=0.5,
         long_context_output_per_1m=22.5,
     ),
+    "gpt-5.4-mini": ModelPrice(
+        input_per_1m=0.75,
+        cached_input_per_1m=0.075,
+        output_per_1m=4.5,
+    ),
     "gpt-5.4-pro": ModelPrice(
         input_per_1m=30.0,
         output_per_1m=180.0,
@@ -174,6 +179,7 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
     "gpt-5.4-pro*": "gpt-5.4-pro",
+    "gpt-5.4-mini*": "gpt-5.4-mini",
     "gpt-5.4*": "gpt-5.4",
     "gpt-5.3-codex*": "gpt-5.3-codex",
     "gpt-5.3-chat-latest*": "gpt-5.3-chat-latest",

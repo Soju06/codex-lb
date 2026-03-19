@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.3](https://github.com/Soju06/codex-lb/compare/v1.6.2...v1.6.3) (2026-03-19)
+
+
+### Bug Fixes
+
+* preserve v1 responses session continuity over HTTP ([#232](https://github.com/Soju06/codex-lb/issues/232)) ([7ba5b75](https://github.com/Soju06/codex-lb/commit/7ba5b751f90e619bb396afa1ed650d837bba9308))
+
 ## [1.6.2](https://github.com/Soju06/codex-lb/compare/v1.6.1...v1.6.2) (2026-03-19)
 
 

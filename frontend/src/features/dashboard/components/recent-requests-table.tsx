@@ -27,7 +27,6 @@ import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatCompactNumber,
-  formatCurrency,
   formatModelLabel,
   formatTimeLong,
 } from "@/utils/formatters";
@@ -48,6 +47,13 @@ const TRANSPORT_CLASS_MAP: Record<string, string> = {
   http: "bg-slate-500/10 text-slate-700 border-slate-500/20 hover:bg-slate-500/15 dark:text-slate-300",
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
 };
+
+function formatBurnRate(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return value.toFixed(1);
+}
 
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
@@ -107,7 +113,7 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="min-w-[1040px] table-fixed">
+        <Table className="min-w-[1160px] table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
@@ -117,7 +123,8 @@ export function RecentRequestsTable({
               <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
-              <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
+              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Burn 5h</TableHead>
+              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Burn 7d</TableHead>
               <TableHead className="w-28 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Error</TableHead>
             </TableRow>
           </TableHeader>
@@ -183,7 +190,10 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell>
                   <TableCell className="text-right align-top font-mono text-xs tabular-nums">
-                    {formatCurrency(request.costUsd)}
+                    {formatBurnRate(request.burnRate5hPlusAccounts)}
+                  </TableCell>
+                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                    {formatBurnRate(request.burnRate7dPlusAccounts)}
                   </TableCell>
                   <TableCell className="overflow-hidden pr-4 align-top">
                     <div className="flex items-center gap-1.5">

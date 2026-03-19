@@ -2456,6 +2456,9 @@ class ProxyService:
         with anyio.CancelScope(shield=True):
             try:
                 async with self._repo_factory() as repos:
+                    burn_rate_5h_plus_accounts, burn_rate_7d_plus_accounts = (
+                        await repos.request_logs.latest_projected_burn_rates()
+                    )
                     await repos.request_logs.add_log(
                         account_id=account_id,
                         api_key_id=api_key.id if api_key else None,
@@ -2468,6 +2471,8 @@ class ProxyService:
                         reasoning_effort=reasoning_effort,
                         transport=transport,
                         service_tier=service_tier,
+                        burn_rate_5h_plus_accounts=burn_rate_5h_plus_accounts,
+                        burn_rate_7d_plus_accounts=burn_rate_7d_plus_accounts,
                         latency_ms=latency_ms,
                         status=status,
                         error_code=error_code,

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.usage.types import BucketModelAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestLog
+from app.db.models import Account, ApiKey, BurnRateHistory, RequestLog
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +92,8 @@ class RequestLogsRepository:
         reasoning_effort: str | None = None,
         service_tier: str | None = None,
         transport: str | None = None,
+        burn_rate_5h_plus_accounts: float | None = None,
+        burn_rate_7d_plus_accounts: float | None = None,
         api_key_id: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
@@ -111,6 +113,8 @@ class RequestLogsRepository:
             status=status,
             error_code=error_code,
             error_message=error_message,
+            burn_rate_5h_plus_accounts=burn_rate_5h_plus_accounts,
+            burn_rate_7d_plus_accounts=burn_rate_7d_plus_accounts,
             requested_at=requested_at or utcnow(),
         )
         self._session.add(log)
@@ -123,6 +127,24 @@ class RequestLogsRepository:
         except BaseException:
             await _safe_rollback(self._session)
             raise
+
+    async def latest_projected_burn_rates(self) -> tuple[float | None, float | None]:
+        stmt = (
+            select(
+                BurnRateHistory.primary_projected_plus_accounts,
+                BurnRateHistory.secondary_projected_plus_accounts,
+            )
+            .order_by(BurnRateHistory.recorded_at.desc(), BurnRateHistory.id.desc())
+            .limit(1)
+        )
+        try:
+            result = await self._session.execute(stmt)
+        except sa_exc.SQLAlchemyError:
+            return None, None
+        row = result.first()
+        if row is None:
+            return None, None
+        return row[0], row[1]
 
     async def list_recent(
         self,

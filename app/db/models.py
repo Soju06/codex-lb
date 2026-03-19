@@ -154,6 +154,8 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    burn_rate_5h_plus_accounts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    burn_rate_7d_plus_accounts: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class StickySession(Base):

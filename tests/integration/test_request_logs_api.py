@@ -71,6 +71,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
             requested_at=now,
             api_key_id="key_logs_1",
             transport="websocket",
+            burn_rate_5h_plus_accounts=0.5,
+            burn_rate_7d_plus_accounts=1.7,
         )
 
     response = await async_client.get("/api/request-logs?limit=2")
@@ -87,6 +89,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["errorCode"] == "rate_limit_exceeded"
     assert latest["errorMessage"] == "Rate limit reached"
     assert latest["transport"] == "websocket"
+    assert latest["burnRate5hPlusAccounts"] == pytest.approx(0.5)
+    assert latest["burnRate7dPlusAccounts"] == pytest.approx(1.7)
 
     older = payload[1]
     assert older["status"] == "ok"
@@ -94,3 +98,5 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None
     assert older["transport"] == "http"
+    assert older["burnRate5hPlusAccounts"] is None
+    assert older["burnRate7dPlusAccounts"] is None

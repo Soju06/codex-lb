@@ -215,6 +215,8 @@ export function createRequestLogEntry(overrides: Partial<RequestLogEntry> = {}):
     cachedInputTokens: 320,
     reasoningEffort: null,
     costUsd: 0.0132,
+    burnRate5hPlusAccounts: 0.7,
+    burnRate7dPlusAccounts: 1.2,
     latencyMs: 920,
     ...overrides,
   });

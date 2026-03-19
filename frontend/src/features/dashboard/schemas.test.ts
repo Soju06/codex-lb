@@ -130,6 +130,8 @@ describe("RequestLogsResponseSchema", () => {
           cachedInputTokens: 0,
           reasoningEffort: null,
           costUsd: 0.001,
+          burnRate5hPlusAccounts: 0.4,
+          burnRate7dPlusAccounts: 1.6,
           latencyMs: 42,
         },
       ],
@@ -139,6 +141,8 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.burnRate5hPlusAccounts).toBe(0.4);
+    expect(parsed.requests[0]?.burnRate7dPlusAccounts).toBe(1.6);
   });
 });
 

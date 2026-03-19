@@ -111,6 +111,8 @@ export const RequestLogSchema = z.object({
   cachedInputTokens: z.number().nullable(),
   reasoningEffort: z.string().nullable(),
   costUsd: z.number().nullable(),
+  burnRate5hPlusAccounts: z.number().nullable().optional().default(null),
+  burnRate7dPlusAccounts: z.number().nullable().optional().default(null),
   latencyMs: z.number().nullable(),
 });
 

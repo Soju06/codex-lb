@@ -22,6 +22,8 @@ class RequestLogEntry(DashboardModel):
     cached_input_tokens: int | None = None
     reasoning_effort: str | None = None
     cost_usd: float | None = None
+    burn_rate_5h_plus_accounts: float | None = Field(default=None, serialization_alias="burnRate5hPlusAccounts")
+    burn_rate_7d_plus_accounts: float | None = Field(default=None, serialization_alias="burnRate7dPlusAccounts")
     latency_ms: int | None = None
 
 

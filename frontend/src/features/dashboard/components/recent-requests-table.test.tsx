@@ -49,6 +49,8 @@ describe("RecentRequestsTable", () => {
             cachedInputTokens: 200,
             reasoningEffort: "high",
             costUsd: 0.01,
+            burnRate5hPlusAccounts: 0.3,
+            burnRate7dPlusAccounts: 1.8,
             latencyMs: 1000,
           },
         ]}
@@ -60,6 +62,10 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("gpt-5.1 (high, priority)")).toBeInTheDocument();
     expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
+    expect(screen.getByText("Burn 5h")).toBeInTheDocument();
+    expect(screen.getByText("Burn 7d")).toBeInTheDocument();
+    expect(screen.getByText("0.3")).toBeInTheDocument();
+    expect(screen.getByText("1.8")).toBeInTheDocument();
 
     const viewButton = screen.getByRole("button", { name: "View" });
     await user.click(viewButton);
@@ -95,6 +101,8 @@ describe("RecentRequestsTable", () => {
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 0,
+            burnRate5hPlusAccounts: null,
+            burnRate7dPlusAccounts: null,
             latencyMs: 1,
           },
         ]}

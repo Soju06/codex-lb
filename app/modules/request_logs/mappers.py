@@ -38,5 +38,7 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         tokens=total_tokens_from_log(log),
         cached_input_tokens=cached_input_tokens_from_log(log),
         cost_usd=cost_from_log(log, precision=6),
+        burn_rate_5h_plus_accounts=log.burn_rate_5h_plus_accounts,
+        burn_rate_7d_plus_accounts=log.burn_rate_7d_plus_accounts,
         latency_ms=log.latency_ms,
     )

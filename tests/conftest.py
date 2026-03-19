@@ -20,6 +20,7 @@ os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
 os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
+os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402

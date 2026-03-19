@@ -16,7 +16,7 @@ The service MUST accept POST requests to `/v1/responses` with a JSON body and MU
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 ### Requirement: Support Responses input types and conversation constraints
-The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST reject `previous_response_id` with an OpenAI error envelope because upstream does not support it. The service MUST continue to reject requests that include both `conversation` and `previous_response_id`.
+The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST accept `previous_response_id` when `conversation` is absent and MUST continue to reject requests that include both `conversation` and `previous_response_id`.
 
 #### Scenario: String input
 - **WHEN** the client sends `input` as a string
@@ -31,8 +31,8 @@ The service MUST accept `input` as either a string or an array of input items. W
 - **THEN** the service returns a 4xx response with an OpenAI error envelope indicating invalid parameters
 
 #### Scenario: previous_response_id provided
-- **WHEN** the client provides `previous_response_id`
-- **THEN** the service returns a 4xx response with an OpenAI error envelope indicating the unsupported parameter
+- **WHEN** the client provides `previous_response_id` without `conversation`
+- **THEN** the service accepts the request and forwards `previous_response_id` upstream unchanged
 
 ### Requirement: Reject input_file file_id in Responses
 The service MUST reject `input_file.file_id` in Responses input items and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
@@ -192,6 +192,31 @@ For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions 
 #### Scenario: dashboard prompt-cache affinity TTL is applied
 - **WHEN** an operator updates the dashboard prompt-cache affinity TTL
 - **THEN** subsequent OpenAI-style prompt-cache affinity decisions use the new freshness window
+
+### Requirement: HTTP /v1/responses preserves upstream websocket session continuity
+When serving HTTP `/v1/responses`, the service MUST preserve upstream Responses websocket session continuity on a stable per-session bridge key instead of opening a brand new upstream session for every eligible request. The bridge key MUST use an explicit session/conversation header when present; otherwise it MUST use normalized `prompt_cache_key`, and when the client omits `prompt_cache_key` the service MUST derive a stable key from the same cache-affinity inputs already used for OpenAI prompt-cache routing. While bridged, the service MUST preserve the external HTTP/SSE contract, MUST continue request logging with `transport = "http"`, and MUST keep requests from different bridge keys isolated from one another.
+
+#### Scenario: sequential HTTP responses requests reuse the same bridged upstream session
+- **WHEN** a client sends repeated HTTP `/v1/responses` requests with the same stable bridge key
+- **THEN** the service reuses one upstream websocket session for those requests instead of opening a fresh upstream session per request
+
+#### Scenario: HTTP previous_response_id remains valid within a bridged session
+- **WHEN** a client sends a later HTTP `/v1/responses` request with `previous_response_id` that references a response created earlier on the same bridged session
+- **THEN** the service forwards that request through the same upstream websocket session so upstream can resolve the referenced prior response
+
+#### Scenario: bridged HTTP requests keep external HTTP transport logging
+- **WHEN** the service fulfills an HTTP `/v1/responses` request through an internal upstream websocket bridge
+- **THEN** the persisted request log still records `transport = "http"`
+
+#### Scenario: clean upstream close forces a fresh bridged session
+- **WHEN** an existing bridged upstream websocket closes cleanly after prior HTTP `/v1/responses` work completes
+- **THEN** the next HTTP `/v1/responses` request for that same bridge key opens a fresh upstream websocket session instead of reusing the closed session
+
+#### Scenario: active bridge pool exhaustion fails fast without evicting live sessions
+- **WHEN** the HTTP `/v1/responses` bridge pool has reached its configured maximum session count
+- **AND** every existing bridge session still has pending in-flight requests
+- **THEN** the service MUST NOT evict those active bridge sessions
+- **AND** it MUST fail the new request fast with `429 rate_limit_exceeded`
 
 ### Requirement: Normalize prompt cache aliases for upstream compatibility
 Before forwarding Responses payloads upstream, the service MUST normalize OpenAI-compatible camelCase prompt cache controls so codex-lb applies compatibility behavior consistently. The service MUST forward `promptCacheKey` as `prompt_cache_key`, and MUST treat `promptCacheRetention` the same as `prompt_cache_retention` for stripping behavior.

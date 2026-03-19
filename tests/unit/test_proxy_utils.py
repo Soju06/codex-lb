@@ -1802,7 +1802,9 @@ async def test_stream_responses_uses_websocket_upstream_when_forced(monkeypatch)
     assert not session.post_calls
     assert session.ws_calls
     assert session.ws_calls[0]["url"] == "wss://chatgpt.com/backend-api/codex/responses"
-    assert response.sent_json == [{"type": "response.create", **payload.to_payload()}]
+    expected_payload = {"type": "response.create", **payload.to_payload()}
+    expected_payload.pop("stream", None)
+    assert response.sent_json == [expected_payload]
     expected_created = (
         "event: response.created\ndata: "
         '{"type":"response.created","response":{"id":"resp_ws","service_tier":"auto"}}\n\n'

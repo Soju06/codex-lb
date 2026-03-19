@@ -18,7 +18,9 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - Upstream limitations determine available modalities, tool output, and overflow handling.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.
-- `previous_response_id` and `truncation` are rejected.
+- `truncation` is rejected.
+- `previous_response_id` is forwarded when `conversation` is absent, but the `conversation + previous_response_id` conflict remains rejected.
+- HTTP `/v1/responses` now uses a server-side upstream websocket session bridge by default so repeated compatible requests can keep upstream response/session continuity without forcing clients onto the public websocket route.
 - `/v1/responses/compact` keeps a final-JSON contract and preserves the raw upstream `/codex/responses/compact` payload shape as the canonical next context window instead of rewriting it through buffered `/codex/responses` streaming.
 - Compact transport failures fail closed with respect to semantics: no surrogate `/codex/responses` fallback and no local compact-window reconstruction.
 - Compact transport may use bounded same-contract retries only for safe pre-body transport failures and `401 -> refresh -> retry`.
@@ -40,6 +42,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - **Stream ends without terminal event:** Emit `response.failed` with `stream_incomplete`.
 - **Upstream error / no accounts:** Non-streaming responses return an OpenAI error envelope with 5xx status.
 - **Compact upstream transport/client failure:** Retry only inside `/codex/responses/compact` when the failure is safely retryable; otherwise return an explicit upstream error without surrogate fallback.
+- **HTTP bridge session closes or expires:** The next compatible HTTP `/v1/responses` request recreates a fresh upstream websocket bridge session; continuity is guaranteed only within the lifetime of one active bridged session.
 - **Invalid request payloads:** Return 4xx with `invalid_request_error`.
 
 ## Error Envelope Mapping (Reference)
@@ -69,6 +72,7 @@ Non-streaming request/response:
 - Pre-release: run unit/integration tests and optional OpenAI client compatibility tests.
 - Smoke tests: stream a response, validate non-stream responses, and verify error envelopes.
 - Post-deploy: monitor `no_accounts`, `upstream_unavailable`, compact retry attempts, and compact failure phases, especially on direct compact requests.
+- Post-deploy: monitor HTTP bridge reuse/create/evict/reconnect counts and any `previous_response_not_found` or queue-saturation errors on `/v1/responses`.
 - When tracing compact incidents, confirm that request logs and upstream logs show direct `/codex/responses/compact` usage without surrogate `/codex/responses` fallback.
 - Post-deploy: monitor `no_accounts`, `stream_incomplete`, and `upstream_unavailable`.
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`

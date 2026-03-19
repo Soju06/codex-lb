@@ -95,7 +95,17 @@ async def test_v1_responses_rejects_input_file_id(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_previous_response_id(async_client):
+async def test_v1_responses_accepts_previous_response_id(async_client, monkeypatch):
+    await _import_account(async_client, "acc_prev_response_id", "prev-response-id@example.com")
+    seen_previous_response_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del headers, access_token, account_id, base_url, raise_for_status, _kw
+        seen_previous_response_ids.append(getattr(payload, "previous_response_id", None))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_abc123"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     payload = {
         "model": "gpt-5.2",
         "previous_response_id": "resp_abc123",
@@ -105,10 +115,11 @@ async def test_v1_responses_rejects_previous_response_id(async_client):
                 "content": [{"type": "input_text", "text": "Continue."}],
             }
         ],
+        "stream": True,
     }
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "invalid_request_error"
+    assert resp.status_code == 200
+    assert seen_previous_response_ids == ["resp_abc123"]
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,5 @@
+- [x] Update Responses request validation/serialization to support previous_response_id
+- [x] Add unit and integration regression coverage for websocket and HTTP forwarding
+- [x] Bring up local docker compose with preserved codex-lb-data auth state
+- [x] Measure cache behavior matrix across websocket on/off and /v1/responses variants
+- [x] Sync relevant spec updates and verify implementation

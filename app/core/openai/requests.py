@@ -368,10 +368,11 @@ class ResponsesRequest(BaseModel):
 
     @field_validator("previous_response_id")
     @classmethod
-    def _reject_previous_response_id(cls, value: str | None) -> str | None:
+    def _normalize_previous_response_id(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        raise ValueError("previous_response_id is not supported")
+        stripped = value.strip()
+        return stripped or None
 
     @field_validator("tools")
     @classmethod

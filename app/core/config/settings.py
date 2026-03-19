@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     openai_prompt_cache_key_derivation_enabled: bool = True
+    http_responses_session_bridge_enabled: bool = True
+    http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
+    http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
+    http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE

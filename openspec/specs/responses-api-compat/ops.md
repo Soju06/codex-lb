@@ -242,3 +242,41 @@ As of 2026-03-10, the following findings were reproduced from this repo workspac
 - Native `Codex CLI` websocket captures did not show raw `service_tier` in the first `response.create` frame.
 - Manually forcing `"service_tier":"fast"` in the websocket JSON payload can produce `Unsupported service_tier: fast`.
 - Several imported `plus` and `team` accounts completed successfully but returned `response.service_tier = "default"`.
+
+## HTTP `/v1/responses` Session Bridge Operations
+
+HTTP `/v1/responses` now uses an internal upstream websocket session bridge by default.
+
+### What to watch
+
+- `http_bridge_event event=create`
+- `http_bridge_event event=reuse`
+- `http_bridge_event event=evict_idle`
+- `http_bridge_event event=reconnect`
+- `http_bridge_event event=queue_full`
+- `http_bridge_event event=capacity_exhausted_active_sessions`
+- `http_bridge_event event=terminal_error`
+
+These log lines include a hashed bridge key, account id, model, and optional detail.
+
+By default, normal lifecycle events such as `create` / `reuse` / `evict_idle` are emitted at application info level. If your deployment only captures warnings and errors, raise the `app.modules.proxy.service` logger to `INFO` before using these events as the primary bridge observability source.
+
+### Multi-instance deployment requirement
+
+For stable HTTP bridge continuity across repeated calls, the same logical bridge key must reach the same `codex-lb` instance.
+
+If you deploy multiple replicas behind a load balancer, configure front-door affinity using one of:
+
+- explicit session header (`session_id`, `x-codex-session-id`, `x-codex-conversation-id`)
+- a load balancer rule based on a stable request key
+- single-instance routing for the `/v1/responses` bridge path
+
+Without front-door affinity, each replica will maintain its own in-memory bridge pool and HTTP continuity can fragment across instances.
+
+### Failure interpretation
+
+- `queue_full`: one bridge key is overloaded; increase bridge capacity carefully or reduce per-session concurrency upstream.
+- `capacity_exhausted_active_sessions`: the bridge pool hit `max_sessions` while every existing session still had pending work. The proxy intentionally refused the new request with `429` instead of evicting an active session. Mitigate by increasing pool size carefully, reducing concurrent bridge fan-out, or improving front-door affinity so related calls land on the same replica.
+- `reconnect`: the bridge recreated an upstream websocket before response creation and retried once.
+- `terminal_error` with `previous_response_not_found`: continuity was already broken upstream; inspect replica affinity, bridge eviction timing, or upstream resets.
+- plain `transport = "http"` request logs are still expected for bridged HTTP requests; the internal upstream websocket does not change external transport accounting.

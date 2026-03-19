@@ -182,6 +182,7 @@ async def v1_responses(
             api_key,
             codex_session_affinity=False,
             openai_cache_affinity=True,
+            prefer_http_bridge=True,
         )
     return await _collect_responses(
         request,
@@ -190,6 +191,7 @@ async def v1_responses(
         api_key,
         codex_session_affinity=False,
         openai_cache_affinity=True,
+        prefer_http_bridge=True,
     )
 
 
@@ -417,6 +419,7 @@ async def _stream_responses(
     codex_session_affinity: bool = False,
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
+    prefer_http_bridge: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -428,16 +431,28 @@ async def _stream_responses(
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
-    stream = context.service.stream_responses(
-        payload,
-        request.headers,
-        codex_session_affinity=codex_session_affinity,
-        propagate_http_errors=True,
-        openai_cache_affinity=openai_cache_affinity,
-        api_key=api_key,
-        api_key_reservation=reservation,
-        suppress_text_done_events=suppress_text_done_events,
-    )
+    if prefer_http_bridge:
+        stream = context.service.stream_http_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
+    else:
+        stream = context.service.stream_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
     try:
         first = await stream.__anext__()
     except StopAsyncIteration:
@@ -465,6 +480,7 @@ async def _collect_responses(
     codex_session_affinity: bool = False,
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
+    prefer_http_bridge: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -476,16 +492,28 @@ async def _collect_responses(
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
-    stream = context.service.stream_responses(
-        payload,
-        request.headers,
-        codex_session_affinity=codex_session_affinity,
-        propagate_http_errors=True,
-        openai_cache_affinity=openai_cache_affinity,
-        api_key=api_key,
-        api_key_reservation=reservation,
-        suppress_text_done_events=suppress_text_done_events,
-    )
+    if prefer_http_bridge:
+        stream = context.service.stream_http_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
+    else:
+        stream = context.service.stream_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
     try:
         response_payload = await _collect_responses_payload(stream)
     except ProxyResponseError as exc:

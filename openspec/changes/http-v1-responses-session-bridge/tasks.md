@@ -1,0 +1,5 @@
+- [x] Add failing TDD coverage for HTTP `/v1/responses` bridge reuse, `previous_response_id` continuity, reconnect after clean close, derived-key reuse, and kill-switch fallback.
+- [x] Implement server-side upstream websocket session bridging for HTTP `/v1/responses`.
+- [x] Keep external HTTP/SSE contracts and `transport = "http"` request logging unchanged.
+- [x] Add runtime settings for bridge enablement and lifecycle bounds.
+- [x] Run lint, compile/static checks, targeted regressions, full local pytest, and local docker-compose validation.

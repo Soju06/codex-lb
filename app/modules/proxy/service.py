@@ -322,13 +322,17 @@ class ProxyService:
         )
 
         try:
+            event_queue = request_state.event_queue
+            assert event_queue is not None
             while True:
-                event_block = await request_state.event_queue.get()
+                event_block = await event_queue.get()
                 if event_block is None:
                     break
                 yield event_block
         finally:
-            session.last_used_at = time.monotonic()
+            with anyio.CancelScope(shield=True):
+                await self._detach_http_bridge_request(session, request_state=request_state)
+                session.last_used_at = time.monotonic()
 
     async def compact_responses(
         self,
@@ -1435,6 +1439,7 @@ class ProxyService:
             await self._prune_http_bridge_sessions_locked()
             existing = self._http_bridge_sessions.get(key)
             if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
+                existing.request_model = request_model
                 existing.last_used_at = time.monotonic()
                 _log_http_bridge_event(
                     "reuse",
@@ -1759,6 +1764,8 @@ class ProxyService:
             gate_acquired = False
             request_enqueued = False
             try:
+                event_queue = warmup_state.event_queue
+                assert event_queue is not None
                 await session.response_create_gate.acquire()
                 gate_acquired = True
                 async with session.pending_lock:
@@ -1766,7 +1773,7 @@ class ProxyService:
                 request_enqueued = True
                 await session.upstream.send_text(warmup_text)
                 while True:
-                    event_block = await warmup_state.event_queue.get()
+                    event_block = await event_queue.get()
                     if event_block is None:
                         break
                     payload = parse_sse_data_json(event_block)
@@ -1805,6 +1812,26 @@ class ProxyService:
             session.queued_request_count = max(0, session.queued_request_count - 1)
         if gate_acquired:
             _release_websocket_response_create_gate(request_state, session.response_create_gate)
+
+    async def _detach_http_bridge_request(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+    ) -> bool:
+        removed = False
+        async with session.pending_lock:
+            if request_state in session.pending_requests:
+                session.pending_requests.remove(request_state)
+                session.queued_request_count = max(0, session.queued_request_count - 1)
+                removed = True
+        request_state.event_queue = None
+        if not removed:
+            return False
+        _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        await self._release_websocket_reservation(request_state.api_key_reservation)
+        request_state.api_key_reservation = None
+        return True
 
     async def _relay_http_bridge_upstream_messages(
         self,
@@ -3933,7 +3960,6 @@ class _WebSocketRequestState:
 class _HTTPBridgeSessionKey:
     affinity_kind: str
     affinity_key: str
-    model: str
     api_key_id: str | None
 
 
@@ -4593,7 +4619,6 @@ def _make_http_bridge_session_key(
     return _HTTPBridgeSessionKey(
         affinity_kind=affinity_kind,
         affinity_key=affinity_key,
-        model=payload.model,
         api_key_id=api_key.id if api_key is not None else None,
     )
 
@@ -4652,7 +4677,7 @@ def _http_bridge_owner_instance(key: _HTTPBridgeSessionKey, settings: object) ->
     instance_id, ring = _normalized_http_bridge_instance_ring(settings)
     if len(ring) <= 1:
         return instance_id
-    hash_input = f"{key.affinity_kind}:{key.affinity_key}:{key.model}:{key.api_key_id or ''}"
+    hash_input = f"{key.affinity_kind}:{key.affinity_key}:{key.api_key_id or ''}"
     digest = sha256(hash_input.encode("utf-8")).digest()
     owner_index = int.from_bytes(digest[:8], "big") % len(ring)
     return ring[owner_index]

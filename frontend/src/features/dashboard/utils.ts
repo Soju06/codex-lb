@@ -25,6 +25,20 @@ const PLUS_DEFAULT_CAPACITY = {
   secondary: 7560,
 } as const;
 
+const PRIMARY_PLUS_EQUIVALENT_BY_PLAN: Record<string, number> = {
+  plus: 1,
+  business: 1,
+  team: 1,
+  pro: 1500 / PLUS_DEFAULT_CAPACITY.primary,
+};
+
+const SECONDARY_PLUS_EQUIVALENT_BY_PLAN: Record<string, number> = {
+  plus: 1,
+  business: 1,
+  team: 1,
+  pro: 50400 / PLUS_DEFAULT_CAPACITY.secondary,
+};
+
 export type RemainingItem = {
   accountId: string;
   label: string;
@@ -154,6 +168,20 @@ function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
 }
 
+function plusEquivalentWeight(planType: string | null | undefined, windowKey: "primary" | "secondary"): number {
+  if (!planType) {
+    return 1;
+  }
+  const normalized = planType.trim().toLowerCase();
+  if (!normalized) {
+    return 1;
+  }
+  if (windowKey === "primary") {
+    return PRIMARY_PLUS_EQUIVALENT_BY_PLAN[normalized] ?? 1;
+  }
+  return SECONDARY_PLUS_EQUIVALENT_BY_PLAN[normalized] ?? 1;
+}
+
 function windowUsedAccountEquivalents(
   overview: DashboardOverview,
   windowKey: "primary" | "secondary",
@@ -162,6 +190,7 @@ function windowUsedAccountEquivalents(
   let includedAccounts = 0;
 
   for (const account of overview.accounts) {
+    const weight = plusEquivalentWeight(account.planType, windowKey);
     const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
     const remainingPercent =
       windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
@@ -170,9 +199,9 @@ function windowUsedAccountEquivalents(
       continue;
     }
 
-    let accountEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    let accountEquivalent = ((100 - clampPercent(remainingPercent)) / 100) * weight;
     if (windowKey === "secondary" && account.status === "quota_exceeded") {
-      accountEquivalent = Math.max(accountEquivalent, 1);
+      accountEquivalent = Math.max(accountEquivalent, weight);
     }
 
     usedEquivalent += accountEquivalent;
@@ -191,6 +220,7 @@ function windowProjectedAccountEquivalents(
   const nowMs = Date.now();
 
   for (const account of overview.accounts) {
+    const weight = plusEquivalentWeight(account.planType, windowKey);
     const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
     const remainingPercent =
       windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
@@ -200,7 +230,7 @@ function windowProjectedAccountEquivalents(
       continue;
     }
 
-    const usedEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    const usedEquivalent = ((100 - clampPercent(remainingPercent)) / 100) * weight;
     let projected = usedEquivalent;
 
     if (resetAt) {
@@ -216,7 +246,7 @@ function windowProjectedAccountEquivalents(
     }
 
     if (windowKey === "secondary" && account.status === "quota_exceeded") {
-      projected = Math.max(projected, 1);
+      projected = Math.max(projected, weight);
     }
 
     projectedEquivalent += projected;
@@ -230,9 +260,10 @@ function windowIncludedAccountCount(
   overview: DashboardOverview,
   windowKey: "primary" | "secondary",
 ): number {
-  let includedAccounts = 0;
+  let includedEquivalent = 0;
 
   for (const account of overview.accounts) {
+    const weight = plusEquivalentWeight(account.planType, windowKey);
     const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
     const remainingPercent =
       windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
@@ -241,10 +272,10 @@ function windowIncludedAccountCount(
       continue;
     }
 
-    includedAccounts += 1;
+    includedEquivalent += weight;
   }
 
-  return includedAccounts;
+  return includedEquivalent;
 }
 
 function clampBurnEquivalent(value: number | null, maxEquivalent: number): number | null {
@@ -346,12 +377,21 @@ export function buildDashboardView(
   const metrics = overview.summary.metrics;
   const cost = overview.summary.cost.totalUsd7d;
   const secondaryLabel = formatWindowLabel("secondary", secondaryWindow?.windowMinutes ?? null);
-  const primaryBurnLabel = formatWindowLabel("primary", overview.summary.primaryWindow.windowMinutes ?? null);
-  const secondaryBurnLabel = formatWindowLabel("secondary", overview.summary.secondaryWindow?.windowMinutes ?? null);
+  const burnRate = overview.burnRate;
+  const primaryBurnLabel = formatWindowLabel(
+    "primary",
+    burnRate?.primaryWindowMinutes ?? overview.summary.primaryWindow.windowMinutes ?? null,
+  );
+  const secondaryBurnLabel = formatWindowLabel(
+    "secondary",
+    burnRate?.secondaryWindowMinutes ?? overview.summary.secondaryWindow?.windowMinutes ?? null,
+  );
   const trends = overview.trends;
 
-  const primaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "primary");
-  const secondaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "secondary");
+  const fallbackPrimaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "primary");
+  const fallbackSecondaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "secondary");
+  const primaryBurnEquivalent = burnRate?.primaryProjectedPlusAccounts ?? fallbackPrimaryBurnEquivalent;
+  const secondaryBurnEquivalent = burnRate?.secondaryProjectedPlusAccounts ?? fallbackSecondaryBurnEquivalent;
   const combinedBurnEquivalent =
     (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0) > 0
       ? (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0)

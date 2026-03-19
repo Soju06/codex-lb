@@ -145,6 +145,7 @@ describe("buildDashboardView", () => {
     const overview = createDashboardOverview({
       depletionPrimary: null,
       depletionSecondary: null,
+      burnRate: null,
     });
 
     const view = buildDashboardView(overview, createDefaultRequestLogs());
@@ -183,6 +184,7 @@ describe("buildDashboardView", () => {
       ],
       depletionPrimary: null,
       depletionSecondary: null,
+      burnRate: null,
     });
 
     const view = buildDashboardView(overview, createDefaultRequestLogs());
@@ -221,6 +223,7 @@ describe("buildDashboardView", () => {
       ],
       depletionPrimary: null,
       depletionSecondary: null,
+      burnRate: null,
     });
 
     const view = buildDashboardView(overview, createDefaultRequestLogs());
@@ -240,6 +243,7 @@ describe("buildDashboardView", () => {
         projectedExhaustionAt: null,
         secondsUntilExhaustion: null,
       },
+      burnRate: null,
     });
 
     const view = buildDashboardView(overview, createDefaultRequestLogs());
@@ -247,6 +251,65 @@ describe("buildDashboardView", () => {
 
     expect(burn.value).toBe("0.7 / 1.2");
     expect(burn.meta).toBe("Primary 0.7 acc/5h · Secondary 1.2 acc/7d");
+  });
+
+  it("treats unknown plans as plus-equivalent in burnrate fallbacks", () => {
+    const overview = createDashboardOverview({
+      accounts: [
+        createAccountSummary({
+          accountId: "acc-enterprise",
+          email: "enterprise@example.com",
+          planType: "enterprise",
+          usage: {
+            primaryRemainingPercent: 10,
+            secondaryRemainingPercent: 10,
+          },
+        }),
+        createAccountSummary({
+          accountId: "acc-plus",
+          email: "plus@example.com",
+          planType: "plus",
+          usage: {
+            primaryRemainingPercent: 80,
+            secondaryRemainingPercent: 20,
+          },
+        }),
+      ],
+      depletionPrimary: null,
+      depletionSecondary: null,
+      burnRate: null,
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("1.1 / 1.7");
+    expect(burn.meta).toBe("Primary 1.1 acc/5h · Secondary 1.7 acc/7d");
+  });
+
+
+  it("uses backend burnrate snapshot when available", () => {
+    const overview = createDashboardOverview({
+      burnRate: {
+        recordedAt: new Date().toISOString(),
+        primaryProjectedPlusAccounts: 0.3,
+        secondaryProjectedPlusAccounts: 0.9,
+        primaryUsedPlusAccounts: 0.3,
+        secondaryUsedPlusAccounts: 0.9,
+        primaryWindowMinutes: 300,
+        secondaryWindowMinutes: 10_080,
+        primaryAccountCount: 2,
+        secondaryAccountCount: 2,
+        primaryMaxPlusEquivalentAccounts: 2,
+        secondaryMaxPlusEquivalentAccounts: 2,
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs());
+    const burn = view.stats[3];
+
+    expect(burn.value).toBe("0.3 / 0.9");
+    expect(burn.meta).toBe("Primary 0.3 acc/5h · Secondary 0.9 acc/7d");
   });
 
   it("caps burn-equivalent to available account count per window", () => {
@@ -259,6 +322,7 @@ describe("buildDashboardView", () => {
         projectedExhaustionAt: null,
         secondsUntilExhaustion: null,
       },
+      burnRate: null,
     });
 
     const view = buildDashboardView(overview, createDefaultRequestLogs());

@@ -107,6 +107,33 @@ class AdditionalUsageHistory(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
+class BurnRateHistory(Base):
+    __tablename__ = "burn_rate_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    primary_projected_plus_accounts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    secondary_projected_plus_accounts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_used_plus_accounts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    secondary_used_plus_accounts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    secondary_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    primary_account_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    secondary_account_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    primary_max_plus_equivalent_accounts: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0.0,
+        server_default=text("0"),
+    )
+    secondary_max_plus_equivalent_accounts: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0.0,
+        server_default=text("0"),
+    )
+
+
 class RequestLog(Base):
     __tablename__ = "request_logs"
 
@@ -361,6 +388,7 @@ Index(
     UsageHistory.recorded_at.desc(),
     UsageHistory.id.desc(),
 )
+Index("idx_burn_rate_recorded_at", BurnRateHistory.recorded_at)
 Index("idx_accounts_email", Account.email)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)

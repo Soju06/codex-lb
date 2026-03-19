@@ -181,6 +181,19 @@ export function createDashboardOverview(overrides: Partial<DashboardOverview> = 
       projectedExhaustionAt: null,
       secondsUntilExhaustion: null,
     },
+    burnRate: {
+      recordedAt: offsetIso(-5),
+      primaryProjectedPlusAccounts: 0.7,
+      secondaryProjectedPlusAccounts: 1.2,
+      primaryUsedPlusAccounts: 0.7,
+      secondaryUsedPlusAccounts: 1.2,
+      primaryWindowMinutes: 300,
+      secondaryWindowMinutes: 10_080,
+      primaryAccountCount: 2,
+      secondaryAccountCount: 2,
+      primaryMaxPlusEquivalentAccounts: 2,
+      secondaryMaxPlusEquivalentAccounts: 2,
+    },
     ...overrides,
   };
   return DashboardOverviewSchema.parse(response);

@@ -62,6 +62,20 @@ export const DepletionSchema = z.object({
   secondsUntilExhaustion: z.number().nullable().optional(),
 });
 
+export const BurnRateSnapshotSchema = z.object({
+  recordedAt: z.string().datetime({ offset: true }),
+  primaryProjectedPlusAccounts: z.number().nullable(),
+  secondaryProjectedPlusAccounts: z.number().nullable(),
+  primaryUsedPlusAccounts: z.number().nullable(),
+  secondaryUsedPlusAccounts: z.number().nullable(),
+  primaryWindowMinutes: z.number().nullable(),
+  secondaryWindowMinutes: z.number().nullable(),
+  primaryAccountCount: z.number().int().nonnegative(),
+  secondaryAccountCount: z.number().int().nonnegative(),
+  primaryMaxPlusEquivalentAccounts: z.number(),
+  secondaryMaxPlusEquivalentAccounts: z.number(),
+});
+
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.string().datetime({ offset: true }).nullable(),
   accounts: z.array(AccountSummarySchema),
@@ -79,6 +93,7 @@ export const DashboardOverviewSchema = z.object({
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   depletionPrimary: DepletionSchema.nullable().optional(),
   depletionSecondary: DepletionSchema.nullable().optional(),
+  burnRate: BurnRateSnapshotSchema.nullable().optional(),
 });
 
 export const RequestLogSchema = z.object({

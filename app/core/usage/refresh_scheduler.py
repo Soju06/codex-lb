@@ -6,10 +6,12 @@ import logging
 from dataclasses import dataclass, field
 
 from app.core.config.settings import get_settings
+from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
-from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.burnrate import compute_burn_rate_snapshot
+from app.modules.usage.repository import AdditionalUsageRepository, BurnRateHistoryRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,31 @@ class UsageRefreshScheduler:
                     accounts = await accounts_repo.list_accounts()
                     updater = UsageUpdater(usage_repo, accounts_repo, additional_usage_repo)
                     await updater.refresh_accounts(accounts, latest_usage)
+
+                    accounts = await accounts_repo.list_accounts()
+                    latest_primary = await usage_repo.latest_by_account(window="primary")
+                    latest_secondary = await usage_repo.latest_by_account(window="secondary")
+                    burn_snapshot = compute_burn_rate_snapshot(
+                        accounts=accounts,
+                        latest_primary_usage=latest_primary,
+                        latest_secondary_usage=latest_secondary,
+                        now=utcnow(),
+                    )
+                    burn_rate_repo = BurnRateHistoryRepository(session)
+                    await burn_rate_repo.add_entry(
+                        primary_projected_plus_accounts=burn_snapshot.primary.projected_plus_accounts,
+                        secondary_projected_plus_accounts=burn_snapshot.secondary.projected_plus_accounts,
+                        primary_used_plus_accounts=burn_snapshot.primary.used_plus_accounts,
+                        secondary_used_plus_accounts=burn_snapshot.secondary.used_plus_accounts,
+                        primary_window_minutes=burn_snapshot.primary.window_minutes,
+                        secondary_window_minutes=burn_snapshot.secondary.window_minutes,
+                        primary_account_count=burn_snapshot.primary.included_account_count,
+                        secondary_account_count=burn_snapshot.secondary.included_account_count,
+                        primary_max_plus_equivalent_accounts=burn_snapshot.primary.max_plus_equivalent_accounts,
+                        secondary_max_plus_equivalent_accounts=burn_snapshot.secondary.max_plus_equivalent_accounts,
+                        recorded_at=burn_snapshot.recorded_at,
+                    )
+
                     await get_rate_limit_headers_cache().invalidate()
             except Exception:
                 logger.exception("Usage refresh loop failed")

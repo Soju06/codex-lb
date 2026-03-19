@@ -6,10 +6,11 @@ from app.core import usage as usage_core
 from app.core.crypto import TokenEncryptor
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
-from app.db.models import UsageHistory
+from app.db.models import BurnRateHistory, UsageHistory
 from app.modules.accounts.mappers import build_account_summaries
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
+    BurnRateSnapshotResponse,
     DashboardOverviewResponse,
     DashboardUsageWindows,
     DepletionResponse,
@@ -19,6 +20,7 @@ from app.modules.usage.builders import (
     build_usage_summary_response,
     build_usage_window_response,
 )
+from app.modules.usage.burnrate import BurnRateSnapshot, compute_burn_rate_snapshot
 from app.modules.usage.depletion_service import (
     compute_aggregate_depletion,
     compute_depletion_for_account,
@@ -190,6 +192,15 @@ class DashboardService:
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
 
         additional_ts = await self._repo.latest_additional_recorded_at()
+        latest_burn_rate_entry = await self._repo.latest_burn_rate_entry()
+        computed_burn_rate = compute_burn_rate_snapshot(
+            accounts=accounts,
+            latest_primary_usage=primary_usage,
+            latest_secondary_usage=secondary_usage,
+            now=now,
+        )
+        burn_rate = _resolve_burn_rate_response(latest_burn_rate_entry, computed_burn_rate)
+
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, additional_ts),
             accounts=account_summaries,
@@ -198,6 +209,7 @@ class DashboardService:
             trends=trends,
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
+            burn_rate=burn_rate,
         )
 
 
@@ -280,3 +292,38 @@ def _latest_recorded_at(
     if additional_ts is not None:
         timestamps.append(additional_ts)
     return max(timestamps) if timestamps else None
+
+
+
+def _resolve_burn_rate_response(
+    latest_entry: BurnRateHistory | None,
+    computed_snapshot: BurnRateSnapshot,
+) -> BurnRateSnapshotResponse:
+    if latest_entry is not None:
+        return BurnRateSnapshotResponse(
+            recorded_at=latest_entry.recorded_at,
+            primary_projected_plus_accounts=latest_entry.primary_projected_plus_accounts,
+            secondary_projected_plus_accounts=latest_entry.secondary_projected_plus_accounts,
+            primary_used_plus_accounts=latest_entry.primary_used_plus_accounts,
+            secondary_used_plus_accounts=latest_entry.secondary_used_plus_accounts,
+            primary_window_minutes=latest_entry.primary_window_minutes,
+            secondary_window_minutes=latest_entry.secondary_window_minutes,
+            primary_account_count=latest_entry.primary_account_count,
+            secondary_account_count=latest_entry.secondary_account_count,
+            primary_max_plus_equivalent_accounts=latest_entry.primary_max_plus_equivalent_accounts,
+            secondary_max_plus_equivalent_accounts=latest_entry.secondary_max_plus_equivalent_accounts,
+        )
+
+    return BurnRateSnapshotResponse(
+        recorded_at=computed_snapshot.recorded_at,
+        primary_projected_plus_accounts=computed_snapshot.primary.projected_plus_accounts,
+        secondary_projected_plus_accounts=computed_snapshot.secondary.projected_plus_accounts,
+        primary_used_plus_accounts=computed_snapshot.primary.used_plus_accounts,
+        secondary_used_plus_accounts=computed_snapshot.secondary.used_plus_accounts,
+        primary_window_minutes=computed_snapshot.primary.window_minutes,
+        secondary_window_minutes=computed_snapshot.secondary.window_minutes,
+        primary_account_count=computed_snapshot.primary.included_account_count,
+        secondary_account_count=computed_snapshot.secondary.included_account_count,
+        primary_max_plus_equivalent_accounts=computed_snapshot.primary.max_plus_equivalent_accounts,
+        secondary_max_plus_equivalent_accounts=computed_snapshot.secondary.max_plus_equivalent_accounts,
+    )

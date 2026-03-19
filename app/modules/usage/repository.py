@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
-from app.db.models import AdditionalUsageHistory, UsageHistory
+from app.db.models import AdditionalUsageHistory, BurnRateHistory, UsageHistory
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
     canonicalize_additional_quota_key,
@@ -275,6 +275,49 @@ class UsageRepository:
         result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None
+
+
+class BurnRateHistoryRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add_entry(
+        self,
+        *,
+        primary_projected_plus_accounts: float | None,
+        secondary_projected_plus_accounts: float | None,
+        primary_used_plus_accounts: float | None,
+        secondary_used_plus_accounts: float | None,
+        primary_window_minutes: int | None,
+        secondary_window_minutes: int | None,
+        primary_account_count: int,
+        secondary_account_count: int,
+        primary_max_plus_equivalent_accounts: float,
+        secondary_max_plus_equivalent_accounts: float,
+        recorded_at: datetime | None = None,
+    ) -> BurnRateHistory:
+        entry = BurnRateHistory(
+            primary_projected_plus_accounts=primary_projected_plus_accounts,
+            secondary_projected_plus_accounts=secondary_projected_plus_accounts,
+            primary_used_plus_accounts=primary_used_plus_accounts,
+            secondary_used_plus_accounts=secondary_used_plus_accounts,
+            primary_window_minutes=primary_window_minutes,
+            secondary_window_minutes=secondary_window_minutes,
+            primary_account_count=primary_account_count,
+            secondary_account_count=secondary_account_count,
+            primary_max_plus_equivalent_accounts=primary_max_plus_equivalent_accounts,
+            secondary_max_plus_equivalent_accounts=secondary_max_plus_equivalent_accounts,
+            recorded_at=recorded_at or utcnow(),
+        )
+        self._session.add(entry)
+        await self._session.commit()
+        await self._session.refresh(entry)
+        return entry
+
+    async def latest_entry(self) -> BurnRateHistory | None:
+        stmt = select(BurnRateHistory).order_by(BurnRateHistory.recorded_at.desc(), BurnRateHistory.id.desc()).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
 
 class AdditionalUsageRepository:

@@ -132,16 +132,14 @@ export function DashboardPage() {
         <>
           <StatsGrid stats={view.stats} />
 
-          <UsageDonuts
-            primaryItems={view.primaryUsageItems}
-            secondaryItems={view.secondaryUsageItems}
-            primaryTotal={overview?.summary.primaryWindow.capacityCredits ?? 0}
-            secondaryTotal={overview?.summary.secondaryWindow?.capacityCredits ?? 0}
-            primaryWindowMinutes={overview?.windows.primary.windowMinutes ?? null}
-            secondaryWindowMinutes={overview?.windows.secondary?.windowMinutes ?? null}
-            safeLinePrimary={view.safeLinePrimary}
-            safeLineSecondary={view.safeLineSecondary}
-          />
+            <UsageDonuts
+              primaryItems={view.primaryUsageItems}
+              secondaryItems={view.secondaryUsageItems}
+              primaryTotal={overview?.summary.primaryWindow.capacityCredits ?? 0}
+              secondaryTotal={overview?.summary.secondaryWindow?.capacityCredits ?? 0}
+              safeLinePrimary={view.safeLinePrimary}
+              safeLineSecondary={view.safeLineSecondary}
+            />
 
           <section className="space-y-4">
             <div className="flex items-center gap-3">

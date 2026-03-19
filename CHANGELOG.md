@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/Soju06/codex-lb/compare/v1.6.1...v1.6.2) (2026-03-19)
+
+
+### Bug Fixes
+
+* **proxy:** restore token cache affinity routing ([#228](https://github.com/Soju06/codex-lb/issues/228)) ([ab8f820](https://github.com/Soju06/codex-lb/commit/ab8f820f2e8adbfb0c1f9ebc43c17acd4333441c))
+
 ## [1.6.1](https://github.com/Soju06/codex-lb/compare/v1.6.0...v1.6.1) (2026-03-18)
 
 

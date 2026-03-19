@@ -10,6 +10,11 @@
           "type": "toml",
           "path": "uv.lock",
           "jsonpath": "$.package[?(@.name=='codex-lb')].version"
+        },
+        {
+          "type": "json",
+          "path": "frontend/package.json",
+          "jsonpath": "$.version"
         }
       ]
     }

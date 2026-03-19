@@ -250,7 +250,7 @@ jobs:
               tag_name: tag,
               previous_tag_name: prev,
             });
-            fs.writeFileSync("release_notes.md", `${data.body.trimEnd()}\\n`);
+            fs.writeFileSync("release_notes.md", `${data.body.trimEnd()}\n`);
             core.setOutput("tag_name", tag);
 
       - name: Append install and contributors

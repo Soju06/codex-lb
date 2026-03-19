@@ -67,6 +67,7 @@ class AccountSelection:
 @dataclass(frozen=True, slots=True)
 class _SelectionInputs:
     accounts: list[Account]
+    runtime_accounts: list[Account]
     latest_primary: dict[str, UsageHistory]
     latest_secondary: dict[str, UsageHistory]
     error_message: str | None = None
@@ -102,6 +103,7 @@ class LoadBalancer:
         if excluded_ids and selection_inputs.accounts:
             selection_inputs = _SelectionInputs(
                 accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],
+                runtime_accounts=selection_inputs.runtime_accounts,
                 latest_primary=selection_inputs.latest_primary,
                 latest_secondary=selection_inputs.latest_secondary,
                 error_message=selection_inputs.error_message,
@@ -118,7 +120,7 @@ class LoadBalancer:
         error_message: str | None = None
         async with self._runtime_lock:
             async with self._repo_factory() as repos:
-                self._prune_runtime(selection_inputs.accounts)
+                self._prune_runtime(selection_inputs.runtime_accounts)
 
                 states, account_map = _build_states(
                     accounts=selection_inputs.accounts,
@@ -195,6 +197,7 @@ class LoadBalancer:
                 if not accounts:
                     return _SelectionInputs(
                         accounts=[],
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
                         latest_primary={},
                         latest_secondary={},
                         error_message="No accounts match the API key tags",
@@ -207,11 +210,13 @@ class LoadBalancer:
                 if not pool_accounts:
                     return _SelectionInputs(
                         accounts=[],
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
                         latest_primary={},
                         latest_secondary={},
                     )
                 return _SelectionInputs(
                     accounts=[],
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
                     latest_primary={},
                     latest_secondary={},
                     error_message=f"No accounts with a plan supporting model '{model}'",
@@ -228,6 +233,7 @@ class LoadBalancer:
                 if not accounts:
                     return _SelectionInputs(
                         accounts=[],
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
                         latest_primary={},
                         latest_secondary={},
                         error_message=error_message,
@@ -236,6 +242,7 @@ class LoadBalancer:
             if not accounts:
                 return _SelectionInputs(
                     accounts=[],
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
                     latest_primary={},
                     latest_secondary={},
                 )
@@ -244,6 +251,7 @@ class LoadBalancer:
             latest_secondary = await repos.usage.latest_by_account(window="secondary")
             return _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
+                runtime_accounts=[_clone_account(account) for account in all_accounts],
                 latest_primary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
                 },

@@ -1043,6 +1043,9 @@ def _state_from_account(
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
+    credits_has = _first_not_none(primary_entry, effective_secondary_entry, "credits_has")
+    credits_unlimited = _first_not_none(primary_entry, effective_secondary_entry, "credits_unlimited")
+    credits_balance = _first_not_none(primary_entry, effective_secondary_entry, "credits_balance")
 
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
@@ -1100,6 +1103,9 @@ def _state_from_account(
         runtime_reset=effective_runtime_reset,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
 
     next_blocked_at = (
@@ -1205,6 +1211,16 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
 def _clone_account(account: Account) -> Account:
     data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
     return Account(**data)
+
+
+def _first_not_none(primary_entry: UsageHistory | None, secondary_entry: UsageHistory | None, field: str):
+    if primary_entry is not None:
+        value = getattr(primary_entry, field)
+        if value is not None:
+            return value
+    if secondary_entry is not None:
+        return getattr(secondary_entry, field)
+    return None
 
 
 def _clone_usage_history(entry: UsageHistory) -> UsageHistory:

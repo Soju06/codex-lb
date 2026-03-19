@@ -562,6 +562,9 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/v1/responses") as websocket:
+            raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+            extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
+            turn_state = extra_headers["x-codex-turn-state"]
             websocket.send_text(json.dumps(first_request))
             first_events = [json.loads(websocket.receive_text()) for _ in range(2)]
 
@@ -571,8 +574,8 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
     assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
     assert len(connect_calls) == 1
-    assert connect_calls[0]["sticky_key"] == "thread_a"
-    assert connect_calls[0]["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
+    assert connect_calls[0]["sticky_key"] == turn_state
+    assert connect_calls[0]["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert connect_calls[0]["model"] == "gpt-5.4"
     assert [json.loads(message) for message in first_upstream.sent_text] == [
         {
@@ -596,6 +599,106 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
             "type": "response.create",
         },
     ]
+
+
+def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_instance, monkeypatch):
+    fake_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": "resp_v1_turn_state", "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_v1_turn_state",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    seen: dict[str, object] = {}
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        seen["headers"] = dict(headers)
+        seen["sticky_key"] = sticky_key
+        seen["sticky_kind"] = sticky_kind
+        return SimpleNamespace(id="acct_v1_turn_state"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "hi",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+            extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
+            turn_state = extra_headers["x-codex-turn-state"]
+            websocket.send_text(json.dumps(request_payload))
+            created = json.loads(websocket.receive_text())
+            assert created["type"] == "response.created"
+            _ = json.loads(websocket.receive_text())
+
+    seen_headers = cast(dict[str, str], seen["headers"])
+    assert turn_state
+    assert seen_headers["x-codex-turn-state"] == turn_state
+    assert seen["sticky_key"] == turn_state
+    assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
 
 
 def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instance, monkeypatch):
@@ -683,16 +786,19 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/v1/responses") as websocket:
+            raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+            extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
+            turn_state = extra_headers["x-codex-turn-state"]
             websocket.send_text(json.dumps(request_payload))
             first = json.loads(websocket.receive_text())
             second = json.loads(websocket.receive_text())
 
     assert first["type"] == "response.created"
     assert second["type"] == "response.completed"
-    assert seen["sticky_key"] == "thread_alias"
-    assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
+    assert seen["sticky_key"] == turn_state
+    assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["reallocate_sticky"] is False
-    assert seen["sticky_max_age_seconds"] == 300
+    assert seen["sticky_max_age_seconds"] is None
     assert seen["model"] == "gpt-5.4"
     assert [json.loads(message) for message in fake_upstream.sent_text] == [
         {

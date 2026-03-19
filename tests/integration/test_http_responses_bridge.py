@@ -90,11 +90,12 @@ def _install_bridge_settings_with_limits(
     queue_limit: int = 8,
     codex_idle_ttl_seconds: float = 900.0,
     codex_prewarm_enabled: bool = False,
+    prefer_earlier_reset_accounts: bool = False,
     instance_id: str = "instance-a",
     instance_ring: list[str] | None = None,
 ) -> None:
     settings = SimpleNamespace(
-        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
         sticky_threads_enabled=False,
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,
@@ -436,6 +437,106 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
     async with service._http_bridge_lock:
         await service._prune_http_bridge_sessions_locked()
         assert key not in service._http_bridge_sessions
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(async_client, app_instance, monkeypatch):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, prefer_earlier_reset_accounts=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_prefer_earlier_reset",
+        "http-bridge-prefer-earlier-reset@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    select_calls: list[bool] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        select_calls.append(prefer_earlier_reset_accounts)
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_open_upstream_websocket_with_budget(self, target, headers, *, timeout_seconds):
+        del self, target, headers, timeout_seconds
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_open_upstream_websocket_with_budget",
+        fake_open_upstream_websocket_with_budget,
+    )
+
+    payload = proxy_module.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": "hello",
+            "prompt_cache_key": "bridge_prefer_earlier_reset",
+        }
+    )
+    affinity = proxy_module._sticky_key_for_responses_request(
+        payload,
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+    key = proxy_module._make_http_bridge_session_key(
+        payload,
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_id="req_bridge_prefer_earlier_reset",
+    )
+
+    session = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
+
+    assert select_calls == [True]
+    await service._close_http_bridge_session(session)
 
 
 @pytest.mark.asyncio

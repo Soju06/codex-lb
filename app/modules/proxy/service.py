@@ -1574,6 +1574,7 @@ class ProxyService:
             transport=_REQUEST_TRANSPORT_HTTP,
         )
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
+        settings = await get_settings_cache().get()
         selection = await self._select_account_with_budget(
             deadline,
             request_id=request_state.request_id,
@@ -1582,8 +1583,8 @@ class ProxyService:
             sticky_kind=affinity.kind,
             reallocate_sticky=affinity.reallocate_sticky,
             sticky_max_age_seconds=affinity.max_age_seconds,
-            prefer_earlier_reset_accounts=False,
-            routing_strategy=_routing_strategy(await get_settings_cache().get()),
+            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+            routing_strategy=_routing_strategy(settings),
             model=request_model,
         )
         account = selection.account

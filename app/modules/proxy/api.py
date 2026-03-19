@@ -211,6 +211,7 @@ async def v1_responses_websocket(
     turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
+    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
     await context.service.proxy_responses_websocket(
         websocket,
         forwarded_headers,

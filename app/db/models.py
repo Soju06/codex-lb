@@ -177,8 +177,8 @@ class DashboardSettings(Base):
     )
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
-        default=300,
-        server_default=text("300"),
+        default=1800,
+        server_default=text("1800"),
         nullable=False,
     )
     import_without_overwrite: Mapped[bool] = mapped_column(

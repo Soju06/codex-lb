@@ -95,7 +95,17 @@ async def test_v1_responses_rejects_input_file_id(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_previous_response_id(async_client):
+async def test_v1_responses_accepts_previous_response_id(async_client, monkeypatch):
+    await _import_account(async_client, "acc_prev_response_id", "prev-response-id@example.com")
+    seen_previous_response_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del headers, access_token, account_id, base_url, raise_for_status, _kw
+        seen_previous_response_ids.append(getattr(payload, "previous_response_id", None))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_abc123"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     payload = {
         "model": "gpt-5.2",
         "previous_response_id": "resp_abc123",
@@ -105,10 +115,11 @@ async def test_v1_responses_rejects_previous_response_id(async_client):
                 "content": [{"type": "input_text", "text": "Continue."}],
             }
         ],
+        "stream": True,
     }
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "invalid_request_error"
+    assert resp.status_code == 200
+    assert seen_previous_response_ids == ["resp_abc123"]
 
 
 @pytest.mark.asyncio
@@ -586,6 +597,30 @@ async def test_v1_chat_completions_normalizes_tools_and_tool_choice(async_client
         }
     ]
     assert seen["payload"].tool_choice == {"type": "function", "name": "get_weather"}
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_does_not_enable_codex_session_affinity(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_affinity_a", "chat-affinity-a@example.com")
+    await _import_account(async_client, "acc_chat_affinity_b", "chat-affinity-b@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["account_id"] = account_id
+        seen["prompt_cache_key"] = getattr(payload, "prompt_cache_key", None)
+        yield _completed_event("resp_chat_affinity")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather?"}],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload, headers={"session_id": "chat-session-123"})
+    assert resp.status_code == 200
+    assert isinstance(seen["prompt_cache_key"], str)
+    assert seen["prompt_cache_key"]
 
 
 @pytest.mark.asyncio

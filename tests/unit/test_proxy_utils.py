@@ -326,6 +326,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         sticky_threads_enabled=False,
         upstream_stream_transport="default",
         openai_cache_affinity_max_age_seconds=300,
+        openai_prompt_cache_key_derivation_enabled=True,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
@@ -695,6 +696,127 @@ def test_log_proxy_request_payload(monkeypatch, caplog):
 
     assert "proxy_request_payload" in caplog.text
     assert '"model":"gpt-5.1"' in caplog.text
+
+
+def test_log_proxy_request_shape_includes_affinity_metadata(monkeypatch, caplog):
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "tools": [{"type": "function", "name": "b_tool"}, {"type": "function", "name": "a_tool"}],
+        }
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = True
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    token = set_request_id("req_shape_1")
+    try:
+        caplog.set_level(logging.WARNING)
+        proxy_service._maybe_log_proxy_request_shape(
+            "stream",
+            payload,
+            {"session_id": "sid_1"},
+            sticky_kind="codex_session",
+            sticky_key_source="session_header",
+            prompt_cache_key_set=True,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "proxy_request_shape" in caplog.text
+    assert "sticky_kind=codex_session" in caplog.text
+    assert "sticky_key_source=session_header" in caplog.text
+    assert "prompt_cache_key_set=True" in caplog.text
+    assert "session_header_present=True" in caplog.text
+    assert "tools_hash=sha256:" in caplog.text
+
+
+def test_log_proxy_request_shape_hashes_prompt_cache_key_without_raw_value(monkeypatch, caplog):
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "prompt_cache_key": "thread_secret_123",
+        }
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = True
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    token = set_request_id("req_shape_2")
+    try:
+        caplog.set_level(logging.WARNING)
+        proxy_service._maybe_log_proxy_request_shape(
+            "stream",
+            payload,
+            {},
+            sticky_kind="prompt_cache",
+            sticky_key_source="payload",
+            prompt_cache_key_set=True,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "prompt_cache_key=sha256:" in caplog.text
+    assert "thread_secret_123" not in caplog.text
+
+
+def test_log_proxy_request_shape_reports_derived_key_after_affinity_resolution(monkeypatch, caplog):
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = True
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "stream": True,
+        }
+    )
+    proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "sid_1"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    token = set_request_id("req_shape_3")
+    try:
+        caplog.set_level(logging.WARNING)
+        proxy_service._maybe_log_proxy_request_shape(
+            "stream",
+            payload,
+            {"session_id": "sid_1"},
+            sticky_kind="codex_session",
+            sticky_key_source="session_header",
+            prompt_cache_key_set=True,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert "prompt_cache_key=sha256:" in caplog.text
+    assert "prompt_cache_key_raw=None" in caplog.text
 
 
 def test_log_proxy_service_tier_trace(monkeypatch, caplog):
@@ -1583,7 +1705,7 @@ async def test_stream_responses_auto_transport_keeps_http_for_bare_session_affin
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket_handshake_rejected(monkeypatch):
+async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket_upgrade_required(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_stream_transport = "auto"
@@ -1603,7 +1725,7 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
 
     async def fake_open_upstream_websocket(**kwargs):
         attempts["websocket"] += 1
-        raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=403, message="Forbidden")
+        raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=426, message="Upgrade Required")
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "get_model_registry", lambda: registry)
@@ -1630,6 +1752,54 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     assert attempts["websocket"] == 1
     assert session.calls
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_auto_transport_does_not_hide_forbidden_websocket_handshake(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "auto"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    registry = SimpleNamespace(
+        get_snapshot=lambda: SimpleNamespace(models={"gpt-5.4": SimpleNamespace(prefer_websockets=True)})
+    )
+    request_info = cast(RequestInfo, SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses"))
+
+    async def fake_open_upstream_websocket(**kwargs):
+        raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=403, message="Forbidden")
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "get_model_registry", lambda: registry)
+    monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']))
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert not session.calls
+    event = json.loads(events[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_error"
 
 
 @pytest.mark.asyncio
@@ -1685,7 +1855,9 @@ async def test_stream_responses_uses_websocket_upstream_when_forced(monkeypatch)
     assert not session.post_calls
     assert session.ws_calls
     assert session.ws_calls[0]["url"] == "wss://chatgpt.com/backend-api/codex/responses"
-    assert response.sent_json == [{"type": "response.create", **payload.to_payload()}]
+    expected_payload = {"type": "response.create", **payload.to_payload()}
+    expected_payload.pop("stream", None)
+    assert response.sent_json == [expected_payload]
     expected_created = (
         "event: response.created\ndata: "
         '{"type":"response.created","response":{"id":"resp_ws","service_tier":"auto"}}\n\n'
@@ -2146,6 +2318,179 @@ def test_sticky_key_for_compact_request_prefers_codex_session_affinity():
     assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
     assert policy.reallocate_sticky is False
     assert policy.max_age_seconds is None
+
+
+def test_sticky_key_from_session_header_accepts_aliases_in_priority_order():
+    assert proxy_service._sticky_key_from_session_header({"session_id": "sid_1"}) == "sid_1"
+    assert proxy_service._sticky_key_from_session_header({"x-codex-session-id": "sid_2"}) == "sid_2"
+    assert proxy_service._sticky_key_from_session_header({"x-codex-conversation-id": "sid_3"}) == "sid_3"
+    assert (
+        proxy_service._sticky_key_from_session_header(
+            {
+                "x-codex-conversation-id": "sid_3",
+                "x-codex-session-id": "sid_2",
+                "session_id": "sid_1",
+            }
+        )
+        == "sid_1"
+    )
+
+
+def test_sticky_key_for_responses_request_derives_prompt_cache_before_codex_session_return():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "stream": True,
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "codex-session-1"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.key == "codex-session-1"
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert isinstance(payload.prompt_cache_key, str)
+    assert payload.prompt_cache_key
+
+
+def test_sticky_key_for_compact_request_derives_prompt_cache_before_codex_session_return():
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_compact_request(
+        payload,
+        headers={"session_id": "codex-session-1"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.key == "codex-session-1"
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert isinstance(payload.prompt_cache_key, str)
+    assert payload.prompt_cache_key
+
+
+def test_sticky_key_for_responses_request_respects_prompt_cache_derivation_flag(monkeypatch):
+    class Settings:
+        openai_prompt_cache_key_derivation_enabled = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "stream": True,
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "codex-session-1"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert payload.prompt_cache_key is None
+
+
+def test_sticky_key_for_responses_request_preserves_client_supplied_prompt_cache_key_when_flag_off(monkeypatch):
+    class Settings:
+        openai_prompt_cache_key_derivation_enabled = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "stream": True,
+            "prompt_cache_key": "thread_123",
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "codex-session-1"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert payload.prompt_cache_key == "thread_123"
+
+
+def test_sticky_key_for_responses_request_strips_whitespace_before_accepting_payload_key():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "stream": True,
+            "prompt_cache_key": "  thread_123  ",
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
+    assert policy.key == "thread_123"
+    assert payload.prompt_cache_key == "thread_123"
+
+
+def test_sticky_key_for_responses_request_derives_when_payload_key_is_whitespace_only():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "stream": True,
+            "prompt_cache_key": "   ",
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
+    assert isinstance(policy.key, str)
+    assert policy.key
+    assert payload.prompt_cache_key == policy.key
 
 
 @pytest.mark.asyncio
@@ -2879,6 +3224,62 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert normalized_payload["model"] == "gpt-5.2"
     assert normalized_payload["reasoning"] == {"effort": "high"}
     assert normalized_payload["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_logs_affinity_metadata(monkeypatch, caplog):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_shape",
+        name="shape",
+        key_prefix="sk-shape",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = True
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    token = set_request_id("req_ws_shape_1")
+    try:
+        caplog.set_level(logging.WARNING)
+        prepared = await service._prepare_websocket_response_create_request(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": "hello",
+            },
+            headers={"session_id": "ws-session-1"},
+            codex_session_affinity=True,
+            openai_cache_affinity=True,
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=300,
+            api_key=api_key,
+        )
+    finally:
+        reset_request_id(token)
+
+    assert prepared.affinity_policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert "proxy_request_shape" in caplog.text
+    assert "kind=websocket" in caplog.text
+    assert "sticky_kind=codex_session" in caplog.text
+    assert "sticky_key_source=session_header" in caplog.text
+    assert "prompt_cache_key_set=True" in caplog.text
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):

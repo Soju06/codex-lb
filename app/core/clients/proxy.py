@@ -84,6 +84,7 @@ _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
 _NATIVE_CODEX_ORIGINATORS = frozenset({"codex_cli_rs", "Codex Desktop"})
 _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
     {
+        "x-codex-turn-state",
         "x-codex-turn-metadata",
         "x-codex-beta-features",
     }
@@ -103,7 +104,7 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
-_AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({403, 404, 426})
+_AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({426})
 _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
 _WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
     ("usage_not_included", "usage not included"),

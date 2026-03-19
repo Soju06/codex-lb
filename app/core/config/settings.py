@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import socket
 from functools import lru_cache
 from ipaddress import ip_network
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -28,6 +29,11 @@ def _default_oauth_callback_host() -> str:
     if _in_container():
         return DOCKER_CALLBACK_HOST
     return "127.0.0.1"
+
+
+def _default_http_bridge_instance_id() -> str:
+    hostname = socket.gethostname().strip()
+    return hostname or "codex-lb"
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
@@ -75,7 +81,16 @@ class Settings(BaseSettings):
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
-    openai_cache_affinity_max_age_seconds: int = Field(default=300, gt=0)
+    openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
+    openai_prompt_cache_key_derivation_enabled: bool = True
+    http_responses_session_bridge_enabled: bool = True
+    http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
+    http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
+    http_responses_session_bridge_codex_prewarm_enabled: bool = False
+    http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
+    http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
+    http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
+    http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
@@ -159,6 +174,24 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
         return cidrs
 
+    @field_validator("http_responses_session_bridge_instance_ring", mode="before")
+    @classmethod
+    def _normalize_http_bridge_instance_ring(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            entries = [entry.strip() for entry in value.split(",")]
+            return [entry for entry in entries if entry]
+        if isinstance(value, list):
+            normalized: list[str] = []
+            for entry in value:
+                if isinstance(entry, str):
+                    instance_id = entry.strip()
+                    if instance_id:
+                        normalized.append(instance_id)
+            return normalized
+        raise TypeError("http_responses_session_bridge_instance_ring must be a list or comma-separated string")
+
     @field_validator("upstream_compact_timeout_seconds")
     @classmethod
     def _validate_upstream_compact_timeout_seconds(cls, value: float | None) -> float | None:
@@ -167,6 +200,16 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
         return value
+
+    @model_validator(mode="after")
+    def _validate_http_bridge_instance_configuration(self) -> "Settings":
+        ring = self.http_responses_session_bridge_instance_ring
+        if ring and self.http_responses_session_bridge_instance_id not in ring:
+            raise ValueError(
+                "http_responses_session_bridge_instance_id must be explicitly present in "
+                "http_responses_session_bridge_instance_ring"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

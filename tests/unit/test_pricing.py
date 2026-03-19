@@ -63,6 +63,16 @@ def test_get_pricing_for_model_gpt_5_4_alias():
     assert model == "gpt-5.4"
 
 
+def test_get_pricing_for_model_gpt_5_4_mini_alias():
+    result = get_pricing_for_model("gpt-5.4-mini-2026-03-17", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+    assert result is not None
+    model, price = result
+    assert model == "gpt-5.4-mini"
+    assert price.input_per_1m == 0.75
+    assert price.cached_input_per_1m == 0.075
+    assert price.output_per_1m == 4.5
+
+
 def test_get_pricing_for_model_gpt_5_2_chat_latest_alias():
     result = get_pricing_for_model("gpt-5.2-chat-latest", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
     assert result is not None
@@ -164,6 +174,20 @@ def test_calculate_cost_from_usage_gpt_5_4_long_context_flex():
     cost = calculate_cost_from_usage(usage, price, service_tier="flex")
 
     expected = (250_000 / 1_000_000) * 2.5 + (50_000 / 1_000_000) * 0.25 + (100_000 / 1_000_000) * 11.25
+    assert cost == pytest.approx(expected)
+
+
+def test_calculate_cost_from_usage_gpt_5_4_mini():
+    usage = UsageTokens(
+        input_tokens=1_000_000.0,
+        output_tokens=1_000_000.0,
+        cached_input_tokens=100_000.0,
+    )
+    price = DEFAULT_PRICING_MODELS["gpt-5.4-mini"]
+
+    cost = calculate_cost_from_usage(usage, price)
+
+    expected = (900_000 / 1_000_000) * 0.75 + (100_000 / 1_000_000) * 0.075 + (1_000_000 / 1_000_000) * 4.5
     assert cost == pytest.approx(expected)
 
 

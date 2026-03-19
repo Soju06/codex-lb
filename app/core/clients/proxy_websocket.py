@@ -56,6 +56,8 @@ class UpstreamResponsesWebSocket(Protocol):
 
     async def close(self) -> None: ...
 
+    def response_header(self, name: str) -> str | None: ...
+
 
 class WebsocketsResponsesWebSocket:
     def __init__(self, connection: ClientConnection) -> None:
@@ -87,6 +89,16 @@ class WebsocketsResponsesWebSocket:
 
     async def close(self) -> None:
         await self._connection.close()
+
+    def response_header(self, name: str) -> str | None:
+        response = getattr(self._connection, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        value = headers.get(name)
+        if value is None:
+            return None
+        return str(value)
 
 
 def filter_inbound_websocket_headers(headers: dict[str, str]) -> dict[str, str]:

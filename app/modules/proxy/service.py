@@ -58,7 +58,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import Account, DashboardSettings, StickySessionKind, UsageHistory
+from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -146,6 +146,8 @@ class ProxyService:
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
+        self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
+        self._http_bridge_lock = anyio.Lock()
 
     def stream_responses(
         self,
@@ -161,7 +163,6 @@ class ProxyService:
         request_transport: str = _REQUEST_TRANSPORT_HTTP,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
-        _maybe_log_proxy_request_shape("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
         return self._stream_with_retry(
             payload,
@@ -175,6 +176,169 @@ class ProxyService:
             request_transport=request_transport,
         )
 
+    def stream_http_responses(
+        self,
+        payload: ResponsesRequest,
+        headers: Mapping[str, str],
+        *,
+        codex_session_affinity: bool = False,
+        propagate_http_errors: bool = False,
+        openai_cache_affinity: bool = False,
+        api_key: ApiKeyData | None = None,
+        api_key_reservation: ApiKeyUsageReservationData | None = None,
+        suppress_text_done_events: bool = False,
+    ) -> AsyncIterator[str]:
+        _maybe_log_proxy_request_payload("stream_http", payload, headers)
+        filtered = filter_inbound_headers(headers)
+        return self._stream_http_bridge_or_retry(
+            payload,
+            filtered,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=propagate_http_errors,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
+
+    async def _stream_http_bridge_or_retry(
+        self,
+        payload: ResponsesRequest,
+        headers: Mapping[str, str],
+        *,
+        codex_session_affinity: bool,
+        propagate_http_errors: bool,
+        openai_cache_affinity: bool,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+        suppress_text_done_events: bool,
+    ) -> AsyncIterator[str]:
+        settings = await get_settings_cache().get()
+        if not _http_responses_session_bridge_enabled(settings):
+            async for line in self._stream_with_retry(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=_REQUEST_TRANSPORT_HTTP,
+            ):
+                yield line
+            return
+
+        async for line in self._stream_via_http_bridge(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=propagate_http_errors,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            suppress_text_done_events=suppress_text_done_events,
+            idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_idle_ttl_seconds", 120.0),
+            codex_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0),
+            max_sessions=getattr(settings, "http_responses_session_bridge_max_sessions", 256),
+            queue_limit=getattr(settings, "http_responses_session_bridge_queue_limit", 8),
+        ):
+            yield line
+
+    async def _stream_via_http_bridge(
+        self,
+        payload: ResponsesRequest,
+        headers: Mapping[str, str],
+        *,
+        codex_session_affinity: bool,
+        propagate_http_errors: bool,
+        openai_cache_affinity: bool,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+        suppress_text_done_events: bool,
+        idle_ttl_seconds: float,
+        codex_idle_ttl_seconds: float,
+        max_sessions: int,
+        queue_limit: int,
+    ) -> AsyncIterator[str]:
+        del propagate_http_errors, suppress_text_done_events
+        request_id = ensure_request_id()
+        settings = await get_settings_cache().get()
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
+        affinity = _sticky_key_for_responses_request(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
+            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=settings.sticky_threads_enabled,
+            api_key=api_key,
+        )
+        sticky_key_source = "none"
+        if affinity.kind == StickySessionKind.CODEX_SESSION:
+            sticky_key_source = (
+                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
+            )
+        elif affinity.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "stream_http_bridge",
+            payload,
+            headers,
+            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
+        )
+
+        bridge_session_key = _make_http_bridge_session_key(
+            payload,
+            headers=headers,
+            affinity=affinity,
+            api_key=api_key,
+            request_id=request_id,
+        )
+        session = await self._get_or_create_http_bridge_session(
+            bridge_session_key,
+            headers=dict(headers),
+            affinity=affinity,
+            api_key=api_key,
+            request_model=payload.model,
+            idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+                affinity=affinity,
+                idle_ttl_seconds=idle_ttl_seconds,
+                codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+            ),
+            max_sessions=max_sessions,
+        )
+
+        request_state, text_data = self._prepare_http_bridge_request(
+            payload,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+        )
+        request_state.session_id_hash = _session_id_hash_from_headers(headers)
+        request_state.transport = _REQUEST_TRANSPORT_HTTP
+
+        await self._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=text_data,
+            queue_limit=queue_limit,
+        )
+
+        try:
+            event_queue = request_state.event_queue
+            assert event_queue is not None
+            while True:
+                event_block = await event_queue.get()
+                if event_block is None:
+                    break
+                yield event_block
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self._detach_http_bridge_request(session, request_state=request_state)
+                session.last_used_at = time.monotonic()
+
     async def compact_responses(
         self,
         payload: ResponsesCompactRequest,
@@ -186,7 +350,6 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> CompactResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
-        _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
@@ -203,6 +366,7 @@ class ProxyService:
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         session_id_hash = _session_id_hash_from_headers(headers)
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
             payload,
             headers,
@@ -211,6 +375,19 @@ class ProxyService:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+        )
+        sticky_key_source = "none"
+        if affinity.kind == StickySessionKind.CODEX_SESSION:
+            sticky_key_source = "session_header"
+        elif affinity.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "compact",
+            payload,
+            headers,
+            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
         try:
@@ -635,6 +812,7 @@ class ProxyService:
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None
         account: Account | None = None
+        upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
 
         try:
             while True:
@@ -724,25 +902,6 @@ class ProxyService:
                     upstream = None
                     account = None
 
-                if request_state is not None and upstream is not None:
-                    async with pending_lock:
-                        has_pending_requests = bool(pending_requests)
-                    if not has_pending_requests:
-                        if upstream_reader is not None:
-                            upstream_reader.cancel()
-                            try:
-                                await upstream_reader
-                            except asyncio.CancelledError:
-                                pass
-                            upstream_reader = None
-                        upstream_control = None
-                        try:
-                            await upstream.close()
-                        except Exception:
-                            logger.debug("Failed to close idle upstream websocket before reselect", exc_info=True)
-                        upstream = None
-                        account = None
-
                 if request_state is not None:
                     await response_create_gate.acquire()
                     async with pending_lock:
@@ -773,8 +932,9 @@ class ProxyService:
                                 )
                             )
                         continue
+                    connect_headers = _headers_with_turn_state(filtered_headers, upstream_turn_state)
                     account, upstream = await self._connect_proxy_websocket(
-                        filtered_headers,
+                        connect_headers,
                         sticky_key=request_affinity.key,
                         sticky_kind=request_affinity.kind,
                         reallocate_sticky=request_affinity.reallocate_sticky,
@@ -794,6 +954,7 @@ class ProxyService:
                                     pending_requests.remove(request_state)
                             _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
+                    upstream_turn_state = _upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
                     upstream_reader = asyncio.create_task(
                         self._relay_upstream_websocket_messages(
@@ -884,38 +1045,97 @@ class ProxyService:
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
-
-        upstream_payload = dict(responses_payload.to_payload())
-        forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
-            request_service_tier=forwarded_service_tier,
+            request_service_tier=_normalize_service_tier_value(
+                dict(responses_payload.to_payload()).get("service_tier")
+            ),
+        )
+        request_state, text_data = self._prepare_response_bridge_request_state(
+            responses_payload,
+            api_key=refreshed_api_key,
+            api_key_reservation=reservation,
+            include_type_field=True,
+            attach_event_queue=False,
+        )
+        request_state.session_id_hash = _session_id_hash_from_headers(headers)
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
+        affinity_policy = _sticky_key_for_responses_request(
+            responses_payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
+            openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=sticky_threads_enabled,
+            api_key=api_key,
+        )
+        sticky_key_source = "none"
+        if affinity_policy.kind == StickySessionKind.CODEX_SESSION:
+            sticky_key_source = (
+                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
+            )
+        elif affinity_policy.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "websocket",
+            responses_payload,
+            headers,
+            sticky_kind=affinity_policy.kind.value if affinity_policy.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(responses_payload) is not None,
         )
 
         return _PreparedWebSocketRequest(
-            text_data=json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":")),
-            request_state=_WebSocketRequestState(
-                request_id=f"ws_{uuid4().hex}",
-                model=responses_payload.model,
-                service_tier=forwarded_service_tier,
-                reasoning_effort=responses_payload.reasoning.effort if responses_payload.reasoning else None,
-                api_key_reservation=reservation,
-                started_at=time.monotonic(),
-                request_kind=_REQUEST_KIND_RESPONSES,
-                session_id_hash=_session_id_hash_from_headers(headers),
-                awaiting_response_created=True,
-            ),
-            affinity_policy=_sticky_key_for_responses_request(
-                responses_payload,
-                headers,
-                codex_session_affinity=codex_session_affinity,
-                openai_cache_affinity=openai_cache_affinity,
-                openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
-                sticky_threads_enabled=sticky_threads_enabled,
-                api_key=api_key,
-            ),
+            text_data=text_data,
+            request_state=request_state,
+            affinity_policy=affinity_policy,
         )
+
+    def _prepare_http_bridge_request(
+        self,
+        payload: ResponsesRequest,
+        *,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+    ) -> tuple[_WebSocketRequestState, str]:
+        return self._prepare_response_bridge_request_state(
+            payload,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            include_type_field=True,
+            attach_event_queue=True,
+        )
+
+    def _prepare_response_bridge_request_state(
+        self,
+        payload: ResponsesRequest,
+        *,
+        api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+        include_type_field: bool,
+        attach_event_queue: bool,
+    ) -> tuple[_WebSocketRequestState, str]:
+        upstream_payload = dict(payload.to_payload())
+        upstream_payload.pop("stream", None)
+        upstream_payload.pop("background", None)
+        if include_type_field:
+            upstream_payload["type"] = "response.create"
+        forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
+        request_state = _WebSocketRequestState(
+            request_id=f"ws_{uuid4().hex}",
+            model=payload.model,
+            service_tier=forwarded_service_tier,
+            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+            api_key_reservation=api_key_reservation,
+            started_at=time.monotonic(),
+            awaiting_response_created=True,
+            event_queue=asyncio.Queue() if attach_event_queue else None,
+            api_key=api_key,
+        )
+        text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
+        request_state.request_text = text_data
+        return request_state, text_data
 
     async def _connect_proxy_websocket(
         self,
@@ -1174,6 +1394,741 @@ class ProxyService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
         return await connect_responses_websocket(headers, access_token, account_id)
+
+    async def _http_bridge_pending_count(self, session: "_HTTPBridgeSession") -> int:
+        async with session.pending_lock:
+            return max(len(session.pending_requests), session.queued_request_count)
+
+    async def _get_or_create_http_bridge_session(
+        self,
+        key: "_HTTPBridgeSessionKey",
+        *,
+        headers: dict[str, str],
+        affinity: _AffinityPolicy,
+        api_key: ApiKeyData | None,
+        request_model: str | None,
+        idle_ttl_seconds: float,
+        max_sessions: int,
+    ) -> "_HTTPBridgeSession":
+        del api_key
+        settings = get_settings()
+        effective_idle_ttl_seconds = _effective_http_bridge_idle_ttl_seconds(
+            affinity=affinity,
+            idle_ttl_seconds=idle_ttl_seconds,
+            codex_idle_ttl_seconds=getattr(
+                settings,
+                "http_responses_session_bridge_codex_idle_ttl_seconds",
+                900.0,
+            ),
+        )
+        owner_instance = _http_bridge_owner_instance(key, settings)
+        current_instance, ring = _normalized_http_bridge_instance_ring(settings)
+        if (
+            key.affinity_kind != "request"
+            and owner_instance is not None
+            and len(ring) > 1
+            and owner_instance != current_instance
+        ):
+            _log_http_bridge_event(
+                "owner_mismatch",
+                key,
+                account_id=None,
+                model=request_model,
+                detail=f"expected_instance={owner_instance}, current_instance={current_instance}",
+            )
+            raise ProxyResponseError(
+                409,
+                openai_error(
+                    "bridge_instance_mismatch",
+                    (
+                        "HTTP responses session bridge request reached the wrong instance "
+                        f"(expected {owner_instance}, got {current_instance})"
+                    ),
+                    error_type="server_error",
+                ),
+            )
+        async with self._http_bridge_lock:
+            await self._prune_http_bridge_sessions_locked()
+            existing = self._http_bridge_sessions.get(key)
+            if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
+                existing.request_model = request_model
+                existing.last_used_at = time.monotonic()
+                _log_http_bridge_event(
+                    "reuse",
+                    key,
+                    account_id=existing.account.id,
+                    model=existing.request_model,
+                    pending_count=await self._http_bridge_pending_count(existing),
+                )
+                return existing
+
+            if existing is not None:
+                _log_http_bridge_event(
+                    "discard_stale",
+                    key,
+                    account_id=existing.account.id,
+                    model=existing.request_model,
+                )
+                await self._close_http_bridge_session(existing)
+                self._http_bridge_sessions.pop(key, None)
+
+            while len(self._http_bridge_sessions) >= max_sessions and self._http_bridge_sessions:
+                evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
+                for candidate_key, candidate_session in self._http_bridge_sessions.items():
+                    pending_count = await self._http_bridge_pending_count(candidate_session)
+                    if pending_count:
+                        continue
+                    evictable_sessions.append((candidate_key, candidate_session))
+                if not evictable_sessions:
+                    _log_http_bridge_event(
+                        "capacity_exhausted_active_sessions",
+                        key,
+                        account_id=None,
+                        model=request_model,
+                        pending_count=len(self._http_bridge_sessions),
+                    )
+                    raise ProxyResponseError(
+                        429,
+                        openai_error(
+                            "rate_limit_exceeded",
+                            "HTTP responses session bridge has no idle capacity",
+                            error_type="rate_limit_error",
+                        ),
+                    )
+                lru_key, lru_session = min(
+                    evictable_sessions,
+                    key=lambda item: _http_bridge_eviction_priority(item[1]),
+                )
+                _log_http_bridge_event(
+                    "evict_lru",
+                    lru_key,
+                    account_id=lru_session.account.id,
+                    model=lru_session.request_model,
+                )
+                await self._close_http_bridge_session(lru_session)
+                self._http_bridge_sessions.pop(lru_key, None)
+
+            session = await self._create_http_bridge_session(
+                key,
+                headers=headers,
+                affinity=affinity,
+                request_model=request_model,
+                idle_ttl_seconds=effective_idle_ttl_seconds,
+            )
+            self._http_bridge_sessions[key] = session
+            _log_http_bridge_event(
+                "create",
+                key,
+                account_id=session.account.id,
+                model=session.request_model,
+            )
+            return session
+
+    async def _prune_http_bridge_sessions_locked(self) -> None:
+        now = time.monotonic()
+        stale_keys: list[_HTTPBridgeSessionKey] = []
+        for key, session in self._http_bridge_sessions.items():
+            if session.closed:
+                stale_keys.append(key)
+                continue
+            pending_count = await self._http_bridge_pending_count(session)
+            if pending_count:
+                continue
+            if now - session.last_used_at < session.idle_ttl_seconds:
+                continue
+            stale_keys.append(key)
+        for key in stale_keys:
+            session = self._http_bridge_sessions.pop(key, None)
+            if session is not None:
+                _log_http_bridge_event(
+                    "evict_idle",
+                    key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                )
+                await self._close_http_bridge_session(session)
+
+    async def _close_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
+        session.closed = True
+        if session.upstream_reader is not None:
+            session.upstream_reader.cancel()
+            try:
+                await session.upstream_reader
+            except asyncio.CancelledError:
+                pass
+        try:
+            await session.upstream.close()
+        except Exception:
+            logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
+        _log_http_bridge_event(
+            "close",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+        )
+
+    async def _create_http_bridge_session(
+        self,
+        key: "_HTTPBridgeSessionKey",
+        *,
+        headers: dict[str, str],
+        affinity: _AffinityPolicy,
+        request_model: str | None,
+        idle_ttl_seconds: float,
+    ) -> "_HTTPBridgeSession":
+        request_state = _WebSocketRequestState(
+            request_id=f"http_bridge_connect_{uuid4().hex}",
+            model=request_model,
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            transport=_REQUEST_TRANSPORT_HTTP,
+        )
+        deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
+        settings = await get_settings_cache().get()
+        selection = await self._select_account_with_budget(
+            deadline,
+            request_id=request_state.request_id,
+            kind="http_bridge",
+            sticky_key=affinity.key,
+            sticky_kind=affinity.kind,
+            reallocate_sticky=affinity.reallocate_sticky,
+            sticky_max_age_seconds=affinity.max_age_seconds,
+            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+            routing_strategy=_routing_strategy(settings),
+            model=request_model,
+        )
+        account = selection.account
+        if account is None:
+            raise ProxyResponseError(
+                503,
+                openai_error(
+                    selection.error_code or "no_accounts",
+                    selection.error_message or "No active accounts available",
+                    error_type="server_error",
+                ),
+            )
+        account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
+        connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
+        upstream = await self._open_upstream_websocket_with_budget(
+            account,
+            connect_headers,
+            timeout_seconds=_remaining_budget_seconds(deadline),
+        )
+        session = _HTTPBridgeSession(
+            key=key,
+            headers=connect_headers,
+            affinity=affinity,
+            request_model=request_model,
+            account=account,
+            upstream=upstream,
+            upstream_control=_WebSocketUpstreamControl(),
+            pending_requests=deque(),
+            pending_lock=anyio.Lock(),
+            response_create_gate=asyncio.Semaphore(1),
+            queued_request_count=0,
+            last_used_at=time.monotonic(),
+            idle_ttl_seconds=idle_ttl_seconds,
+            codex_session=affinity.kind == StickySessionKind.CODEX_SESSION,
+            prewarm_lock=anyio.Lock(),
+            upstream_turn_state=_upstream_turn_state_from_socket(upstream),
+        )
+        session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+        return session
+
+    async def _submit_http_bridge_request(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        if session.closed:
+            _log_http_bridge_event(
+                "submit_on_closed",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+            )
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+            )
+        await self._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=request_state,
+            text_data=text_data,
+        )
+        gate_acquired = False
+        request_enqueued = False
+        async with session.pending_lock:
+            if session.queued_request_count >= queue_limit:
+                _log_http_bridge_event(
+                    "queue_full",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    pending_count=session.queued_request_count,
+                )
+                raise ProxyResponseError(
+                    429,
+                    openai_error(
+                        "rate_limit_exceeded",
+                        "HTTP responses session bridge queue is full",
+                        error_type="rate_limit_error",
+                    ),
+                )
+            session.queued_request_count += 1
+        try:
+            await session.response_create_gate.acquire()
+            gate_acquired = True
+            async with session.pending_lock:
+                session.pending_requests.append(request_state)
+            request_enqueued = True
+            await session.upstream.send_text(text_data)
+            session.last_used_at = time.monotonic()
+        except asyncio.CancelledError:
+            await self._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=gate_acquired,
+                request_enqueued=request_enqueued,
+            )
+            raise
+        except Exception as exc:
+            _log_http_bridge_event(
+                "send_failure",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail=str(exc) or None,
+            )
+            retried = await self._retry_http_bridge_request_on_fresh_upstream(
+                session,
+                request_state=request_state,
+                text_data=text_data,
+            )
+            if retried:
+                return
+            await self._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=gate_acquired,
+                request_enqueued=request_enqueued,
+            )
+            await self._fail_pending_websocket_requests(
+                account_id_value=session.account.id,
+                pending_requests=deque([request_state]),
+                pending_lock=anyio.Lock(),
+                error_code="stream_incomplete",
+                error_message="Upstream websocket closed before response.completed",
+                api_key=None,
+                response_create_gate=session.response_create_gate,
+            )
+            session.closed = True
+            try:
+                await session.upstream.close()
+            except Exception:
+                logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", str(exc) or "Upstream websocket closed"),
+            ) from exc
+
+    async def _maybe_prewarm_http_bridge_session(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+    ) -> None:
+        if (
+            not session.codex_session
+            or session.prewarmed
+            or not getattr(get_settings(), "http_responses_session_bridge_codex_prewarm_enabled", False)
+        ):
+            return
+        prewarm_lock = session.prewarm_lock
+        if prewarm_lock is None:
+            return
+        async with prewarm_lock:
+            if session.prewarmed:
+                return
+            warmup_text = _build_http_bridge_prewarm_text(text_data)
+            session.prewarmed = True
+            if warmup_text is None:
+                return
+
+            warmup_state = _WebSocketRequestState(
+                request_id=f"http_prewarm_{uuid4().hex}",
+                model=request_state.model,
+                service_tier=request_state.service_tier,
+                reasoning_effort=request_state.reasoning_effort,
+                api_key_reservation=None,
+                started_at=time.monotonic(),
+                awaiting_response_created=True,
+                event_queue=asyncio.Queue(),
+                transport=_REQUEST_TRANSPORT_HTTP,
+                request_text=warmup_text,
+                skip_request_log=True,
+            )
+            gate_acquired = False
+            request_enqueued = False
+            try:
+                event_queue = warmup_state.event_queue
+                assert event_queue is not None
+                await session.response_create_gate.acquire()
+                gate_acquired = True
+                async with session.pending_lock:
+                    session.pending_requests.append(warmup_state)
+                request_enqueued = True
+                await session.upstream.send_text(warmup_text)
+                while True:
+                    event_block = await event_queue.get()
+                    if event_block is None:
+                        break
+                    payload = parse_sse_data_json(event_block)
+                    event = parse_sse_event(event_block)
+                    event_type = _event_type_from_payload(event, payload)
+                    if event_type in {"response.failed", "response.incomplete", "error"}:
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "upstream_unavailable",
+                                "HTTP responses session bridge prewarm failed",
+                            ),
+                        )
+                session.last_used_at = time.monotonic()
+            except Exception:
+                session.prewarmed = False
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=warmup_state,
+                    gate_acquired=gate_acquired,
+                    request_enqueued=request_enqueued,
+                )
+                raise
+
+    async def _cleanup_http_bridge_submit_interruption(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        gate_acquired: bool,
+        request_enqueued: bool,
+    ) -> None:
+        async with session.pending_lock:
+            if request_enqueued and request_state in session.pending_requests:
+                session.pending_requests.remove(request_state)
+            session.queued_request_count = max(0, session.queued_request_count - 1)
+        if gate_acquired:
+            _release_websocket_response_create_gate(request_state, session.response_create_gate)
+
+    async def _detach_http_bridge_request(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+    ) -> bool:
+        removed = False
+        async with session.pending_lock:
+            if request_state in session.pending_requests:
+                session.pending_requests.remove(request_state)
+                session.queued_request_count = max(0, session.queued_request_count - 1)
+                removed = True
+        request_state.event_queue = None
+        if not removed:
+            return False
+        _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        await self._release_websocket_reservation(request_state.api_key_reservation)
+        request_state.api_key_reservation = None
+        return True
+
+    async def _relay_http_bridge_upstream_messages(
+        self,
+        session: "_HTTPBridgeSession",
+    ) -> None:
+        runtime_settings = get_settings()
+        try:
+            while True:
+                receive_timeout = await self._next_websocket_receive_timeout(
+                    session.pending_requests,
+                    pending_lock=session.pending_lock,
+                    proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                    stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                )
+                try:
+                    if receive_timeout is None:
+                        message = await session.upstream.receive()
+                    elif receive_timeout.timeout_seconds <= 0:
+                        raise asyncio.TimeoutError()
+                    else:
+                        message = await asyncio.wait_for(
+                            session.upstream.receive(),
+                            timeout=receive_timeout.timeout_seconds,
+                        )
+                except asyncio.TimeoutError:
+                    if receive_timeout is None:
+                        raise
+                    retried = await self._retry_http_bridge_precreated_request(session)
+                    if retried:
+                        continue
+                    async with session.pending_lock:
+                        session.queued_request_count = 0
+                    await self._fail_pending_websocket_requests(
+                        account_id_value=session.account.id,
+                        pending_requests=session.pending_requests,
+                        pending_lock=session.pending_lock,
+                        error_code=receive_timeout.error_code,
+                        error_message=receive_timeout.error_message,
+                        api_key=None,
+                        response_create_gate=session.response_create_gate,
+                    )
+                    session.closed = True
+                    break
+
+                if message.kind == "text" and message.text is not None:
+                    await self._process_http_bridge_upstream_text(session, message.text)
+                    continue
+
+                retried = await self._retry_http_bridge_precreated_request(session)
+                if retried:
+                    continue
+                async with session.pending_lock:
+                    session.queued_request_count = 0
+                await self._fail_pending_websocket_requests(
+                    account_id_value=session.account.id,
+                    pending_requests=session.pending_requests,
+                    pending_lock=session.pending_lock,
+                    error_code="stream_incomplete",
+                    error_message=_upstream_websocket_disconnect_message(message),
+                    api_key=None,
+                    response_create_gate=session.response_create_gate,
+                )
+                session.closed = True
+                break
+        finally:
+            session.closed = True
+
+    async def _retry_http_bridge_request_on_fresh_upstream(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+    ) -> bool:
+        if request_state.replay_count >= 1:
+            return False
+        request_state.replay_count += 1
+        _log_http_bridge_event(
+            "retry_fresh_upstream",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=1,
+        )
+        try:
+            await self._reconnect_http_bridge_session(
+                session,
+                request_state=request_state,
+                restart_reader=True,
+            )
+            await session.upstream.send_text(text_data)
+            session.last_used_at = time.monotonic()
+            return True
+        except Exception:
+            logger.warning("HTTP bridge retry on fresh upstream failed", exc_info=True)
+            return False
+
+    async def _retry_http_bridge_precreated_request(self, session: "_HTTPBridgeSession") -> bool:
+        async with session.pending_lock:
+            if len(session.pending_requests) != 1:
+                return False
+            request_state = session.pending_requests[0]
+            if request_state.response_id is not None:
+                return False
+            if not request_state.awaiting_response_created:
+                return False
+            if not request_state.request_text:
+                return False
+            if request_state.replay_count >= 1:
+                return False
+            request_text = request_state.request_text
+            request_state.replay_count += 1
+        _log_http_bridge_event(
+            "retry_precreated",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=1,
+        )
+        try:
+            await self._reconnect_http_bridge_session(session, request_state=request_state)
+            await session.upstream.send_text(request_text)
+            session.last_used_at = time.monotonic()
+            return True
+        except Exception:
+            logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
+            return False
+
+    async def _reconnect_http_bridge_session(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        restart_reader: bool = False,
+    ) -> None:
+        old_account_id = session.account.id
+        old_upstream = session.upstream
+        old_reader = session.upstream_reader if restart_reader else None
+        if old_reader is not None:
+            old_reader.cancel()
+            if old_reader is not asyncio.current_task():
+                try:
+                    await old_reader
+                except asyncio.CancelledError:
+                    pass
+        try:
+            await old_upstream.close()
+        except Exception:
+            logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
+
+        deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
+        settings = await get_settings_cache().get()
+        selection = await self._select_account_with_budget(
+            deadline,
+            request_id=request_state.request_id,
+            kind="http_bridge",
+            sticky_key=session.affinity.key,
+            sticky_kind=session.affinity.kind,
+            reallocate_sticky=session.affinity.reallocate_sticky,
+            sticky_max_age_seconds=session.affinity.max_age_seconds,
+            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+            routing_strategy=_routing_strategy(settings),
+            model=session.request_model,
+        )
+        account = selection.account
+        if account is None:
+            raise ProxyResponseError(
+                503,
+                openai_error(
+                    selection.error_code or "no_accounts",
+                    selection.error_message or "No active accounts available",
+                    error_type="server_error",
+                ),
+            )
+        account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
+        connect_headers = _headers_with_turn_state(session.headers, session.upstream_turn_state)
+        upstream = await self._open_upstream_websocket_with_budget(
+            account,
+            connect_headers,
+            timeout_seconds=_remaining_budget_seconds(deadline),
+        )
+        session.account = account
+        session.headers = connect_headers
+        session.upstream = upstream
+        session.upstream_control = _WebSocketUpstreamControl()
+        session.closed = False
+        session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+        if restart_reader:
+            session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+        _log_http_bridge_event(
+            "reconnect",
+            session.key,
+            account_id=account.id,
+            model=session.request_model,
+            detail=f"previous_account={old_account_id}",
+        )
+
+    async def _process_http_bridge_upstream_text(
+        self,
+        session: "_HTTPBridgeSession",
+        text: str,
+    ) -> None:
+        event_block = f"data: {text}\n\n"
+        payload = parse_sse_data_json(event_block)
+        event = parse_sse_event(event_block)
+        event_type = _event_type_from_payload(event, payload)
+        response_id = _websocket_response_id(event, payload)
+
+        async with session.pending_lock:
+            matched_request_state = None
+            created_request_state = None
+            if event_type == "response.created":
+                matched_request_state = _assign_websocket_response_id(session.pending_requests, response_id)
+                created_request_state = matched_request_state
+                release_create_gate = matched_request_state is not None
+            elif response_id is not None:
+                matched_request_state = _find_websocket_request_state_by_response_id(
+                    session.pending_requests,
+                    response_id,
+                )
+                release_create_gate = False
+            elif response_id is None and len(session.pending_requests) == 1:
+                matched_request_state = session.pending_requests[0]
+                release_create_gate = False
+            else:
+                release_create_gate = False
+
+            if matched_request_state is not None:
+                actual_service_tier = _service_tier_from_event_payload(payload)
+                if actual_service_tier is not None:
+                    matched_request_state.service_tier = actual_service_tier
+
+            terminal_request_state = None
+            if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                terminal_request_state = _pop_terminal_websocket_request_state(
+                    session.pending_requests,
+                    response_id=response_id,
+                    fallback_request_state=matched_request_state,
+                )
+                if terminal_request_state is not None:
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+
+        if event_type == "response.created" and release_create_gate and created_request_state is not None:
+            _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
+
+        if matched_request_state is not None and matched_request_state.event_queue is not None:
+            await matched_request_state.event_queue.put(event_block)
+
+        if terminal_request_state is None:
+            return
+
+        if terminal_request_state is not matched_request_state and terminal_request_state.event_queue is not None:
+            await terminal_request_state.event_queue.put(event_block)
+        if terminal_request_state.event_queue is not None:
+            await terminal_request_state.event_queue.put(None)
+
+        if event_type in {"response.failed", "response.incomplete", "error"}:
+            error_code = None
+            if event_type == "error":
+                error = event.error if event else None
+                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+            elif event and event.response:
+                error = event.response.error
+                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+            _log_http_bridge_event(
+                "terminal_error",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail=error_code,
+                pending_count=await self._http_bridge_pending_count(session),
+            )
+
+        await self._finalize_websocket_request_state(
+            terminal_request_state,
+            account=session.account,
+            account_id_value=session.account.id,
+            event=event,
+            event_type=event_type,
+            payload=payload,
+            api_key=terminal_request_state.api_key,
+            upstream_control=session.upstream_control,
+            response_create_gate=session.response_create_gate,
+        )
 
     async def _refresh_websocket_api_key_policy(self, api_key: ApiKeyData | None) -> ApiKeyData | None:
         if api_key is None:
@@ -1518,25 +2473,26 @@ class ProxyService:
         reasoning_tokens = (
             usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
         )
-        await self._write_request_log(
-            account_id=account_id_value,
-            api_key=api_key,
-            request_id=response_id,
-            model=request_state.model or "",
-            latency_ms=latency_ms,
-            status=status,
-            error_code=error_code,
-            error_message=error_message,
-            input_tokens=usage.input_tokens if usage else None,
-            output_tokens=usage.output_tokens if usage else None,
-            cached_input_tokens=cached_input_tokens,
-            reasoning_tokens=reasoning_tokens,
-            reasoning_effort=request_state.reasoning_effort,
-            request_kind=request_state.request_kind,
-            session_id_hash=request_state.session_id_hash,
-            transport=_REQUEST_TRANSPORT_WEBSOCKET,
-            service_tier=response_service_tier,
-        )
+        if not request_state.skip_request_log:
+            await self._write_request_log(
+                account_id=account_id_value,
+                api_key=api_key,
+                request_id=response_id,
+                model=request_state.model or "",
+                latency_ms=latency_ms,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                input_tokens=usage.input_tokens if usage else None,
+                output_tokens=usage.output_tokens if usage else None,
+                cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=reasoning_tokens,
+                reasoning_effort=request_state.reasoning_effort,
+                request_kind=request_state.request_kind,
+                session_id_hash=request_state.session_id_hash,
+                transport=request_state.transport,
+                service_tier=response_service_tier,
+            )
 
     async def _write_websocket_connect_failure(
         self,
@@ -1547,6 +2503,8 @@ class ProxyService:
         error_code: str,
         error_message: str,
     ) -> None:
+        if request_state.skip_request_log:
+            return
         await self._write_request_log(
             account_id=account_id,
             api_key=api_key,
@@ -1559,7 +2517,7 @@ class ProxyService:
             reasoning_effort=request_state.reasoning_effort,
             request_kind=request_state.request_kind,
             session_id_hash=request_state.session_id_hash,
-            transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            transport=request_state.transport,
             service_tier=request_state.service_tier,
         )
 
@@ -1634,6 +2592,17 @@ class ProxyService:
         for request_state in remaining:
             if response_create_gate is not None:
                 _release_websocket_response_create_gate(request_state, response_create_gate)
+            if request_state.event_queue is not None:
+                await request_state.event_queue.put(
+                    format_sse_event(
+                        response_failed_event(
+                            error_code,
+                            error_message,
+                            response_id=request_state.response_id or request_state.request_id,
+                        )
+                    )
+                )
+                await request_state.event_queue.put(None)
             if websocket is not None and client_send_lock is not None:
                 await self._emit_websocket_terminal_error(
                     websocket,
@@ -1643,7 +2612,7 @@ class ProxyService:
                     error_message=error_message,
                 )
             await self._release_websocket_reservation(request_state.api_key_reservation)
-            if account_id_value is None:
+            if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
             await self._write_request_log(
@@ -1658,7 +2627,7 @@ class ProxyService:
                 reasoning_effort=request_state.reasoning_effort,
                 request_kind=request_state.request_kind,
                 session_id_hash=request_state.session_id_hash,
-                transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                transport=request_state.transport,
                 service_tier=request_state.service_tier,
             )
 
@@ -1896,6 +2865,7 @@ class ProxyService:
         deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
@@ -1906,6 +2876,19 @@ class ProxyService:
             api_key=api_key,
         )
         session_id_hash = _session_id_hash_from_headers(headers)
+        sticky_key_source = "none"
+        if affinity.kind == StickySessionKind.CODEX_SESSION:
+            sticky_key_source = "session_header"
+        elif affinity.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "stream",
+            payload,
+            headers,
+            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
+        )
         routing_strategy = _routing_strategy(settings)
         max_attempts = 3
         settled = False
@@ -3023,6 +4006,42 @@ class _WebSocketRequestState:
     awaiting_response_created: bool = False
     request_kind: str = _REQUEST_KIND_RESPONSES
     session_id_hash: str | None = None
+    event_queue: asyncio.Queue[str | None] | None = None
+    transport: str = _REQUEST_TRANSPORT_WEBSOCKET
+    api_key: ApiKeyData | None = None
+    request_text: str | None = None
+    replay_count: int = 0
+    skip_request_log: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeSessionKey:
+    affinity_kind: str
+    affinity_key: str
+    api_key_id: str | None
+
+
+@dataclass(slots=True)
+class _HTTPBridgeSession:
+    key: _HTTPBridgeSessionKey
+    headers: dict[str, str]
+    affinity: _AffinityPolicy
+    request_model: str | None
+    account: Account
+    upstream: UpstreamResponsesWebSocket
+    upstream_control: _WebSocketUpstreamControl
+    pending_requests: deque[_WebSocketRequestState]
+    pending_lock: anyio.Lock
+    response_create_gate: asyncio.Semaphore
+    queued_request_count: int
+    last_used_at: float
+    idle_ttl_seconds: float
+    codex_session: bool = False
+    prewarmed: bool = False
+    prewarm_lock: anyio.Lock | None = None
+    upstream_turn_state: str | None = None
+    upstream_reader: asyncio.Task[None] | None = None
+    closed: bool = False
 
 
 @dataclass(slots=True)
@@ -3297,6 +4316,10 @@ def _maybe_log_proxy_request_shape(
     kind: str,
     payload: ResponsesRequest | ResponsesCompactRequest,
     headers: Mapping[str, str],
+    *,
+    sticky_kind: str | None = None,
+    sticky_key_source: str | None = None,
+    prompt_cache_key_set: bool | None = None,
 ) -> None:
     settings = get_settings()
     if not settings.log_proxy_request_shape:
@@ -3315,10 +4338,13 @@ def _maybe_log_proxy_request_shape(
     fields_set = sorted(payload.model_fields_set)
     input_summary = _summarize_input(payload.input)
     header_keys = _interesting_header_keys(headers)
+    session_header_present = _sticky_key_from_session_header(headers) is not None
+    tools_hash = _tools_hash(payload)
 
     logger.warning(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
-        "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s",
+        "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
+        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s session_header_present=%s tools_hash=%s",
         request_id,
         kind,
         payload.model,
@@ -3329,6 +4355,11 @@ def _maybe_log_proxy_request_shape(
         fields_set,
         extra_keys,
         header_keys,
+        sticky_kind,
+        sticky_key_source,
+        prompt_cache_key_set,
+        session_header_present,
+        tools_hash,
     )
 
 
@@ -3403,6 +4434,14 @@ def _truncate_identifier(value: str, *, max_length: int = 96) -> str:
     if len(value) <= max_length:
         return value
     return f"{value[:48]}...{value[-16:]}"
+
+
+def _tools_hash(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    payload_tools = payload.to_payload().get("tools")
+    if not isinstance(payload_tools, list) or not payload_tools:
+        return None
+    serialized = json.dumps(payload_tools, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return _hash_identifier(serialized)
 
 
 def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
@@ -3498,11 +4537,14 @@ def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
 
 
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
-    for key, value in headers.items():
-        if key.lower() != "session_id":
+    normalized = {key.lower(): value for key, value in headers.items()}
+    for key in ("session_id", "x-codex-session-id", "x-codex-conversation-id"):
+        value = normalized.get(key)
+        if not isinstance(value, str):
             continue
         stripped = value.strip()
-        return stripped or None
+        if stripped:
+            return stripped
     return None
 
 
@@ -3511,6 +4553,69 @@ def _session_id_hash_from_headers(headers: Mapping[str, str]) -> str | None:
     if session_id is None:
         return None
     return _hash_identifier(session_id)
+
+
+def _sticky_key_from_turn_state_header(headers: Mapping[str, str]) -> str | None:
+    normalized = {key.lower(): value for key, value in headers.items()}
+    value = normalized.get("x-codex-turn-state")
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def ensure_downstream_turn_state(headers: Mapping[str, str]) -> str:
+    existing = _sticky_key_from_turn_state_header(headers)
+    if existing is not None:
+        return existing
+    return f"turn_{uuid4().hex}"
+
+
+def build_downstream_turn_state_accept_headers(turn_state: str) -> list[tuple[bytes, bytes]]:
+    return [(b"x-codex-turn-state", turn_state.encode("utf-8"))]
+
+
+def _upstream_turn_state_from_socket(upstream: UpstreamResponsesWebSocket | None) -> str | None:
+    if upstream is None:
+        return None
+    getter = getattr(upstream, "response_header", None)
+    if not callable(getter):
+        return None
+    value = getter("x-codex-turn-state")
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:
+    forwarded = dict(headers)
+    if turn_state:
+        forwarded["x-codex-turn-state"] = turn_state
+    return forwarded
+
+
+def _resolve_prompt_cache_key(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    openai_cache_affinity: bool,
+    api_key: ApiKeyData | None,
+) -> tuple[str | None, str]:
+    cache_key = _prompt_cache_key_from_request_model(payload)
+    if isinstance(cache_key, str):
+        stripped = cache_key.strip()
+        if stripped:
+            if stripped != cache_key:
+                payload.prompt_cache_key = stripped
+            return stripped, "payload"
+    if not openai_cache_affinity:
+        return None, "none"
+    settings = get_settings()
+    if not settings.openai_prompt_cache_key_derivation_enabled:
+        return None, "none"
+    cache_key = _derive_prompt_cache_key(payload, api_key)
+    payload.prompt_cache_key = cache_key
+    return cache_key, "derived"
 
 
 def _sticky_key_for_responses_request(
@@ -3523,6 +4628,17 @@ def _sticky_key_for_responses_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
+    cache_key, _ = _resolve_prompt_cache_key(
+        payload,
+        openai_cache_affinity=openai_cache_affinity,
+        api_key=api_key,
+    )
+    turn_state_key = _sticky_key_from_turn_state_header(headers)
+    if turn_state_key:
+        return _AffinityPolicy(
+            key=turn_state_key,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
@@ -3530,10 +4646,6 @@ def _sticky_key_for_responses_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
-    cache_key = _sticky_key_from_payload(payload)
-    if cache_key is None and openai_cache_affinity:
-        cache_key = _derive_prompt_cache_key(payload, api_key)
-        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
             key=cache_key,
@@ -3547,6 +4659,135 @@ def _sticky_key_for_responses_request(
             reallocate_sticky=True,
         )
     return _AffinityPolicy()
+
+
+def _make_http_bridge_session_key(
+    payload: ResponsesRequest,
+    *,
+    headers: Mapping[str, str],
+    affinity: _AffinityPolicy,
+    api_key: ApiKeyData | None,
+    request_id: str,
+) -> _HTTPBridgeSessionKey:
+    turn_state_key = _sticky_key_from_turn_state_header(headers)
+    if turn_state_key is not None:
+        affinity_key = turn_state_key
+        affinity_kind = "turn_state_header"
+    else:
+        session_key = _sticky_key_from_session_header(headers)
+        if session_key is not None:
+            affinity_key = session_key
+            affinity_kind = "session_header"
+        else:
+            affinity_key = affinity.key or request_id
+            affinity_kind = affinity.kind.value if affinity.kind is not None else "request"
+    return _HTTPBridgeSessionKey(
+        affinity_kind=affinity_kind,
+        affinity_key=affinity_key,
+        api_key_id=api_key.id if api_key is not None else None,
+    )
+
+
+def _effective_http_bridge_idle_ttl_seconds(
+    *,
+    affinity: _AffinityPolicy,
+    idle_ttl_seconds: float,
+    codex_idle_ttl_seconds: float,
+) -> float:
+    if affinity.kind == StickySessionKind.CODEX_SESSION:
+        return max(idle_ttl_seconds, codex_idle_ttl_seconds)
+    return idle_ttl_seconds
+
+
+def _http_bridge_eviction_priority(session: _HTTPBridgeSession) -> tuple[int, float]:
+    return (0 if not session.codex_session else 1, session.last_used_at)
+
+
+def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
+    try:
+        payload = json.loads(text_data)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("generate") is False:
+        return None
+    previous_response_id = payload.get("previous_response_id")
+    if isinstance(previous_response_id, str) and previous_response_id.strip():
+        return None
+    warmup_payload = dict(payload)
+    warmup_payload["generate"] = False
+    return json.dumps(warmup_payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _normalized_http_bridge_instance_ring(settings: object) -> tuple[str, tuple[str, ...]]:
+    instance_id_value = getattr(settings, "http_responses_session_bridge_instance_id", None)
+    instance_id = instance_id_value.strip() if isinstance(instance_id_value, str) else ""
+    if not instance_id:
+        instance_id = "codex-lb"
+    ring_value = getattr(settings, "http_responses_session_bridge_instance_ring", None)
+    ring_entries: list[str] = []
+    if isinstance(ring_value, list):
+        for entry in ring_value:
+            if isinstance(entry, str):
+                stripped = entry.strip()
+                if stripped:
+                    ring_entries.append(stripped)
+    if instance_id not in ring_entries:
+        ring_entries.append(instance_id)
+    return instance_id, tuple(sorted(set(ring_entries)))
+
+
+def _http_bridge_owner_instance(key: _HTTPBridgeSessionKey, settings: object) -> str | None:
+    instance_id, ring = _normalized_http_bridge_instance_ring(settings)
+    if len(ring) <= 1:
+        return instance_id
+    hash_input = f"{key.affinity_kind}:{key.affinity_key}:{key.api_key_id or ''}"
+    digest = sha256(hash_input.encode("utf-8")).digest()
+    owner_index = int.from_bytes(digest[:8], "big") % len(ring)
+    return ring[owner_index]
+
+
+def _http_responses_session_bridge_enabled(settings: object) -> bool:
+    value = getattr(settings, "http_responses_session_bridge_enabled", None)
+    if isinstance(value, bool):
+        return value
+    return bool(getattr(get_settings(), "http_responses_session_bridge_enabled", True))
+
+
+def _log_http_bridge_event(
+    event: str,
+    key: _HTTPBridgeSessionKey,
+    *,
+    account_id: str | None,
+    model: str | None,
+    pending_count: int | None = None,
+    detail: str | None = None,
+) -> None:
+    level = logging.INFO
+    if event in {
+        "queue_full",
+        "submit_on_closed",
+        "send_failure",
+        "retry_fresh_upstream",
+        "retry_precreated",
+        "reconnect",
+        "terminal_error",
+        "capacity_exhausted_active_sessions",
+        "owner_mismatch",
+    }:
+        level = logging.WARNING
+    logger.log(
+        level,
+        "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s pending=%s detail=%s",
+        event,
+        key.affinity_kind,
+        _hash_identifier(key.affinity_key),
+        account_id,
+        model,
+        pending_count,
+        detail,
+    )
 
 
 def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
@@ -3567,6 +4808,11 @@ def _sticky_key_for_compact_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
+    cache_key, _ = _resolve_prompt_cache_key(
+        payload,
+        openai_cache_affinity=openai_cache_affinity,
+        api_key=api_key,
+    )
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
@@ -3574,10 +4820,6 @@ def _sticky_key_for_compact_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
-    cache_key = _sticky_key_from_compact_payload(payload)
-    if cache_key is None and openai_cache_affinity:
-        cache_key = _derive_prompt_cache_key(payload, api_key)
-        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
             key=cache_key,

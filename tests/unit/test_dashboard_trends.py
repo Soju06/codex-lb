@@ -170,3 +170,18 @@ class TestBuildTrendsFromBuckets:
         _, _, cost = build_trends_from_buckets(rows, SINCE)
 
         assert cost.total_usd_7d == pytest.approx(35.0)
+
+    def test_cost_is_computed_from_gpt_5_4_mini_pricing(self):
+        rows = [
+            _make_row(
+                slot_index=0,
+                model="gpt-5.4-mini",
+                input_tokens=1_000_000,
+                output_tokens=1_000_000,
+                cached_input_tokens=100_000,
+            ),
+        ]
+        _, _, cost = build_trends_from_buckets(rows, SINCE)
+
+        expected = (900_000 / 1_000_000) * 0.75 + (100_000 / 1_000_000) * 0.075 + (1_000_000 / 1_000_000) * 4.5
+        assert cost.total_usd_7d == pytest.approx(expected)

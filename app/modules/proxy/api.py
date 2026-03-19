@@ -52,6 +52,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallService
+from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     openai_invalid_payload_error,
@@ -137,10 +138,13 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    await websocket.accept()
+    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    forwarded_headers = dict(websocket.headers)
+    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
     await context.service.proxy_responses_websocket(
         websocket,
-        websocket.headers,
+        forwarded_headers,
         codex_session_affinity=True,
         openai_cache_affinity=True,
         api_key=api_key,
@@ -180,14 +184,18 @@ async def v1_responses(
             responses_payload,
             context,
             api_key,
+            codex_session_affinity=False,
             openai_cache_affinity=True,
+            prefer_http_bridge=True,
         )
     return await _collect_responses(
         request,
         responses_payload,
         context,
         api_key,
+        codex_session_affinity=False,
         openai_cache_affinity=True,
+        prefer_http_bridge=True,
     )
 
 
@@ -200,10 +208,13 @@ async def v1_responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    await websocket.accept()
+    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    forwarded_headers = dict(websocket.headers)
+    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
     await context.service.proxy_responses_websocket(
         websocket,
-        websocket.headers,
+        forwarded_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
         api_key=api_key,
@@ -364,6 +375,7 @@ async def v1_chat_completions(
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
+        codex_session_affinity=False,
         propagate_http_errors=True,
         openai_cache_affinity=True,
         api_key=api_key,
@@ -414,6 +426,7 @@ async def _stream_responses(
     codex_session_affinity: bool = False,
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
+    prefer_http_bridge: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -425,16 +438,28 @@ async def _stream_responses(
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
-    stream = context.service.stream_responses(
-        payload,
-        request.headers,
-        codex_session_affinity=codex_session_affinity,
-        propagate_http_errors=True,
-        openai_cache_affinity=openai_cache_affinity,
-        api_key=api_key,
-        api_key_reservation=reservation,
-        suppress_text_done_events=suppress_text_done_events,
-    )
+    if prefer_http_bridge:
+        stream = context.service.stream_http_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
+    else:
+        stream = context.service.stream_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
     try:
         first = await stream.__anext__()
     except StopAsyncIteration:
@@ -462,6 +487,7 @@ async def _collect_responses(
     codex_session_affinity: bool = False,
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
+    prefer_http_bridge: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -473,16 +499,28 @@ async def _collect_responses(
 
     rate_limit_headers = await context.service.rate_limit_headers()
     payload.stream = True
-    stream = context.service.stream_responses(
-        payload,
-        request.headers,
-        codex_session_affinity=codex_session_affinity,
-        propagate_http_errors=True,
-        openai_cache_affinity=openai_cache_affinity,
-        api_key=api_key,
-        api_key_reservation=reservation,
-        suppress_text_done_events=suppress_text_done_events,
-    )
+    if prefer_http_bridge:
+        stream = context.service.stream_http_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
+    else:
+        stream = context.service.stream_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
     try:
         response_payload = await _collect_responses_payload(stream)
     except ProxyResponseError as exc:
@@ -549,6 +587,7 @@ async def v1_responses_compact(
         compact_payload,
         context,
         api_key,
+        codex_session_affinity=False,
         openai_cache_affinity=True,
     )
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, ArrowRightLeft } from "lucide-react";
+import { Activity, ArrowRightLeft, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { getDashboardOverview } from "@/features/dashboard/api";
@@ -49,7 +49,7 @@ export function StatusBar() {
       <div className="mx-auto flex w-full max-w-[1500px] flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1.5">
           {isLive ? (
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-label="Live" />
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title="Live" />
           ) : (
             <Activity className="h-3 w-3" aria-hidden="true" />
           )}
@@ -58,6 +58,10 @@ export function StatusBar() {
         <span className="inline-flex items-center gap-1.5">
           <ArrowRightLeft className="h-3 w-3" aria-hidden="true" />
           <span className="font-medium">Routing:</span> {routingLabel}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <Tag className="h-3 w-3" aria-hidden="true" />
+          <span className="font-medium">Version:</span> {__APP_VERSION__}
         </span>
       </div>
     </footer>

@@ -589,6 +589,30 @@ async def test_v1_chat_completions_normalizes_tools_and_tool_choice(async_client
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_does_not_enable_codex_session_affinity(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_affinity_a", "chat-affinity-a@example.com")
+    await _import_account(async_client, "acc_chat_affinity_b", "chat-affinity-b@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["account_id"] = account_id
+        seen["prompt_cache_key"] = getattr(payload, "prompt_cache_key", None)
+        yield _completed_event("resp_chat_affinity")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather?"}],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload, headers={"session_id": "chat-session-123"})
+    assert resp.status_code == 200
+    assert isinstance(seen["prompt_cache_key"], str)
+    assert seen["prompt_cache_key"]
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_maps_reasoning_effort(async_client, monkeypatch):
     await _import_account(async_client, "acc_chat_reason", "chat-reason@example.com")
 

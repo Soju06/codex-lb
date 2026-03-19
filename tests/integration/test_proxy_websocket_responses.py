@@ -83,7 +83,12 @@ def _websocket_settings(**overrides):
         "prefer_earlier_reset_accounts": False,
         "sticky_threads_enabled": False,
         "openai_cache_affinity_max_age_seconds": 300,
+        "openai_prompt_cache_key_derivation_enabled": True,
         "routing_strategy": "usage_weighted",
+        "proxy_request_budget_seconds": 75.0,
+        "stream_idle_timeout_seconds": 300.0,
+        "log_proxy_request_shape": False,
+        "log_proxy_request_shape_raw_cache_key": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -577,7 +582,10 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
         async def get(self):
             return _websocket_settings()
 
-    runtime_settings = SimpleNamespace(proxy_request_budget_seconds=5.0, stream_idle_timeout_seconds=0.01)
+    runtime_settings = _websocket_settings(
+        proxy_request_budget_seconds=5.0,
+        stream_idle_timeout_seconds=0.01,
+    )
 
     async def allow_firewall(_websocket):
         return None

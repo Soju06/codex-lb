@@ -463,9 +463,45 @@ def _strip_unsupported_fields(payload: dict[str, JsonValue]) -> dict[str, JsonVa
     _normalize_openai_compatible_aliases(payload)
     _normalize_service_tier_aliases(payload)
     _sanitize_interleaved_reasoning_input(payload)
+    _canonicalize_tools(payload)
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
+
+
+def _canonicalize_tools(payload: dict[str, JsonValue]) -> None:
+    tools = payload.get("tools")
+    if not is_json_list(tools):
+        return
+    tool_list = cast(list[JsonValue], tools)
+    if not tool_list:
+        return
+    sorted_tools = sorted(tool_list, key=_tool_sort_key)
+    payload["tools"] = [_sort_keys_recursive(t) for t in sorted_tools]
+
+
+def _tool_sort_key(tool: JsonValue) -> str:
+    if not is_json_mapping(tool):
+        return ""
+    tool_map = cast(Mapping[str, JsonValue], tool)
+    name = tool_map.get("name")
+    if isinstance(name, str):
+        return name
+    func = tool_map.get("function")
+    if is_json_mapping(func):
+        func_name = cast(Mapping[str, JsonValue], func).get("name")
+        if isinstance(func_name, str):
+            return func_name
+    return ""
+
+
+def _sort_keys_recursive(value: JsonValue) -> JsonValue:
+    if is_json_mapping(value):
+        mapping = cast(Mapping[str, JsonValue], value)
+        return {k: _sort_keys_recursive(v) for k, v in sorted(mapping.items())}
+    if is_json_list(value):
+        return [_sort_keys_recursive(item) for item in cast(list[JsonValue], value)]
+    return value
 
 
 def _strip_compact_unsupported_fields(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:

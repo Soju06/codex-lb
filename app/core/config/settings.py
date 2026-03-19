@@ -75,7 +75,8 @@ class Settings(BaseSettings):
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
-    openai_cache_affinity_max_age_seconds: int = Field(default=300, gt=0)
+    openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
+    openai_prompt_cache_key_derivation_enabled: bool = True
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE

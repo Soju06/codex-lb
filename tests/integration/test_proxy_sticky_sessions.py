@@ -81,11 +81,13 @@ def _install_proxy_settings_cache(
     sticky_threads_enabled: bool,
     prefer_earlier_reset_accounts: bool = False,
     openai_cache_affinity_max_age_seconds: int = 300,
+    openai_prompt_cache_key_derivation_enabled: bool = True,
 ) -> None:
     settings = SimpleNamespace(
         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
         sticky_threads_enabled=sticky_threads_enabled,
         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+        openai_prompt_cache_key_derivation_enabled=openai_prompt_cache_key_derivation_enabled,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
@@ -571,7 +573,7 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
 
 
 @pytest.mark.asyncio
-async def test_v1_session_id_does_not_pin_routing_without_sticky_threads(async_client, monkeypatch):
+async def test_v1_session_id_does_not_create_durable_codex_session_affinity(async_client, monkeypatch):
     await _set_routing_settings(async_client, sticky_threads_enabled=False)
     acc_a_id = await _import_account(async_client, "acc_v1_sid_a", "v1_sid_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_v1_sid_b", "v1_sid_b@example.com")
@@ -645,6 +647,15 @@ async def test_v1_session_id_does_not_pin_routing_without_sticky_threads(async_c
     response = await async_client.post("/v1/responses/compact", json=compact_payload, headers=headers)
     assert response.status_code == 200
     assert compact_seen == ["acc_v1_sid_a"]
+
+    async with SessionLocal() as session:
+        codex_row = (
+            await session.execute(
+                text("SELECT kind FROM sticky_sessions WHERE key = :key"),
+                {"key": "v1-thread-123"},
+            )
+        ).fetchone()
+        assert codex_row is None
 
 
 @pytest.mark.asyncio
@@ -736,6 +747,103 @@ async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_s
     response = await async_client.post("/v1/responses", json=stream_payload)
     assert response.status_code == 200
     assert stream_seen == ["acc_v1_cache_a", "acc_v1_cache_a"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_derives_prompt_cache_key_when_absent(async_client, monkeypatch):
+    _install_proxy_settings_cache(
+        monkeypatch,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=60,
+    )
+    acc_a_id = await _import_account(async_client, "acc_v1_derived_a", "v1_derived_a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_v1_derived_b", "v1_derived_b@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen_keys: list[str | None] = []
+    seen_accounts: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        seen_accounts.append(account_id)
+        seen_keys.append(getattr(payload, "prompt_cache_key", None))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_v1_derived"}}\\n\\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": "hello", "stream": True}
+    response = await async_client.post("/v1/responses", json=payload)
+    assert response.status_code == 200
+    assert seen_accounts == ["acc_v1_derived_a"]
+    assert isinstance(seen_keys[0], str)
+    assert seen_keys[0]
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_session_affinity_also_forwards_prompt_cache_key_when_missing(async_client, monkeypatch):
+    _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
+    acc_id = await _import_account(async_client, "acc_codex_sid_1", "codex_sid_1@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen_keys: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        seen_keys.append(getattr(payload, "prompt_cache_key", None))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_backend_codex"}}\\n\\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "stream": True,
+        },
+        headers={"session_id": "backend-thread-123"},
+    )
+    assert response.status_code == 200
+    assert isinstance(seen_keys[0], str)
+    assert seen_keys[0]
+
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(
+                text("SELECT kind FROM sticky_sessions WHERE key = :key"),
+                {"key": "backend-thread-123"},
+            )
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "codex_session"
 
 
 @pytest.mark.asyncio

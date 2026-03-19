@@ -14,7 +14,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamStreamTransport"] == "default"
     assert payload["preferEarlierResetAccounts"] is False
     assert payload["routingStrategy"] == "usage_weighted"
-    assert payload["openaiCacheAffinityMaxAgeSeconds"] == 300
+    assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False

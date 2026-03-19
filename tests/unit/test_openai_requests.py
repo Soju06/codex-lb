@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from typing import Mapping, cast
+
 import pytest
 from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
+from app.core.types import JsonValue
 
 
 def test_responses_requires_instructions():
@@ -155,6 +158,46 @@ def test_openai_prompt_cache_aliases_are_normalized():
     assert "prompt_cache_retention" not in dumped
     assert "promptCacheKey" not in dumped
     assert "promptCacheRetention" not in dumped
+
+
+def test_settings_default_prompt_cache_affinity_ttl_is_1800():
+    from app.core.config.settings import Settings
+
+    settings = Settings()
+
+    assert settings.openai_cache_affinity_max_age_seconds == 1800
+
+
+def test_responses_to_payload_canonicalizes_tool_order_and_object_keys():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "zeta",
+                    "parameters": {"required": [], "type": "object", "properties": {}},
+                    "description": "later",
+                },
+                {
+                    "description": "first",
+                    "parameters": {"properties": {}, "required": [], "type": "object"},
+                    "type": "function",
+                    "name": "alpha",
+                },
+            ],
+        }
+    )
+
+    dumped = request.to_payload()
+    tools = cast(list[JsonValue], dumped["tools"])
+    first_tool = cast(Mapping[str, JsonValue], tools[0])
+    parameters = cast(Mapping[str, JsonValue], first_tool["parameters"])
+    assert first_tool["name"] == "alpha"
+    assert list(first_tool.keys()) == ["description", "name", "parameters", "type"]
+    assert list(parameters.keys()) == ["properties", "required", "type"]
 
 
 def test_openai_compatible_reasoning_aliases_are_normalized():

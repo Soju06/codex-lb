@@ -157,7 +157,6 @@ class ProxyService:
         request_transport: str = _REQUEST_TRANSPORT_HTTP,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
-        _maybe_log_proxy_request_shape("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
         return self._stream_with_retry(
             payload,
@@ -182,7 +181,6 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
     ) -> CompactResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
-        _maybe_log_proxy_request_shape("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
@@ -198,6 +196,7 @@ class ProxyService:
 
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
             payload,
             headers,
@@ -206,6 +205,19 @@ class ProxyService:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+        )
+        sticky_key_source = "none"
+        if affinity.kind == StickySessionKind.CODEX_SESSION:
+            sticky_key_source = "session_header"
+        elif affinity.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "compact",
+            payload,
+            headers,
+            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
         try:
@@ -882,6 +894,29 @@ class ProxyService:
             request_model=responses_payload.model,
             request_service_tier=forwarded_service_tier,
         )
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
+        affinity_policy = _sticky_key_for_responses_request(
+            responses_payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
+            openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=sticky_threads_enabled,
+            api_key=api_key,
+        )
+        sticky_key_source = "none"
+        if affinity_policy.kind == StickySessionKind.CODEX_SESSION:
+            sticky_key_source = "session_header"
+        elif affinity_policy.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "websocket",
+            responses_payload,
+            headers,
+            sticky_kind=affinity_policy.kind.value if affinity_policy.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(responses_payload) is not None,
+        )
 
         return _PreparedWebSocketRequest(
             text_data=json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":")),
@@ -894,15 +929,7 @@ class ProxyService:
                 started_at=time.monotonic(),
                 awaiting_response_created=True,
             ),
-            affinity_policy=_sticky_key_for_responses_request(
-                responses_payload,
-                headers,
-                codex_session_affinity=codex_session_affinity,
-                openai_cache_affinity=openai_cache_affinity,
-                openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
-                sticky_threads_enabled=sticky_threads_enabled,
-                api_key=api_key,
-            ),
+            affinity_policy=affinity_policy,
         )
 
     async def _connect_proxy_websocket(
@@ -1878,6 +1905,7 @@ class ProxyService:
         deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
@@ -1886,6 +1914,19 @@ class ProxyService:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+        )
+        sticky_key_source = "none"
+        if affinity.kind == StickySessionKind.CODEX_SESSION:
+            sticky_key_source = "session_header"
+        elif affinity.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "stream",
+            payload,
+            headers,
+            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
         max_attempts = 3
@@ -3240,6 +3281,10 @@ def _maybe_log_proxy_request_shape(
     kind: str,
     payload: ResponsesRequest | ResponsesCompactRequest,
     headers: Mapping[str, str],
+    *,
+    sticky_kind: str | None = None,
+    sticky_key_source: str | None = None,
+    prompt_cache_key_set: bool | None = None,
 ) -> None:
     settings = get_settings()
     if not settings.log_proxy_request_shape:
@@ -3258,10 +3303,13 @@ def _maybe_log_proxy_request_shape(
     fields_set = sorted(payload.model_fields_set)
     input_summary = _summarize_input(payload.input)
     header_keys = _interesting_header_keys(headers)
+    session_header_present = _sticky_key_from_session_header(headers) is not None
+    tools_hash = _tools_hash(payload)
 
     logger.warning(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
-        "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s",
+        "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
+        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s session_header_present=%s tools_hash=%s",
         request_id,
         kind,
         payload.model,
@@ -3272,6 +3320,11 @@ def _maybe_log_proxy_request_shape(
         fields_set,
         extra_keys,
         header_keys,
+        sticky_kind,
+        sticky_key_source,
+        prompt_cache_key_set,
+        session_header_present,
+        tools_hash,
     )
 
 
@@ -3346,6 +3399,14 @@ def _truncate_identifier(value: str, *, max_length: int = 96) -> str:
     if len(value) <= max_length:
         return value
     return f"{value[:48]}...{value[-16:]}"
+
+
+def _tools_hash(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    payload_tools = payload.to_payload().get("tools")
+    if not isinstance(payload_tools, list) or not payload_tools:
+        return None
+    serialized = json.dumps(payload_tools, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return _hash_identifier(serialized)
 
 
 def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
@@ -3441,12 +3502,38 @@ def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
 
 
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
-    for key, value in headers.items():
-        if key.lower() != "session_id":
+    normalized = {key.lower(): value for key, value in headers.items()}
+    for key in ("session_id", "x-codex-session-id", "x-codex-conversation-id"):
+        value = normalized.get(key)
+        if not isinstance(value, str):
             continue
         stripped = value.strip()
-        return stripped or None
+        if stripped:
+            return stripped
     return None
+
+
+def _resolve_prompt_cache_key(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    openai_cache_affinity: bool,
+    api_key: ApiKeyData | None,
+) -> tuple[str | None, str]:
+    cache_key = _prompt_cache_key_from_request_model(payload)
+    if isinstance(cache_key, str):
+        stripped = cache_key.strip()
+        if stripped:
+            if stripped != cache_key:
+                payload.prompt_cache_key = stripped
+            return stripped, "payload"
+    if not openai_cache_affinity:
+        return None, "none"
+    settings = get_settings()
+    if not settings.openai_prompt_cache_key_derivation_enabled:
+        return None, "none"
+    cache_key = _derive_prompt_cache_key(payload, api_key)
+    payload.prompt_cache_key = cache_key
+    return cache_key, "derived"
 
 
 def _sticky_key_for_responses_request(
@@ -3459,6 +3546,11 @@ def _sticky_key_for_responses_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
+    cache_key, _ = _resolve_prompt_cache_key(
+        payload,
+        openai_cache_affinity=openai_cache_affinity,
+        api_key=api_key,
+    )
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
@@ -3466,10 +3558,6 @@ def _sticky_key_for_responses_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
-    cache_key = _sticky_key_from_payload(payload)
-    if cache_key is None and openai_cache_affinity:
-        cache_key = _derive_prompt_cache_key(payload, api_key)
-        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
             key=cache_key,
@@ -3503,6 +3591,11 @@ def _sticky_key_for_compact_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
+    cache_key, _ = _resolve_prompt_cache_key(
+        payload,
+        openai_cache_affinity=openai_cache_affinity,
+        api_key=api_key,
+    )
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
@@ -3510,10 +3603,6 @@ def _sticky_key_for_compact_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
             )
-    cache_key = _sticky_key_from_compact_payload(payload)
-    if cache_key is None and openai_cache_affinity:
-        cache_key = _derive_prompt_cache_key(payload, api_key)
-        payload.prompt_cache_key = cache_key
     if openai_cache_affinity:
         return _AffinityPolicy(
             key=cache_key,

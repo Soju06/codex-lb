@@ -11,6 +11,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
 
 pytestmark = pytest.mark.integration
@@ -53,16 +54,8 @@ async def _create_accounts() -> list[Account]:
 
 async def _set_affinity_ttl(seconds: int) -> None:
     async with SessionLocal() as session:
-        await session.execute(
-            text(
-                """
-                UPDATE dashboard_settings
-                SET openai_cache_affinity_max_age_seconds = :seconds
-                WHERE id = 1
-                """
-            ),
-            {"seconds": seconds},
-        )
+        settings = await SettingsRepository(session).get_or_create()
+        settings.openai_cache_affinity_max_age_seconds = seconds
         await session.commit()
 
 

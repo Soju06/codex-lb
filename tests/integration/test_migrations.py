@@ -491,7 +491,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     text("SELECT openai_cache_affinity_max_age_seconds FROM dashboard_settings WHERE id=1")
                 )
             ).scalar_one()
-            assert affinity_ttl == 300
+            assert affinity_ttl == 1800
             sticky_columns_rows = (await session.execute(text("PRAGMA table_info(sticky_sessions)"))).fetchall()
             sticky_columns = {str(row[1]) for row in sticky_columns_rows if len(row) > 1}
             assert "kind" in sticky_columns

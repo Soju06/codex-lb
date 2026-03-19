@@ -180,6 +180,7 @@ async def v1_responses(
             responses_payload,
             context,
             api_key,
+            codex_session_affinity=False,
             openai_cache_affinity=True,
         )
     return await _collect_responses(
@@ -187,6 +188,7 @@ async def v1_responses(
         responses_payload,
         context,
         api_key,
+        codex_session_affinity=False,
         openai_cache_affinity=True,
     )
 
@@ -364,6 +366,7 @@ async def v1_chat_completions(
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
+        codex_session_affinity=False,
         propagate_http_errors=True,
         openai_cache_affinity=True,
         api_key=api_key,
@@ -549,6 +552,7 @@ async def v1_responses_compact(
         compact_payload,
         context,
         api_key,
+        codex_session_affinity=False,
         openai_cache_affinity=True,
     )
 

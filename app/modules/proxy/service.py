@@ -299,24 +299,6 @@ class ProxyService:
             max_sessions=max_sessions,
         )
 
-        queued_request_count = await self._http_bridge_pending_count(session)
-        if queued_request_count >= queue_limit:
-            _log_http_bridge_event(
-                "queue_full",
-                bridge_session_key,
-                account_id=session.account.id,
-                model=session.request_model,
-                pending_count=queued_request_count,
-            )
-            raise ProxyResponseError(
-                429,
-                openai_error(
-                    "rate_limit_exceeded",
-                    "HTTP responses session bridge queue is full",
-                    error_type="rate_limit_error",
-                ),
-            )
-
         request_state, text_data = self._prepare_http_bridge_request(
             payload,
             api_key=api_key,
@@ -324,7 +306,12 @@ class ProxyService:
         )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
 
-        await self._submit_http_bridge_request(session, request_state=request_state, text_data=text_data)
+        await self._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=text_data,
+            queue_limit=queue_limit,
+        )
 
         try:
             while True:
@@ -1572,6 +1559,7 @@ class ProxyService:
             pending_requests=deque(),
             pending_lock=anyio.Lock(),
             response_create_gate=asyncio.Semaphore(1),
+            queued_request_count=0,
             last_used_at=time.monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,
         )
@@ -1584,6 +1572,7 @@ class ProxyService:
         *,
         request_state: _WebSocketRequestState,
         text_data: str,
+        queue_limit: int,
     ) -> None:
         if session.closed:
             _log_http_bridge_event(
@@ -1596,6 +1585,24 @@ class ProxyService:
                 502,
                 openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
             )
+        async with session.pending_lock:
+            if session.queued_request_count >= queue_limit:
+                _log_http_bridge_event(
+                    "queue_full",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    pending_count=session.queued_request_count,
+                )
+                raise ProxyResponseError(
+                    429,
+                    openai_error(
+                        "rate_limit_exceeded",
+                        "HTTP responses session bridge queue is full",
+                        error_type="rate_limit_error",
+                    ),
+                )
+            session.queued_request_count += 1
         await session.response_create_gate.acquire()
         async with session.pending_lock:
             session.pending_requests.append(request_state)
@@ -1617,6 +1624,10 @@ class ProxyService:
             )
             if retried:
                 return
+            async with session.pending_lock:
+                if request_state in session.pending_requests:
+                    session.pending_requests.remove(request_state)
+                session.queued_request_count = max(0, session.queued_request_count - 1)
             await self._fail_pending_websocket_requests(
                 account_id_value=session.account.id,
                 pending_requests=deque([request_state]),
@@ -1665,6 +1676,8 @@ class ProxyService:
                     retried = await self._retry_http_bridge_precreated_request(session)
                     if retried:
                         continue
+                    async with session.pending_lock:
+                        session.queued_request_count = 0
                     await self._fail_pending_websocket_requests(
                         account_id_value=session.account.id,
                         pending_requests=session.pending_requests,
@@ -1684,6 +1697,8 @@ class ProxyService:
                 retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
+                async with session.pending_lock:
+                    session.queued_request_count = 0
                 await self._fail_pending_websocket_requests(
                     account_id_value=session.account.id,
                     pending_requests=session.pending_requests,
@@ -1850,6 +1865,8 @@ class ProxyService:
                     response_id=response_id,
                     fallback_request_state=matched_request_state,
                 )
+                if terminal_request_state is not None:
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
@@ -2351,14 +2368,12 @@ class ProxyService:
                 _release_websocket_response_create_gate(request_state, response_create_gate)
             if request_state.event_queue is not None:
                 await request_state.event_queue.put(
-                    json.dumps(
+                    format_sse_event(
                         response_failed_event(
                             error_code,
                             error_message,
                             response_id=request_state.response_id or request_state.request_id,
-                        ),
-                        ensure_ascii=True,
-                        separators=(",", ":"),
+                        )
                     )
                 )
                 await request_state.event_queue.put(None)
@@ -3751,6 +3766,7 @@ class _HTTPBridgeSession:
     pending_requests: deque[_WebSocketRequestState]
     pending_lock: anyio.Lock
     response_create_gate: asyncio.Semaphore
+    queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
     upstream_reader: asyncio.Task[None] | None = None

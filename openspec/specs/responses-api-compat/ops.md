@@ -199,6 +199,14 @@ Dashboard shortcut:
 - `HTTP` means HTTP proxy traffic
 - `--` means a legacy row written before transport logging existed
 
+## Additional Signals After Turn-State / Bridge Hardening
+
+- Watch websocket accept traffic for a non-empty `x-codex-turn-state` header on `/backend-api/codex/responses`.
+- If native Codex websocket reconnects are flaky, verify the client is replaying that same `x-codex-turn-state` header.
+- `403` / `404` websocket handshake failures should now stay visible as websocket errors; they should no longer disappear behind automatic HTTP fallback.
+- In HTTP bridge logs, idle eviction should prefer prompt-cache sessions before Codex-session bridges when both are idle.
+- On Codex-affinity HTTP bridges, an internal `generate=false` prewarm only appears when the dedicated Codex bridge prewarm flag is enabled.
+
 ## Result Matrix
 
 - Direct upstream probe = `default`, `codex-lb` run = `default`:
@@ -273,10 +281,13 @@ If you deploy multiple replicas behind a load balancer, configure front-door aff
 
 Without front-door affinity, each replica will maintain its own in-memory bridge pool and HTTP continuity can fragment across instances.
 
+If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring so the proxy can fail closed with `bridge_instance_mismatch` rather than silently creating a second bridge on the wrong replica.
+
 ### Failure interpretation
 
 - `queue_full`: one bridge key is overloaded; increase bridge capacity carefully or reduce per-session concurrency upstream.
 - `capacity_exhausted_active_sessions`: the bridge pool hit `max_sessions` while every existing session still had pending work. The proxy intentionally refused the new request with `429` instead of evicting an active session. Mitigate by increasing pool size carefully, reducing concurrent bridge fan-out, or improving front-door affinity so related calls land on the same replica.
+- `owner_mismatch` / `bridge_instance_mismatch`: deterministic replica ownership is enabled for a stable bridge key and the request landed on the wrong instance. Fix ingress affinity or route the stable bridge key to the logged owner instance. Requests that only have an unstable per-request bridge key are intentionally exempt from owner enforcement.
 - `reconnect`: the bridge recreated an upstream websocket before response creation and retried once.
 - `terminal_error` with `previous_response_not_found`: continuity was already broken upstream; inspect replica affinity, bridge eviction timing, or upstream resets.
 - plain `transport = "http"` request logs are still expected for bridged HTTP requests; the internal upstream websocket does not change external transport accounting.

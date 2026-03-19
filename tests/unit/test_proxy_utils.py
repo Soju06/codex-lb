@@ -1700,7 +1700,7 @@ async def test_stream_responses_auto_transport_keeps_http_for_bare_session_affin
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket_handshake_rejected(monkeypatch):
+async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket_upgrade_required(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_stream_transport = "auto"
@@ -1720,7 +1720,7 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
 
     async def fake_open_upstream_websocket(**kwargs):
         attempts["websocket"] += 1
-        raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=403, message="Forbidden")
+        raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=426, message="Upgrade Required")
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "get_model_registry", lambda: registry)
@@ -1747,6 +1747,54 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     assert attempts["websocket"] == 1
     assert session.calls
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_auto_transport_does_not_hide_forbidden_websocket_handshake(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "auto"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    registry = SimpleNamespace(
+        get_snapshot=lambda: SimpleNamespace(models={"gpt-5.4": SimpleNamespace(prefer_websockets=True)})
+    )
+    request_info = cast(RequestInfo, SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses"))
+
+    async def fake_open_upstream_websocket(**kwargs):
+        raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=403, message="Forbidden")
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "get_model_registry", lambda: registry)
+    monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']))
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert not session.calls
+    event = json.loads(events[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_error"
 
 
 @pytest.mark.asyncio

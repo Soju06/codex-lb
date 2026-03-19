@@ -52,6 +52,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallService
+from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     openai_invalid_payload_error,
@@ -137,10 +138,13 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    await websocket.accept()
+    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    forwarded_headers = dict(websocket.headers)
+    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
     await context.service.proxy_responses_websocket(
         websocket,
-        websocket.headers,
+        forwarded_headers,
         codex_session_affinity=True,
         openai_cache_affinity=True,
         api_key=api_key,
@@ -204,10 +208,12 @@ async def v1_responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    await websocket.accept()
+    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    forwarded_headers = dict(websocket.headers)
     await context.service.proxy_responses_websocket(
         websocket,
-        websocket.headers,
+        forwarded_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
         api_key=api_key,

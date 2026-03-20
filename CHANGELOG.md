@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/Soju06/codex-lb/compare/v1.6.3...v1.7.0) (2026-03-20)
+
+
+### Features
+
+* add GPT-5.4 mini pricing ([#234](https://github.com/Soju06/codex-lb/issues/234)) ([3236119](https://github.com/Soju06/codex-lb/commit/323611940387057cc70e474219240c225b40d33b))
+
+
+### Bug Fixes
+
+* bridge backend HTTP responses through websocket sessions ([#236](https://github.com/Soju06/codex-lb/issues/236)) ([2723d97](https://github.com/Soju06/codex-lb/commit/2723d9720af184cd875de8ca3d5ed8d89171c30c))
+
 ## [1.6.3](https://github.com/Soju06/codex-lb/compare/v1.6.2...v1.6.3) (2026-03-19)
 
 

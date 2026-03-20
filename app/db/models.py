@@ -118,6 +118,8 @@ class RequestLog(Base):
     model: Mapped[str] = mapped_column(String, nullable=False)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

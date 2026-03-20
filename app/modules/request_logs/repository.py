@@ -91,6 +91,8 @@ class RequestLogsRepository:
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
         service_tier: str | None = None,
+        requested_service_tier: str | None = None,
+        actual_service_tier: str | None = None,
         transport: str | None = None,
         api_key_id: str | None = None,
     ) -> RequestLog:
@@ -102,6 +104,8 @@ class RequestLogsRepository:
             model=model,
             transport=transport,
             service_tier=service_tier,
+            requested_service_tier=requested_service_tier,
+            actual_service_tier=actual_service_tier,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,

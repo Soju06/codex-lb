@@ -615,7 +615,9 @@ class ProxyService:
                 ),
                 reasoning_effort=reasoning_effort,
                 transport=_REQUEST_TRANSPORT_HTTP,
-                service_tier=_service_tier_from_response(response) or _service_tier_from_compact_payload(payload),
+                service_tier=_effective_service_tier(request_service_tier, actual_service_tier),
+                requested_service_tier=request_service_tier,
+                actual_service_tier=actual_service_tier,
             )
             _maybe_log_proxy_service_tier_trace(
                 "compact",
@@ -1124,6 +1126,7 @@ class ProxyService:
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
             api_key_reservation=api_key_reservation,
             started_at=time.monotonic(),
+            requested_service_tier=forwarded_service_tier,
             awaiting_response_created=True,
             event_queue=asyncio.Queue() if attach_event_queue else None,
             api_key=api_key,
@@ -1825,6 +1828,8 @@ class ProxyService:
                 reasoning_effort=request_state.reasoning_effort,
                 api_key_reservation=None,
                 started_at=time.monotonic(),
+                requested_service_tier=request_state.requested_service_tier,
+                actual_service_tier=request_state.actual_service_tier,
                 awaiting_response_created=True,
                 event_queue=asyncio.Queue(),
                 transport=_REQUEST_TRANSPORT_HTTP,
@@ -2135,6 +2140,7 @@ class ProxyService:
             if matched_request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
+                    matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
 
             terminal_request_state = None
@@ -2321,12 +2327,11 @@ class ProxyService:
         finally:
             async with pending_lock:
                 has_pending_requests = bool(pending_requests)
-            if upstream_control.reconnect_requested or not has_pending_requests:
-                return
-            try:
-                await websocket.close()
-            except Exception:
-                logger.debug("Failed to close downstream websocket", exc_info=True)
+            if not upstream_control.reconnect_requested and has_pending_requests:
+                try:
+                    await websocket.close()
+                except Exception:
+                    logger.debug("Failed to close downstream websocket", exc_info=True)
 
     async def _process_upstream_websocket_text(
         self,
@@ -2364,6 +2369,7 @@ class ProxyService:
             if request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
+                    request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
@@ -2492,6 +2498,7 @@ class ProxyService:
 
         actual_service_tier = _service_tier_from_event_payload(payload)
         if actual_service_tier is not None:
+            request_state.actual_service_tier = actual_service_tier
             response_service_tier = actual_service_tier
 
         settlement = _StreamSettlement(
@@ -2550,6 +2557,8 @@ class ProxyService:
                 reasoning_effort=request_state.reasoning_effort,
                 transport=request_state.transport,
                 service_tier=response_service_tier,
+                requested_service_tier=request_state.requested_service_tier,
+                actual_service_tier=request_state.actual_service_tier,
             )
 
     async def _write_websocket_connect_failure(
@@ -2575,6 +2584,8 @@ class ProxyService:
             reasoning_effort=request_state.reasoning_effort,
             transport=request_state.transport,
             service_tier=request_state.service_tier,
+            requested_service_tier=request_state.requested_service_tier,
+            actual_service_tier=request_state.actual_service_tier,
         )
 
     async def _emit_websocket_connect_failure(
@@ -2683,6 +2694,8 @@ class ProxyService:
                 reasoning_effort=request_state.reasoning_effort,
                 transport=request_state.transport,
                 service_tier=request_state.service_tier,
+                requested_service_tier=request_state.requested_service_tier,
+                actual_service_tier=request_state.actual_service_tier,
             )
 
     async def _emit_websocket_terminal_error(
@@ -3039,6 +3052,7 @@ class ProxyService:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
                         service_tier=payload.service_tier,
+                        requested_service_tier=payload.service_tier,
                     )
                     return
 
@@ -3400,6 +3414,7 @@ class ProxyService:
                     reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                     transport=request_transport,
                     service_tier=payload.service_tier,
+                    requested_service_tier=payload.service_tier,
                 )
         finally:
             if not settled and api_key is not None and api_key_reservation is not None:
@@ -3610,6 +3625,8 @@ class ProxyService:
                 reasoning_effort=reasoning_effort,
                 transport=request_transport,
                 service_tier=service_tier,
+                requested_service_tier=requested_service_tier,
+                actual_service_tier=actual_service_tier,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",
@@ -3635,6 +3652,8 @@ class ProxyService:
         reasoning_effort: str | None = None,
         transport: str | None = None,
         service_tier: str | None = None,
+        requested_service_tier: str | None = None,
+        actual_service_tier: str | None = None,
     ) -> None:
         with anyio.CancelScope(shield=True):
             try:
@@ -3651,6 +3670,8 @@ class ProxyService:
                         reasoning_effort=reasoning_effort,
                         transport=transport,
                         service_tier=service_tier,
+                        requested_service_tier=requested_service_tier,
+                        actual_service_tier=actual_service_tier,
                         latency_ms=latency_ms,
                         status=status,
                         error_code=error_code,
@@ -3690,6 +3711,7 @@ class ProxyService:
             reasoning_effort=reasoning_effort,
             transport=transport,
             service_tier=service_tier,
+            requested_service_tier=service_tier,
         )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
@@ -4019,6 +4041,8 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    requested_service_tier: str | None = None
+    actual_service_tier: str | None = None
     response_id: str | None = None
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
@@ -4895,6 +4919,14 @@ def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> st
     if not isinstance(response, dict):
         return None
     return _normalize_service_tier_value(response.get("service_tier"))
+
+
+def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
+    if isinstance(actual_service_tier, str):
+        return actual_service_tier
+    if isinstance(requested_service_tier, str):
+        return requested_service_tier
+    return None
 
 
 def _normalize_service_tier_value(value: object) -> str | None:

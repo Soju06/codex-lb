@@ -240,6 +240,37 @@ async def test_request_logs_filters_by_account_model_and_time(async_client, db_s
 
 
 @pytest.mark.asyncio
+async def test_request_logs_expose_requested_and_actual_service_tiers(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_tier", "tiers@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_tier",
+            request_id="req_tier_1",
+            model="gpt-5.4",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            service_tier="default",
+            requested_service_tier="priority",
+            actual_service_tier="default",
+            requested_at=now,
+        )
+
+    response = await async_client.get("/api/request-logs")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert payload[0]["serviceTier"] == "default"
+    assert payload[0]["requestedServiceTier"] == "priority"
+    assert payload[0]["actualServiceTier"] == "default"
+
+
+@pytest.mark.asyncio
 async def test_request_logs_filters_by_multiple_accounts_returns_union(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

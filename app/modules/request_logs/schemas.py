@@ -15,6 +15,8 @@ class RequestLogEntry(DashboardModel):
     model: str
     transport: str | None = None
     service_tier: str | None = None
+    requested_service_tier: str | None = None
+    actual_service_tier: str | None = None
     status: str
     error_code: str | None = None
     error_message: str | None = None

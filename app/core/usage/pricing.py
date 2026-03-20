@@ -15,6 +15,9 @@ class ModelPrice:
     output_per_1m: float
     cached_input_per_1m: float | None = None
     priority_multiplier: float | None = None
+    priority_input_per_1m: float | None = None
+    priority_output_per_1m: float | None = None
+    priority_cached_input_per_1m: float | None = None
     flex_input_per_1m: float | None = None
     flex_output_per_1m: float | None = None
     flex_cached_input_per_1m: float | None = None
@@ -71,7 +74,9 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=2.5,
         cached_input_per_1m=0.25,
         output_per_1m=15.0,
-        priority_multiplier=2.0,
+        priority_input_per_1m=5.0,
+        priority_cached_input_per_1m=0.5,
+        priority_output_per_1m=30.0,
         flex_input_per_1m=1.25,
         flex_cached_input_per_1m=0.125,
         flex_output_per_1m=7.5,
@@ -84,6 +89,17 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=0.75,
         cached_input_per_1m=0.075,
         output_per_1m=4.5,
+        flex_input_per_1m=0.375,
+        flex_cached_input_per_1m=0.0375,
+        flex_output_per_1m=2.25,
+    ),
+    "gpt-5.4-nano": ModelPrice(
+        input_per_1m=0.20,
+        cached_input_per_1m=0.02,
+        output_per_1m=1.25,
+        flex_input_per_1m=0.10,
+        flex_cached_input_per_1m=0.01,
+        flex_output_per_1m=0.625,
     ),
     "gpt-5.4-pro": ModelPrice(
         input_per_1m=30.0,
@@ -98,7 +114,9 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.75,
         cached_input_per_1m=0.175,
         output_per_1m=14.0,
-        priority_multiplier=2.0,
+        priority_input_per_1m=3.5,
+        priority_cached_input_per_1m=0.35,
+        priority_output_per_1m=28.0,
     ),
     "gpt-5.3": ModelPrice(
         input_per_1m=1.75,
@@ -114,10 +132,6 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.75,
         cached_input_per_1m=0.175,
         output_per_1m=14.0,
-        priority_multiplier=2.0,
-        flex_input_per_1m=0.875,
-        flex_cached_input_per_1m=0.0875,
-        flex_output_per_1m=7.0,
     ),
     "gpt-5.2-chat-latest": ModelPrice(
         input_per_1m=1.75,
@@ -128,10 +142,6 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
-        priority_multiplier=2.0,
-        flex_input_per_1m=0.625,
-        flex_cached_input_per_1m=0.0625,
-        flex_output_per_1m=5.0,
     ),
     "gpt-5.1-chat-latest": ModelPrice(
         input_per_1m=1.25,
@@ -142,21 +152,27 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
-        priority_multiplier=2.0,
-        flex_input_per_1m=0.625,
-        flex_cached_input_per_1m=0.0625,
-        flex_output_per_1m=5.0,
     ),
     "gpt-5-chat-latest": ModelPrice(
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
     ),
+    "gpt-5.2-codex": ModelPrice(
+        input_per_1m=1.75,
+        cached_input_per_1m=0.175,
+        output_per_1m=14.0,
+        priority_input_per_1m=3.5,
+        priority_cached_input_per_1m=0.35,
+        priority_output_per_1m=28.0,
+    ),
     "gpt-5.1-codex-max": ModelPrice(
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
-        priority_multiplier=2.0,
+        priority_input_per_1m=2.5,
+        priority_cached_input_per_1m=0.25,
+        priority_output_per_1m=20.0,
     ),
     "gpt-5.1-codex-mini": ModelPrice(
         input_per_1m=0.25,
@@ -167,22 +183,28 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
-        priority_multiplier=2.0,
+        priority_input_per_1m=2.5,
+        priority_cached_input_per_1m=0.25,
+        priority_output_per_1m=20.0,
     ),
     "gpt-5-codex": ModelPrice(
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
-        priority_multiplier=2.0,
+        priority_input_per_1m=2.5,
+        priority_cached_input_per_1m=0.25,
+        priority_output_per_1m=20.0,
     ),
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
     "gpt-5.4-pro*": "gpt-5.4-pro",
     "gpt-5.4-mini*": "gpt-5.4-mini",
+    "gpt-5.4-nano*": "gpt-5.4-nano",
     "gpt-5.4*": "gpt-5.4",
     "gpt-5.3-codex*": "gpt-5.3-codex",
     "gpt-5.3-chat-latest*": "gpt-5.3-chat-latest",
+    "gpt-5.2-codex*": "gpt-5.2-codex",
     "gpt-5.2-chat-latest*": "gpt-5.2-chat-latest",
     "gpt-5.3*": "gpt-5.3",
     "gpt-5.1-chat-latest*": "gpt-5.1-chat-latest",
@@ -271,13 +293,19 @@ def _effective_rates(
     cached_rate = price.cached_input_per_1m if price.cached_input_per_1m is not None else input_rate
     output_rate = price.output_per_1m
 
-    # Priority pricing uses the published priority tier directly rather than stacking
-    # on top of any standard-tier long-context premium.
-    if _uses_priority_tier(service_tier) and price.priority_multiplier is not None:
-        input_rate *= price.priority_multiplier
-        cached_rate *= price.priority_multiplier
-        output_rate *= price.priority_multiplier
-        return input_rate, cached_rate, output_rate
+    if _uses_priority_tier(service_tier):
+        if price.priority_input_per_1m is not None and price.priority_output_per_1m is not None:
+            priority_cached = (
+                price.priority_cached_input_per_1m
+                if price.priority_cached_input_per_1m is not None
+                else price.priority_input_per_1m
+            )
+            return price.priority_input_per_1m, priority_cached, price.priority_output_per_1m
+        if price.priority_multiplier is not None:
+            input_rate *= price.priority_multiplier
+            cached_rate *= price.priority_multiplier
+            output_rate *= price.priority_multiplier
+            return input_rate, cached_rate, output_rate
 
     if _uses_flex_tier(service_tier) and price.flex_input_per_1m is not None and price.flex_output_per_1m is not None:
         input_rate = price.flex_input_per_1m

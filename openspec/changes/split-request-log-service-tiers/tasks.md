@@ -1,0 +1,6 @@
+- [ ] 1.1 Add request-log columns for requested and actual service tiers
+- [ ] 1.2 Persist requested, actual, and effective billable tiers for compact, HTTP stream, and websocket Responses flows
+- [ ] 1.3 Expose requested and actual tiers from `/api/request-logs`
+- [ ] 1.4 Update the dashboard request-log UI to render the actual tier and show requested tier when it differs
+- [ ] 1.5 Add or update backend and frontend regression tests for tier persistence, pricing, and display
+- [ ] 1.6 Validate OpenSpec and targeted test suites

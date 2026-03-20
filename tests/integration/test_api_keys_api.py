@@ -650,6 +650,8 @@ async def test_stream_usage_logs_actual_service_tier(async_client, monkeypatch):
         latest_log = result.scalars().first()
         assert latest_log is not None
         assert latest_log.api_key_id == key_id
+        assert latest_log.requested_service_tier == "priority"
+        assert latest_log.actual_service_tier == "default"
         assert latest_log.service_tier == "default"
 
 
@@ -733,6 +735,8 @@ async def test_stream_usage_logs_actual_service_tier_when_response_created_echoe
         latest_log = result.scalars().first()
         assert latest_log is not None
         assert latest_log.api_key_id == key_id
+        assert latest_log.requested_service_tier == "priority"
+        assert latest_log.actual_service_tier == "default"
         assert latest_log.service_tier == "default"
 
 

@@ -128,6 +128,9 @@ export function RecentRequestsTable({
               const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorMessage = request.errorMessage || request.errorCode || "-";
               const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
+              const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
+              const showRequestedTier =
+                !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
 
               return (
                 <TableRow key={request.requestId}>
@@ -148,9 +151,16 @@ export function RecentRequestsTable({
                     {request.apiKeyName || "--"}
                   </TableCell>
                   <TableCell className="truncate align-top">
-                    <span className="font-mono text-xs">
-                      {formatModelLabel(request.model, request.reasoningEffort, request.serviceTier)}
-                    </span>
+                    <div className="leading-tight">
+                      <span className="font-mono text-xs">
+                        {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
+                      </span>
+                      {showRequestedTier ? (
+                        <div className="text-[11px] text-muted-foreground">
+                          Requested {request.requestedServiceTier}
+                        </div>
+                      ) : null}
+                    </div>
                   </TableCell>
                   <TableCell className="align-top">
                     {request.transport ? (

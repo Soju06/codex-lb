@@ -2601,6 +2601,8 @@ async def test_stream_responses_logs_actual_service_tier_and_requested_tier_trac
     assert chunks
     assert request_id
     assert request_logs.calls[0]["service_tier"] == "default"
+    assert request_logs.calls[0]["requested_service_tier"] == "priority"
+    assert request_logs.calls[0]["actual_service_tier"] == "default"
     assert f"request_id={request_id}" in caplog.text
     assert "kind=stream" in caplog.text
     assert "requested_service_tier=priority" in caplog.text
@@ -2695,6 +2697,9 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
         reset_request_id(token)
 
     assert proxy_service._service_tier_from_response(response) == "default"
+    assert request_logs.calls[0]["service_tier"] == "default"
+    assert request_logs.calls[0]["requested_service_tier"] == "priority"
+    assert request_logs.calls[0]["actual_service_tier"] == "default"
     assert request_id
     assert f"request_id={request_id}" in caplog.text
     assert "kind=compact" in caplog.text

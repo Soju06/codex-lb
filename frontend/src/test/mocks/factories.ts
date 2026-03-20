@@ -195,6 +195,8 @@ export function createRequestLogEntry(overrides: Partial<RequestLogEntry> = {}):
     model: "gpt-5.1",
     transport: "http",
     serviceTier: null,
+    requestedServiceTier: null,
+    actualServiceTier: null,
     status: "ok",
     errorCode: null,
     errorMessage: null,

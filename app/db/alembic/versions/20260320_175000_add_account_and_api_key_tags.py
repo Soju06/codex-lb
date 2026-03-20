@@ -1,8 +1,8 @@
 """add account and api key tags
 
-Revision ID: 20260313_120000_add_account_and_api_key_tags
-Revises: 20260312_120000_add_dashboard_upstream_stream_transport
-Create Date: 2026-03-13 12:00:00.000000
+Revision ID: 20260320_175000_add_account_and_api_key_tags
+Revises: 20260319_183000_normalize_sqlite_account_status_casing
+Create Date: 2026-03-20 17:50:00.000000
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
-revision = "20260313_120000_add_account_and_api_key_tags"
-down_revision = "20260312_120000_add_dashboard_upstream_stream_transport"
+revision = "20260320_175000_add_account_and_api_key_tags"
+down_revision = "20260319_183000_normalize_sqlite_account_status_casing"
 branch_labels = None
 depends_on = None
 

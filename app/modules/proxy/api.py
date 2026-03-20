@@ -125,7 +125,13 @@ async def responses(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _stream_responses(
-        request, payload, context, api_key, codex_session_affinity=True, openai_cache_affinity=True
+        request,
+        payload,
+        context,
+        api_key,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        prefer_http_bridge=True,
     )
 
 
@@ -437,6 +443,15 @@ async def _stream_responses(
     )
 
     rate_limit_headers = await context.service.rate_limit_headers()
+    bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
+    downstream_turn_state = (
+        proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
+    )
+    turn_state_headers = (
+        proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
+        if downstream_turn_state is not None
+        else {}
+    )
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -448,6 +463,7 @@ async def _stream_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            downstream_turn_state=downstream_turn_state,
         )
     else:
         stream = context.service.stream_responses(
@@ -470,11 +486,16 @@ async def _stream_responses(
         )
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers=rate_limit_headers,
+        )
     return StreamingResponse(
         _prepend_first(first, stream),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", **rate_limit_headers},
+        headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
     )
 
 
@@ -498,6 +519,15 @@ async def _collect_responses(
     )
 
     rate_limit_headers = await context.service.rate_limit_headers()
+    bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
+    downstream_turn_state = (
+        proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
+    )
+    turn_state_headers = (
+        proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
+        if downstream_turn_state is not None
+        else {}
+    )
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -509,6 +539,7 @@ async def _collect_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            downstream_turn_state=downstream_turn_state,
         )
     else:
         stream = context.service.stream_responses(
@@ -540,18 +571,18 @@ async def _collect_responses(
                 request,
                 status_code,
                 error_payload.model_dump(mode="json", exclude_none=True),
-                headers=rate_limit_headers,
+                headers={**turn_state_headers, **rate_limit_headers},
             )
         return JSONResponse(
             content=response_payload.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**turn_state_headers, **rate_limit_headers},
         )
     status_code = _status_for_error(response_payload.error)
     return _logged_error_json_response(
         request,
         status_code,
         response_payload.model_dump(mode="json", exclude_none=True),
-        headers=rate_limit_headers,
+        headers={**turn_state_headers, **rate_limit_headers},
     )
 
 

@@ -312,9 +312,6 @@ class ProxyService:
             ),
             max_sessions=max_sessions,
         )
-        if downstream_turn_state is not None:
-            await self._register_http_bridge_turn_state(session, downstream_turn_state)
-
         request_state, text_data = self._prepare_http_bridge_request(
             payload,
             api_key=api_key,
@@ -328,6 +325,8 @@ class ProxyService:
             text_data=text_data,
             queue_limit=queue_limit,
         )
+        if downstream_turn_state is not None:
+            await self._register_http_bridge_turn_state(session, downstream_turn_state)
 
         try:
             event_queue = request_state.event_queue

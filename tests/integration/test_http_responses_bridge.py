@@ -2592,6 +2592,120 @@ async def test_v1_responses_http_bridge_startup_error_omits_turn_state_header(as
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_before_request_admission(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_alias_after_admission",
+        "http-bridge-alias-after-admission@example.com",
+    )
+    service = get_proxy_service_for_app(app_instance)
+    account = await _get_account(account_id)
+    upstream = _SilentUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    async def fake_submit_http_bridge_request(
+        self,
+        session,
+        *,
+        request_state,
+        text_data,
+        queue_limit,
+    ):
+        del self, session, request_state, text_data, queue_limit
+        raise proxy_module.ProxyResponseError(
+            429,
+            proxy_module.openai_error(
+                "rate_limit_exceeded",
+                "HTTP responses session bridge queue is full",
+                error_type="rate_limit_error",
+            ),
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.1",
+        instructions="Return exactly OK.",
+        input="hello",
+        prompt_cache_key="bridge-alias-after-admission",
+    )
+    stream = service.stream_http_responses(
+        payload,
+        {},
+        openai_cache_affinity=True,
+        downstream_turn_state="http_turn_unadmitted",
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await stream.__anext__()
+
+    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    assert exc.status_code == 429
+    async with service._http_bridge_lock:
+        sessions = list(service._http_bridge_sessions.values())
+        assert len(sessions) == 1
+        bridge_session = sessions[0]
+        assert bridge_session.downstream_turn_state is None
+        assert bridge_session.downstream_turn_state_aliases == set()
+        assert service._http_bridge_turn_state_index == {}
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(async_client, "acc_http_bridge_reconnect", "http-bridge-reconnect@example.com")

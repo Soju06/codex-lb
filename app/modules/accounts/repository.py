@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import delete, func, select, text, update
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -55,12 +55,24 @@ class AccountsRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_id_without_tags(self, account_id: str) -> Account | None:
+        result = await self._session.execute(
+            select(Account).execution_options(populate_existing=True).where(Account.id == account_id)
+        )
+        return result.scalar_one_or_none()
+
     async def list_accounts(self) -> list[Account]:
         result = await self._session.execute(
             select(Account)
             .options(selectinload(Account.tag_links))
             .execution_options(populate_existing=True)
             .order_by(Account.email)
+        )
+        return list(result.scalars().unique().all())
+
+    async def list_accounts_without_tags(self) -> list[Account]:
+        result = await self._session.execute(
+            select(Account).execution_options(populate_existing=True).order_by(Account.email)
         )
         return list(result.scalars().unique().all())
 
@@ -79,11 +91,7 @@ class AccountsRepository:
         desired_tags = set(tags)
 
         if desired_tags:
-            existing_tags = set(
-                (await self._session.execute(select(Tag.name).where(Tag.name.in_(desired_tags)))).scalars().all()
-            )
-            for missing_tag in desired_tags - existing_tags:
-                self._session.add(Tag(name=missing_tag))
+            await self._ensure_tags_exist(desired_tags)
 
         for tag_name, link in existing_links.items():
             if tag_name not in desired_tags:
@@ -99,6 +107,25 @@ class AccountsRepository:
         if refreshed is None:
             return None
         return sorted(link.tag_name for link in refreshed.tag_links)
+
+    async def _ensure_tags_exist(self, desired_tags: set[str]) -> None:
+        missing_tags = desired_tags
+        while missing_tags:
+            existing_tags = set(
+                (await self._session.execute(select(Tag.name).where(Tag.name.in_(missing_tags)))).scalars().all()
+            )
+            missing_tags = missing_tags - existing_tags
+            if not missing_tags:
+                return
+
+            try:
+                async with self._session.begin_nested():
+                    for missing_tag in missing_tags:
+                        self._session.add(Tag(name=missing_tag))
+                    await self._session.flush()
+                return
+            except IntegrityError:
+                continue
 
     async def list_request_usage_summary_by_account(
         self,

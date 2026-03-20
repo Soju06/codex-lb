@@ -16,6 +16,7 @@ from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
     AccountStatus,
+    AccountTag,
     AdditionalUsageHistory,
     StickySession,
     StickySessionKind,
@@ -58,8 +59,14 @@ class StubAccountsRepository(AccountsRepository):
     def __init__(self, accounts: list[Account]) -> None:
         self._accounts = accounts
         self.status_updates: list[dict[str, Any]] = []
+        self.list_calls: list[str] = []
 
     async def list_accounts(self) -> list[Account]:
+        self.list_calls.append("with_tags")
+        return list(self._accounts)
+
+    async def list_accounts_without_tags(self) -> list[Account]:
+        self.list_calls.append("without_tags")
         return list(self._accounts)
 
     async def update_status(
@@ -341,6 +348,26 @@ async def test_select_account_proceeds_without_cached_usage_rows(monkeypatch) ->
     assert selection.account.id == account.id
     assert usage_repo.primary_calls == 1
     assert usage_repo.secondary_calls == 1
+    assert accounts_repo.list_calls == ["without_tags"]
+
+
+@pytest.mark.asyncio
+async def test_select_account_requests_tags_only_when_filtering_by_tags() -> None:
+    tagged_account = _make_account("acc-tagged", email="tagged@example.com")
+    tagged_account.tag_links = [AccountTag(account_id=tagged_account.id, tag_name="paid")]
+    other_account = _make_account("acc-other", email="other@example.com")
+    other_account.tag_links = []
+
+    accounts_repo = StubAccountsRepository([tagged_account, other_account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(account_tags=["paid"])
+
+    assert selection.account is not None
+    assert selection.account.id == tagged_account.id
+    assert accounts_repo.list_calls == ["with_tags"]
 
 
 @pytest.mark.asyncio
@@ -794,12 +821,12 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
     usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
     sticky_repo = StubStickySessionsRepository()
 
-    async def blocking_list_accounts() -> list[Account]:
+    async def blocking_list_accounts_without_tags() -> list[Account]:
         accounts_started.set()
         await release_accounts.wait()
         return [account]
 
-    monkeypatch.setattr(accounts_repo, "list_accounts", blocking_list_accounts)
+    monkeypatch.setattr(accounts_repo, "list_accounts_without_tags", blocking_list_accounts_without_tags)
 
     @asynccontextmanager
     async def repo_factory() -> AsyncIterator[ProxyRepositories]:

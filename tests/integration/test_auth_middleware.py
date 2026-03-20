@@ -157,6 +157,12 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
         repo = ApiKeysRepository(session)
         row = await repo.get_by_id(created.id)
         assert row is not None
+        assert sorted(link.tag_name for link in row.tag_links) == []
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        row = await repo.get_by_id(created.id)
+        assert row is not None
         row.expires_at = utcnow() - timedelta(seconds=1)
         await session.commit()
 

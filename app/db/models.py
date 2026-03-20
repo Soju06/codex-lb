@@ -78,7 +78,6 @@ class Account(Base):
         "AccountTag",
         back_populates="account",
         cascade="all, delete-orphan",
-        lazy="selectin",
     )
 
 
@@ -246,7 +245,6 @@ class ApiKey(Base):
         "ApiKeyTag",
         back_populates="api_key",
         cascade="all, delete-orphan",
-        lazy="selectin",
     )
 
 

@@ -189,7 +189,9 @@ class LoadBalancer:
         account_tags: Collection[str] | None = None,
     ) -> _SelectionInputs:
         async with self._repo_factory() as repos:
-            all_accounts = await repos.accounts.list_accounts()
+            all_accounts = await (
+                repos.accounts.list_accounts() if account_tags else repos.accounts.list_accounts_without_tags()
+            )
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = all_accounts
             if account_tags:

@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -86,10 +87,28 @@ class ApiKeysRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_id_without_tags(self, key_id: str) -> ApiKey | None:
+        result = await self._session.execute(
+            select(ApiKey)
+            .options(selectinload(ApiKey.limits))
+            .execution_options(populate_existing=True)
+            .where(ApiKey.id == key_id)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         result = await self._session.execute(
             select(ApiKey)
             .options(selectinload(ApiKey.limits), selectinload(ApiKey.tag_links))
+            .execution_options(populate_existing=True)
+            .where(ApiKey.key_hash == key_hash)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_hash_without_tags(self, key_hash: str) -> ApiKey | None:
+        result = await self._session.execute(
+            select(ApiKey)
+            .options(selectinload(ApiKey.limits))
             .execution_options(populate_existing=True)
             .where(ApiKey.key_hash == key_hash)
         )
@@ -268,11 +287,7 @@ class ApiKeysRepository:
         desired_tags = set(tags)
 
         if desired_tags:
-            existing_tags = set(
-                (await self._session.execute(select(Tag.name).where(Tag.name.in_(desired_tags)))).scalars().all()
-            )
-            for missing_tag in desired_tags - existing_tags:
-                self._session.add(Tag(name=missing_tag))
+            await self._ensure_tags_exist(desired_tags)
 
         for tag_name, link in existing_links.items():
             if tag_name not in desired_tags:
@@ -288,6 +303,25 @@ class ApiKeysRepository:
         if refreshed is None:
             return None
         return sorted(link.tag_name for link in refreshed.tag_links)
+
+    async def _ensure_tags_exist(self, desired_tags: set[str]) -> None:
+        missing_tags = desired_tags
+        while missing_tags:
+            existing_tags = set(
+                (await self._session.execute(select(Tag.name).where(Tag.name.in_(missing_tags)))).scalars().all()
+            )
+            missing_tags = missing_tags - existing_tags
+            if not missing_tags:
+                return
+
+            try:
+                async with self._session.begin_nested():
+                    for missing_tag in missing_tags:
+                        self._session.add(Tag(name=missing_tag))
+                    await self._session.flush()
+                return
+            except IntegrityError:
+                continue
 
     async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]:
         existing = await self.get_limits_by_key(key_id)

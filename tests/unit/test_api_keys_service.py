@@ -34,6 +34,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._tags: dict[str, list[str]] = {}
         self._limit_id_seq = 0
         self._reservations: dict[str, UsageReservationData] = {}
+        self.by_hash_calls: list[str] = []
 
     async def create(self, row: ApiKey) -> ApiKey:
         self.rows[row.id] = row
@@ -48,11 +49,28 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.tag_links = [ApiKeyTag(api_key_id=key_id, tag_name=tag) for tag in self._tags.get(key_id, [])]
         return row
 
+    async def get_by_id_without_tags(self, key_id: str) -> ApiKey | None:
+        row = self.rows.get(key_id)
+        if row is not None:
+            row.limits = self._limits.get(key_id, [])
+            row.tag_links = []
+        return row
+
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
+        self.by_hash_calls.append("with_tags")
         for row in self.rows.values():
             if row.key_hash == key_hash:
                 row.limits = self._limits.get(row.id, [])
                 row.tag_links = [ApiKeyTag(api_key_id=row.id, tag_name=tag) for tag in self._tags.get(row.id, [])]
+                return row
+        return None
+
+    async def get_by_hash_without_tags(self, key_hash: str) -> ApiKey | None:
+        self.by_hash_calls.append("without_tags")
+        for row in self.rows.values():
+            if row.key_hash == key_hash:
+                row.limits = self._limits.get(row.id, [])
+                row.tag_links = []
                 return row
         return None
 
@@ -548,6 +566,7 @@ async def test_validate_key_lazy_resets_expired_limit() -> None:
     updated_limits = await repo.get_limits_by_key(created.id)
     assert updated_limits[0].current_value == 0
     assert updated_limits[0].reset_at > utcnow()
+    assert repo.by_hash_calls == ["without_tags", "with_tags"]
 
 
 @pytest.mark.asyncio

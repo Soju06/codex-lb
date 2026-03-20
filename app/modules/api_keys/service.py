@@ -31,7 +31,11 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def get_by_id(self, key_id: str) -> ApiKey | None: ...
 
+    async def get_by_id_without_tags(self, key_id: str) -> ApiKey | None: ...
+
     async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
+
+    async def get_by_hash_without_tags(self, key_hash: str) -> ApiKey | None: ...
 
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
@@ -385,7 +389,7 @@ class ApiKeysService:
 
         key_hash = _hash_key(plain_key)
         now = utcnow()
-        row = _ensure_valid_api_key_row(await self._repository.get_by_hash(key_hash))
+        row = _ensure_valid_api_key_row(await self._repository.get_by_hash_without_tags(key_hash))
         if row.expires_at is not None and row.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
         await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
@@ -409,11 +413,11 @@ class ApiKeysService:
         request_service_tier: str | None = None,
     ) -> ApiKeyUsageReservationData:
         now = utcnow()
-        row = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
+        row = _ensure_valid_api_key_row(await self._repository.get_by_id_without_tags(key_id))
         if row.expires_at is not None and row.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
         await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
-        refreshed = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
+        refreshed = _ensure_valid_api_key_row(await self._repository.get_by_id_without_tags(key_id))
         if refreshed.expires_at is not None and refreshed.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
 

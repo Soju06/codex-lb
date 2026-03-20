@@ -587,14 +587,14 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
 
     priority_reservation = await service.enforce_limits_for_request(
         priority_created.id,
-        request_model="gpt-5.1",
+        request_model="gpt-5.4",
         request_service_tier="priority",
     )
     assert priority_reservation.key_id == priority_created.id
 
     priority_limits = await repo.get_limits_by_key(priority_created.id)
     priority_cost_limit = next(lim for lim in priority_limits if lim.limit_type == LimitType.COST_USD)
-    assert priority_cost_limit.current_value == 184_319
+    assert priority_cost_limit.current_value == 286_720
 
     standard_created = await service.create_key(
         ApiKeyCreateData(
@@ -608,14 +608,14 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
     )
     standard_reservation = await service.enforce_limits_for_request(
         standard_created.id,
-        request_model="gpt-5.1",
+        request_model="gpt-5.4",
         request_service_tier=None,
     )
     assert standard_reservation.key_id == standard_created.id
 
     standard_limits = await repo.get_limits_by_key(standard_created.id)
     standard_cost_limit = next(lim for lim in standard_limits if lim.limit_type == LimitType.COST_USD)
-    assert standard_cost_limit.current_value == 92_159
+    assert standard_cost_limit.current_value == 143_360
 
 
 @pytest.mark.asyncio
@@ -765,7 +765,7 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
 
     await service.record_usage(
         created.id,
-        model="gpt-5.1",
+        model="gpt-5.4-mini",
         input_tokens=1_000_000,
         output_tokens=1_000_000,
         service_tier="flex",
@@ -773,7 +773,7 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
 
     limits = await repo.get_limits_by_key(created.id)
     cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
-    assert cost_limit.current_value == 5_625_000
+    assert cost_limit.current_value == 2_625_000
 
 
 @pytest.mark.asyncio

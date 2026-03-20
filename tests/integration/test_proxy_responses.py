@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from hashlib import sha256
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -47,6 +48,35 @@ def _extract_first_event(lines: list[str]) -> dict:
         if line.startswith("data: "):
             return json.loads(line[6:])
     raise AssertionError("No SSE data event found")
+
+
+@pytest.fixture(autouse=True)
+def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=False,
+        prefer_earlier_reset_accounts=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        openai_prompt_cache_key_derivation_enabled=True,
+        routing_strategy="usage_weighted",
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        upstream_compact_timeout_seconds=None,
+        upstream_stream_transport="auto",
+        log_proxy_request_payload=False,
+        log_proxy_request_shape=False,
+        log_proxy_request_shape_raw_cache_key=False,
+        log_proxy_service_tier_trace=False,
+        stream_idle_timeout_seconds=300.0,
+    )
+
+    class _SettingsCache:
+        async def get(self):
+            return settings
+
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
 
 
 @pytest.mark.asyncio
@@ -210,7 +240,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
     expected_account_id = generate_unique_account_id(raw_account_id, email)
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         seen["access_token"] = access_token
         seen["account_id"] = account_id
         yield (
@@ -261,7 +291,7 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
 
     seen_headers: dict[str, str] = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         del payload, access_token, account_id, base_url, raise_for_status
         seen_headers.update(headers)
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
@@ -302,7 +332,7 @@ async def test_v1_responses_stream_preserves_done_text_events(async_client, monk
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"Hey there! "}\n\n'
         yield 'data: {"type":"response.output_text.delta","delta":"What are we tackling?"}\n\n'
         yield 'data: {"type":"response.output_text.done","text":"Hey there! What are we tackling?"}\n\n'
@@ -343,7 +373,7 @@ async def test_v1_responses_stream_keeps_non_text_content_part_done_events(async
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"First line"}\n\n'
         yield (
             'data: {"type":"response.content_part.done","part":{"type":"output_image",'
@@ -382,7 +412,7 @@ async def test_backend_responses_stream_preserves_done_text_events(async_client,
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"Hey there! "}\n\n'
         yield 'data: {"type":"response.output_text.delta","delta":"What are we tackling?"}\n\n'
         yield 'data: {"type":"response.output_text.done","text":"Hey there! What are we tackling?"}\n\n'
@@ -428,7 +458,7 @@ async def test_v1_responses_sanitizes_interleaved_reasoning_fields(async_client,
 
     seen_input: dict[str, object] = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         seen_input["input"] = payload.input
         yield 'data: {"type":"response.completed","response":{"id":"resp_reasoning_sanitize"}}\n\n'
 
@@ -479,7 +509,7 @@ async def test_proxy_responses_forces_stream(async_client, monkeypatch):
 
     observed_stream: dict[str, bool | None] = {"value": None}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         observed_stream["value"] = payload.stream
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
@@ -507,7 +537,7 @@ async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, 
 
     seen: dict[str, object] = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         seen["payload"] = payload
         yield 'data: {"type":"response.completed","response":{"id":"resp_tools"}}\n\n'
 
@@ -542,7 +572,7 @@ async def test_v1_responses_streams_event_sequence(async_client, monkeypatch):
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield 'data: {"type":"response.function_call_arguments.delta","delta":"{}"}\n\n'
@@ -570,7 +600,7 @@ async def test_proxy_responses_stream_large_event_line(async_client, monkeypatch
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         delta = "A" * (200 * 1024)
         yield f'data: {{"type":"response.output_text.delta","delta":"{delta}"}}\n\n'
         yield 'data: {"type":"response.completed","response":{"id":"resp_large"}}\n\n'
@@ -604,7 +634,7 @@ async def test_v1_responses_non_streaming_returns_response(async_client, monkeyp
 
     observed_stream: dict[str, bool | None] = {"value": None}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         observed_stream["value"] = payload.stream
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
@@ -633,7 +663,7 @@ async def test_v1_responses_non_streaming_reconstructs_reasoning_output(async_cl
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1",'
             '"type":"reasoning","summary":[{"type":"summary_text","text":"Need more steps"}],'
@@ -671,7 +701,7 @@ async def test_v1_responses_non_streaming_preserves_sse_error_payload(async_clie
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"error","error":{"message":"No active accounts available",'
             '"type":"server_error","code":"no_accounts"}}\n\n'
@@ -698,7 +728,7 @@ async def test_v1_responses_non_streaming_failed_without_status_returns_error(as
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.failed","response":{"error":{"message":"No active accounts available",'
             '"type":"server_error","code":"no_accounts"}}}\n\n'
@@ -789,7 +819,7 @@ async def test_v1_responses_normalizes_assistant_input_text(async_client, monkey
 
     seen_input: dict[str, object] = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         seen_input["input"] = payload.input
         yield 'data: {"type":"response.completed","response":{"id":"resp_assistant_normalize"}}\n\n'
 
@@ -826,7 +856,7 @@ async def test_v1_responses_normalizes_tool_messages(async_client, monkeypatch):
 
     seen_input: dict[str, object] = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         seen_input["input"] = payload.input
         yield 'data: {"type":"response.completed","response":{"id":"resp_tool_normalize"}}\n\n'
 

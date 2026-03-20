@@ -28,6 +28,7 @@ async def _cleanup_http_bridge_sessions(app_instance):
     async with service._http_bridge_lock:
         sessions = list(service._http_bridge_sessions.values())
         service._http_bridge_sessions.clear()
+        service._http_bridge_turn_state_index.clear()
     for session in sessions:
         await service._close_http_bridge_session(session)
 
@@ -52,6 +53,33 @@ def _make_auth_json(account_id: str, email: str) -> dict:
             "accountId": account_id,
         },
     }
+
+
+async def _collect_sse_events(
+    async_client,
+    path: str,
+    *,
+    json_body: dict,
+    headers: dict[str, str] | None = None,
+) -> list[dict]:
+    async with async_client.stream("POST", path, json=json_body, headers=headers) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
+    return [json.loads(line[6:]) for line in lines]
+
+
+async def _collect_sse_events_with_headers(
+    async_client,
+    path: str,
+    *,
+    json_body: dict,
+    headers: dict[str, str] | None = None,
+) -> tuple[list[dict], dict[str, str]]:
+    async with async_client.stream("POST", path, json=json_body, headers=headers) as response:
+        assert response.status_code == 200
+        response_headers = dict(response.headers)
+        lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
+    return [json.loads(line[6:]) for line in lines], response_headers
 
 
 async def _import_account(async_client, account_id: str, email: str) -> str:
@@ -795,6 +823,476 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owner_and_promotes_session(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        instance_id="instance-a",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_alias_owner",
+        "http-bridge-alias-owner@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    upstreams = [_FakeBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
+    connect_headers_seen: list[dict[str, str]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, account_id_header, base_url, session
+        connect_headers_seen.append(dict(headers))
+        return upstreams.pop(0)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    candidate_suffix = 0
+    while True:
+        payload = proxy_module.ResponsesRequest(
+            model="gpt-5.1",
+            instructions="Return exactly OK.",
+            input="hello",
+            prompt_cache_key=f"owner-alias-thread-{candidate_suffix}",
+        )
+        affinity = proxy_module._sticky_key_for_responses_request(
+            payload,
+            {},
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            openai_cache_affinity_max_age_seconds=300,
+            sticky_threads_enabled=False,
+            api_key=None,
+        )
+        key = proxy_module._make_http_bridge_session_key(
+            payload,
+            headers={},
+            affinity=affinity,
+            api_key=None,
+            request_id="req_owner_alias",
+        )
+        if proxy_module._http_bridge_owner_instance(key, proxy_module.get_settings()) == "instance-a":
+            break
+        candidate_suffix += 1
+
+    session = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    replay_turn_state = next(
+        candidate
+        for candidate in ("turn_owner_alias_b", "turn_owner_alias_c", "turn_owner_alias_d", "turn_owner_alias_e")
+        if proxy_module._http_bridge_owner_instance(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", candidate, None),
+            proxy_module.get_settings(),
+        )
+        == "instance-b"
+    )
+    await service._register_http_bridge_turn_state(session, replay_turn_state)
+
+    replayed = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None),
+        headers={"x-codex-turn-state": replay_turn_state},
+        affinity=proxy_module._AffinityPolicy(key=replay_turn_state, kind=proxy_module.StickySessionKind.CODEX_SESSION),
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    assert replayed is session
+    assert replayed.codex_session is True
+    assert replayed.affinity.kind == proxy_module.StickySessionKind.CODEX_SESSION
+    assert replayed.affinity.key == replay_turn_state
+    assert replayed.idle_ttl_seconds == 600.0
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req_owner_alias_reconnect",
+        model=payload.model,
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    await service._reconnect_http_bridge_session(replayed, request_state=request_state)
+    assert connect_headers_seen[-1]["x-codex-turn-state"] == replay_turn_state
+    await service._close_http_bridge_session(session)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_without_local_alias(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-a",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_missing_alias",
+        "http-bridge-missing-alias@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_missing_alias", None),
+            headers={"x-codex-turn-state": "http_turn_missing_alias"},
+            affinity=proxy_module._AffinityPolicy(
+                key="http_turn_missing_alias",
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.1",
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+        )
+
+    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    assert exc.status_code == 409
+    assert exc.payload["error"]["code"] == "bridge_instance_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolation(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_api_key_alias",
+        "http-bridge-api-key-alias@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.1",
+        instructions="Return exactly OK.",
+        input="hello",
+        prompt_cache_key="api-key-alias-thread",
+    )
+    affinity = proxy_module._sticky_key_for_responses_request(
+        payload,
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=None,
+    )
+    api_key_a = cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-a"))
+    session = await service._get_or_create_http_bridge_session(
+        proxy_module._make_http_bridge_session_key(
+            payload,
+            headers={},
+            affinity=affinity,
+            api_key=api_key_a,
+            request_id="req_api_key_alias",
+        ),
+        headers={},
+        affinity=affinity,
+        api_key=api_key_a,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+    await service._register_http_bridge_turn_state(session, "http_turn_api_key_alias")
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_api_key_alias", "api-key-b"),
+            headers={"x-codex-turn-state": "http_turn_api_key_alias"},
+            affinity=proxy_module._AffinityPolicy(
+                key="http_turn_api_key_alias",
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-b")),
+            request_model=payload.model,
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+        )
+
+    assert isinstance(exc_info.value, proxy_module.ProxyResponseError)
+    exc = exc_info.value
+    assert exc.status_code == 409
+    assert exc.payload["error"]["code"] == "bridge_instance_mismatch"
+    await service._close_http_bridge_session(session)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_alias_preserve",
+        "http-bridge-alias-preserve@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.1",
+        instructions="Return exactly OK.",
+        input="hello",
+        prompt_cache_key="alias-preserve-thread",
+    )
+    affinity = proxy_module._sticky_key_for_responses_request(
+        payload,
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=None,
+    )
+    session = await service._get_or_create_http_bridge_session(
+        proxy_module._make_http_bridge_session_key(
+            payload,
+            headers={},
+            affinity=affinity,
+            api_key=None,
+            request_id="req_alias_preserve",
+        ),
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    await service._register_http_bridge_turn_state(session, "http_turn_alias_a")
+    await service._register_http_bridge_turn_state(session, "http_turn_alias_b")
+
+    replayed = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_alias_a", None),
+        headers={"x-codex-turn-state": "http_turn_alias_a"},
+        affinity=proxy_module._AffinityPolicy(
+            key="http_turn_alias_a",
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    assert replayed is session
+    assert "http_turn_alias_a" in replayed.downstream_turn_state_aliases
+    assert "http_turn_alias_b" in replayed.downstream_turn_state_aliases
+    await service._close_http_bridge_session(session)
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_allows_unstable_request_key_even_on_non_owner_instance(
     async_client,
     app_instance,
@@ -1012,6 +1510,129 @@ async def test_v1_responses_http_bridge_reconnect_uses_last_upstream_turn_state(
 
     assert connect_headers_seen[0]["x-codex-turn-state"] == "local_turn_state"
     assert connect_headers_seen[1]["x-codex-turn-state"] == "upstream_turn_state_1"
+    assert bridge_session.upstream_turn_state == "upstream_turn_state_2"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_session_id_reconnect_keeps_upstream_turn_state(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_session_reconnect",
+        "http-bridge-session-reconnect@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    connect_headers_seen: list[dict[str, str]] = []
+    upstreams = [
+        _TurnStateBridgeUpstreamWebSocket("upstream_turn_state_1"),
+        _TurnStateBridgeUpstreamWebSocket("upstream_turn_state_2"),
+    ]
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, account_id_header, base_url, session
+        connect_headers_seen.append(dict(headers))
+        return upstreams.pop(0)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = proxy_module.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    headers = {"session_id": "session_http_bridge_1"}
+    affinity = proxy_module._sticky_key_for_responses_request(
+        payload,
+        headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=None,
+    )
+    key = proxy_module._make_http_bridge_session_key(
+        payload,
+        headers=headers,
+        affinity=affinity,
+        api_key=None,
+        request_id="req_session_turn_state",
+    )
+    bridge_session = await service._get_or_create_http_bridge_session(
+        key,
+        headers=headers,
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
+    await service._register_http_bridge_turn_state(bridge_session, "http_turn_alias_session")
+
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-session-turn-state-reconnect",
+        model=payload.model,
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.4", "input": []}),
+    )
+    await service._reconnect_http_bridge_session(bridge_session, request_state=request_state)
+
+    assert connect_headers_seen[0]["session_id"] == "session_http_bridge_1"
+    assert "x-codex-turn-state" not in connect_headers_seen[0]
+    assert connect_headers_seen[1]["x-codex-turn-state"] == "upstream_turn_state_1"
+    assert bridge_session.downstream_turn_state == "http_turn_alias_session"
     assert bridge_session.upstream_turn_state == "upstream_turn_state_2"
 
 
@@ -1280,6 +1901,307 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_preserves_previous_response_id(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_reuse",
+        "backend-http-bridge-reuse@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_calls: list[tuple[str | None, str | None]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connect_calls.append((account_id, account_id_header))
+        return fake_upstream
+
+    async def fail_legacy_stream(*args, **kwargs):
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": "hello",
+        "prompt_cache_key": "backend-http-bridge-thread-1",
+        "stream": True,
+    }
+    first_events = await _collect_sse_events(async_client, "/backend-api/codex/responses", json_body=payload)
+    first_response = first_events[-1]["response"]
+
+    second_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={**payload, "previous_response_id": first_response["id"]},
+    )
+    second_response = second_events[-1]["response"]
+
+    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
+    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    assert first_response["id"] == "resp_bridge_1"
+    assert second_response["id"] == "resp_bridge_2"
+    assert connect_calls == [(account_id, account.chatgpt_account_id)]
+    assert len(fake_upstream.sent_text) == 2
+    assert json.loads(fake_upstream.sent_text[1])["previous_response_id"] == "resp_bridge_1"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_prefers_codex_session_header_over_prompt_cache_key(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_session_header",
+        "backend-http-bridge-session-header@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_calls: list[tuple[str | None, proxy_module.StickySessionKind | None]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        connect_calls.append((sticky_key, sticky_kind))
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    headers = {"session_id": "backend-http-session-1"}
+    first_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "backend-http-prompt-a",
+            "stream": True,
+        },
+        headers=headers,
+    )
+    first_response = first_events[-1]["response"]
+
+    second_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "backend-http-prompt-b",
+            "previous_response_id": first_response["id"],
+            "stream": True,
+        },
+        headers=headers,
+    )
+
+    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
+    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    assert len(connect_calls) == 1
+    assert connect_calls[0] == ("backend-http-session-1", proxy_module.StickySessionKind.CODEX_SESSION)
+    assert len(fake_upstream.sent_text) == 2
+    assert json.loads(fake_upstream.sent_text[1])["prompt_cache_key"] == "backend-http-prompt-b"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_replayed(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_turn_state",
+        "backend-http-bridge-turn-state@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_calls: list[tuple[str | None, proxy_module.StickySessionKind | None]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        connect_calls.append((sticky_key, sticky_kind))
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first_events, first_headers = await _collect_sse_events_with_headers(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "backend-http-turn-state-a",
+            "stream": True,
+        },
+    )
+    turn_state = first_headers["x-codex-turn-state"]
+    first_response = first_events[-1]["response"]
+
+    second_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "backend-http-turn-state-b",
+            "previous_response_id": first_response["id"],
+            "stream": True,
+        },
+        headers={"x-codex-turn-state": turn_state},
+    )
+
+    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
+    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    assert turn_state.startswith("http_turn_")
+    assert connect_calls == [("backend-http-turn-state-a", proxy_module.StickySessionKind.PROMPT_CACHE)]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_previous_response_id(
     async_client,
     monkeypatch,
@@ -1376,6 +2298,99 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
     second_payload = json.loads(fake_upstream.sent_text[1])
     assert second_payload["model"] == "gpt-5.4"
     assert second_payload["previous_response_id"] == first_body["id"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_emits_turn_state_header_and_reuses_when_replayed(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_v1_http_bridge_turn_state",
+        "v1-http-bridge-turn-state@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_calls: list[tuple[str | None, proxy_module.StickySessionKind | None]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        connect_calls.append((sticky_key, sticky_kind))
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "v1-http-turn-state-a",
+        },
+    )
+    assert first.status_code == 200
+    turn_state = first.headers["x-codex-turn-state"]
+    first_body = first.json()
+
+    second = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": turn_state},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "v1-http-turn-state-b",
+            "previous_response_id": first_body["id"],
+        },
+    )
+    assert second.status_code == 200
+
+    assert turn_state.startswith("http_turn_")
+    assert connect_calls == [("v1-http-turn-state-a", proxy_module.StickySessionKind.PROMPT_CACHE)]
 
 
 @pytest.mark.asyncio
@@ -1493,7 +2508,201 @@ async def test_v1_responses_http_bridge_kill_switch_falls_back_to_legacy_path(as
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": "hi"})
     assert response.status_code == 200
     assert response.json()["id"] == "resp_legacy"
+    assert "x-codex-turn-state" not in response.headers
     assert seen["legacy"] == 1
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_kill_switch_falls_back_to_legacy_path(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=False)
+    await _import_account(async_client, "acc_backend_http_bridge_fallback", "backend-http-bridge-fallback@example.com")
+    seen = {"legacy": 0}
+
+    async def fake_legacy_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **_kw,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, _kw
+        seen["legacy"] += 1
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_backend_legacy",'
+            '"object":"response","status":"completed",'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,'
+            '"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}\n\n'
+        )
+
+    async def fail_connect(*args, **kwargs):
+        raise AssertionError("bridge websocket path must not be used when the kill switch disables it")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_legacy_stream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fail_connect)
+
+    events, response_headers = await _collect_sse_events_with_headers(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={"model": "gpt-5.1", "instructions": "hi", "input": "hello", "stream": True},
+    )
+
+    assert [event["type"] for event in events] == ["response.completed"]
+    assert events[0]["response"]["id"] == "resp_backend_legacy"
+    assert "x-codex-turn-state" not in response_headers
+    assert seen["legacy"] == 1
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_startup_error_omits_turn_state_header(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
+    assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_startup_error_omits_turn_state_header(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
+    assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_before_request_admission(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_alias_after_admission",
+        "http-bridge-alias-after-admission@example.com",
+    )
+    service = get_proxy_service_for_app(app_instance)
+    account = await _get_account(account_id)
+    upstream = _SilentUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    async def fake_submit_http_bridge_request(
+        self,
+        session,
+        *,
+        request_state,
+        text_data,
+        queue_limit,
+    ):
+        del self, session, request_state, text_data, queue_limit
+        raise proxy_module.ProxyResponseError(
+            429,
+            proxy_module.openai_error(
+                "rate_limit_exceeded",
+                "HTTP responses session bridge queue is full",
+                error_type="rate_limit_error",
+            ),
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.1",
+        instructions="Return exactly OK.",
+        input="hello",
+        prompt_cache_key="bridge-alias-after-admission",
+    )
+    stream = service.stream_http_responses(
+        payload,
+        {},
+        openai_cache_affinity=True,
+        downstream_turn_state="http_turn_unadmitted",
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await stream.__anext__()
+
+    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    assert exc.status_code == 429
+    async with service._http_bridge_lock:
+        sessions = list(service._http_bridge_sessions.values())
+        assert len(sessions) == 1
+        bridge_session = sessions[0]
+        assert bridge_session.downstream_turn_state is None
+        assert bridge_session.downstream_turn_state_aliases == set()
+        assert service._http_bridge_turn_state_index == {}
 
 
 @pytest.mark.asyncio

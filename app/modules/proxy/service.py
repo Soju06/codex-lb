@@ -7,7 +7,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import AsyncIterator, Mapping, NoReturn
 from uuid import uuid4
@@ -147,6 +147,7 @@ class ProxyService:
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
+        self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_lock = anyio.Lock()
 
     def stream_responses(
@@ -187,6 +188,7 @@ class ProxyService:
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
+        downstream_turn_state: str | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         filtered = filter_inbound_headers(headers)
@@ -199,6 +201,7 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
+            downstream_turn_state=downstream_turn_state,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -212,6 +215,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
+        downstream_turn_state: str | None = None,
     ) -> AsyncIterator[str]:
         settings = await get_settings_cache().get()
         if not _http_responses_session_bridge_enabled(settings):
@@ -242,6 +246,7 @@ class ProxyService:
             codex_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0),
             max_sessions=getattr(settings, "http_responses_session_bridge_max_sessions", 256),
             queue_limit=getattr(settings, "http_responses_session_bridge_queue_limit", 8),
+            downstream_turn_state=downstream_turn_state,
         ):
             yield line
 
@@ -260,6 +265,7 @@ class ProxyService:
         codex_idle_ttl_seconds: float,
         max_sessions: int,
         queue_limit: int,
+        downstream_turn_state: str | None = None,
     ) -> AsyncIterator[str]:
         del propagate_http_errors, suppress_text_done_events
         request_id = ensure_request_id()
@@ -310,7 +316,6 @@ class ProxyService:
             ),
             max_sessions=max_sessions,
         )
-
         request_state, text_data = self._prepare_http_bridge_request(
             payload,
             api_key=api_key,
@@ -325,6 +330,8 @@ class ProxyService:
             text_data=text_data,
             queue_limit=queue_limit,
         )
+        if downstream_turn_state is not None:
+            await self._register_http_bridge_turn_state(session, downstream_turn_state)
 
         try:
             event_queue = request_state.event_queue
@@ -1410,8 +1417,8 @@ class ProxyService:
         idle_ttl_seconds: float,
         max_sessions: int,
     ) -> "_HTTPBridgeSession":
-        del api_key
         settings = get_settings()
+        api_key_id = api_key.id if api_key is not None else None
         effective_idle_ttl_seconds = _effective_http_bridge_idle_ttl_seconds(
             affinity=affinity,
             idle_ttl_seconds=idle_ttl_seconds,
@@ -1421,36 +1428,64 @@ class ProxyService:
                 900.0,
             ),
         )
-        owner_instance = _http_bridge_owner_instance(key, settings)
-        current_instance, ring = _normalized_http_bridge_instance_ring(settings)
-        if (
-            key.affinity_kind != "request"
-            and owner_instance is not None
-            and len(ring) > 1
-            and owner_instance != current_instance
-        ):
-            _log_http_bridge_event(
-                "owner_mismatch",
-                key,
-                account_id=None,
-                model=request_model,
-                detail=f"expected_instance={owner_instance}, current_instance={current_instance}",
-            )
-            raise ProxyResponseError(
-                409,
-                openai_error(
-                    "bridge_instance_mismatch",
-                    (
-                        "HTTP responses session bridge request reached the wrong instance "
-                        f"(expected {owner_instance}, got {current_instance})"
-                    ),
-                    error_type="server_error",
-                ),
-            )
         async with self._http_bridge_lock:
+            incoming_turn_state = _sticky_key_from_turn_state_header(headers)
+            if incoming_turn_state is not None:
+                alias_key = self._http_bridge_turn_state_index.get(
+                    _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
+                )
+                if alias_key is not None:
+                    key = alias_key
+                elif incoming_turn_state.startswith("http_turn_"):
+                    raise ProxyResponseError(
+                        409,
+                        openai_error(
+                            "bridge_instance_mismatch",
+                            "HTTP bridge turn-state reached an instance that does not own the live session",
+                            error_type="server_error",
+                        ),
+                    )
+            owner_instance = _http_bridge_owner_instance(key, settings)
+            current_instance, ring = _normalized_http_bridge_instance_ring(settings)
+            if (
+                key.affinity_kind != "request"
+                and owner_instance is not None
+                and len(ring) > 1
+                and owner_instance != current_instance
+            ):
+                _log_http_bridge_event(
+                    "owner_mismatch",
+                    key,
+                    account_id=None,
+                    model=request_model,
+                    detail=f"expected_instance={owner_instance}, current_instance={current_instance}",
+                )
+                raise ProxyResponseError(
+                    409,
+                    openai_error(
+                        "bridge_instance_mismatch",
+                        (
+                            "HTTP responses session bridge request reached the wrong instance "
+                            f"(expected {owner_instance}, got {current_instance})"
+                        ),
+                        error_type="server_error",
+                    ),
+                )
             await self._prune_http_bridge_sessions_locked()
             existing = self._http_bridge_sessions.get(key)
             if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
+                if (
+                    incoming_turn_state is not None
+                    and self._http_bridge_turn_state_index.get(
+                        _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
+                    )
+                    == key
+                ):
+                    self._promote_http_bridge_session_to_codex_affinity(
+                        existing,
+                        turn_state=incoming_turn_state,
+                        settings=settings,
+                    )
                 existing.request_model = request_model
                 existing.last_used_at = time.monotonic()
                 _log_http_bridge_event(
@@ -1550,6 +1585,11 @@ class ProxyService:
 
     async def _close_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
         session.closed = True
+        for alias in session.downstream_turn_state_aliases:
+            self._http_bridge_turn_state_index.pop(
+                _http_bridge_turn_state_alias_key(alias, session.key.api_key_id),
+                None,
+            )
         if session.upstream_reader is not None:
             session.upstream_reader.cancel()
             try:
@@ -1566,6 +1606,34 @@ class ProxyService:
             account_id=session.account.id,
             model=session.request_model,
         )
+
+    async def _register_http_bridge_turn_state(self, session: "_HTTPBridgeSession", turn_state: str) -> None:
+        async with self._http_bridge_lock:
+            if session.closed:
+                return
+            session.downstream_turn_state_aliases.add(turn_state)
+            if session.downstream_turn_state is None:
+                session.downstream_turn_state = turn_state
+            self._http_bridge_turn_state_index[
+                _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
+            ] = session.key
+
+    def _promote_http_bridge_session_to_codex_affinity(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        turn_state: str,
+        settings: object,
+    ) -> None:
+        session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
+        session.codex_session = True
+        session.downstream_turn_state = turn_state
+        session.downstream_turn_state_aliases.add(turn_state)
+        session.idle_ttl_seconds = max(
+            session.idle_ttl_seconds,
+            float(getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0)),
+        )
+        session.headers = _headers_with_turn_state(session.headers, turn_state)
 
     async def _create_http_bridge_session(
         self,
@@ -1633,6 +1701,7 @@ class ProxyService:
             codex_session=affinity.kind == StickySessionKind.CODEX_SESSION,
             prewarm_lock=anyio.Lock(),
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
+            downstream_turn_state=None,
         )
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         return session
@@ -2020,7 +2089,10 @@ class ProxyService:
                 ),
             )
         account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
-        connect_headers = _headers_with_turn_state(session.headers, session.upstream_turn_state)
+        connect_headers = _headers_with_turn_state(
+            session.headers,
+            _preferred_http_bridge_reconnect_turn_state(session),
+        )
         upstream = await self._open_upstream_websocket_with_budget(
             account,
             connect_headers,
@@ -4040,6 +4112,8 @@ class _HTTPBridgeSession:
     prewarmed: bool = False
     prewarm_lock: anyio.Lock | None = None
     upstream_turn_state: str | None = None
+    downstream_turn_state: str | None = None
+    downstream_turn_state_aliases: set[str] = field(default_factory=set)
     upstream_reader: asyncio.Task[None] | None = None
     closed: bool = False
 
@@ -4571,8 +4645,19 @@ def ensure_downstream_turn_state(headers: Mapping[str, str]) -> str:
     return f"turn_{uuid4().hex}"
 
 
+def ensure_http_downstream_turn_state(headers: Mapping[str, str]) -> str:
+    existing = _sticky_key_from_turn_state_header(headers)
+    if existing is not None:
+        return existing
+    return f"http_turn_{uuid4().hex}"
+
+
 def build_downstream_turn_state_accept_headers(turn_state: str) -> list[tuple[bytes, bytes]]:
     return [(b"x-codex-turn-state", turn_state.encode("utf-8"))]
+
+
+def build_downstream_turn_state_response_headers(turn_state: str) -> dict[str, str]:
+    return {"x-codex-turn-state": turn_state}
 
 
 def _upstream_turn_state_from_socket(upstream: UpstreamResponsesWebSocket | None) -> str | None:
@@ -4593,6 +4678,21 @@ def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None)
     if turn_state:
         forwarded["x-codex-turn-state"] = turn_state
     return forwarded
+
+
+def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -> str | None:
+    if (
+        session.codex_session
+        and session.downstream_turn_state is not None
+        and session.affinity.kind == StickySessionKind.CODEX_SESSION
+        and session.affinity.key == session.downstream_turn_state
+    ):
+        return session.downstream_turn_state
+    return session.upstream_turn_state
+
+
+def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -> tuple[str, str | None]:
+    return (turn_state, api_key_id)
 
 
 def _resolve_prompt_cache_key(

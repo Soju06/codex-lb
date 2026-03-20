@@ -5,6 +5,8 @@ import {
   AccountAdditionalQuotaSchema,
   DashboardOverviewSchema,
   DepletionSchema,
+  FilterStateSchema,
+  RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
   UsageWindowSchema,
 } from "@/features/dashboard/schemas";
@@ -122,6 +124,8 @@ describe("RequestLogsResponseSchema", () => {
           apiKeyName: "Key A",
           requestId: "req-1",
           model: "gpt-5.1",
+          requestKind: "compact",
+          sessionIdHash: "sha256:abc123def456",
           transport: "websocket",
           status: "ok",
           errorCode: null,
@@ -138,7 +142,43 @@ describe("RequestLogsResponseSchema", () => {
     });
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
+    expect(parsed.requests[0]?.requestKind).toBe("compact");
+    expect(parsed.requests[0]?.sessionIdHash).toBe("sha256:abc123def456");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+  });
+});
+
+describe("RequestLogFilterOptionsSchema", () => {
+  it("parses request kind and transport facets", () => {
+    const parsed = RequestLogFilterOptionsSchema.parse({
+      accountIds: ["acc-1"],
+      modelOptions: [{ model: "gpt-5.1", reasoningEffort: "high" }],
+      requestKinds: ["responses", "compact"],
+      transports: ["http", "websocket"],
+      statuses: ["ok", "rate_limit"],
+    });
+
+    expect(parsed.requestKinds).toEqual(["responses", "compact"]);
+    expect(parsed.transports).toEqual(["http", "websocket"]);
+  });
+});
+
+describe("FilterStateSchema", () => {
+  it("accepts request kind and transport filters", () => {
+    const parsed = FilterStateSchema.parse({
+      search: "",
+      timeframe: "24h",
+      accountIds: ["acc-1"],
+      modelOptions: ["gpt-5.1:::high"],
+      requestKinds: ["compact"],
+      transports: ["websocket"],
+      statuses: ["ok"],
+      limit: 25,
+      offset: 0,
+    });
+
+    expect(parsed.requestKinds).toEqual(["compact"]);
+    expect(parsed.transports).toEqual(["websocket"]);
   });
 });
 

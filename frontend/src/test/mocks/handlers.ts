@@ -26,7 +26,9 @@ import {
 } from "@/test/mocks/factories";
 
 const MODEL_OPTION_DELIMITER = ":::";
+const REQUEST_KIND_ORDER = ["responses", "compact", "transcription"] as const;
 const STATUS_ORDER = ["ok", "rate_limit", "quota", "error"] as const;
+const TRANSPORT_ORDER = ["http", "websocket"] as const;
 
 // ── Zod schemas for mock request bodies ──
 
@@ -128,7 +130,9 @@ function parseDateValue(value: string | null): number | null {
 function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): RequestLogEntry[] {
   const includeStatuses = options?.includeStatuses ?? true;
   const accountIds = new Set(url.searchParams.getAll("accountId"));
+  const requestKinds = new Set(url.searchParams.getAll("requestKind"));
   const statuses = new Set(url.searchParams.getAll("status").map((value) => value.toLowerCase()));
+  const transports = new Set(url.searchParams.getAll("transport"));
   const models = new Set(url.searchParams.getAll("model"));
   const reasoningEfforts = new Set(url.searchParams.getAll("reasoningEffort"));
   const modelOptions = new Set(url.searchParams.getAll("modelOption"));
@@ -141,7 +145,15 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
       return false;
     }
 
+    if (requestKinds.size > 0 && (!entry.requestKind || !requestKinds.has(entry.requestKind))) {
+      return false;
+    }
+
     if (includeStatuses && statuses.size > 0 && !statuses.has("all") && !statuses.has(entry.status)) {
+      return false;
+    }
+
+    if (transports.size > 0 && (!entry.transport || !transports.has(entry.transport))) {
       return false;
     }
 
@@ -178,6 +190,8 @@ function filterRequestLogs(url: URL, options?: { includeStatuses?: boolean }): R
         entry.apiKeyName,
         entry.requestId,
         entry.model,
+        entry.requestKind,
+        entry.sessionIdHash,
         entry.reasoningEffort,
         entry.errorCode,
         entry.errorMessage,
@@ -217,10 +231,16 @@ function requestLogOptionsFromEntries(entries: RequestLogEntry[]) {
 
   const presentStatuses = new Set(entries.map((entry) => entry.status));
   const statuses = STATUS_ORDER.filter((status) => presentStatuses.has(status));
+  const presentRequestKinds = new Set(entries.map((entry) => entry.requestKind).filter((value): value is string => value != null));
+  const requestKinds = REQUEST_KIND_ORDER.filter((requestKind) => presentRequestKinds.has(requestKind));
+  const presentTransports = new Set(entries.map((entry) => entry.transport).filter((value): value is string => value != null));
+  const transports = TRANSPORT_ORDER.filter((transport) => presentTransports.has(transport));
 
   return createRequestLogFilterOptions({
     accountIds,
     modelOptions: modelOptionsList,
+    requestKinds: [...requestKinds],
+    transports: [...transports],
     statuses: [...statuses],
   });
 }

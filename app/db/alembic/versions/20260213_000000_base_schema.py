@@ -114,6 +114,8 @@ def upgrade() -> None:
                 server_default=sa.text("CURRENT_TIMESTAMP"),
             ),
             sa.Column("model", sa.String(), nullable=False),
+            sa.Column("request_kind", sa.String(), nullable=True),
+            sa.Column("session_id_hash", sa.String(), nullable=True),
             sa.Column("transport", sa.String(), nullable=True),
             sa.Column("input_tokens", sa.Integer(), nullable=True),
             sa.Column("output_tokens", sa.Integer(), nullable=True),

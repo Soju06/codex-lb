@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections import deque
+from hashlib import sha256
 from types import SimpleNamespace
 from typing import Protocol, cast
 from unittest.mock import AsyncMock
@@ -36,6 +37,10 @@ pytestmark = pytest.mark.unit
 def _assert_proxy_response_error(exc: BaseException) -> proxy_module.ProxyResponseError:
     assert isinstance(exc, proxy_module.ProxyResponseError)
     return exc
+
+
+def _hash_session_id(value: str) -> str:
+    return f"sha256:{sha256(value.encode('utf-8')).hexdigest()[:12]}"
 
 
 def test_filter_inbound_headers_strips_auth_and_account():
@@ -2885,6 +2890,8 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
         reasoning_effort="high",
         api_key_reservation=None,
         started_at=100.0,
+        request_kind="responses",
+        session_id_hash=_hash_session_id("sid-budget-timeout"),
     )
 
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
@@ -2912,6 +2919,8 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
     assert sent_payload["error"]["message"] == "Proxy request budget exhausted"
     assert request_logs.calls[0]["request_id"] == "ws_req_budget_timeout"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+    assert request_logs.calls[0]["request_kind"] == "responses"
+    assert request_logs.calls[0]["session_id_hash"] == _hash_session_id("sid-budget-timeout")
     assert request_logs.calls[0]["service_tier"] == "priority"
 
 
@@ -2941,6 +2950,8 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=0.0,
+        request_kind="responses",
+        session_id_hash=_hash_session_id("sid-retry-error"),
     )
 
     websocket_send = AsyncMock()
@@ -2967,6 +2978,8 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
     assert sent_payload["status"] == 403
     assert sent_payload["error"]["code"] == "forbidden"
     assert request_logs.calls[0]["error_code"] == "forbidden"
+    assert request_logs.calls[0]["request_kind"] == "responses"
+    assert request_logs.calls[0]["session_id_hash"] == _hash_session_id("sid-retry-error")
 
 
 @pytest.mark.asyncio

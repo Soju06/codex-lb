@@ -20,6 +20,15 @@ import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import { formatModelLabel, formatSlug } from "@/utils/formatters";
 
 const MODEL_OPTION_DELIMITER = ":::";
+const REQUEST_KIND_FILTER_LABELS: Record<string, string> = {
+  responses: "Response",
+  compact: "Compact",
+  transcription: "Audio",
+};
+const TRANSPORT_FILTER_LABELS: Record<string, string> = {
+  http: "HTTP",
+  websocket: "WS",
+};
 
 export function DashboardPage() {
   const navigate = useNavigate();
@@ -97,6 +106,24 @@ export function DashboardPage() {
     [optionsQuery.data?.statuses],
   );
 
+  const requestKindOptions = useMemo(
+    () =>
+      (optionsQuery.data?.requestKinds ?? []).map((requestKind) => ({
+        value: requestKind,
+        label: REQUEST_KIND_FILTER_LABELS[requestKind] ?? formatSlug(requestKind),
+      })),
+    [optionsQuery.data?.requestKinds],
+  );
+
+  const transportOptions = useMemo(
+    () =>
+      (optionsQuery.data?.transports ?? []).map((transport) => ({
+        value: transport,
+        label: TRANSPORT_FILTER_LABELS[transport] ?? formatSlug(transport),
+      })),
+    [optionsQuery.data?.transports],
+  );
+
   const errorMessage =
     (dashboardQuery.error instanceof Error && dashboardQuery.error.message) ||
     (logsQuery.error instanceof Error && logsQuery.error.message) ||
@@ -158,6 +185,8 @@ export function DashboardPage() {
               filters={filters}
               accountOptions={accountOptions}
               modelOptions={modelOptions}
+              requestKindOptions={requestKindOptions}
+              transportOptions={transportOptions}
               statusOptions={statusOptions}
               onSearchChange={(search) => updateFilters({ search, offset: 0 })}
               onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
@@ -165,6 +194,8 @@ export function DashboardPage() {
               onModelChange={(modelOptionsSelected) =>
                 updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
               }
+              onRequestKindChange={(requestKinds) => updateFilters({ requestKinds, offset: 0 })}
+              onTransportChange={(transports) => updateFilters({ transports, offset: 0 })}
               onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
               onReset={() =>
                 updateFilters({
@@ -172,6 +203,8 @@ export function DashboardPage() {
                   timeframe: "all",
                   accountIds: [],
                   modelOptions: [],
+                  requestKinds: [],
+                  transports: [],
                   statuses: [],
                   offset: 0,
                 })

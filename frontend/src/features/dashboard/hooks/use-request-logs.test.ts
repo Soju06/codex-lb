@@ -34,7 +34,7 @@ describe("useRequestLogs", () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(
       queryClient,
-      "/dashboard?search=rate&timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&status=rate_limit&limit=10&offset=20",
+      "/dashboard?search=rate&timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&requestKind=compact&transport=websocket&status=rate_limit&limit=10&offset=20",
     );
 
     const { result } = renderHook(() => useRequestLogs(), { wrapper });
@@ -46,6 +46,8 @@ describe("useRequestLogs", () => {
       timeframe: "24h",
       accountIds: ["acc_primary"],
       modelOptions: ["gpt-5.1:::high"],
+      requestKinds: ["compact"],
+      transports: ["websocket"],
       statuses: ["rate_limit"],
       limit: 10,
       offset: 20,
@@ -88,6 +90,8 @@ describe("useRequestLogs", () => {
       statuses: string[];
       accountIds: string[];
       modelOptions: string[];
+      requestKinds: string[];
+      transports: string[];
       since: string | null;
     }> = [];
     server.use(
@@ -97,11 +101,15 @@ describe("useRequestLogs", () => {
           statuses: url.searchParams.getAll("status"),
           accountIds: url.searchParams.getAll("accountId"),
           modelOptions: url.searchParams.getAll("modelOption"),
+          requestKinds: url.searchParams.getAll("requestKind"),
+          transports: url.searchParams.getAll("transport"),
           since: url.searchParams.get("since"),
         });
         return HttpResponse.json({
           accountIds: [],
           modelOptions: [],
+          requestKinds: [],
+          transports: [],
           statuses: ["ok", "rate_limit", "quota", "error"],
         });
       }),
@@ -110,7 +118,7 @@ describe("useRequestLogs", () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(
       queryClient,
-      "/dashboard?timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&status=ok",
+      "/dashboard?timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&requestKind=compact&transport=websocket&status=ok",
     );
 
     const { result } = renderHook(() => useRequestLogs(), { wrapper });
@@ -121,10 +129,14 @@ describe("useRequestLogs", () => {
     const matchingCall = calls.find(
       (call) =>
         call.accountIds.includes("acc_primary") &&
-        call.modelOptions.includes("gpt-5.1:::high"),
+        call.modelOptions.includes("gpt-5.1:::high") &&
+        call.requestKinds.includes("compact") &&
+        call.transports.includes("websocket"),
     );
     expect(matchingCall).toBeDefined();
     expect(matchingCall?.statuses).toEqual([]);
+    expect(matchingCall?.requestKinds).toEqual(["compact"]);
+    expect(matchingCall?.transports).toEqual(["websocket"]);
     expect(matchingCall?.since).toMatch(/T/);
   });
 

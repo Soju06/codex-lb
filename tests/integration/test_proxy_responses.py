@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,10 @@ from app.db.models import RequestLog
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
+
+
+def _hash_session_id(value: str) -> str:
+    return f"sha256:{sha256(value.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -82,7 +87,7 @@ async def test_proxy_responses_no_accounts(async_client):
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers={"x-request-id": request_id},
+        headers={"x-request-id": request_id, "session_id": "sid-http-stream"},
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -251,7 +256,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         "POST",
         "/backend-api/codex/responses",
         json=payload,
-        headers={"x-request-id": request_id},
+        headers={"x-request-id": request_id, "session_id": "sid-http-stream"},
     ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -271,6 +276,8 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         assert log is not None
         assert log.request_id == request_id
         assert log.transport == "http"
+        assert log.request_kind == "responses"
+        assert log.session_id_hash == _hash_session_id("sid-http-stream")
 
 
 @pytest.mark.asyncio

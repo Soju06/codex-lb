@@ -13,6 +13,8 @@ class RequestLogEntry(DashboardModel):
     api_key_name: str | None = None
     request_id: str
     model: str
+    request_kind: str | None = None
+    session_id_hash: str | None = None
     transport: str | None = None
     service_tier: str | None = None
     status: str
@@ -39,4 +41,6 @@ class RequestLogModelOption(DashboardModel):
 class RequestLogFilterOptionsResponse(DashboardModel):
     account_ids: list[str] = Field(default_factory=list)
     model_options: list[RequestLogModelOption] = Field(default_factory=list)
+    request_kinds: list[str] = Field(default_factory=list)
+    transports: list[str] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)

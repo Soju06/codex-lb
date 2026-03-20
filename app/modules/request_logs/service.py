@@ -12,6 +12,9 @@ from app.modules.request_logs.mappers import (
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.schemas import RequestLogEntry
 
+_REQUEST_KIND_ORDER = ("responses", "compact", "transcription")
+_TRANSPORT_ORDER = ("http", "websocket")
+
 
 @dataclass(frozen=True, slots=True)
 class RequestLogModelOption:
@@ -31,6 +34,8 @@ class RequestLogStatusFilter:
 class RequestLogFilterOptions:
     account_ids: list[str]
     model_options: list[RequestLogModelOption]
+    request_kinds: list[str]
+    transports: list[str]
     statuses: list[str]
 
 
@@ -54,6 +59,8 @@ class RequestLogsService:
         until: datetime | None = None,
         account_ids: list[str] | None = None,
         model_options: list[RequestLogModelOption] | None = None,
+        request_kinds: list[str] | None = None,
+        transports: list[str] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         status: list[str] | None = None,
@@ -70,6 +77,8 @@ class RequestLogsService:
             until=until,
             account_ids=account_ids,
             model_options=normalized_model_options,
+            request_kinds=request_kinds,
+            transports=transports,
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=status_filter.include_success,
@@ -98,17 +107,27 @@ class RequestLogsService:
         until: datetime | None = None,
         account_ids: list[str] | None = None,
         model_options: list[RequestLogModelOption] | None = None,
+        request_kinds: list[str] | None = None,
+        transports: list[str] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
     ) -> RequestLogFilterOptions:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
         )
-        option_account_ids, option_model_options, status_values = await self._repo.list_filter_options(
+        (
+            option_account_ids,
+            option_model_options,
+            option_request_kinds,
+            option_transports,
+            status_values,
+        ) = await self._repo.list_filter_options(
             since=since,
             until=until,
             account_ids=account_ids,
             model_options=normalized_model_options,
+            request_kinds=request_kinds,
+            transports=transports,
             models=models,
             reasoning_efforts=reasoning_efforts,
         )
@@ -118,6 +137,8 @@ class RequestLogsService:
                 RequestLogModelOption(model=model, reasoning_effort=reasoning_effort)
                 for model, reasoning_effort in option_model_options
             ],
+            request_kinds=_normalize_ordered_values(option_request_kinds, _REQUEST_KIND_ORDER),
+            transports=_normalize_ordered_values(option_transports, _TRANSPORT_ORDER),
             statuses=_normalize_status_values(status_values),
         )
 
@@ -162,3 +183,10 @@ def _normalize_status_values(values: list[tuple[str, str | None]]) -> list[str]:
     normalized = {normalize_log_status(status, error_code) for status, error_code in values}
     ordered = ["ok", "rate_limit", "quota", "error"]
     return [status for status in ordered if status in normalized]
+
+
+def _normalize_ordered_values(values: list[str], preferred_order: tuple[str, ...]) -> list[str]:
+    normalized = {value for value in values if value}
+    ordered = [value for value in preferred_order if value in normalized]
+    remaining = sorted(normalized - set(preferred_order))
+    return ordered + remaining

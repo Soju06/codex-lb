@@ -107,6 +107,10 @@ _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.ref
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_REQUEST_KIND_RESPONSES = "responses"
+_REQUEST_KIND_COMPACT = "compact"
+_REQUEST_KIND_TRANSCRIPTION = "transcription"
+_COMPACT_UPSTREAM_ENDPOINT = "/codex/responses/compact"
 _COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
@@ -317,6 +321,7 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
         )
+        request_state.session_id_hash = _session_id_hash_from_headers(headers)
         request_state.transport = _REQUEST_TRANSPORT_HTTP
 
         await self._submit_http_bridge_request(
@@ -367,6 +372,7 @@ class ProxyService:
 
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        session_id_hash = _session_id_hash_from_headers(headers)
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
             payload,
@@ -614,6 +620,8 @@ class ProxyService:
                     usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
                 ),
                 reasoning_effort=reasoning_effort,
+                request_kind=_REQUEST_KIND_COMPACT,
+                session_id_hash=session_id_hash,
                 transport=_REQUEST_TRANSPORT_HTTP,
                 service_tier=_service_tier_from_response(response) or _service_tier_from_compact_payload(payload),
             )
@@ -647,6 +655,7 @@ class ProxyService:
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
+        session_id_hash = _session_id_hash_from_headers(headers)
         try:
             selection = await self._select_account_with_budget(
                 deadline,
@@ -781,6 +790,8 @@ class ProxyService:
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,
+                request_kind=_REQUEST_KIND_TRANSCRIPTION,
+                session_id_hash=session_id_hash,
                 transport=_REQUEST_TRANSPORT_HTTP,
             )
 
@@ -1055,6 +1066,7 @@ class ProxyService:
             include_type_field=True,
             attach_event_queue=False,
         )
+        request_state.session_id_hash = _session_id_hash_from_headers(headers)
         had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         affinity_policy = _sticky_key_for_responses_request(
             responses_payload,
@@ -2548,6 +2560,8 @@ class ProxyService:
                 cached_input_tokens=cached_input_tokens,
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=request_state.reasoning_effort,
+                request_kind=request_state.request_kind,
+                session_id_hash=request_state.session_id_hash,
                 transport=request_state.transport,
                 service_tier=response_service_tier,
             )
@@ -2573,6 +2587,8 @@ class ProxyService:
             error_code=error_code,
             error_message=error_message,
             reasoning_effort=request_state.reasoning_effort,
+            request_kind=request_state.request_kind,
+            session_id_hash=request_state.session_id_hash,
             transport=request_state.transport,
             service_tier=request_state.service_tier,
         )
@@ -2681,6 +2697,8 @@ class ProxyService:
                 error_code=error_code,
                 error_message=error_message,
                 reasoning_effort=request_state.reasoning_effort,
+                request_kind=request_state.request_kind,
+                session_id_hash=request_state.session_id_hash,
                 transport=request_state.transport,
                 service_tier=request_state.service_tier,
             )
@@ -2929,6 +2947,7 @@ class ProxyService:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        session_id_hash = _session_id_hash_from_headers(headers)
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = "session_header"
@@ -2966,6 +2985,8 @@ class ProxyService:
                         error_code="upstream_request_timeout",
                         error_message="Proxy request budget exhausted",
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                        request_kind=_REQUEST_KIND_RESPONSES,
+                        session_id_hash=session_id_hash,
                         service_tier=payload.service_tier,
                         transport=request_transport,
                     )
@@ -2998,6 +3019,8 @@ class ProxyService:
                             error_code="upstream_request_timeout",
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            request_kind=_REQUEST_KIND_RESPONSES,
+                            session_id_hash=session_id_hash,
                             service_tier=payload.service_tier,
                             transport=request_transport,
                         )
@@ -3037,6 +3060,8 @@ class ProxyService:
                         error_code=error_code,
                         error_message=no_accounts_msg,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                        request_kind=_REQUEST_KIND_RESPONSES,
+                        session_id_hash=session_id_hash,
                         transport=request_transport,
                         service_tier=payload.service_tier,
                     )
@@ -3062,6 +3087,8 @@ class ProxyService:
                             error_code="upstream_request_timeout",
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            request_kind=_REQUEST_KIND_RESPONSES,
+                            session_id_hash=session_id_hash,
                             service_tier=payload.service_tier,
                             transport=request_transport,
                         )
@@ -3087,6 +3114,8 @@ class ProxyService:
                             error_code="upstream_unavailable",
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            request_kind=_REQUEST_KIND_RESPONSES,
+                            session_id_hash=session_id_hash,
                             service_tier=payload.service_tier,
                             transport=request_transport,
                         )
@@ -3117,6 +3146,8 @@ class ProxyService:
                             error_code="upstream_request_timeout",
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            request_kind=_REQUEST_KIND_RESPONSES,
+                            session_id_hash=session_id_hash,
                             service_tier=payload.service_tier,
                             transport=request_transport,
                         )
@@ -3144,6 +3175,8 @@ class ProxyService:
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
+                                request_kind=_REQUEST_KIND_RESPONSES,
+                                session_id_hash=session_id_hash,
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
@@ -3236,6 +3269,8 @@ class ProxyService:
                                 error_code="upstream_request_timeout",
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                request_kind=_REQUEST_KIND_RESPONSES,
+                                session_id_hash=session_id_hash,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
                             )
@@ -3269,6 +3304,8 @@ class ProxyService:
                                 error_code="upstream_unavailable",
                                 error_message=message,
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                request_kind=_REQUEST_KIND_RESPONSES,
+                                session_id_hash=session_id_hash,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
                             )
@@ -3298,6 +3335,8 @@ class ProxyService:
                                 error_code="upstream_request_timeout",
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                request_kind=_REQUEST_KIND_RESPONSES,
+                                session_id_hash=session_id_hash,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
                             )
@@ -3316,6 +3355,8 @@ class ProxyService:
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
+                                request_kind=_REQUEST_KIND_RESPONSES,
+                                session_id_hash=session_id_hash,
                             ):
                                 yield line
                         finally:
@@ -3398,6 +3439,8 @@ class ProxyService:
                     error_code="no_accounts",
                     error_message=retries_exhausted_msg,
                     reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                    request_kind=_REQUEST_KIND_RESPONSES,
+                    session_id_hash=session_id_hash,
                     transport=request_transport,
                     service_tier=payload.service_tier,
                 )
@@ -3432,6 +3475,8 @@ class ProxyService:
         suppress_text_done_events: bool,
         upstream_stream_transport: str | None,
         request_transport: str,
+        request_kind: str,
+        session_id_hash: str | None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -3608,6 +3653,8 @@ class ProxyService:
                 cached_input_tokens=cached_input_tokens,
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
+                request_kind=request_kind,
+                session_id_hash=session_id_hash,
                 transport=request_transport,
                 service_tier=service_tier,
             )
@@ -3633,6 +3680,8 @@ class ProxyService:
         cached_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        request_kind: str | None = None,
+        session_id_hash: str | None = None,
         transport: str | None = None,
         service_tier: str | None = None,
     ) -> None:
@@ -3649,6 +3698,8 @@ class ProxyService:
                         cached_input_tokens=cached_input_tokens,
                         reasoning_tokens=reasoning_tokens,
                         reasoning_effort=reasoning_effort,
+                        request_kind=request_kind,
+                        session_id_hash=session_id_hash,
                         transport=transport,
                         service_tier=service_tier,
                         latency_ms=latency_ms,
@@ -3676,6 +3727,8 @@ class ProxyService:
         error_message: str,
         reasoning_effort: str | None,
         service_tier: str | None,
+        request_kind: str | None = None,
+        session_id_hash: str | None = None,
         transport: str = _REQUEST_TRANSPORT_HTTP,
     ) -> None:
         await self._write_request_log(
@@ -3688,6 +3741,8 @@ class ProxyService:
             error_code=error_code,
             error_message=error_message,
             reasoning_effort=reasoning_effort,
+            request_kind=request_kind,
+            session_id_hash=session_id_hash,
             transport=transport,
             service_tier=service_tier,
         )
@@ -4021,6 +4076,8 @@ class _WebSocketRequestState:
     started_at: float
     response_id: str | None = None
     awaiting_response_created: bool = False
+    request_kind: str = _REQUEST_KIND_RESPONSES
+    session_id_hash: str | None = None
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     api_key: ApiKeyData | None = None
@@ -4563,6 +4620,13 @@ def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
         if stripped:
             return stripped
     return None
+
+
+def _session_id_hash_from_headers(headers: Mapping[str, str]) -> str | None:
+    session_id = _sticky_key_from_session_header(headers)
+    if session_id is None:
+        return None
+    return _hash_identifier(session_id)
 
 
 def _sticky_key_from_turn_state_header(headers: Mapping[str, str]) -> str | None:

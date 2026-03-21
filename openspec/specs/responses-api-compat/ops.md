@@ -252,6 +252,7 @@ As of 2026-03-10, the following findings were reproduced from this repo workspac
 - Native `Codex CLI` websocket captures did not show raw `service_tier` in the first `response.create` frame.
 - Manually forcing `"service_tier":"fast"` in the websocket JSON payload can produce `Unsupported service_tier: fast`.
 - Several imported `plus` and `team` accounts completed successfully but returned `response.service_tier = "default"`.
+- `codex-lb` now preserves websocket `response.create.client_metadata` when bridging backend Codex websocket traffic and treats real first-party originators like `codex_exec` as native Codex signals, so future parity investigations can focus on deeper upstream session-envelope differences instead of those already-fixed gaps.
 
 ## HTTP `/v1/responses` Session Bridge Operations
 

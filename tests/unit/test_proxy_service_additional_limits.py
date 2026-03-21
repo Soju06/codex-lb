@@ -156,6 +156,7 @@ async def test_build_additional_rate_limits_aggregates_reset_metadata_determinis
             usage=object(),  # type: ignore[arg-type]
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=object(),  # type: ignore[arg-type]
+            http_bridge_leases=object(),  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
             additional_usage=additional_usage,  # type: ignore[arg-type]
         )
@@ -168,6 +169,7 @@ async def test_build_additional_rate_limits_aggregates_reset_metadata_determinis
             usage=object(),  # type: ignore[arg-type]
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=object(),  # type: ignore[arg-type]
+            http_bridge_leases=object(),  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
             additional_usage=additional_usage,  # type: ignore[arg-type]
         ),

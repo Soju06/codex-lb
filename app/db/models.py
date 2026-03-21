@@ -157,6 +157,34 @@ class StickySession(Base):
     )
 
 
+class HttpBridgeLease(Base):
+    __tablename__ = "http_bridge_leases"
+    __table_args__ = (
+        Index("ix_http_bridge_leases_owner_expires", "owner_instance_id", "lease_expires_at"),
+        Index("ix_http_bridge_leases_expires", "lease_expires_at"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String, primary_key=True)
+    affinity_kind: Mapped[str] = mapped_column(String, nullable=False)
+    affinity_key: Mapped[str] = mapped_column(String, nullable=False)
+    api_key_scope: Mapped[str] = mapped_column(String, nullable=False, default="", server_default=text("''"))
+    owner_instance_id: Mapped[str] = mapped_column(String, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    codex_session: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    idle_ttl_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    upstream_turn_state: Mapped[str | None] = mapped_column(String, nullable=True)
+    downstream_turn_state: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class DashboardSettings(Base):
     __tablename__ = "dashboard_settings"
 

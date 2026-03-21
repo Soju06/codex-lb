@@ -6,6 +6,7 @@ from typing import AsyncContextManager
 
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy.bridge_repository import HttpBridgeLeasesRepository
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -17,6 +18,7 @@ class ProxyRepositories:
     usage: UsageRepository
     request_logs: RequestLogsRepository
     sticky_sessions: StickySessionsRepository
+    http_bridge_leases: HttpBridgeLeasesRepository
     api_keys: ApiKeysRepository
     additional_usage: AdditionalUsageRepository
 

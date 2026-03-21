@@ -260,6 +260,7 @@ async def _repo_factory(
         usage=usage_repo,
         request_logs=StubRequestLogsRepository(),
         sticky_sessions=sticky_repo,
+        http_bridge_leases=object(),  # type: ignore[arg-type]
         api_keys=StubApiKeysRepository(),
         additional_usage=additional_usage_repo or StubAdditionalUsageRepository(),
     )
@@ -961,6 +962,7 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
             additional_usage=StubAdditionalUsageRepository(),
             request_logs=object(),  # type: ignore[arg-type]
             sticky_sessions=sticky_repo,
+            http_bridge_leases=object(),  # type: ignore[arg-type]
             api_keys=object(),  # type: ignore[arg-type]
         )
 

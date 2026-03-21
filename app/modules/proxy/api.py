@@ -445,13 +445,9 @@ async def _stream_responses(
     rate_limit_headers = await context.service.rate_limit_headers()
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     downstream_turn_state = (
-        proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
+        proxy_service_module.requested_http_downstream_turn_state(request.headers) if bridge_active else None
     )
-    turn_state_headers = (
-        proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
-        if downstream_turn_state is not None
-        else {}
-    )
+    turn_state_headers: dict[str, str] = {}
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -464,6 +460,7 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            response_headers_out=turn_state_headers,
         )
     else:
         stream = context.service.stream_responses(
@@ -521,13 +518,9 @@ async def _collect_responses(
     rate_limit_headers = await context.service.rate_limit_headers()
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     downstream_turn_state = (
-        proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
+        proxy_service_module.requested_http_downstream_turn_state(request.headers) if bridge_active else None
     )
-    turn_state_headers = (
-        proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
-        if downstream_turn_state is not None
-        else {}
-    )
+    turn_state_headers: dict[str, str] = {}
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -540,6 +533,7 @@ async def _collect_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            response_headers_out=turn_state_headers,
         )
     else:
         stream = context.service.stream_responses(

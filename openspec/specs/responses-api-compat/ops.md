@@ -284,13 +284,15 @@ If you deploy multiple replicas behind a load balancer, configure front-door aff
 
 Without front-door affinity, each replica will maintain its own in-memory bridge pool and HTTP continuity can fragment across instances.
 
-If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring so the proxy can fail closed with `bridge_instance_mismatch` rather than silently creating a second bridge on the wrong replica.
+If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring and keep the durable bridge-lease table healthy so the proxy can fail closed with `bridge_wrong_instance` on true live-owner conflicts rather than silently creating a second bridge on the wrong replica.
 
 ### Failure interpretation
 
 - `queue_full`: one bridge key is overloaded; increase bridge capacity carefully or reduce per-session concurrency upstream.
 - `capacity_exhausted_active_sessions`: the bridge pool hit `max_sessions` while every existing session still had pending work. The proxy intentionally refused the new request with `429` instead of evicting an active session. Mitigate by increasing pool size carefully, reducing concurrent bridge fan-out, or improving front-door affinity so related calls land on the same replica.
-- `owner_mismatch` / `bridge_instance_mismatch`: deterministic replica ownership is enabled for a stable bridge key and the request landed on the wrong instance. Fix ingress affinity or route the stable bridge key to the logged owner instance. Requests that only have an unstable per-request bridge key are intentionally exempt from owner enforcement.
+- `owner_mismatch` / `bridge_wrong_instance`: either deterministic replica ownership rejected a stable non-turn-state key on the wrong instance, or a replayed signed turn-state still has a live lease on another instance. Fix ingress affinity or route the bridge key to the logged owner instance.
+- `bridge_session_expired`: the replayed turn-state no longer has a live bridge session and the request still required `previous_response_id` continuity. Drop the stale `x-codex-turn-state` and start a fresh turn.
+- `bridge_token_invalid`: the replayed signed turn-state could not be validated or belonged to another API key scope.
 - `reconnect`: the bridge recreated an upstream websocket before response creation and retried once.
 - `terminal_error` with `previous_response_not_found`: continuity was already broken upstream; inspect replica affinity, bridge eviction timing, or upstream resets.
 - plain `transport = "http"` request logs are still expected for bridged HTTP requests; the internal upstream websocket does not change external transport accounting.

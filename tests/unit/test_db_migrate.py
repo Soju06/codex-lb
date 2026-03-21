@@ -4,11 +4,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from alembic.util.exc import CommandError
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import exc as sa_exc
+from sqlalchemy.engine import Connection
 
 import app.db.migrate as migrate_module
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
@@ -546,7 +548,7 @@ def test_ensure_alembic_version_table_capacity_alters_short_column(monkeypatch) 
 def test_read_current_revisions_returns_empty_when_alembic_version_table_is_missing() -> None:
     connection = _MissingAlembicVersionConnection()
 
-    assert _read_current_revisions_from_connection(connection) == ()
+    assert _read_current_revisions_from_connection(cast(Connection, connection)) == ()
 
 
 def test_max_revision_id_length_exceeds_alembic_default(tmp_path: Path) -> None:

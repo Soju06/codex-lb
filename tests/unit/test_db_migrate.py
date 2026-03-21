@@ -8,7 +8,9 @@ from types import SimpleNamespace
 import pytest
 from alembic.util.exc import CommandError
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import exc as sa_exc
 
+import app.db.migrate as migrate_module
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
 from app.db.migrate import (
@@ -17,6 +19,7 @@ from app.db.migrate import (
     _collect_migration_policy_violations,
     _ensure_alembic_version_table_capacity_for_connection,
     _max_revision_id_length,
+    _read_current_revisions_from_connection,
     check_migration_policy,
     check_schema_drift,
     inspect_migration_state,
@@ -29,6 +32,43 @@ from app.modules.usage.additional_quota_keys import clear_additional_quota_regis
 
 def _db_url(path: Path) -> str:
     return f"sqlite+aiosqlite:///{path}"
+
+
+def test_check_schema_drift_disposes_sync_engine(monkeypatch) -> None:
+    class _FakeConnectionContext:
+        def __init__(self) -> None:
+            self.connection = object()
+
+        def __enter__(self) -> object:
+            return self.connection
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _FakeEngine:
+        def __init__(self) -> None:
+            self.connection_context = _FakeConnectionContext()
+            self.disposed = False
+
+        def connect(self) -> _FakeConnectionContext:
+            return self.connection_context
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    fake_engine = _FakeEngine()
+
+    monkeypatch.setattr(migrate_module, "create_engine", lambda *args, **kwargs: fake_engine)
+    monkeypatch.setattr(
+        migrate_module.MigrationContext,
+        "configure",
+        lambda *, connection, opts: SimpleNamespace(connection=connection, opts=opts),
+    )
+    monkeypatch.setattr(migrate_module, "compare_metadata", lambda context, metadata: [])
+    monkeypatch.setattr(migrate_module, "_manual_schema_drift_diffs", lambda connection: ())
+
+    assert check_schema_drift("sqlite+aiosqlite:///tmp/drift.db") == ()
+    assert fake_engine.disposed is True
 
 
 def test_inspect_migration_state_requires_upgrade_when_uninitialized(tmp_path: Path) -> None:
@@ -453,6 +493,15 @@ class _FakeConnection:
         self.executed_sql.append(str(statement))
 
 
+class _MissingAlembicVersionConnection:
+    def execute(self, statement: object) -> None:
+        raise sa_exc.ProgrammingError(
+            str(statement),
+            {},
+            Exception('relation "alembic_version" does not exist'),
+        )
+
+
 class _FakeInspector:
     def __init__(self, *, has_table: bool, version_num_length: int | None = None) -> None:
         self._has_table = has_table
@@ -492,6 +541,12 @@ def test_ensure_alembic_version_table_capacity_alters_short_column(monkeypatch) 
     _ensure_alembic_version_table_capacity_for_connection(connection, required_length=64)  # type: ignore[arg-type]
 
     assert connection.executed_sql == ["ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)"]
+
+
+def test_read_current_revisions_returns_empty_when_alembic_version_table_is_missing() -> None:
+    connection = _MissingAlembicVersionConnection()
+
+    assert _read_current_revisions_from_connection(connection) == ()
 
 
 def test_max_revision_id_length_exceeds_alembic_default(tmp_path: Path) -> None:

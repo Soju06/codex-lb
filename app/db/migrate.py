@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import logging
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
@@ -13,6 +15,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from anyio import to_thread
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import Connection
 
 from app.core.config.settings import get_settings
@@ -114,6 +117,26 @@ def _required_sqlalchemy_url(config: Config) -> str:
     return sync_database_url
 
 
+@contextmanager
+def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
+    engine = create_engine(sync_database_url, future=True)
+    try:
+        with engine.connect() as connection:
+            yield connection
+    finally:
+        engine.dispose()
+
+
+@contextmanager
+def _sync_transaction(sync_database_url: str) -> Iterator[Connection]:
+    engine = create_engine(sync_database_url, future=True)
+    try:
+        with engine.begin() as connection:
+            yield connection
+    finally:
+        engine.dispose()
+
+
 def _read_table_names(connection: Connection) -> set[str]:
     inspector = inspect(connection)
     return set(inspector.get_table_names())
@@ -126,7 +149,18 @@ def _read_legacy_migration_names(connection: Connection) -> set[str]:
 
 
 def _read_current_revisions_from_connection(connection: Connection) -> tuple[str, ...]:
-    rows = connection.execute(text(f"SELECT {_ALEMBIC_VERSION_COLUMN} FROM {_ALEMBIC_VERSION_TABLE}")).fetchall()
+    try:
+        rows = connection.execute(text(f"SELECT {_ALEMBIC_VERSION_COLUMN} FROM {_ALEMBIC_VERSION_TABLE}")).fetchall()
+    except sa_exc.ProgrammingError as exc:
+        # PostgreSQL can still raise UndefinedTable here on a fresh database if
+        # the alembic_version table is absent when startup migration state is
+        # re-read. Treat that the same as "no revision yet".
+        message = str(exc).lower()
+        if _ALEMBIC_VERSION_TABLE in message and (
+            "does not exist" in message or "undefinedtable" in message or "no such table" in message
+        ):
+            return ()
+        raise
     revisions = {str(row[0]) for row in rows if row and row[0]}
     return tuple(sorted(revisions))
 
@@ -162,7 +196,7 @@ def _missing_required_legacy_tables_for_stamp(tables: set[str]) -> tuple[str, ..
 def _bootstrap_legacy_history(config: Config) -> LegacyBootstrapResult:
     sync_database_url = _required_sqlalchemy_url(config)
 
-    with create_engine(sync_database_url, future=True).connect() as connection:
+    with _sync_connection(sync_database_url) as connection:
         tables = _read_table_names(connection)
         if _ALEMBIC_VERSION_TABLE in tables:
             return LegacyBootstrapResult(
@@ -229,7 +263,7 @@ def _bootstrap_legacy_history(config: Config) -> LegacyBootstrapResult:
 
 
 def _read_current_revision(sync_database_url: str) -> str | None:
-    with create_engine(sync_database_url, future=True).connect() as connection:
+    with _sync_connection(sync_database_url) as connection:
         tables = _read_table_names(connection)
         if _ALEMBIC_VERSION_TABLE not in tables:
             return None
@@ -301,7 +335,7 @@ def _ensure_alembic_version_table_capacity_for_connection(connection: Connection
 def _ensure_alembic_version_table_capacity(config: Config) -> None:
     sync_database_url = _required_sqlalchemy_url(config)
     required_length = _max_revision_id_length(config)
-    with create_engine(sync_database_url, future=True).begin() as connection:
+    with _sync_transaction(sync_database_url) as connection:
         _ensure_alembic_version_table_capacity_for_connection(connection, required_length=required_length)
 
 
@@ -349,7 +383,7 @@ def _remap_legacy_alembic_revisions(config: Config) -> tuple[str, ...]:
     sync_database_url = _required_sqlalchemy_url(config)
     known_revisions = _known_revisions(config)
 
-    with create_engine(sync_database_url, future=True).begin() as connection:
+    with _sync_transaction(sync_database_url) as connection:
         tables = _read_table_names(connection)
         if _ALEMBIC_VERSION_TABLE not in tables:
             return ()
@@ -407,7 +441,7 @@ def inspect_migration_state(database_url: str) -> MigrationState:
     sync_database_url = _required_sqlalchemy_url(config)
     head_revision = _head_revision(config)
 
-    with create_engine(sync_database_url, future=True).connect() as connection:
+    with _sync_connection(sync_database_url) as connection:
         tables = _read_table_names(connection)
         has_alembic = _ALEMBIC_VERSION_TABLE in tables
         has_legacy = _LEGACY_MIGRATIONS_TABLE in tables
@@ -474,7 +508,7 @@ def check_schema_drift(database_url: str) -> tuple[str, ...]:
     config = _build_alembic_config(database_url)
     sync_database_url = _required_sqlalchemy_url(config)
 
-    with create_engine(sync_database_url, future=True).connect() as connection:
+    with _sync_connection(sync_database_url) as connection:
         migration_context = MigrationContext.configure(
             connection=connection,
             opts={

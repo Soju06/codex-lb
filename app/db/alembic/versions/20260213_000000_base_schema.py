@@ -51,7 +51,8 @@ def upgrade() -> None:
     bind = op.get_bind()
     account_status = _account_status_enum()
 
-    if not _table_exists(bind, "accounts"):
+    created_accounts = not _table_exists(bind, "accounts")
+    if created_accounts:
         op.create_table(
             "accounts",
             sa.Column("id", sa.String(), primary_key=True),
@@ -73,7 +74,8 @@ def upgrade() -> None:
             sa.Column("reset_at", sa.Integer(), nullable=True),
         )
 
-    if not _table_exists(bind, "usage_history"):
+    created_usage_history = not _table_exists(bind, "usage_history")
+    if created_usage_history:
         op.create_table(
             "usage_history",
             sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -94,13 +96,14 @@ def upgrade() -> None:
             sa.Column("credits_unlimited", sa.Boolean(), nullable=True),
             sa.Column("credits_balance", sa.Float(), nullable=True),
         )
-    usage_indexes = _indexes(bind, "usage_history")
+    usage_indexes = set() if created_usage_history else _indexes(bind, "usage_history")
     if "idx_usage_recorded_at" not in usage_indexes:
         op.create_index("idx_usage_recorded_at", "usage_history", ["recorded_at"], unique=False)
     if "idx_usage_account_time" not in usage_indexes:
         op.create_index("idx_usage_account_time", "usage_history", ["account_id", "recorded_at"], unique=False)
 
-    if not _table_exists(bind, "request_logs"):
+    created_request_logs = not _table_exists(bind, "request_logs")
+    if created_request_logs:
         op.create_table(
             "request_logs",
             sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -125,11 +128,12 @@ def upgrade() -> None:
             sa.Column("error_code", sa.String(), nullable=True),
             sa.Column("error_message", sa.Text(), nullable=True),
         )
-    request_log_indexes = _indexes(bind, "request_logs")
+    request_log_indexes = set() if created_request_logs else _indexes(bind, "request_logs")
     if "idx_logs_account_time" not in request_log_indexes:
         op.create_index("idx_logs_account_time", "request_logs", ["account_id", "requested_at"], unique=False)
 
-    if not _table_exists(bind, "sticky_sessions"):
+    created_sticky_sessions = not _table_exists(bind, "sticky_sessions")
+    if created_sticky_sessions:
         op.create_table(
             "sticky_sessions",
             sa.Column("key", sa.String(), primary_key=True),
@@ -147,7 +151,7 @@ def upgrade() -> None:
                 server_default=sa.text("CURRENT_TIMESTAMP"),
             ),
         )
-    sticky_indexes = _indexes(bind, "sticky_sessions")
+    sticky_indexes = set() if created_sticky_sessions else _indexes(bind, "sticky_sessions")
     if "idx_sticky_account" not in sticky_indexes:
         op.create_index("idx_sticky_account", "sticky_sessions", ["account_id"], unique=False)
 
@@ -176,7 +180,8 @@ def upgrade() -> None:
             ),
         )
 
-    if not _table_exists(bind, "api_keys"):
+    created_api_keys = not _table_exists(bind, "api_keys")
+    if created_api_keys:
         op.create_table(
             "api_keys",
             sa.Column("id", sa.String(), primary_key=True),
@@ -197,7 +202,7 @@ def upgrade() -> None:
             ),
             sa.Column("last_used_at", sa.DateTime(), nullable=True),
         )
-    api_key_indexes = _indexes(bind, "api_keys")
+    api_key_indexes = set() if created_api_keys else _indexes(bind, "api_keys")
     if "idx_api_keys_hash" not in api_key_indexes:
         op.create_index("idx_api_keys_hash", "api_keys", ["key_hash"], unique=False)
 

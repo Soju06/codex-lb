@@ -5,7 +5,7 @@
 
 ## 2. OAuth persona selection
 
-- [x] 2.1 Add a configurable OAuth authorize originator with `codex_cli_rs` as the default
+- [x] 2.1 Add a configurable OAuth authorize originator with `codex_chatgpt_desktop` as the default
 - [x] 2.2 Add regression coverage proving the configured OAuth originator is forwarded into the authorize URL
 
 ## 3. Verification

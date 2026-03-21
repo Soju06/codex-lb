@@ -261,6 +261,7 @@ async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.current_revision == _HEAD_REVISION
 
+    assert check_migration_policy is not None
     assert check_migration_policy(_DATABASE_URL) == ()
     assert check_schema_drift(_DATABASE_URL) == ()
 
@@ -528,9 +529,16 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             usage_index_rows = (await session.execute(text("PRAGMA index_list(usage_history)"))).fetchall()
             usage_index_names = {str(row[1]) for row in usage_index_rows if len(row) > 1}
             assert "idx_usage_window_account_latest" in usage_index_names
+            assert "idx_usage_window_account_time" in usage_index_names
             request_log_index_rows = (await session.execute(text("PRAGMA index_list(request_logs)"))).fetchall()
             request_log_index_names = {str(row[1]) for row in request_log_index_rows if len(row) > 1}
             assert "idx_logs_requested_at_id" in request_log_index_names
+            assert "idx_logs_requested_at_model_tier" in request_log_index_names
+            assert "idx_logs_model_effort_time" in request_log_index_names
+            assert "idx_logs_status_error_time" in request_log_index_names
+            api_key_index_rows = (await session.execute(text("PRAGMA index_list(api_keys)"))).fetchall()
+            api_key_index_names = {str(row[1]) for row in api_key_index_rows if len(row) > 1}
+            assert "idx_api_keys_name" in api_key_index_names
 
             await session.execute(
                 text(

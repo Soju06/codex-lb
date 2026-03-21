@@ -355,6 +355,12 @@ _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index(
+    "idx_usage_window_account_time",
+    _PRIMARY_WINDOW_INDEX_EXPR,
+    UsageHistory.account_id,
+    UsageHistory.recorded_at,
+)
+Index(
     "idx_usage_window_account_latest",
     _PRIMARY_WINDOW_INDEX_EXPR,
     UsageHistory.account_id,
@@ -362,9 +368,30 @@ Index(
     UsageHistory.id.desc(),
 )
 Index("idx_accounts_email", Account.email)
+Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_requested_at_model_tier",
+    RequestLog.requested_at.desc(),
+    RequestLog.model,
+    RequestLog.service_tier,
+)
+Index(
+    "idx_logs_model_effort_time",
+    RequestLog.model,
+    RequestLog.reasoning_effort,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
+Index(
+    "idx_logs_status_error_time",
+    RequestLog.status,
+    RequestLog.error_code,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)

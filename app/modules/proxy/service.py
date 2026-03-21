@@ -301,6 +301,7 @@ class ProxyService:
         )
         request_state, text_data = self._prepare_http_bridge_request(
             payload,
+            headers,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
         )
@@ -319,7 +320,6 @@ class ProxyService:
             max_sessions=max_sessions,
             previous_response_id=request_state.previous_response_id,
         )
-
         await self._submit_http_bridge_request(
             session,
             request_state=request_state,
@@ -1041,6 +1041,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
+        client_metadata = _response_create_client_metadata(payload, headers=headers)
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
@@ -1057,6 +1058,7 @@ class ProxyService:
             api_key_reservation=reservation,
             include_type_field=True,
             attach_event_queue=False,
+            client_metadata=client_metadata,
         )
         had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         affinity_policy = _sticky_key_for_responses_request(
@@ -1093,6 +1095,7 @@ class ProxyService:
     def _prepare_http_bridge_request(
         self,
         payload: ResponsesRequest,
+        headers: Mapping[str, str],
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
@@ -1103,6 +1106,7 @@ class ProxyService:
             api_key_reservation=api_key_reservation,
             include_type_field=True,
             attach_event_queue=True,
+            client_metadata=_response_create_client_metadata({}, headers=headers),
         )
 
     def _prepare_response_bridge_request_state(
@@ -1113,12 +1117,15 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None,
         include_type_field: bool,
         attach_event_queue: bool,
+        client_metadata: Mapping[str, JsonValue] | None,
     ) -> tuple[_WebSocketRequestState, str]:
         upstream_payload = dict(payload.to_payload())
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
         if include_type_field:
             upstream_payload["type"] = "response.create"
+        if client_metadata:
+            upstream_payload["client_metadata"] = client_metadata
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         request_state = _WebSocketRequestState(
             request_id=f"ws_{uuid4().hex}",
@@ -4701,6 +4708,25 @@ def _upstream_turn_state_from_socket(upstream: UpstreamResponsesWebSocket | None
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _response_create_client_metadata(
+    payload: Mapping[str, JsonValue],
+    *,
+    headers: Mapping[str, str],
+) -> Mapping[str, JsonValue] | None:
+    raw_value = payload.get("client_metadata")
+    client_metadata: dict[str, JsonValue] = {}
+    if isinstance(raw_value, dict):
+        for key, value in raw_value.items():
+            if isinstance(key, str) and isinstance(value, str):
+                client_metadata[key] = value
+
+    turn_metadata = headers.get("x-codex-turn-metadata")
+    if isinstance(turn_metadata, str) and turn_metadata.strip():
+        client_metadata.setdefault("x-codex-turn-metadata", turn_metadata)
+
+    return client_metadata or None
 
 
 def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:

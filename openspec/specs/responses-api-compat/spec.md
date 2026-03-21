@@ -212,6 +212,12 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **WHEN** a client sends a later HTTP `/backend-api/codex/responses` request with `previous_response_id` that references a response created earlier on the same bridged session
 - **THEN** the service forwards that request through the same upstream websocket session so upstream can resolve the referenced prior response
 
+#### Scenario: HTTP previous_response_id fails closed when bridged continuity is unavailable
+- **WHEN** a client sends HTTP `/v1/responses` or `/backend-api/codex/responses` with `previous_response_id`
+- **AND** there is no matching live bridged upstream websocket session for that continuity key
+- **THEN** the service MUST fail the request without opening a fresh upstream session
+- **AND** it MUST return `previous_response_not_found` on `previous_response_id`
+
 #### Scenario: bridged HTTP requests keep external HTTP transport logging
 - **WHEN** the service fulfills an HTTP `/v1/responses` or `/backend-api/codex/responses` request through an internal upstream websocket bridge
 - **THEN** the persisted request log still records `transport = "http"`

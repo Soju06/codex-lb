@@ -51,7 +51,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.firewall.repository import FirewallRepository
-from app.modules.firewall.service import FirewallService
+from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
@@ -800,7 +800,8 @@ async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONRespo
         trusted_proxy_networks=_parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs),
     )
     async with get_background_session() as session:
-        service = FirewallService(FirewallRepository(session))
+        repository = cast(FirewallRepositoryPort, FirewallRepository(session))
+        service = FirewallService(repository)
         if await service.is_ip_allowed(client_ip):
             return None
     return JSONResponse(

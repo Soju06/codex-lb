@@ -103,4 +103,4 @@ build-backend = "hatchling.build"
 artifacts = ["app/static/**"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["app"]
+packages = ["app","config"]

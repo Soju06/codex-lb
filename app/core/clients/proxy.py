@@ -81,7 +81,7 @@ _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
         "x-request-id",
     }
 )
-_NATIVE_CODEX_ORIGINATORS = frozenset({"codex_cli_rs", "Codex Desktop"})
+_NATIVE_CODEX_ORIGINATORS = frozenset({"codex_cli_rs", "Codex Desktop", "codex_atlas", "codex_chatgpt_desktop"})
 _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
     {
         "x-codex-turn-state",

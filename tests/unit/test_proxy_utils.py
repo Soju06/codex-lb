@@ -142,6 +142,8 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
 def test_has_native_codex_transport_headers_requires_allowlisted_originator():
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_cli_rs"}) is True
     assert proxy_module._has_native_codex_transport_headers({"originator": "Codex Desktop"}) is True
+    assert proxy_module._has_native_codex_transport_headers({"originator": "codex_atlas"}) is True
+    assert proxy_module._has_native_codex_transport_headers({"originator": "codex_chatgpt_desktop"}) is True
     assert proxy_module._has_native_codex_transport_headers({"originator": "other-client"}) is False
 
 

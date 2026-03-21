@@ -1587,7 +1587,14 @@ class ProxyService:
                 raise continuity_error
 
             if inflight_future is not None and not owns_creation:
-                session = await asyncio.shield(inflight_future)
+                try:
+                    session = await asyncio.shield(inflight_future)
+                except asyncio.CancelledError:
+                    if inflight_future.cancelled():
+                        continue
+                    raise
+                except Exception:
+                    continue
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     return session
                 continue
@@ -1600,14 +1607,17 @@ class ProxyService:
                     request_model=request_model,
                     idle_ttl_seconds=effective_idle_ttl_seconds,
                 )
-            except Exception as exc:
+            except BaseException as exc:
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(key, None)
                         if inflight_future is not None and not inflight_future.done():
-                            inflight_future.set_exception(exc)
-                            inflight_future.exception()
+                            if isinstance(exc, asyncio.CancelledError):
+                                inflight_future.cancel()
+                            else:
+                                inflight_future.set_exception(exc)
+                                inflight_future.exception()
                 raise
 
             async with self._http_bridge_lock:

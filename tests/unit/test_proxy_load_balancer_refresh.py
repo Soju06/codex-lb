@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer.types import UpstreamError
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import ModelRegistrySnapshot
@@ -894,6 +895,72 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
 
     release_accounts.set()
     selection = await select_task
+    assert selection.account is not None
+
+
+@pytest.mark.asyncio
+async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-runtime-before-repo", "runtime-before-repo@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=20.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    repo_entered = asyncio.Event()
+    release_repo = asyncio.Event()
+
+    @asynccontextmanager
+    async def blocking_repo_factory() -> AsyncIterator[ProxyRepositories]:
+        repo_entered.set()
+        await release_repo.wait()
+        yield ProxyRepositories(
+            accounts=accounts_repo,
+            usage=usage_repo,
+            additional_usage=StubAdditionalUsageRepository(),
+            request_logs=StubRequestLogsRepository(),
+            sticky_sessions=sticky_repo,
+            api_keys=StubApiKeysRepository(),
+        )
+
+    balancer = LoadBalancer(blocking_repo_factory)
+
+    async def fake_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+        del model, additional_limit_name
+        return load_balancer_module._SelectionInputs(
+            accounts=[account],
+            latest_primary={account.id: primary_entry},
+            latest_secondary={account.id: secondary_entry},
+        )
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", fake_load_selection_inputs)
+
+    async with balancer._runtime_lock:
+        select_task = asyncio.create_task(balancer.select_account())
+        await asyncio.sleep(0.01)
+        assert not repo_entered.is_set()
+
+    release_repo.set()
+    selection = await select_task
+    assert repo_entered.is_set()
     assert selection.account is not None
 
 

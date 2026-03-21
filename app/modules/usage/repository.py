@@ -160,6 +160,17 @@ class UsageRepository:
 
     async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
         conditions = _window_clause(window)
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql":
+            stmt = (
+                select(UsageHistory)
+                .distinct(UsageHistory.account_id)
+                .where(conditions)
+                .order_by(UsageHistory.account_id.asc(), UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            )
+            result = await self._session.execute(stmt)
+            return {entry.account_id: entry for entry in result.scalars().all()}
         subq = (
             select(
                 UsageHistory.id.label("usage_id"),

@@ -179,21 +179,15 @@ async def test_latest_by_account_primary_query_plan_uses_normalized_window_index
                 text(
                     """
                     EXPLAIN (FORMAT JSON)
-                    SELECT uh.id
-                    FROM usage_history AS uh
-                    JOIN (
-                        SELECT id AS usage_id,
-                               row_number() OVER (
-                                   PARTITION BY account_id
-                                   ORDER BY recorded_at DESC, id DESC
-                               ) AS row_number
-                        FROM usage_history
-                        WHERE coalesce("window", 'primary') = 'primary'
-                    ) AS ranked ON uh.id = ranked.usage_id
-                    WHERE ranked.row_number = 1
+                    SELECT DISTINCT ON (account_id) id
+                    FROM usage_history
+                    WHERE coalesce("window", 'primary') = 'primary'
+                    ORDER BY account_id ASC, recorded_at DESC, id DESC
                     """
                 )
             )
         ).scalar_one()
 
-    assert "idx_usage_window_account_latest" in json.dumps(plan)
+    plan_json = json.dumps(plan)
+    assert "idx_usage_window_account_latest" in plan_json or "idx_usage_window_account_time" in plan_json
+    assert "Seq Scan" not in plan_json

@@ -1807,6 +1807,21 @@ class ProxyService:
                 await session.upstream.close()
             except Exception:
                 logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
+            if request_state.previous_response_id is not None:
+                payload = openai_error(
+                    request_state.error_code_override or "previous_response_not_found",
+                    request_state.error_message_override
+                    or (
+                        f"Previous response with id '{request_state.previous_response_id}' not found. "
+                        "HTTP bridge continuity was lost before the request reached upstream."
+                    ),
+                    error_type=request_state.error_type_override or "invalid_request_error",
+                )
+                payload["error"]["param"] = request_state.error_param_override or "previous_response_id"
+                raise ProxyResponseError(
+                    400,
+                    payload,
+                ) from exc
             raise ProxyResponseError(
                 502,
                 openai_error("upstream_unavailable", str(exc) or "Upstream websocket closed"),

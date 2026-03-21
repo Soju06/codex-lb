@@ -4453,3 +4453,34 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
     async with session.pending_lock:
         assert list(session.pending_requests) == []
         assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_http_bridge_request_preserves_existing_client_metadata(app_instance):
+    service = get_proxy_service_for_app(app_instance)
+    payload = proxy_module.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "client_metadata": {
+                "bool_flag": True,
+                "count": 2,
+                "nested": {"enabled": False},
+            },
+        }
+    )
+
+    _request_state, text_data = service._prepare_http_bridge_request(
+        payload,
+        {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
+        api_key=None,
+        api_key_reservation=None,
+    )
+
+    assert json.loads(text_data)["client_metadata"] == {
+        "bool_flag": True,
+        "count": 2,
+        "nested": {"enabled": False},
+        "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+    }

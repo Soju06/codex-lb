@@ -150,6 +150,29 @@ def test_has_native_codex_transport_headers_requires_allowlisted_originator():
     assert proxy_module._has_native_codex_transport_headers({"originator": "other-client"}) is False
 
 
+def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():
+    payload = {
+        "client_metadata": {
+            "bool_flag": True,
+            "count": 2,
+            "nested": {"enabled": False},
+            "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+        }
+    }
+
+    metadata = proxy_service._response_create_client_metadata(
+        payload,
+        headers={"x-codex-turn-metadata": '{"turn_id":"header-turn"}'},
+    )
+
+    assert metadata == {
+        "bool_flag": True,
+        "count": 2,
+        "nested": {"enabled": False},
+        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+    }
+
+
 def test_has_native_codex_transport_headers_does_not_treat_session_id_as_websocket_signal():
     assert proxy_module._has_native_codex_transport_headers({"session_id": "sid_123"}) is False
 

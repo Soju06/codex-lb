@@ -55,6 +55,7 @@ from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
+from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -1106,7 +1107,7 @@ class ProxyService:
             api_key_reservation=api_key_reservation,
             include_type_field=True,
             attach_event_queue=True,
-            client_metadata=_response_create_client_metadata({}, headers=headers),
+            client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
         )
 
     def _prepare_response_bridge_request_state(
@@ -4717,9 +4718,9 @@ def _response_create_client_metadata(
 ) -> Mapping[str, JsonValue] | None:
     raw_value = payload.get("client_metadata")
     client_metadata: dict[str, JsonValue] = {}
-    if isinstance(raw_value, dict):
+    if is_json_mapping(raw_value):
         for key, value in raw_value.items():
-            if isinstance(key, str) and isinstance(value, str):
+            if isinstance(key, str):
                 client_metadata[key] = value
 
     turn_metadata = headers.get("x-codex-turn-metadata")

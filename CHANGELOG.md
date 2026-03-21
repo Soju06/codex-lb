@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.8.0](https://github.com/Soju06/codex-lb/compare/v1.7.0...v1.8.0) (2026-03-21)
+
+
+### Features
+
+* **proxy:** split service tier logging and pricing ([#238](https://github.com/Soju06/codex-lb/issues/238)) ([04c9304](https://github.com/Soju06/codex-lb/commit/04c93044aa061051d0ea404795078e44b6241360))
+
+
+### Bug Fixes
+
+* fail closed when HTTP bridge loses previous_response continuity ([#239](https://github.com/Soju06/codex-lb/issues/239)) ([a87e0ca](https://github.com/Soju06/codex-lb/commit/a87e0ca342981263d33668d97eac5cdc9c86842b))
+* improve native Codex websocket parity ([#242](https://github.com/Soju06/codex-lb/issues/242)) ([fb0e759](https://github.com/Soju06/codex-lb/commit/fb0e7595f46984d26c97a761dd339af4ade83223))
+* **proxy:** support desktop Codex originators ([#240](https://github.com/Soju06/codex-lb/issues/240)) ([ac38bd1](https://github.com/Soju06/codex-lb/commit/ac38bd186dd4eb51947ad9b7e83ecb6addd6ca99))
+* tighten dashboard database indexes ([#241](https://github.com/Soju06/codex-lb/issues/241)) ([f2469a2](https://github.com/Soju06/codex-lb/commit/f2469a2b8102dd1efe7f4948ee1e82d461f30e93))
+
 ## [1.7.0](https://github.com/Soju06/codex-lb/compare/v1.6.3...v1.7.0) (2026-03-20)
 
 

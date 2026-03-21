@@ -81,7 +81,16 @@ _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
         "x-request-id",
     }
 )
-_NATIVE_CODEX_ORIGINATORS = frozenset({"codex_cli_rs", "Codex Desktop", "codex_atlas", "codex_chatgpt_desktop"})
+_NATIVE_CODEX_ORIGINATORS = frozenset(
+    {
+        "Codex Desktop",
+        "codex_atlas",
+        "codex_chatgpt_desktop",
+        "codex_cli_rs",
+        "codex_exec",
+        "codex_vscode",
+    }
+)
 _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
     {
         "x-codex-turn-state",
@@ -787,9 +796,20 @@ def _configured_stream_transport(
 def _has_native_codex_transport_headers(headers: Mapping[str, str]) -> bool:
     normalized = {key.lower(): value for key, value in headers.items()}
     originator = normalized.get("originator")
-    if isinstance(originator, str) and originator in _NATIVE_CODEX_ORIGINATORS:
+    if _is_native_codex_originator(originator):
         return True
     return any(key in normalized for key in _NATIVE_CODEX_STREAM_HEADER_KEYS)
+
+
+def _is_native_codex_originator(originator: object) -> bool:
+    if not isinstance(originator, str):
+        return False
+    stripped = originator.strip()
+    if not stripped:
+        return False
+    if stripped in _NATIVE_CODEX_ORIGINATORS:
+        return True
+    return stripped.startswith("Codex ")
 
 
 def _resolve_stream_transport(

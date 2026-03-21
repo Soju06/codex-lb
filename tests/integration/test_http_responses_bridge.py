@@ -388,6 +388,7 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -403,6 +404,7 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -494,6 +496,7 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -508,6 +511,7 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         select_calls.append(prefer_earlier_reset_accounts)
@@ -593,6 +597,7 @@ async def test_v1_responses_http_bridge_codex_session_prewarms_first_request(asy
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -608,6 +613,7 @@ async def test_v1_responses_http_bridge_codex_session_prewarms_first_request(asy
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -669,6 +675,7 @@ async def test_v1_responses_http_bridge_codex_session_does_not_prewarm_by_defaul
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -684,6 +691,7 @@ async def test_v1_responses_http_bridge_codex_session_does_not_prewarm_by_defaul
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -749,6 +757,7 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -764,6 +773,7 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -859,6 +869,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -874,6 +885,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -940,7 +952,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
         candidate
         for candidate in ("turn_owner_alias_b", "turn_owner_alias_c", "turn_owner_alias_d", "turn_owner_alias_e")
         if proxy_module._http_bridge_owner_instance(
-            proxy_module._HTTPBridgeSessionKey("turn_state_header", candidate, None),
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", candidate, None, None),
             proxy_module.get_settings(),
         )
         == "instance-b"
@@ -948,7 +960,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     await service._register_http_bridge_turn_state(session, replay_turn_state)
 
     replayed = await service._get_or_create_http_bridge_session(
-        proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None),
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None, None),
         headers={"x-codex-turn-state": replay_turn_state},
         affinity=proxy_module._AffinityPolicy(key=replay_turn_state, kind=proxy_module.StickySessionKind.CODEX_SESSION),
         api_key=None,
@@ -1009,6 +1021,7 @@ async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_withou
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1024,6 +1037,7 @@ async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_withou
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1032,7 +1046,7 @@ async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_withou
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._get_or_create_http_bridge_session(
-            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_missing_alias", None),
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_missing_alias", None, None),
             headers={"x-codex-turn-state": "http_turn_missing_alias"},
             affinity=proxy_module._AffinityPolicy(
                 key="http_turn_missing_alias",
@@ -1079,6 +1093,7 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1094,6 +1109,7 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1132,7 +1148,7 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
         sticky_threads_enabled=False,
         api_key=None,
     )
-    api_key_a = cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-a"))
+    api_key_a = cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-a", tags=None))
     session = await service._get_or_create_http_bridge_session(
         proxy_module._make_http_bridge_session_key(
             payload,
@@ -1152,13 +1168,13 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._get_or_create_http_bridge_session(
-            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_api_key_alias", "api-key-b"),
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_api_key_alias", "api-key-b", None),
             headers={"x-codex-turn-state": "http_turn_api_key_alias"},
             affinity=proxy_module._AffinityPolicy(
                 key="http_turn_api_key_alias",
                 kind=proxy_module.StickySessionKind.CODEX_SESSION,
             ),
-            api_key=cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-b")),
+            api_key=cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-b", tags=None)),
             request_model=payload.model,
             idle_ttl_seconds=120.0,
             max_sessions=128,
@@ -1201,6 +1217,7 @@ async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1216,6 +1233,7 @@ async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1274,7 +1292,7 @@ async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
     await service._register_http_bridge_turn_state(session, "http_turn_alias_b")
 
     replayed = await service._get_or_create_http_bridge_session(
-        proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_alias_a", None),
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_alias_a", None, None),
         headers={"x-codex-turn-state": "http_turn_alias_a"},
         affinity=proxy_module._AffinityPolicy(
             key="http_turn_alias_a",
@@ -1323,6 +1341,7 @@ async def test_v1_responses_http_bridge_allows_unstable_request_key_even_on_non_
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1338,6 +1357,7 @@ async def test_v1_responses_http_bridge_allows_unstable_request_key_even_on_non_
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1428,6 +1448,7 @@ async def test_v1_responses_http_bridge_reconnect_uses_last_upstream_turn_state(
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1443,6 +1464,7 @@ async def test_v1_responses_http_bridge_reconnect_uses_last_upstream_turn_state(
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1547,6 +1569,7 @@ async def test_v1_responses_http_bridge_session_id_reconnect_keeps_upstream_turn
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1562,6 +1585,7 @@ async def test_v1_responses_http_bridge_session_id_reconnect_keeps_upstream_turn
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1662,6 +1686,7 @@ async def test_v1_responses_http_bridge_prefers_evicting_prompt_cache_session_be
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1677,6 +1702,7 @@ async def test_v1_responses_http_bridge_prefers_evicting_prompt_cache_session_be
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1833,6 +1859,7 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1848,6 +1875,7 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -1929,6 +1957,7 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -1944,6 +1973,7 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -2027,6 +2057,7 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2040,6 +2071,7 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         connect_calls.append((sticky_key, sticky_kind))
@@ -2130,6 +2162,7 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2143,6 +2176,7 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         connect_calls.append((sticky_key, sticky_kind))
@@ -2230,6 +2264,7 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2245,6 +2280,7 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -2326,6 +2362,7 @@ async def test_v1_responses_http_emits_turn_state_header_and_reuses_when_replaye
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2339,6 +2376,7 @@ async def test_v1_responses_http_emits_turn_state_header_and_reuses_when_replaye
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         connect_calls.append((sticky_key, sticky_kind))
@@ -2415,6 +2453,7 @@ async def test_v1_responses_http_bridge_streaming_path_uses_persistent_upstream_
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2430,6 +2469,7 @@ async def test_v1_responses_http_bridge_streaming_path_uses_persistent_upstream_
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -2621,6 +2661,7 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2636,6 +2677,7 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -2729,6 +2771,7 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2744,6 +2787,7 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -2810,6 +2854,7 @@ async def test_v1_responses_http_bridge_reuses_derived_prompt_cache_key_when_cli
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2825,6 +2870,7 @@ async def test_v1_responses_http_bridge_reuses_derived_prompt_cache_key_when_cli
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -2893,6 +2939,7 @@ async def test_v1_responses_http_bridge_prefers_session_header_for_isolation(asy
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2908,6 +2955,7 @@ async def test_v1_responses_http_bridge_prefers_session_header_for_isolation(asy
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -2972,6 +3020,7 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -2987,6 +3036,7 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3053,6 +3103,7 @@ async def test_v1_responses_http_bridge_does_not_evict_active_session_when_pool_
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3068,6 +3119,7 @@ async def test_v1_responses_http_bridge_does_not_evict_active_session_when_pool_
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3203,6 +3255,7 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3218,6 +3271,7 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3365,6 +3419,7 @@ async def test_v1_responses_http_bridge_enforces_queue_limit_atomically_for_same
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3380,6 +3435,7 @@ async def test_v1_responses_http_bridge_enforces_queue_limit_atomically_for_same
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3480,6 +3536,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3495,6 +3552,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3559,6 +3617,7 @@ async def test_v1_responses_http_bridge_cancellation_releases_queued_slot(async_
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3574,6 +3633,7 @@ async def test_v1_responses_http_bridge_cancellation_releases_queued_slot(async_
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3678,6 +3738,7 @@ async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client,
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3693,6 +3754,7 @@ async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client,
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3801,6 +3863,7 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3816,6 +3879,7 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -3899,6 +3963,7 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
         affinity_kind="prompt_cache",
         affinity_key="retry-send-followup-key",
         api_key_id=None,
+        account_tags=None,
     )
     async with service._http_bridge_lock:
         session = service._http_bridge_sessions[session_key]
@@ -3935,6 +4000,7 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
         routing_strategy,
         model,
         exclude_account_ids=None,
+        account_tags=None,
         additional_limit_name=None,
     ):
         del (
@@ -3950,6 +4016,7 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
             routing_strategy,
             model,
             exclude_account_ids,
+            account_tags,
             additional_limit_name,
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -4003,6 +4070,7 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
         affinity_kind="prompt_cache",
         affinity_key="cancel-stream-key",
         api_key_id=None,
+        account_tags=None,
     )
     async with service._http_bridge_lock:
         session = service._http_bridge_sessions[session_key]

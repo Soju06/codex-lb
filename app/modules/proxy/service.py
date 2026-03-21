@@ -1538,6 +1538,7 @@ class ProxyService:
                 key,
                 headers=headers,
                 affinity=affinity,
+                api_key=api_key,
                 request_model=request_model,
                 idle_ttl_seconds=effective_idle_ttl_seconds,
             )
@@ -1632,6 +1633,7 @@ class ProxyService:
         *,
         headers: dict[str, str],
         affinity: _AffinityPolicy,
+        api_key: ApiKeyData | None,
         request_model: str | None,
         idle_ttl_seconds: float,
     ) -> "_HTTPBridgeSession":
@@ -1657,6 +1659,7 @@ class ProxyService:
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             routing_strategy=_routing_strategy(settings),
             model=request_model,
+            account_tags=list(api_key.tags) if api_key and api_key.tags else None,
         )
         account = selection.account
         if account is None:
@@ -2068,6 +2071,7 @@ class ProxyService:
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             routing_strategy=_routing_strategy(settings),
             model=session.request_model,
+            account_tags=list(session.key.account_tags) if session.key.account_tags else None,
         )
         account = selection.account
         if account is None:
@@ -4040,6 +4044,7 @@ class _HTTPBridgeSessionKey:
     affinity_kind: str
     affinity_key: str
     api_key_id: str | None
+    account_tags: frozenset[str] | None
 
 
 @dataclass(slots=True)
@@ -4727,6 +4732,7 @@ def _make_http_bridge_session_key(
         affinity_kind=affinity_kind,
         affinity_key=affinity_key,
         api_key_id=api_key.id if api_key is not None else None,
+        account_tags=frozenset(api_key.tags) if api_key and api_key.tags else None,
     )
 
 

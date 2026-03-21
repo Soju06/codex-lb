@@ -4723,7 +4723,8 @@ def _response_create_client_metadata(
             if isinstance(key, str):
                 client_metadata[key] = value
 
-    turn_metadata = headers.get("x-codex-turn-metadata")
+    normalized_headers = {key.lower(): value for key, value in headers.items()}
+    turn_metadata = normalized_headers.get("x-codex-turn-metadata")
     if isinstance(turn_metadata, str) and turn_metadata.strip():
         client_metadata.setdefault("x-codex-turn-metadata", turn_metadata)
 

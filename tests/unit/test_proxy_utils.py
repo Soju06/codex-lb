@@ -173,6 +173,15 @@ def test_response_create_client_metadata_preserves_existing_json_values_and_turn
     }
 
 
+def test_response_create_client_metadata_reads_turn_metadata_case_insensitively():
+    metadata = proxy_service._response_create_client_metadata(
+        {},
+        headers={"X-Codex-Turn-Metadata": '{"turn_id":"header-turn"}'},
+    )
+
+    assert metadata == {"x-codex-turn-metadata": '{"turn_id":"header-turn"}'}
+
+
 def test_has_native_codex_transport_headers_does_not_treat_session_id_as_websocket_signal():
     assert proxy_module._has_native_codex_transport_headers({"session_id": "sid_123"}) is False
 

@@ -55,6 +55,7 @@ class RuntimeState:
     last_error_at: float | None = None
     last_selected_at: float | None = None
     error_count: int = 0
+    version: int = 0
 
 
 @dataclass
@@ -114,60 +115,114 @@ class LoadBalancer:
 
         selected_snapshot: Account | None = None
         error_message: str | None = None
-        async with self._runtime_lock:
-            async with self._repo_factory() as repos:
-                self._prune_runtime(selection_inputs.accounts)
+        selected_states: list[AccountState] = []
+        selected_account_map: dict[str, Account] = {}
+        async with self._repo_factory() as repos:
+            if sticky_key is None:
+                while True:
+                    async with self._runtime_lock:
+                        self._prune_runtime(selection_inputs.accounts)
+                        states, account_map = _build_states(
+                            accounts=selection_inputs.accounts,
+                            latest_primary=selection_inputs.latest_primary,
+                            latest_secondary=selection_inputs.latest_secondary,
+                            runtime=self._runtime,
+                        )
+                        runtime_versions = {
+                            account.id: self._runtime.get(account.id, RuntimeState()).version
+                            for account in selection_inputs.accounts
+                        }
 
-                states, account_map = _build_states(
-                    accounts=selection_inputs.accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    runtime=self._runtime,
-                )
+                    result = select_account(
+                        states,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                    )
 
-                result = await self._select_with_stickiness(
-                    states=states,
-                    account_map=account_map,
-                    sticky_key=sticky_key,
-                    sticky_kind=sticky_kind,
-                    reallocate_sticky=reallocate_sticky,
-                    sticky_max_age_seconds=sticky_max_age_seconds,
-                    prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-                    routing_strategy=routing_strategy,
-                    sticky_repo=repos.sticky_sessions,
-                )
-                if result.account is not None:
-                    runtime = self._runtime.setdefault(result.account.account_id, RuntimeState())
-                    runtime.last_selected_at = time.time()
+                    async with self._runtime_lock:
+                        if any(
+                            self._runtime.get(account.id, RuntimeState()).version != runtime_versions[account.id]
+                            for account in selection_inputs.accounts
+                        ):
+                            continue
 
-                for state in states:
-                    account = account_map.get(state.account_id)
-                    if account:
-                        await self._sync_state(repos.accounts, account, state)
-
-                if result.account is None:
-                    error_message = result.error_message
-                else:
-                    selected = account_map.get(result.account.account_id)
-                    if selected is None:
-                        error_message = result.error_message
+                        selected_account_map = account_map
+                        selected_states = []
+                        for state in states:
+                            account = account_map.get(state.account_id)
+                            if account is None:
+                                continue
+                            self._sync_runtime_state(
+                                account,
+                                state,
+                                selected=result.account is not None and state.account_id == result.account.account_id,
+                            )
+                            selected_states.append(state)
+                        if result.account is not None:
+                            selected = account_map.get(result.account.account_id)
+                            if selected is None:
+                                error_message = result.error_message
+                            else:
+                                selected.status = result.account.status
+                                selected.deactivation_reason = result.account.deactivation_reason
+                                selected_snapshot = _clone_account(selected)
+                        else:
+                            error_message = result.error_message
+                        break
+            else:
+                async with self._runtime_lock:
+                    self._prune_runtime(selection_inputs.accounts)
+                    states, account_map = _build_states(
+                        accounts=selection_inputs.accounts,
+                        latest_primary=selection_inputs.latest_primary,
+                        latest_secondary=selection_inputs.latest_secondary,
+                        runtime=self._runtime,
+                    )
+                    result = await self._select_with_stickiness(
+                        states=states,
+                        account_map=account_map,
+                        sticky_key=sticky_key,
+                        sticky_kind=sticky_kind,
+                        reallocate_sticky=reallocate_sticky,
+                        sticky_max_age_seconds=sticky_max_age_seconds,
+                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        sticky_repo=repos.sticky_sessions,
+                    )
+                    selected_account_map = account_map
+                    for state in states:
+                        account = account_map.get(state.account_id)
+                        if account is None:
+                            continue
+                        self._sync_runtime_state(
+                            account,
+                            state,
+                            selected=result.account is not None and state.account_id == result.account.account_id,
+                        )
+                        selected_states.append(state)
+                    if result.account is not None:
+                        selected = account_map.get(result.account.account_id)
+                        if selected is None:
+                            error_message = result.error_message
+                        else:
+                            selected.status = result.account.status
+                            selected.deactivation_reason = result.account.deactivation_reason
+                            selected_snapshot = _clone_account(selected)
                     else:
-                        selected.status = result.account.status
-                        selected.deactivation_reason = result.account.deactivation_reason
-                        selected_snapshot = _clone_account(selected)
+                        error_message = result.error_message
+
+            if selected_snapshot is None:
+                logger.warning(
+                    "No account selected strategy=%s sticky=%s model=%s error=%s",
+                    routing_strategy,
+                    bool(sticky_key),
+                    model,
+                    error_message,
+                )
+            await self._persist_selection_state(repos.accounts, selected_account_map, selected_states)
 
         if selected_snapshot is None:
-            logger.warning(
-                "No account selected strategy=%s sticky=%s model=%s error=%s",
-                routing_strategy,
-                bool(sticky_key),
-                model,
-                error_message,
-            )
             return AccountSelection(account=None, error_message=error_message, error_code=None)
-
-        runtime = self._runtime.setdefault(selected_snapshot.id, RuntimeState())
-        runtime.last_selected_at = time.time()
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
             selected_snapshot.id,
@@ -435,22 +490,25 @@ class LoadBalancer:
         async with self._runtime_lock:
             state = self._state_for(account)
             handle_rate_limit(state, error)
-            async with self._repo_factory() as repos:
-                await self._sync_state(repos.accounts, account, state)
+            self._sync_runtime_state(account, state)
+        async with self._repo_factory() as repos:
+            await self._persist_state(repos.accounts, account, state)
 
     async def mark_quota_exceeded(self, account: Account, error: UpstreamError) -> None:
         async with self._runtime_lock:
             state = self._state_for(account)
             handle_quota_exceeded(state, error)
-            async with self._repo_factory() as repos:
-                await self._sync_state(repos.accounts, account, state)
+            self._sync_runtime_state(account, state)
+        async with self._repo_factory() as repos:
+            await self._persist_state(repos.accounts, account, state)
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
         async with self._runtime_lock:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
-            async with self._repo_factory() as repos:
-                await self._sync_state(repos.accounts, account, state)
+            self._sync_runtime_state(account, state)
+        async with self._repo_factory() as repos:
+            await self._persist_state(repos.accounts, account, state)
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)
@@ -463,8 +521,9 @@ class LoadBalancer:
             state = self._state_for(account)
             state.error_count += count
             state.last_error_at = time.time()
-            async with self._repo_factory() as repos:
-                await self._sync_state(repos.accounts, account, state)
+            self._sync_runtime_state(account, state)
+        async with self._repo_factory() as repos:
+            await self._persist_state(repos.accounts, account, state)
 
     async def record_success(self, account: Account) -> None:
         """Clear transient error state after a successful upstream request."""
@@ -473,6 +532,7 @@ class LoadBalancer:
             if runtime and runtime.error_count > 0:
                 runtime.error_count = 0
                 runtime.last_error_at = None
+                runtime.version += 1
 
     def _state_for(self, account: Account) -> AccountState:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
@@ -490,18 +550,58 @@ class LoadBalancer:
             deactivation_reason=account.deactivation_reason,
         )
 
-    async def _sync_state(
+    def _sync_runtime_state(
+        self,
+        account: Account,
+        state: AccountState,
+        *,
+        selected: bool = False,
+        expected_version: int | None = None,
+    ) -> bool:
+        runtime = self._runtime.setdefault(account.id, RuntimeState())
+        if expected_version is not None and runtime.version != expected_version:
+            if selected:
+                runtime.last_selected_at = time.time()
+                runtime.version += 1
+            return False
+
+        dirty = False
+        if runtime.reset_at != state.reset_at:
+            runtime.reset_at = state.reset_at
+            dirty = True
+        if runtime.cooldown_until != state.cooldown_until:
+            runtime.cooldown_until = state.cooldown_until
+            dirty = True
+        if runtime.last_error_at != state.last_error_at:
+            runtime.last_error_at = state.last_error_at
+            dirty = True
+        if runtime.error_count != state.error_count:
+            runtime.error_count = state.error_count
+            dirty = True
+        if selected:
+            runtime.last_selected_at = time.time()
+            dirty = True
+        if dirty:
+            runtime.version += 1
+        return True
+
+    async def _persist_selection_state(
+        self,
+        accounts_repo: AccountsRepository,
+        account_map: dict[str, Account],
+        states: list[AccountState],
+    ) -> None:
+        for state in states:
+            account = account_map.get(state.account_id)
+            if account is not None:
+                await self._persist_state(accounts_repo, account, state)
+
+    async def _persist_state(
         self,
         accounts_repo: AccountsRepository,
         account: Account,
         state: AccountState,
     ) -> None:
-        runtime = self._runtime.setdefault(account.id, RuntimeState())
-        runtime.reset_at = state.reset_at
-        runtime.cooldown_until = state.cooldown_until
-        runtime.last_error_at = state.last_error_at
-        runtime.error_count = state.error_count
-
         reset_at_int = int(state.reset_at) if state.reset_at else None
         status_changed = account.status != state.status
         reason_changed = account.deactivation_reason != state.deactivation_reason
@@ -517,6 +617,15 @@ class LoadBalancer:
             account.status = state.status
             account.deactivation_reason = state.deactivation_reason
             account.reset_at = reset_at_int
+
+    async def _sync_state(
+        self,
+        accounts_repo: AccountsRepository,
+        account: Account,
+        state: AccountState,
+    ) -> None:
+        self._sync_runtime_state(account, state)
+        await self._persist_state(accounts_repo, account, state)
 
 
 def _build_states(

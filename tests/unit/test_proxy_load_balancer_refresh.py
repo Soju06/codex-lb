@@ -618,7 +618,7 @@ async def test_select_account_prunes_stale_runtime_for_removed_accounts() -> Non
 
 
 @pytest.mark.asyncio
-async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
+async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) -> None:
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     account_a = _make_account("acc-round-robin-a", "a@example.com")
@@ -668,18 +668,18 @@ async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
     usage_repo = StubUsageRepository(primary=primary_entries, secondary=secondary_entries)
     sticky_repo = StubStickySessionsRepository()
 
-    original_sync = LoadBalancer._sync_state
+    original_persist_selection_state = LoadBalancer._persist_selection_state
 
-    async def slow_sync(
+    async def slow_persist_selection_state(
         self: LoadBalancer,
         accounts_repo: AccountsRepository,
-        account: Account,
-        state,
+        account_map: dict[str, Account],
+        states: list[Any],
     ) -> None:
         await asyncio.sleep(0.05)
-        await original_sync(self, accounts_repo, account, state)
+        await original_persist_selection_state(self, accounts_repo, account_map, states)
 
-    monkeypatch.setattr(LoadBalancer, "_sync_state", slow_sync)
+    monkeypatch.setattr(LoadBalancer, "_persist_selection_state", slow_persist_selection_state)
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     start = asyncio.Event()
@@ -692,10 +692,13 @@ async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
 
     first = asyncio.create_task(pick_account())
     second = asyncio.create_task(pick_account())
+    started = time.perf_counter()
     start.set()
     selected_ids = await asyncio.gather(first, second)
+    elapsed = time.perf_counter() - started
 
     assert len(set(selected_ids)) == 2
+    assert elapsed < 0.09
 
 
 @pytest.mark.asyncio
@@ -726,25 +729,25 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
     usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
     sticky_repo = StubStickySessionsRepository()
 
-    original_sync = LoadBalancer._sync_state
+    original_persist_selection_state = LoadBalancer._persist_selection_state
     release_select_sync = asyncio.Event()
     select_sync_blocked = asyncio.Event()
     blocked_once = False
 
-    async def controlled_sync(
+    async def controlled_persist_selection_state(
         self: LoadBalancer,
         accounts_repo: AccountsRepository,
-        account: Account,
-        state: Any,
+        account_map: dict[str, Account],
+        states: list[Any],
     ) -> None:
         nonlocal blocked_once
-        if not blocked_once and state.error_count == 0:
+        if not blocked_once and any(state.error_count == 0 for state in states):
             blocked_once = True
             select_sync_blocked.set()
             await release_select_sync.wait()
-        await original_sync(self, accounts_repo, account, state)
+        await original_persist_selection_state(self, accounts_repo, account_map, states)
 
-    monkeypatch.setattr(LoadBalancer, "_sync_state", controlled_sync)
+    monkeypatch.setattr(LoadBalancer, "_persist_selection_state", controlled_persist_selection_state)
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     select_task = asyncio.create_task(balancer.select_account())
@@ -752,7 +755,7 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
 
     record_error_task = asyncio.create_task(balancer.record_error(account))
     await asyncio.sleep(0.01)
-    assert not record_error_task.done()
+    assert record_error_task.done()
 
     release_select_sync.set()
     await select_task

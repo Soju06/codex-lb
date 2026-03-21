@@ -63,8 +63,16 @@ _BRANCHED_ENFORCEMENT_DESCENDANT_REVISIONS = frozenset(
     }
 )
 _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
-    "usage_history": frozenset({"idx_usage_window_account_latest"}),
-    "request_logs": frozenset({"idx_logs_requested_at_id"}),
+    "usage_history": frozenset({"idx_usage_window_account_latest", "idx_usage_window_account_time"}),
+    "request_logs": frozenset(
+        {
+            "idx_logs_requested_at_id",
+            "idx_logs_requested_at_model_tier",
+            "idx_logs_model_effort_time",
+            "idx_logs_status_error_time",
+        }
+    ),
+    "api_keys": frozenset({"idx_api_keys_name"}),
 }
 
 

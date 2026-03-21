@@ -131,6 +131,29 @@ def test_check_schema_drift_detects_missing_manual_performance_index(tmp_path: P
     assert any("idx_usage_window_account_latest" in diff for diff in drift)
 
 
+def test_check_schema_drift_detects_missing_dashboard_read_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-dashboard-read-indexes.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(text("DROP INDEX idx_usage_window_account_time"))
+        connection.execute(text("DROP INDEX idx_logs_requested_at_model_tier"))
+        connection.execute(text("DROP INDEX idx_logs_model_effort_time"))
+        connection.execute(text("DROP INDEX idx_logs_status_error_time"))
+        connection.execute(text("DROP INDEX idx_api_keys_name"))
+        connection.commit()
+
+    drift = check_schema_drift(url)
+    assert any("idx_usage_window_account_time" in diff for diff in drift)
+    assert any("idx_logs_requested_at_model_tier" in diff for diff in drift)
+    assert any("idx_logs_model_effort_time" in diff for diff in drift)
+    assert any("idx_logs_status_error_time" in diff for diff in drift)
+    assert any("idx_api_keys_name" in diff for diff in drift)
+
+
 def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
     db_path = tmp_path / "remap.db"
     url = _db_url(db_path)

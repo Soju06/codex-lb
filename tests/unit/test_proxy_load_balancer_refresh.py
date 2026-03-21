@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from app.core.crypto import TokenEncryptor
 from app.core.balancer.types import UpstreamError
+from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import ModelRegistrySnapshot
 from app.core.utils.time import utcnow
 from app.db.models import (

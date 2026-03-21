@@ -1563,7 +1563,9 @@ class ProxyService:
                                 key,
                                 account_id=None,
                                 model=request_model,
-                                pending_count=len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions),
+                                pending_count=(
+                                    len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
+                                ),
                             )
                             raise ProxyResponseError(
                                 429,

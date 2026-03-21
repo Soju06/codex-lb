@@ -978,6 +978,8 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
 
 
 def _status_for_error(error_value: OpenAIError | None) -> int:
+    if error_value and error_value.code == "previous_response_not_found":
+        return 400
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
     return 502

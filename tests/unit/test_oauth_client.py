@@ -7,6 +7,7 @@ import urllib.parse
 import pytest
 
 from app.core.clients.oauth import build_authorization_url, pkce_challenge
+from app.core.config.settings import get_settings
 
 pytestmark = pytest.mark.unit
 
@@ -44,3 +45,24 @@ def test_build_authorization_url_contains_required_params():
     assert query["id_token_add_organizations"] == ["true"]
     assert query["codex_cli_simplified_flow"] == ["true"]
     assert query["originator"] == ["codex_cli_rs"]
+
+
+def test_build_authorization_url_uses_configured_originator(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CODEX_LB_OAUTH_ORIGINATOR", "codex_chatgpt_desktop")
+    get_settings.cache_clear()
+
+    try:
+        url = build_authorization_url(
+            state="state_123",
+            code_challenge="challenge_456",
+            base_url="https://auth.openai.com",
+            client_id="client_id",
+            redirect_uri="http://localhost:1455/auth/callback",
+            scope="openid profile email offline_access",
+        )
+    finally:
+        get_settings.cache_clear()
+
+    parsed = urllib.parse.urlparse(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    assert query["originator"] == ["codex_chatgpt_desktop"]

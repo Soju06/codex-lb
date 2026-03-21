@@ -60,6 +60,7 @@ def build_authorization_url(
     code_challenge: str,
     base_url: str | None = None,
     client_id: str | None = None,
+    originator: str | None = None,
     redirect_uri: str | None = None,
     scope: str | None = None,
 ) -> str:
@@ -76,7 +77,7 @@ def build_authorization_url(
         "state": state,
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
-        "originator": "codex_cli_rs",
+        "originator": originator or settings.oauth_originator,
     }
     query = urlencode(params, quote_via=quote)
     return f"{auth_base}/oauth/authorize?{query}"

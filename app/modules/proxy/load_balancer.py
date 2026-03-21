@@ -163,9 +163,14 @@ class LoadBalancer:
                             if selected is None:
                                 error_message = result.error_message
                             else:
-                                selected.status = result.account.status
-                                selected.deactivation_reason = result.account.deactivation_reason
+                                for state in selected_states:
+                                    if state.account_id == result.account.account_id:
+                                        state.status = result.account.status
+                                        state.deactivation_reason = result.account.deactivation_reason
+                                        break
                                 selected_snapshot = _clone_account(selected)
+                                selected_snapshot.status = result.account.status
+                                selected_snapshot.deactivation_reason = result.account.deactivation_reason
                         else:
                             error_message = result.error_message
                         break
@@ -205,9 +210,14 @@ class LoadBalancer:
                         if selected is None:
                             error_message = result.error_message
                         else:
-                            selected.status = result.account.status
-                            selected.deactivation_reason = result.account.deactivation_reason
+                            for state in selected_states:
+                                if state.account_id == result.account.account_id:
+                                    state.status = result.account.status
+                                    state.deactivation_reason = result.account.deactivation_reason
+                                    break
                             selected_snapshot = _clone_account(selected)
+                            selected_snapshot.status = result.account.status
+                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
                     else:
                         error_message = result.error_message
 
@@ -491,24 +501,24 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_rate_limit(state, error)
             self._sync_runtime_state(account, state)
-        async with self._repo_factory() as repos:
-            await self._persist_state(repos.accounts, account, state)
+            async with self._repo_factory() as repos:
+                await self._persist_state(repos.accounts, account, state)
 
     async def mark_quota_exceeded(self, account: Account, error: UpstreamError) -> None:
         async with self._runtime_lock:
             state = self._state_for(account)
             handle_quota_exceeded(state, error)
             self._sync_runtime_state(account, state)
-        async with self._repo_factory() as repos:
-            await self._persist_state(repos.accounts, account, state)
+            async with self._repo_factory() as repos:
+                await self._persist_state(repos.accounts, account, state)
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
         async with self._runtime_lock:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
-        async with self._repo_factory() as repos:
-            await self._persist_state(repos.accounts, account, state)
+            async with self._repo_factory() as repos:
+                await self._persist_state(repos.accounts, account, state)
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)

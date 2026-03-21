@@ -845,7 +845,7 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
             max_sessions=8,
         )
 
-    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    exc = exc_info.value
     assert exc.status_code == 409
     assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
 
@@ -1072,7 +1072,7 @@ async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_withou
             max_sessions=128,
         )
 
-    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    exc = exc_info.value
     assert exc.status_code == 409
     assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
 
@@ -2826,7 +2826,7 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await stream.__anext__()
 
-    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    exc = exc_info.value
     assert exc.status_code == 429
     async with service._http_bridge_lock:
         sessions = list(service._http_bridge_sessions.values())
@@ -3406,7 +3406,7 @@ async def test_v1_responses_http_bridge_does_not_evict_active_session_when_pool_
             idle_ttl_seconds=120.0,
             max_sessions=1,
         )
-    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    exc = exc_info.value
     assert exc.status_code == 429
     assert hanging_upstream.closed is False
     await service._close_http_bridge_session(first_session)
@@ -3568,7 +3568,7 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
             max_sessions=1,
         )
 
-    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    exc = exc_info.value
     assert exc.status_code == 429
     assert hanging_upstream.closed is False
 
@@ -3691,7 +3691,7 @@ async def test_v1_responses_http_bridge_enforces_queue_limit_atomically_for_same
             queue_limit=1,
         )
 
-    exc = cast(proxy_module.ProxyResponseError, exc_info.value)
+    exc = exc_info.value
     assert exc.status_code == 429
     assert session.queued_request_count == 1
     await service._close_http_bridge_session(session)
@@ -3842,6 +3842,140 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         assert create_started == ["bridge-singleflight"]
         assert session_one is session_two
         assert service._http_bridge_sessions[key] is session_one
+    finally:
+        service._http_bridge_sessions.clear()
+        service._http_bridge_inflight_sessions.clear()
+        service._http_bridge_turn_state_index.clear()
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(app_instance, monkeypatch):
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=True,
+        http_responses_session_bridge_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_max_sessions=8,
+        http_responses_session_bridge_instance_id="instance-a",
+        http_responses_session_bridge_instance_ring=[],
+    )
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    create_started: list[str] = []
+
+    async def fake_create_http_bridge_session(
+        self,
+        key,
+        *,
+        headers,
+        affinity,
+        request_model,
+        idle_ttl_seconds,
+    ):
+        del self, headers, affinity, request_model, idle_ttl_seconds
+        create_started.append(key.affinity_key)
+        await asyncio.sleep(0.2)
+        return _make_dummy_bridge_session(key)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
+
+    key = proxy_module._HTTPBridgeSessionKey("request", "bridge-stale-replace", None)
+    stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+    stale_session.closed = True
+    service._http_bridge_sessions[key] = stale_session
+
+    try:
+        first = asyncio.create_task(
+            service._get_or_create_http_bridge_session(
+                key,
+                headers={},
+                affinity=proxy_module._AffinityPolicy(),
+                api_key=None,
+                request_model="gpt-5.4",
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        )
+        second = asyncio.create_task(
+            service._get_or_create_http_bridge_session(
+                key,
+                headers={},
+                affinity=proxy_module._AffinityPolicy(),
+                api_key=None,
+                request_model="gpt-5.4",
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        )
+        session_one, session_two = await asyncio.gather(first, second)
+
+        assert create_started == ["bridge-stale-replace"]
+        assert session_one is session_two
+        assert service._http_bridge_sessions[key] is session_one
+    finally:
+        service._http_bridge_sessions.clear()
+        service._http_bridge_inflight_sessions.clear()
+        service._http_bridge_turn_state_index.clear()
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_instance, monkeypatch):
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=True,
+        http_responses_session_bridge_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_max_sessions=8,
+        http_responses_session_bridge_instance_id="instance-a",
+        http_responses_session_bridge_instance_ring=[],
+    )
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    create_started: list[str] = []
+
+    async def fake_create_http_bridge_session(
+        self,
+        key,
+        *,
+        headers,
+        affinity,
+        request_model,
+        idle_ttl_seconds,
+    ):
+        del self, headers, affinity, request_model, idle_ttl_seconds
+        create_started.append(key.affinity_key)
+        return _make_dummy_bridge_session(key)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
+
+    key = proxy_module._HTTPBridgeSessionKey("request", "bridge-idle-prune", None)
+    stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+    stale_session.last_used_at = time.monotonic() - 300.0
+    stale_session.idle_ttl_seconds = 120.0
+    service._http_bridge_sessions[key] = stale_session
+
+    try:
+        replacement = await service._get_or_create_http_bridge_session(
+            key,
+            headers={},
+            affinity=proxy_module._AffinityPolicy(),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+
+        assert create_started == ["bridge-idle-prune"]
+        assert replacement is not stale_session
+        assert service._http_bridge_sessions[key] is replacement
     finally:
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()

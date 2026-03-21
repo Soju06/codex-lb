@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.balancer.types import UpstreamError
 from app.core.openai.model_registry import ModelRegistrySnapshot
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -764,6 +765,70 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
     runtime = balancer._runtime[account.id]
     assert runtime.error_count == 1
     assert runtime.last_error_at is not None
+
+
+@pytest.mark.asyncio
+async def test_mark_quota_exceeded_keeps_selection_blocked_until_persisted(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-quota-lock", "quota-lock@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=10.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+
+    async def blocking_update_status(
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+    ) -> bool:
+        persist_started.set()
+        await release_persist.wait()
+        return await StubAccountsRepository.update_status(
+            accounts_repo,
+            account_id,
+            status,
+            deactivation_reason,
+            reset_at,
+        )
+
+    monkeypatch.setattr(accounts_repo, "update_status", blocking_update_status)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    quota_error: UpstreamError = {"message": "quota exceeded"}
+    mark_task = asyncio.create_task(balancer.mark_quota_exceeded(account, quota_error))
+    await persist_started.wait()
+
+    select_task = asyncio.create_task(balancer.select_account())
+    await asyncio.sleep(0.01)
+    assert not select_task.done()
+
+    release_persist.set()
+    await mark_task
+    await select_task
+
+    assert accounts_repo.status_updates[0]["status"] == AccountStatus.QUOTA_EXCEEDED
 
 
 @pytest.mark.asyncio

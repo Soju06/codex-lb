@@ -1455,6 +1455,8 @@ class ProxyService:
                             ),
                         )
 
+                await self._prune_http_bridge_sessions_locked()
+
                 owner_instance = _http_bridge_owner_instance(key, settings)
                 current_instance, ring = _normalized_http_bridge_instance_ring(settings)
                 if (
@@ -1481,8 +1483,6 @@ class ProxyService:
                             error_type="server_error",
                         ),
                     )
-
-                await self._prune_http_bridge_sessions_locked()
 
                 existing = self._http_bridge_sessions.get(key)
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
@@ -1557,7 +1557,6 @@ class ProxyService:
                             )
                             self._http_bridge_sessions.pop(lru_key, None)
                             sessions_to_close.append(lru_session)
-
                         if len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions:
                             _log_http_bridge_event(
                                 "capacity_exhausted_active_sessions",

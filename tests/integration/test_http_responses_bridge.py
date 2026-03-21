@@ -819,7 +819,7 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
 
     exc = cast(proxy_module.ProxyResponseError, exc_info.value)
     assert exc.status_code == 409
-    assert exc.payload["error"]["code"] == "bridge_instance_mismatch"
+    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
 
 
 @pytest.mark.asyncio
@@ -1046,7 +1046,7 @@ async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_withou
 
     exc = cast(proxy_module.ProxyResponseError, exc_info.value)
     assert exc.status_code == 409
-    assert exc.payload["error"]["code"] == "bridge_instance_mismatch"
+    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
 
 
 @pytest.mark.asyncio
@@ -1167,7 +1167,7 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
     assert isinstance(exc_info.value, proxy_module.ProxyResponseError)
     exc = exc_info.value
     assert exc.status_code == 409
-    assert exc.payload["error"]["code"] == "bridge_instance_mismatch"
+    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
     await service._close_http_bridge_session(session)
 
 
@@ -2301,6 +2301,110 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_requires_live_session_for_previous_response_id(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_live_session_required",
+        "http-bridge-live-session-required@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-live-session-a",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "http-bridge-live-session-b",
+            "previous_response_id": first_body["id"],
+        },
+    )
+
+    assert second.status_code == 400
+    assert second.json() == {
+        "error": {
+            "message": (
+                f"Previous response with id '{first_body['id']}' not found. "
+                "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
+            ),
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "param": "previous_response_id",
+        }
+    }
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_emits_turn_state_header_and_reuses_when_replayed(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -2786,6 +2890,113 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
     assert first.status_code == 200
     assert second.status_code == 200
     assert connect_count == 2
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous_response_id(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_previous_response_reconnect",
+        "http-bridge-previous-response-reconnect@example.com",
+    )
+    account = await _get_account(account_id)
+    first_upstream = _ClosingBridgeUpstreamWebSocket()
+    second_upstream = _FakeBridgeUpstreamWebSocket()
+    upstreams = [first_upstream, second_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-previous-response-reconnect",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "http-bridge-previous-response-reconnect",
+            "previous_response_id": first_body["id"],
+        },
+    )
+
+    assert second.status_code == 400
+    assert second.json() == {
+        "error": {
+            "message": (
+                f"Previous response with id '{first_body['id']}' not found. "
+                "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
+            ),
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "param": "previous_response_id",
+        }
+    }
+    assert connect_count == 1
 
 
 @pytest.mark.asyncio

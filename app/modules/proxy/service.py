@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import AsyncIterator, Mapping, NoReturn
+from typing import AsyncIterator, Mapping, NoReturn, cast
 from uuid import uuid4
 
 import aiohttp
@@ -299,6 +299,12 @@ class ProxyService:
             api_key=api_key,
             request_id=request_id,
         )
+        request_state, text_data = self._prepare_http_bridge_request(
+            payload,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+        )
+        request_state.transport = _REQUEST_TRANSPORT_HTTP
         session = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),
@@ -311,13 +317,8 @@ class ProxyService:
                 codex_idle_ttl_seconds=codex_idle_ttl_seconds,
             ),
             max_sessions=max_sessions,
+            previous_response_id=request_state.previous_response_id,
         )
-        request_state, text_data = self._prepare_http_bridge_request(
-            payload,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-        )
-        request_state.transport = _REQUEST_TRANSPORT_HTTP
 
         await self._submit_http_bridge_request(
             session,
@@ -1130,6 +1131,7 @@ class ProxyService:
             awaiting_response_created=True,
             event_queue=asyncio.Queue() if attach_event_queue else None,
             api_key=api_key,
+            previous_response_id=payload.previous_response_id,
         )
         text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
         request_state.request_text = text_data
@@ -1407,6 +1409,7 @@ class ProxyService:
         request_model: str | None,
         idle_ttl_seconds: float,
         max_sessions: int,
+        previous_response_id: str | None = None,
     ) -> "_HTTPBridgeSession":
         settings = get_settings()
         api_key_id = api_key.id if api_key is not None else None
@@ -1497,6 +1500,18 @@ class ProxyService:
                 )
                 await self._close_http_bridge_session(existing)
                 self._http_bridge_sessions.pop(key, None)
+
+            if previous_response_id is not None:
+                raise ProxyResponseError(
+                    400,
+                    _http_bridge_previous_response_error_envelope(
+                        previous_response_id,
+                        (
+                            "HTTP bridge continuity was lost. Replay x-codex-turn-state "
+                            "or retry with a stable prompt_cache_key."
+                        ),
+                    ),
+                )
 
             while len(self._http_bridge_sessions) >= max_sessions and self._http_bridge_sessions:
                 evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
@@ -1981,6 +1996,15 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         text_data: str,
     ) -> bool:
+        if request_state.previous_response_id is not None:
+            _mark_request_state_previous_response_not_found(
+                request_state,
+                (
+                    "HTTP bridge continuity was lost before the request reached upstream. "
+                    "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
+                ),
+            )
+            return False
         if request_state.replay_count >= 1:
             return False
         request_state.replay_count += 1
@@ -2014,6 +2038,16 @@ class ProxyService:
             if not request_state.awaiting_response_created:
                 return False
             if not request_state.request_text:
+                return False
+            if request_state.previous_response_id is not None:
+                _mark_request_state_previous_response_not_found(
+                    request_state,
+                    (
+                        "HTTP bridge continuity was lost before upstream created the next "
+                        "response. Replay x-codex-turn-state or retry with a stable "
+                        "prompt_cache_key."
+                    ),
+                )
                 return False
             if request_state.replay_count >= 1:
                 return False
@@ -2657,15 +2691,21 @@ class ProxyService:
             pending_requests.clear()
 
         for request_state in remaining:
+            request_error_code = request_state.error_code_override or error_code
+            request_error_message = request_state.error_message_override or error_message
+            request_error_type = request_state.error_type_override or "server_error"
+            request_error_param = request_state.error_param_override
             if response_create_gate is not None:
                 _release_websocket_response_create_gate(request_state, response_create_gate)
             if request_state.event_queue is not None:
                 await request_state.event_queue.put(
                     format_sse_event(
                         response_failed_event(
-                            error_code,
-                            error_message,
+                            request_error_code,
+                            request_error_message,
+                            error_type=request_error_type,
                             response_id=request_state.response_id or request_state.request_id,
+                            error_param=request_error_param,
                         )
                     )
                 )
@@ -2675,8 +2715,10 @@ class ProxyService:
                     websocket,
                     client_send_lock=client_send_lock,
                     request_state=request_state,
-                    error_code=error_code,
-                    error_message=error_message,
+                    error_code=request_error_code,
+                    error_message=request_error_message,
+                    error_type=request_error_type,
+                    error_param=request_error_param,
                 )
             await self._release_websocket_reservation(request_state.api_key_reservation)
             if account_id_value is None or request_state.skip_request_log:
@@ -2689,8 +2731,8 @@ class ProxyService:
                 model=request_state.model or "",
                 latency_ms=latency_ms,
                 status="error",
-                error_code=error_code,
-                error_message=error_message,
+                error_code=request_error_code,
+                error_message=request_error_message,
                 reasoning_effort=request_state.reasoning_effort,
                 transport=request_state.transport,
                 service_tier=request_state.service_tier,
@@ -2706,11 +2748,15 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         error_code: str,
         error_message: str,
+        error_type: str = "server_error",
+        error_param: str | None = None,
     ) -> None:
         event = response_failed_event(
             error_code,
             error_message,
+            error_type=error_type,
             response_id=request_state.response_id or request_state.request_id,
+            error_param=error_param,
         )
         try:
             async with client_send_lock:
@@ -4051,6 +4097,11 @@ class _WebSocketRequestState:
     request_text: str | None = None
     replay_count: int = 0
     skip_request_log: bool = False
+    previous_response_id: str | None = None
+    error_code_override: str | None = None
+    error_message_override: str | None = None
+    error_type_override: str | None = None
+    error_param_override: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4263,11 +4314,15 @@ def _wrapped_websocket_error_event(
     status_code: int,
     payload: OpenAIErrorEnvelope,
 ) -> dict[str, JsonValue]:
-    event: dict[str, JsonValue] = {
-        "type": "error",
-        "status": status_code,
-        "error": dict(payload["error"]),
-    }
+    error_payload = cast(JsonValue, dict(payload["error"]))
+    event = cast(
+        dict[str, JsonValue],
+        {
+            "type": "error",
+            "status": status_code,
+            "error": error_payload,
+        },
+    )
     return event
 
 
@@ -4778,6 +4833,34 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
     warmup_payload = dict(payload)
     warmup_payload["generate"] = False
     return json.dumps(warmup_payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _http_bridge_previous_response_error_envelope(
+    previous_response_id: str,
+    detail: str,
+) -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        f"Previous response with id '{previous_response_id}' not found. {detail}",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
+
+
+def _mark_request_state_previous_response_not_found(
+    request_state: _WebSocketRequestState,
+    detail: str,
+) -> None:
+    previous_response_id = request_state.previous_response_id
+    if previous_response_id is None:
+        return
+    payload = _http_bridge_previous_response_error_envelope(previous_response_id, detail)
+    error = payload["error"]
+    request_state.error_code_override = error.get("code")
+    request_state.error_message_override = error.get("message")
+    request_state.error_type_override = error.get("type")
+    request_state.error_param_override = error.get("param")
 
 
 def _normalized_http_bridge_instance_ring(settings: object) -> tuple[str, tuple[str, ...]]:

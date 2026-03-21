@@ -608,7 +608,7 @@ class LoadBalancer:
         for state in states:
             account = account_map.get(state.account_id)
             if account is not None:
-                await self._persist_state(accounts_repo, account, state)
+                await self._persist_state_if_current(accounts_repo, account, state)
 
     async def _persist_state(
         self,
@@ -631,6 +631,32 @@ class LoadBalancer:
             account.status = state.status
             account.deactivation_reason = state.deactivation_reason
             account.reset_at = reset_at_int
+
+    async def _persist_state_if_current(
+        self,
+        accounts_repo: AccountsRepository,
+        account: Account,
+        state: AccountState,
+    ) -> None:
+        reset_at_int = int(state.reset_at) if state.reset_at else None
+        status_changed = account.status != state.status
+        reason_changed = account.deactivation_reason != state.deactivation_reason
+        reset_changed = account.reset_at != reset_at_int
+
+        if status_changed or reason_changed or reset_changed:
+            updated = await accounts_repo.update_status_if_current(
+                account.id,
+                state.status,
+                state.deactivation_reason,
+                reset_at_int,
+                expected_status=account.status,
+                expected_deactivation_reason=account.deactivation_reason,
+                expected_reset_at=account.reset_at,
+            )
+            if updated:
+                account.status = state.status
+                account.deactivation_reason = state.deactivation_reason
+                account.reset_at = reset_at_int
 
     async def _sync_state(
         self,

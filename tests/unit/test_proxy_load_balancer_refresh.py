@@ -64,6 +64,9 @@ class StubAccountsRepository(AccountsRepository):
     async def list_accounts(self) -> list[Account]:
         return list(self._accounts)
 
+    def _find_account(self, account_id: str) -> Account | None:
+        return next((account for account in self._accounts if account.id == account_id), None)
+
     async def update_status(
         self,
         account_id: str,
@@ -71,6 +74,12 @@ class StubAccountsRepository(AccountsRepository):
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
     ) -> bool:
+        account = self._find_account(account_id)
+        if account is None:
+            return False
+        account.status = status
+        account.deactivation_reason = deactivation_reason
+        account.reset_at = reset_at
         self.status_updates.append(
             {
                 "account_id": account_id,
@@ -80,6 +89,28 @@ class StubAccountsRepository(AccountsRepository):
             }
         )
         return True
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+    ) -> bool:
+        account = self._find_account(account_id)
+        if account is None:
+            return False
+        if (
+            account.status != expected_status
+            or account.deactivation_reason != expected_deactivation_reason
+            or account.reset_at != expected_reset_at
+        ):
+            return False
+        return await self.update_status(account_id, status, deactivation_reason, reset_at)
 
 
 class StubUsageRepository(UsageRepository):
@@ -962,6 +993,75 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
     selection = await select_task
     assert repo_entered.is_set()
     assert selection.account is not None
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_stale_persistence_after_terminal_status_update(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-select-lockstep", "select-lockstep@example.com")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=20.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    persist_blocked = asyncio.Event()
+    release_persist = asyncio.Event()
+    original_update_status_if_current = accounts_repo.update_status_if_current
+
+    async def blocking_update_status_if_current(
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+    ) -> bool:
+        persist_blocked.set()
+        await release_persist.wait()
+        return await original_update_status_if_current(
+            account_id,
+            status,
+            deactivation_reason,
+            reset_at,
+            expected_status=expected_status,
+            expected_deactivation_reason=expected_deactivation_reason,
+            expected_reset_at=expected_reset_at,
+        )
+
+    monkeypatch.setattr(accounts_repo, "update_status_if_current", blocking_update_status_if_current)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    select_task = asyncio.create_task(balancer.select_account())
+    await persist_blocked.wait()
+
+    fail_task = asyncio.create_task(balancer.mark_permanent_failure(account, "refresh_token_expired"))
+    await fail_task
+
+    release_persist.set()
+    await select_task
+
+    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
 
 
 @pytest.mark.asyncio

@@ -185,6 +185,36 @@ class AccountsRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+    ) -> bool:
+        stmt = (
+            update(Account)
+            .where(Account.id == account_id)
+            .where(Account.status == expected_status)
+            .values(status=status, deactivation_reason=deactivation_reason, reset_at=reset_at)
+            .returning(Account.id)
+        )
+        if expected_deactivation_reason is None:
+            stmt = stmt.where(Account.deactivation_reason.is_(None))
+        else:
+            stmt = stmt.where(Account.deactivation_reason == expected_deactivation_reason)
+        if expected_reset_at is None:
+            stmt = stmt.where(Account.reset_at.is_(None))
+        else:
+            stmt = stmt.where(Account.reset_at == expected_reset_at)
+        result = await self._session.execute(stmt)
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def delete(self, account_id: str) -> bool:
         await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
         await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))

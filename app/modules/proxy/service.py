@@ -1599,6 +1599,8 @@ class ProxyService:
                     return session
                 continue
 
+            session: _HTTPBridgeSession | None = None
+            session_registered = False
             try:
                 session = await self._create_http_bridge_session(
                     key,
@@ -1607,6 +1609,14 @@ class ProxyService:
                     request_model=request_model,
                     idle_ttl_seconds=effective_idle_ttl_seconds,
                 )
+                async with self._http_bridge_lock:
+                    current_future = self._http_bridge_inflight_sessions.get(key)
+                    if current_future is inflight_future:
+                        self._http_bridge_inflight_sessions.pop(key, None)
+                        self._http_bridge_sessions[key] = session
+                        session_registered = True
+                        if inflight_future is not None and not inflight_future.done():
+                            inflight_future.set_result(session)
             except BaseException as exc:
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -1618,15 +1628,9 @@ class ProxyService:
                             else:
                                 inflight_future.set_exception(exc)
                                 inflight_future.exception()
+                if session is not None and not session_registered:
+                    await self._close_http_bridge_session(session)
                 raise
-
-            async with self._http_bridge_lock:
-                current_future = self._http_bridge_inflight_sessions.get(key)
-                if current_future is inflight_future:
-                    self._http_bridge_inflight_sessions.pop(key, None)
-                    self._http_bridge_sessions[key] = session
-                    if inflight_future is not None and not inflight_future.done():
-                        inflight_future.set_result(session)
             _log_http_bridge_event(
                 "create",
                 key,

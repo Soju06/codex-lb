@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 
+import app.modules.proxy.load_balancer as load_balancer_module
+from app.core.balancer.types import UpstreamError
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import ModelRegistrySnapshot
 from app.core.utils.time import utcnow
@@ -62,6 +64,9 @@ class StubAccountsRepository(AccountsRepository):
     async def list_accounts(self) -> list[Account]:
         return list(self._accounts)
 
+    def _find_account(self, account_id: str) -> Account | None:
+        return next((account for account in self._accounts if account.id == account_id), None)
+
     async def update_status(
         self,
         account_id: str,
@@ -69,6 +74,12 @@ class StubAccountsRepository(AccountsRepository):
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
     ) -> bool:
+        account = self._find_account(account_id)
+        if account is None:
+            return False
+        account.status = status
+        account.deactivation_reason = deactivation_reason
+        account.reset_at = reset_at
         self.status_updates.append(
             {
                 "account_id": account_id,
@@ -78,6 +89,28 @@ class StubAccountsRepository(AccountsRepository):
             }
         )
         return True
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+    ) -> bool:
+        account = self._find_account(account_id)
+        if account is None:
+            return False
+        if (
+            account.status != expected_status
+            or account.deactivation_reason != expected_deactivation_reason
+            or account.reset_at != expected_reset_at
+        ):
+            return False
+        return await self.update_status(account_id, status, deactivation_reason, reset_at)
 
 
 class StubUsageRepository(UsageRepository):
@@ -618,7 +651,7 @@ async def test_select_account_prunes_stale_runtime_for_removed_accounts() -> Non
 
 
 @pytest.mark.asyncio
-async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
+async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) -> None:
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     account_a = _make_account("acc-round-robin-a", "a@example.com")
@@ -668,18 +701,18 @@ async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
     usage_repo = StubUsageRepository(primary=primary_entries, secondary=secondary_entries)
     sticky_repo = StubStickySessionsRepository()
 
-    original_sync = LoadBalancer._sync_state
+    original_persist_selection_state = LoadBalancer._persist_selection_state
 
-    async def slow_sync(
+    async def slow_persist_selection_state(
         self: LoadBalancer,
         accounts_repo: AccountsRepository,
-        account: Account,
-        state,
+        account_map: dict[str, Account],
+        states: list[Any],
     ) -> None:
         await asyncio.sleep(0.05)
-        await original_sync(self, accounts_repo, account, state)
+        await original_persist_selection_state(self, accounts_repo, account_map, states)
 
-    monkeypatch.setattr(LoadBalancer, "_sync_state", slow_sync)
+    monkeypatch.setattr(LoadBalancer, "_persist_selection_state", slow_persist_selection_state)
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     start = asyncio.Event()
@@ -692,10 +725,13 @@ async def test_round_robin_serializes_concurrent_selection(monkeypatch) -> None:
 
     first = asyncio.create_task(pick_account())
     second = asyncio.create_task(pick_account())
+    started = time.perf_counter()
     start.set()
     selected_ids = await asyncio.gather(first, second)
+    elapsed = time.perf_counter() - started
 
     assert len(set(selected_ids)) == 2
+    assert elapsed < 0.09
 
 
 @pytest.mark.asyncio
@@ -726,25 +762,25 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
     usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
     sticky_repo = StubStickySessionsRepository()
 
-    original_sync = LoadBalancer._sync_state
+    original_persist_selection_state = LoadBalancer._persist_selection_state
     release_select_sync = asyncio.Event()
     select_sync_blocked = asyncio.Event()
     blocked_once = False
 
-    async def controlled_sync(
+    async def controlled_persist_selection_state(
         self: LoadBalancer,
         accounts_repo: AccountsRepository,
-        account: Account,
-        state: Any,
+        account_map: dict[str, Account],
+        states: list[Any],
     ) -> None:
         nonlocal blocked_once
-        if not blocked_once and state.error_count == 0:
+        if not blocked_once and any(state.error_count == 0 for state in states):
             blocked_once = True
             select_sync_blocked.set()
             await release_select_sync.wait()
-        await original_sync(self, accounts_repo, account, state)
+        await original_persist_selection_state(self, accounts_repo, account_map, states)
 
-    monkeypatch.setattr(LoadBalancer, "_sync_state", controlled_sync)
+    monkeypatch.setattr(LoadBalancer, "_persist_selection_state", controlled_persist_selection_state)
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     select_task = asyncio.create_task(balancer.select_account())
@@ -752,7 +788,7 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
 
     record_error_task = asyncio.create_task(balancer.record_error(account))
     await asyncio.sleep(0.01)
-    assert not record_error_task.done()
+    assert record_error_task.done()
 
     release_select_sync.set()
     await select_task
@@ -761,6 +797,70 @@ async def test_select_account_does_not_clobber_concurrent_error_state(monkeypatc
     runtime = balancer._runtime[account.id]
     assert runtime.error_count == 1
     assert runtime.last_error_at is not None
+
+
+@pytest.mark.asyncio
+async def test_mark_quota_exceeded_keeps_selection_blocked_until_persisted(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-quota-lock", "quota-lock@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=10.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+
+    async def blocking_update_status(
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+    ) -> bool:
+        persist_started.set()
+        await release_persist.wait()
+        return await StubAccountsRepository.update_status(
+            accounts_repo,
+            account_id,
+            status,
+            deactivation_reason,
+            reset_at,
+        )
+
+    monkeypatch.setattr(accounts_repo, "update_status", blocking_update_status)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    quota_error: UpstreamError = {"message": "quota exceeded"}
+    mark_task = asyncio.create_task(balancer.mark_quota_exceeded(account, quota_error))
+    await persist_started.wait()
+
+    select_task = asyncio.create_task(balancer.select_account())
+    await asyncio.sleep(0.01)
+    assert not select_task.done()
+
+    release_persist.set()
+    await mark_task
+    await select_task
+
+    assert accounts_repo.status_updates[0]["status"] == AccountStatus.QUOTA_EXCEEDED
 
 
 @pytest.mark.asyncio
@@ -827,6 +927,141 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
     release_accounts.set()
     selection = await select_task
     assert selection.account is not None
+
+
+@pytest.mark.asyncio
+async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-runtime-before-repo", "runtime-before-repo@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=20.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    repo_entered = asyncio.Event()
+    release_repo = asyncio.Event()
+
+    @asynccontextmanager
+    async def blocking_repo_factory() -> AsyncIterator[ProxyRepositories]:
+        repo_entered.set()
+        await release_repo.wait()
+        yield ProxyRepositories(
+            accounts=accounts_repo,
+            usage=usage_repo,
+            additional_usage=StubAdditionalUsageRepository(),
+            request_logs=StubRequestLogsRepository(),
+            sticky_sessions=sticky_repo,
+            api_keys=StubApiKeysRepository(),
+        )
+
+    balancer = LoadBalancer(blocking_repo_factory)
+
+    async def fake_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+        del model, additional_limit_name
+        return load_balancer_module._SelectionInputs(
+            accounts=[account],
+            latest_primary={account.id: primary_entry},
+            latest_secondary={account.id: secondary_entry},
+        )
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", fake_load_selection_inputs)
+
+    async with balancer._runtime_lock:
+        select_task = asyncio.create_task(balancer.select_account())
+        await asyncio.sleep(0.01)
+        assert not repo_entered.is_set()
+
+    release_repo.set()
+    selection = await select_task
+    assert repo_entered.is_set()
+    assert selection.account is not None
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_stale_persistence_after_terminal_status_update(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-select-lockstep", "select-lockstep@example.com")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=20.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    persist_blocked = asyncio.Event()
+    release_persist = asyncio.Event()
+    original_update_status_if_current = accounts_repo.update_status_if_current
+
+    async def blocking_update_status_if_current(
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+    ) -> bool:
+        persist_blocked.set()
+        await release_persist.wait()
+        return await original_update_status_if_current(
+            account_id,
+            status,
+            deactivation_reason,
+            reset_at,
+            expected_status=expected_status,
+            expected_deactivation_reason=expected_deactivation_reason,
+            expected_reset_at=expected_reset_at,
+        )
+
+    monkeypatch.setattr(accounts_repo, "update_status_if_current", blocking_update_status_if_current)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    select_task = asyncio.create_task(balancer.select_account())
+    await persist_blocked.wait()
+
+    fail_task = asyncio.create_task(balancer.mark_permanent_failure(account, "refresh_token_expired"))
+    await fail_task
+
+    release_persist.set()
+    await select_task
+
+    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
 
 
 @pytest.mark.asyncio

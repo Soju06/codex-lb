@@ -1444,11 +1444,29 @@ class ProxyService:
 
             async with self._http_bridge_lock:
                 if incoming_turn_state is not None:
-                    alias_key = self._http_bridge_turn_state_index.get(
-                        _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
-                    )
+                    alias_index_key = _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
+                    alias_key = self._http_bridge_turn_state_index.get(alias_index_key)
                     if alias_key is not None:
                         key = alias_key
+                        alias_session = self._http_bridge_sessions.get(alias_key)
+                        if (
+                            alias_session is None
+                            or alias_session.closed
+                            or alias_session.account.status != AccountStatus.ACTIVE
+                        ):
+                            self._http_bridge_turn_state_index.pop(alias_index_key, None)
+                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                        else:
+                            self._promote_http_bridge_session_to_codex_affinity(
+                                alias_session,
+                                turn_state=incoming_turn_state,
+                                settings=settings,
+                            )
+                            for alias in alias_session.downstream_turn_state_aliases:
+                                self._http_bridge_turn_state_index[
+                                    _http_bridge_turn_state_alias_key(alias, alias_session.key.api_key_id)
+                                ] = alias_session.key
+                            key = alias_session.key
                     elif incoming_turn_state.startswith("http_turn_"):
                         if previous_response_id is not None:
                             raise ProxyResponseError(
@@ -1501,18 +1519,6 @@ class ProxyService:
 
                 existing = self._http_bridge_sessions.get(key)
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
-                    if (
-                        incoming_turn_state is not None
-                        and self._http_bridge_turn_state_index.get(
-                            _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
-                        )
-                        == key
-                    ):
-                        self._promote_http_bridge_session_to_codex_affinity(
-                            existing,
-                            turn_state=incoming_turn_state,
-                            settings=settings,
-                        )
                     existing.request_model = request_model
                     existing.last_used_at = time.monotonic()
                     _log_http_bridge_event(
@@ -1713,7 +1719,6 @@ class ProxyService:
             session.downstream_turn_state_aliases.add(turn_state)
             if session.downstream_turn_state is None:
                 session.downstream_turn_state = turn_state
-            self._promote_http_bridge_session_to_codex_affinity(session, turn_state=turn_state, settings=get_settings())
             for alias in session.downstream_turn_state_aliases:
                 self._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
                     session.key
@@ -4851,6 +4856,8 @@ def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None)
 
 
 def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -> str | None:
+    if session.upstream_turn_state is not None:
+        return session.upstream_turn_state
     if (
         session.codex_session
         and session.downstream_turn_state is not None

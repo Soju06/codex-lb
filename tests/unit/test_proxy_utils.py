@@ -2966,7 +2966,9 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
 
     assert selected_account is None
     assert selected_upstream is None
-    sent_payload = json.loads(websocket_send.await_args.args[0])
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
     assert sent_payload["status"] == 502
     assert sent_payload["error"]["code"] == "upstream_request_timeout"
     assert sent_payload["error"]["message"] == "Proxy request budget exhausted"
@@ -3023,7 +3025,9 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
     await_args = handle_connect_error.await_args
     assert await_args is not None
     assert await_args.args[1] is second_exc
-    sent_payload = json.loads(websocket_send.await_args.args[0])
+    websocket_await_args = websocket_send.await_args
+    assert websocket_await_args is not None
+    sent_payload = json.loads(websocket_await_args.args[0])
     assert sent_payload["status"] == 403
     assert sent_payload["error"]["code"] == "forbidden"
     assert request_logs.calls[0]["error_code"] == "forbidden"
@@ -3071,7 +3075,9 @@ async def test_connect_proxy_websocket_surfaces_refresh_transport_error(monkeypa
     assert selected_account is None
     assert selected_upstream is None
     release_reservation.assert_awaited_once_with(None)
-    sent_payload = json.loads(websocket_send.await_args.args[0])
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
     assert sent_payload["status"] == 502
     assert sent_payload["error"]["code"] == "upstream_unavailable"
     assert sent_payload["error"]["message"] == "Request to upstream timed out"
@@ -3124,7 +3130,9 @@ async def test_connect_proxy_websocket_surfaces_forced_refresh_transport_error(m
     assert selected_account is None
     assert selected_upstream is None
     release_reservation.assert_awaited_once_with(None)
-    sent_payload = json.loads(websocket_send.await_args.args[0])
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
     assert sent_payload["status"] == 502
     assert sent_payload["error"]["code"] == "upstream_unavailable"
     assert sent_payload["error"]["message"] == "Request to upstream timed out"
@@ -3187,7 +3195,9 @@ async def test_connect_proxy_websocket_maps_handshake_budget_exhaustion_to_timeo
     assert selected_account is None
     assert selected_upstream is None
     handle_connect_error.assert_not_awaited()
-    sent_payload = json.loads(websocket_send.await_args.args[0])
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
     assert sent_payload["status"] == 502
     assert sent_payload["error"]["code"] == "upstream_request_timeout"
     assert sent_payload["error"]["message"] == "Proxy request budget exhausted"

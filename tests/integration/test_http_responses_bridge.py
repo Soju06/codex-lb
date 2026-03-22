@@ -1015,13 +1015,11 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     )
     await service._register_http_bridge_turn_state(session, replay_turn_state)
     replay_key = proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None)
-    assert service._http_bridge_sessions[replay_key] is session
-    assert key not in service._http_bridge_sessions
     assert (
         service._http_bridge_turn_state_index[
             proxy_module._http_bridge_turn_state_alias_key(replay_turn_state, session.key.api_key_id)
         ]
-        == replay_key
+        == key
     )
     _install_bridge_settings_with_limits(
         monkeypatch,
@@ -1042,6 +1040,15 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     )
 
     assert replayed is session
+    assert replayed.key == replay_key
+    assert service._http_bridge_sessions[replay_key] is session
+    assert key not in service._http_bridge_sessions
+    assert (
+        service._http_bridge_turn_state_index[
+            proxy_module._http_bridge_turn_state_alias_key(replay_turn_state, session.key.api_key_id)
+        ]
+        == replay_key
+    )
     assert replayed.codex_session is True
     assert replayed.affinity.kind == proxy_module.StickySessionKind.CODEX_SESSION
     assert replayed.affinity.key == replay_turn_state

@@ -4236,6 +4236,90 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_limiting_other_keys(
+    app_instance, monkeypatch
+):
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=True,
+        http_responses_session_bridge_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_max_sessions=1,
+        http_responses_session_bridge_instance_id="instance-a",
+        http_responses_session_bridge_instance_ring=[],
+    )
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    first_create_started = asyncio.Event()
+    release_first_create = asyncio.Event()
+    create_attempts: list[str] = []
+
+    async def fake_create_http_bridge_session(
+        self,
+        key,
+        *,
+        headers,
+        affinity,
+        request_model,
+        idle_ttl_seconds,
+    ):
+        del self, headers, affinity, request_model, idle_ttl_seconds
+        create_attempts.append(key.affinity_key)
+        if key.affinity_key == "bridge-capacity-a":
+            first_create_started.set()
+            await release_first_create.wait()
+            raise RuntimeError("first create failed")
+        return _make_dummy_bridge_session(key)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
+
+    key_one = proxy_module._HTTPBridgeSessionKey("request", "bridge-capacity-a", None)
+    key_two = proxy_module._HTTPBridgeSessionKey("request", "bridge-capacity-b", None)
+
+    first = asyncio.create_task(
+        service._get_or_create_http_bridge_session(
+            key_one,
+            headers={},
+            affinity=proxy_module._AffinityPolicy(),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=1,
+        )
+    )
+    await first_create_started.wait()
+
+    second = asyncio.create_task(
+        service._get_or_create_http_bridge_session(
+            key_two,
+            headers={},
+            affinity=proxy_module._AffinityPolicy(),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=1,
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert not second.done()
+
+    release_first_create.set()
+
+    with pytest.raises(RuntimeError, match="first create failed"):
+        await first
+    created_session = await asyncio.wait_for(second, timeout=1.0)
+
+    assert create_attempts == ["bridge-capacity-a", "bridge-capacity-b"]
+    assert service._http_bridge_sessions[key_two] is created_session
+    assert key_one not in service._http_bridge_inflight_sessions
+    assert key_two not in service._http_bridge_inflight_sessions
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_model(app_instance, monkeypatch):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()

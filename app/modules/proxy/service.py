@@ -1441,6 +1441,7 @@ class ProxyService:
         while True:
             sessions_to_close: list[_HTTPBridgeSession] = []
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
+            capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
 
@@ -1585,33 +1586,47 @@ class ProxyService:
                             self._http_bridge_sessions.pop(lru_key, None)
                             sessions_to_close.append(lru_session)
                         if len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions:
-                            _log_http_bridge_event(
-                                "capacity_exhausted_active_sessions",
-                                key,
-                                account_id=None,
-                                model=request_model,
-                                pending_count=(
-                                    len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
-                                ),
-                            )
-                            raise ProxyResponseError(
-                                429,
-                                openai_error(
-                                    "rate_limit_exceeded",
-                                    "HTTP responses session bridge has no idle capacity",
-                                    error_type="rate_limit_error",
-                                ),
-                            )
-
-                        inflight_future = asyncio.get_running_loop().create_future()
-                        self._http_bridge_inflight_sessions[key] = inflight_future
-                        owns_creation = True
+                            if self._http_bridge_inflight_sessions:
+                                capacity_wait_future = next(iter(self._http_bridge_inflight_sessions.values()))
+                            else:
+                                _log_http_bridge_event(
+                                    "capacity_exhausted_active_sessions",
+                                    key,
+                                    account_id=None,
+                                    model=request_model,
+                                    pending_count=(
+                                        len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
+                                    ),
+                                )
+                                raise ProxyResponseError(
+                                    429,
+                                    openai_error(
+                                        "rate_limit_exceeded",
+                                        "HTTP responses session bridge has no idle capacity",
+                                        error_type="rate_limit_error",
+                                    ),
+                                )
+                        else:
+                            inflight_future = asyncio.get_running_loop().create_future()
+                            self._http_bridge_inflight_sessions[key] = inflight_future
+                            owns_creation = True
 
             for stale_session in sessions_to_close:
                 await self._close_http_bridge_session(stale_session)
 
             if continuity_error is not None:
                 raise continuity_error
+
+            if capacity_wait_future is not None:
+                try:
+                    await asyncio.shield(capacity_wait_future)
+                except asyncio.CancelledError:
+                    if capacity_wait_future.cancelled():
+                        continue
+                    raise
+                except Exception:
+                    pass
+                continue
 
             if inflight_future is not None and not owns_creation:
                 try:

@@ -1321,6 +1321,107 @@ async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_close_waits_for_turn_state_index_lock(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_close_lock",
+        "http-bridge-close-lock@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = proxy_module.ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    affinity = proxy_module._AffinityPolicy(key="turn-close-lock", kind=proxy_module.StickySessionKind.CODEX_SESSION)
+
+    session = await service._get_or_create_http_bridge_session(
+        proxy_module._make_http_bridge_session_key(
+            payload,
+            headers={},
+            affinity=affinity,
+            api_key=None,
+            request_id="req_close_lock",
+        ),
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+    await service._register_http_bridge_turn_state(session, "http_turn_close_lock")
+
+    alias_key = proxy_module._http_bridge_turn_state_alias_key("http_turn_close_lock", session.key.api_key_id)
+
+    async with service._http_bridge_lock:
+        close_task = asyncio.create_task(service._close_http_bridge_session(session))
+        await asyncio.sleep(0)
+        assert not close_task.done()
+        assert service._http_bridge_turn_state_index[alias_key] == session.key
+
+    await close_task
+
+    assert alias_key not in service._http_bridge_turn_state_index
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_allows_unstable_request_key_even_on_non_owner_instance(
     async_client,
     app_instance,

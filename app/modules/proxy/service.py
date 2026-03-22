@@ -1666,11 +1666,7 @@ class ProxyService:
 
     async def _close_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
         session.closed = True
-        for alias in session.downstream_turn_state_aliases:
-            self._http_bridge_turn_state_index.pop(
-                _http_bridge_turn_state_alias_key(alias, session.key.api_key_id),
-                None,
-            )
+        await self._unregister_http_bridge_turn_states(session)
         if session.upstream_reader is not None:
             session.upstream_reader.cancel()
             try:
@@ -1698,6 +1694,16 @@ class ProxyService:
             self._http_bridge_turn_state_index[
                 _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
             ] = session.key
+
+    async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
+        async with self._http_bridge_lock:
+            aliases = tuple(session.downstream_turn_state_aliases)
+            for alias in aliases:
+                self._http_bridge_turn_state_index.pop(
+                    _http_bridge_turn_state_alias_key(alias, session.key.api_key_id),
+                    None,
+                )
+            session.downstream_turn_state_aliases.clear()
 
     def _promote_http_bridge_session_to_codex_affinity(
         self,

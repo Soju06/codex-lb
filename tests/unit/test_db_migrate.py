@@ -527,6 +527,15 @@ class _MissingAlembicVersionConnection:
         )
 
 
+class _MissingAlembicVersionSQLiteConnection:
+    def execute(self, statement: object) -> None:
+        raise sa_exc.OperationalError(
+            str(statement),
+            {},
+            Exception("no such table: alembic_version"),
+        )
+
+
 class _FakeInspector:
     def __init__(self, *, has_table: bool, version_num_length: int | None = None) -> None:
         self._has_table = has_table
@@ -570,6 +579,12 @@ def test_ensure_alembic_version_table_capacity_alters_short_column(monkeypatch) 
 
 def test_read_current_revisions_returns_empty_when_alembic_version_table_is_missing() -> None:
     connection = _MissingAlembicVersionConnection()
+
+    assert _read_current_revisions_from_connection(cast(Connection, connection)) == ()
+
+
+def test_read_current_revisions_returns_empty_when_alembic_version_table_is_missing_on_sqlite() -> None:
+    connection = _MissingAlembicVersionSQLiteConnection()
 
     assert _read_current_revisions_from_connection(cast(Connection, connection)) == ()
 

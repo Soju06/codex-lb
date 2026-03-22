@@ -1446,6 +1446,17 @@ class ProxyService:
                     if alias_key is not None:
                         key = alias_key
                     elif incoming_turn_state.startswith("http_turn_"):
+                        if previous_response_id is not None:
+                            raise ProxyResponseError(
+                                400,
+                                _http_bridge_previous_response_error_envelope(
+                                    previous_response_id,
+                                    (
+                                        "HTTP bridge continuity was lost. Replay x-codex-turn-state "
+                                        "or retry with a stable prompt_cache_key."
+                                    ),
+                                ),
+                            )
                         raise ProxyResponseError(
                             409,
                             openai_error(
@@ -1521,17 +1532,16 @@ class ProxyService:
 
                 inflight_future = self._http_bridge_inflight_sessions.get(key)
                 if previous_response_id is not None:
-                    if inflight_future is None:
-                        continuity_error = ProxyResponseError(
-                            400,
-                            _http_bridge_previous_response_error_envelope(
-                                previous_response_id,
-                                (
-                                    "HTTP bridge continuity was lost. Replay x-codex-turn-state "
-                                    "or retry with a stable prompt_cache_key."
-                                ),
+                    continuity_error = ProxyResponseError(
+                        400,
+                        _http_bridge_previous_response_error_envelope(
+                            previous_response_id,
+                            (
+                                "HTTP bridge continuity was lost. Replay x-codex-turn-state "
+                                "or retry with a stable prompt_cache_key."
                             ),
-                        )
+                        ),
+                    )
                 else:
                     if inflight_future is None:
                         while (

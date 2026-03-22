@@ -851,6 +851,45 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_response_id_fails_closed(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_missing_alias", None),
+            headers={"x-codex-turn-state": "http_turn_missing_alias"},
+            affinity=proxy_module._AffinityPolicy(
+                key="http_turn_missing_alias",
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.1",
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+            previous_response_id="resp_missing_alias",
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 400
+    assert exc.payload["error"] == {
+        "message": (
+            "Previous response with id 'resp_missing_alias' not found. "
+            "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
+        ),
+        "type": "invalid_request_error",
+        "code": "previous_response_not_found",
+        "param": "previous_response_id",
+    }
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owner_and_promotes_session(
     async_client,
     app_instance,
@@ -4243,12 +4282,25 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
         )
     )
     await asyncio.sleep(0.01)
-    assert not follower.done()
+    assert follower.done()
 
     release_create.set()
-    created_session, reused_session = await asyncio.gather(creator, follower)
+    created_session = await creator
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await follower
 
-    assert reused_session is created_session
+    assert service._http_bridge_sessions[key] is created_session
+    exc = exc_info.value
+    assert exc.status_code == 400
+    assert exc.payload["error"] == {
+        "message": (
+            "Previous response with id 'resp_inflight' not found. "
+            "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
+        ),
+        "type": "invalid_request_error",
+        "code": "previous_response_not_found",
+        "param": "previous_response_id",
+    }
 
 
 @pytest.mark.asyncio

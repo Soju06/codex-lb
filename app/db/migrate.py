@@ -159,10 +159,11 @@ def _read_legacy_migration_names(connection: Connection) -> set[str]:
 def _read_current_revisions_from_connection(connection: Connection) -> tuple[str, ...]:
     try:
         rows = connection.execute(text(f"SELECT {_ALEMBIC_VERSION_COLUMN} FROM {_ALEMBIC_VERSION_TABLE}")).fetchall()
-    except sa_exc.ProgrammingError as exc:
+    except (sa_exc.ProgrammingError, sa_exc.OperationalError) as exc:
         # PostgreSQL can still raise UndefinedTable here on a fresh database if
         # the alembic_version table is absent when startup migration state is
-        # re-read. Treat that the same as "no revision yet".
+        # re-read. SQLite raises OperationalError for the same missing-table
+        # path. Treat both the same as "no revision yet".
         message = str(exc).lower()
         if _ALEMBIC_VERSION_TABLE in message and (
             "does not exist" in message or "undefinedtable" in message or "no such table" in message

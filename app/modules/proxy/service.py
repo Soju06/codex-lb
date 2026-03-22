@@ -1566,6 +1566,8 @@ class ProxyService:
                 return None
             return _HTTPBridgeLeaseSnapshot(
                 session_id=lease.session_id,
+                affinity_kind=lease.affinity_kind,
+                affinity_key=lease.affinity_key,
                 owner_instance_id=lease.owner_instance_id,
                 api_key_scope=lease.api_key_scope,
                 account_id=lease.account_id,
@@ -1596,24 +1598,12 @@ class ProxyService:
             )
 
     async def _touch_http_bridge_lease(self, session: "_HTTPBridgeSession") -> None:
-        async with self._repo_factory() as repos:
-            touched = await repos.http_bridge_leases.touch(
-                session.bridge_session_id,
-                lease_expires_at=_http_bridge_lease_expires_at(session.idle_ttl_seconds),
-                account_id=session.account.id,
-                request_model=session.request_model,
-                codex_session=session.codex_session,
-                idle_ttl_seconds=session.idle_ttl_seconds,
-                upstream_turn_state=session.upstream_turn_state,
-                downstream_turn_state=session.downstream_turn_state,
-            )
-            if not touched:
-                await repos.http_bridge_leases.upsert(
-                    session_id=session.bridge_session_id,
-                    affinity_kind=session.key.affinity_kind,
-                    affinity_key=session.key.affinity_key,
-                    api_key_scope=_http_bridge_api_key_scope(session.key.api_key_id),
-                    owner_instance_id=session.owner_instance_id,
+        async with session.lease_lock:
+            if session.closed:
+                return
+            async with self._repo_factory() as repos:
+                touched = await repos.http_bridge_leases.touch(
+                    session.bridge_session_id,
                     lease_expires_at=_http_bridge_lease_expires_at(session.idle_ttl_seconds),
                     account_id=session.account.id,
                     request_model=session.request_model,
@@ -1622,6 +1612,23 @@ class ProxyService:
                     upstream_turn_state=session.upstream_turn_state,
                     downstream_turn_state=session.downstream_turn_state,
                 )
+                if not touched:
+                    if session.closed:
+                        return
+                    await repos.http_bridge_leases.upsert(
+                        session_id=session.bridge_session_id,
+                        affinity_kind=session.key.affinity_kind,
+                        affinity_key=session.key.affinity_key,
+                        api_key_scope=_http_bridge_api_key_scope(session.key.api_key_id),
+                        owner_instance_id=session.owner_instance_id,
+                        lease_expires_at=_http_bridge_lease_expires_at(session.idle_ttl_seconds),
+                        account_id=session.account.id,
+                        request_model=session.request_model,
+                        codex_session=session.codex_session,
+                        idle_ttl_seconds=session.idle_ttl_seconds,
+                        upstream_turn_state=session.upstream_turn_state,
+                        downstream_turn_state=session.downstream_turn_state,
+                    )
 
     def _has_http_bridge_turn_state_alias_conflict(self, turn_state: str, *, api_key_id: str | None) -> bool:
         requested_alias_key = _http_bridge_turn_state_alias_key(turn_state, api_key_id)
@@ -1725,7 +1732,14 @@ class ProxyService:
                         key = alias_session.key
                     elif turn_state_token is not None:
                         delete_stale_turn_state_lease = True
-                        key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                        if active_turn_state_lease is not None:
+                            key = _HTTPBridgeSessionKey(
+                                active_turn_state_lease.affinity_kind,
+                                active_turn_state_lease.affinity_key,
+                                api_key_id,
+                            )
+                        else:
+                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
                     elif incoming_turn_state.startswith("http_turn_") and self._has_http_bridge_turn_state_alias_conflict(
                         incoming_turn_state,
                         api_key_id=api_key_id,
@@ -1980,22 +1994,23 @@ class ProxyService:
         *,
         turn_state_lock_held: bool = False,
     ) -> None:
-        session.closed = True
-        if turn_state_lock_held:
-            self._unregister_http_bridge_turn_states_locked(session)
-        else:
-            await self._unregister_http_bridge_turn_states(session)
-        if session.upstream_reader is not None:
-            session.upstream_reader.cancel()
+        async with session.lease_lock:
+            session.closed = True
+            if turn_state_lock_held:
+                self._unregister_http_bridge_turn_states_locked(session)
+            else:
+                await self._unregister_http_bridge_turn_states(session)
+            if session.upstream_reader is not None:
+                session.upstream_reader.cancel()
+                try:
+                    await session.upstream_reader
+                except asyncio.CancelledError:
+                    pass
             try:
-                await session.upstream_reader
-            except asyncio.CancelledError:
-                pass
-        try:
-            await session.upstream.close()
-        except Exception:
-            logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
-        await self._delete_http_bridge_lease(session.bridge_session_id)
+                await session.upstream.close()
+            except Exception:
+                logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
+            await self._delete_http_bridge_lease(session.bridge_session_id)
         _log_http_bridge_event(
             "close",
             session.key,
@@ -2127,6 +2142,7 @@ class ProxyService:
             upstream_control=_WebSocketUpstreamControl(),
             pending_requests=deque(),
             pending_lock=anyio.Lock(),
+            lease_lock=anyio.Lock(),
             response_create_gate=asyncio.Semaphore(1),
             queued_request_count=0,
             last_used_at=time.monotonic(),
@@ -2577,7 +2593,14 @@ class ProxyService:
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
-        await self._touch_http_bridge_lease(session)
+        try:
+            await self._touch_http_bridge_lease(session)
+        except Exception:
+            logger.warning(
+                "Failed to persist HTTP bridge lease after reconnect session_id=%s",
+                session.bridge_session_id,
+                exc_info=True,
+            )
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(
@@ -4570,6 +4593,8 @@ class _HTTPBridgeTurnStateToken:
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeLeaseSnapshot:
     session_id: str
+    affinity_kind: str
+    affinity_key: str
     owner_instance_id: str
     api_key_scope: str
     account_id: str | None
@@ -4587,6 +4612,7 @@ class _HTTPBridgeSession:
     upstream_control: _WebSocketUpstreamControl
     pending_requests: deque[_WebSocketRequestState]
     pending_lock: anyio.Lock
+    lease_lock: anyio.Lock
     response_create_gate: asyncio.Semaphore
     queued_request_count: int
     last_used_at: float
@@ -5219,7 +5245,7 @@ def _http_bridge_api_key_scope(api_key_id: str | None) -> str:
 
 
 def _http_bridge_lease_expires_at(idle_ttl_seconds: float) -> datetime:
-    return utcnow() + timedelta(seconds=max(30.0, idle_ttl_seconds + 30.0))
+    return utcnow() + timedelta(seconds=max(0.0, idle_ttl_seconds))
 
 
 def _resolve_prompt_cache_key(

@@ -6,6 +6,7 @@ import json
 import time
 from collections import deque
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
 
@@ -19,6 +20,7 @@ from app.core.utils.request_id import reset_request_id, set_request_id
 from app.db.models import Account, AccountStatus, HttpBridgeLease
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy.bridge_repository import HttpBridgeLeasesRepository
 from app.modules.proxy.load_balancer import AccountSelection
 
 pytestmark = pytest.mark.integration

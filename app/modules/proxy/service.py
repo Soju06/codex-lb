@@ -1662,11 +1662,19 @@ class ProxyService:
                     account_id=session.account.id,
                     model=session.request_model,
                 )
-                await self._close_http_bridge_session(session)
+                await self._close_http_bridge_session(session, turn_state_lock_held=True)
 
-    async def _close_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
+    async def _close_http_bridge_session(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        turn_state_lock_held: bool = False,
+    ) -> None:
         session.closed = True
-        await self._unregister_http_bridge_turn_states(session)
+        if turn_state_lock_held:
+            self._unregister_http_bridge_turn_states_locked(session)
+        else:
+            await self._unregister_http_bridge_turn_states(session)
         if session.upstream_reader is not None:
             session.upstream_reader.cancel()
             try:
@@ -1697,13 +1705,16 @@ class ProxyService:
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:
-            aliases = tuple(session.downstream_turn_state_aliases)
-            for alias in aliases:
-                self._http_bridge_turn_state_index.pop(
-                    _http_bridge_turn_state_alias_key(alias, session.key.api_key_id),
-                    None,
-                )
-            session.downstream_turn_state_aliases.clear()
+            self._unregister_http_bridge_turn_states_locked(session)
+
+    def _unregister_http_bridge_turn_states_locked(self, session: "_HTTPBridgeSession") -> None:
+        aliases = tuple(session.downstream_turn_state_aliases)
+        for alias in aliases:
+            self._http_bridge_turn_state_index.pop(
+                _http_bridge_turn_state_alias_key(alias, session.key.api_key_id),
+                None,
+            )
+        session.downstream_turn_state_aliases.clear()
 
     def _promote_http_bridge_session_to_codex_affinity(
         self,

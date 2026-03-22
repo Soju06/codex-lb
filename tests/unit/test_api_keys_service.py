@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -20,6 +20,7 @@ from app.modules.api_keys.service import (
     ApiKeyRateLimitExceededError,
     ApiKeysRepositoryProtocol,
     ApiKeysService,
+    ApiKeyUpdateData,
     LimitRuleInput,
 )
 
@@ -389,6 +390,26 @@ async def test_create_key_stores_hash_and_prefix() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_key_normalizes_timezone_aware_expiry_to_utc_naive() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="expiring-key",
+            allowed_models=None,
+            expires_at=datetime(2026, 3, 20, 23, 59, 59, tzinfo=timezone(timedelta(hours=9))),
+        )
+    )
+
+    assert created.expires_at == datetime(2026, 3, 20, 14, 59, 59)
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.expires_at == datetime(2026, 3, 20, 14, 59, 59)
+
+
+@pytest.mark.asyncio
 async def test_create_key_rejects_enforced_model_outside_allowed_models() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -616,6 +637,27 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
     standard_limits = await repo.get_limits_by_key(standard_created.id)
     standard_cost_limit = next(lim for lim in standard_limits if lim.limit_type == LimitType.COST_USD)
     assert standard_cost_limit.current_value == 143_360
+
+
+@pytest.mark.asyncio
+async def test_update_key_normalizes_timezone_aware_expiry_to_utc_naive() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="update-expiry", allowed_models=None, expires_at=None))
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            expires_at=datetime(2026, 4, 1, 5, 30, 0, tzinfo=timezone(timedelta(hours=-7))),
+            expires_at_set=True,
+        ),
+    )
+
+    assert updated.expires_at == datetime(2026, 4, 1, 12, 30, 0)
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.expires_at == datetime(2026, 4, 1, 12, 30, 0)
 
 
 @pytest.mark.asyncio

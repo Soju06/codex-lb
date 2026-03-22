@@ -1,0 +1,3 @@
+- [x] Normalize `expires_at` to UTC naive before API key create and update writes.
+- [x] Add unit regression coverage for timezone-aware expiration values.
+- [x] Update the API key spec to document offset-aware `expiresAt` support.

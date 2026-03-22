@@ -1503,6 +1503,62 @@ async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_reque
 
 
 @pytest.mark.asyncio
+async def test_select_account_retries_no_accounts_after_runtime_recovery(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-no-accounts-retry", "no-accounts-retry@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=10.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[account.id] = RuntimeState(error_count=3, last_error_at=time.time())
+
+    original_persist_selection_state = balancer._persist_selection_state
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+
+    async def blocking_persist_selection_state(
+        accounts_repo_arg: AccountsRepository,
+        account_map: dict[str, Account],
+        states: list[Any],
+    ) -> set[str]:
+        persist_started.set()
+        await release_persist.wait()
+        return await original_persist_selection_state(accounts_repo_arg, account_map, states)
+
+    monkeypatch.setattr(balancer, "_persist_selection_state", blocking_persist_selection_state)
+
+    select_task = asyncio.create_task(balancer.select_account())
+    await persist_started.wait()
+
+    await balancer.record_success(account)
+    release_persist.set()
+    selection = await select_task
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+
+
+@pytest.mark.asyncio
 async def test_select_account_returns_data_unavailable_error_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-stale", "gated-stale@example.com")
     now = utcnow()

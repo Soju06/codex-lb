@@ -1798,13 +1798,27 @@ class ProxyService:
                     error_type="server_error",
                 ),
             )
-        account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
-        connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
-        upstream = await self._open_upstream_websocket_with_budget(
-            account,
-            connect_headers,
-            timeout_seconds=_remaining_budget_seconds(deadline),
-        )
+        try:
+            account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
+            connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
+            upstream = await self._open_upstream_websocket_with_budget(
+                account,
+                connect_headers,
+                timeout_seconds=_remaining_budget_seconds(deadline),
+            )
+        except RefreshError as exc:
+            if exc.is_permanent:
+                await self._load_balancer.mark_permanent_failure(account, exc.code)
+            raise ProxyResponseError(
+                401,
+                openai_error(
+                    "invalid_api_key",
+                    exc.message,
+                    error_type="authentication_error",
+                ),
+            ) from exc
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
         session = _HTTPBridgeSession(
             key=key,
             headers=connect_headers,

@@ -2881,6 +2881,135 @@ async def test_v1_responses_http_bridge_startup_error_omits_turn_state_header(as
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_refresh_failure_returns_proxy_error(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_refresh_failure",
+        "backend-http-bridge-refresh-failure@example.com",
+    )
+    account = await _get_account(account_id)
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fail_refresh(self, target, *, force=False, timeout_seconds):
+        del self, target, force, timeout_seconds
+        raise proxy_module.RefreshError("refresh_token_expired", "token expired", True)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fail_refresh)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+    assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_refresh_failure_returns_proxy_error(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_v1_http_bridge_refresh_failure",
+        "v1-http-bridge-refresh-failure@example.com",
+    )
+    account = await _get_account(account_id)
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fail_refresh(self, target, *, force=False, timeout_seconds):
+        del self, target, force, timeout_seconds
+        raise proxy_module.RefreshError("refresh_token_expired", "token expired", True)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fail_refresh)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+    assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_before_request_admission(
     async_client,
     app_instance,

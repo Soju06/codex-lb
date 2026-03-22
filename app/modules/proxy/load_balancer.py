@@ -201,6 +201,24 @@ class LoadBalancer:
                         selected_states,
                     )
                 stale_account_ids = stale_account_ids or set()
+                if selected_snapshot is None:
+                    async with self._runtime_lock:
+                        runtime_changed = any(
+                            self._runtime.get(account.id, RuntimeState()).version != runtime_versions[account.id]
+                            for account in selection_inputs.accounts
+                        )
+                    if runtime_changed:
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        continue
                 if selected_snapshot is not None and selected_runtime_version is not None:
                     async with self._runtime_lock:
                         current_runtime = self._runtime.get(selected_snapshot.id)

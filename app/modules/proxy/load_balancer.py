@@ -623,8 +623,8 @@ class LoadBalancer:
             state.error_count += count
             state.last_error_at = time.time()
             self._sync_runtime_state(account, state)
-        async with self._repo_factory() as repos:
-            await self._persist_state_if_current(repos.accounts, account_snapshot, state)
+            async with self._repo_factory() as repos:
+                await self._persist_state_if_current(repos.accounts, account_snapshot, state)
 
     async def record_success(self, account: Account) -> None:
         """Clear transient error state after a successful upstream request."""

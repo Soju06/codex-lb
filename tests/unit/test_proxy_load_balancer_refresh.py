@@ -902,9 +902,13 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
     record_task = asyncio.create_task(balancer.record_errors(account, 1))
     await persist_started.wait()
 
-    await balancer.mark_permanent_failure(account, "refresh_token_expired")
+    fail_task = asyncio.create_task(balancer.mark_permanent_failure(account, "refresh_token_expired"))
+    await asyncio.sleep(0.01)
+    assert not fail_task.done()
+
     release_persist.set()
     await record_task
+    await fail_task
 
     assert account.status == AccountStatus.DEACTIVATED
     assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED

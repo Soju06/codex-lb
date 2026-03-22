@@ -1162,6 +1162,77 @@ async def test_select_account_reloads_inputs_after_version_conflict(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_select_account_does_not_hold_runtime_lock_during_conflict_reload(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-conflict-reload-unblocks-runtime", "conflict-reload@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=10.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    original_load_selection_inputs = balancer._load_selection_inputs
+    reload_started = asyncio.Event()
+    release_reload = asyncio.Event()
+    load_calls = 0
+
+    async def blocking_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+        nonlocal load_calls
+        load_calls += 1
+        if load_calls == 2:
+            reload_started.set()
+            await release_reload.wait()
+        return await original_load_selection_inputs(model=model, additional_limit_name=additional_limit_name)
+
+    original_select_account = load_balancer_module.select_account
+    first_call = True
+
+    def conflict_injecting_select_account(states, **kwargs):
+        nonlocal first_call
+        if first_call:
+            first_call = False
+            balancer._runtime.setdefault(account.id, RuntimeState()).version += 1
+        return original_select_account(states, **kwargs)
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", blocking_load_selection_inputs)
+    monkeypatch.setattr(load_balancer_module, "select_account", conflict_injecting_select_account)
+
+    select_task = asyncio.create_task(balancer.select_account())
+    await reload_started.wait()
+
+    record_error_task = asyncio.create_task(balancer.record_error(account))
+    await asyncio.sleep(0.01)
+
+    assert record_error_task.done()
+    runtime = balancer._runtime[account.id]
+    assert runtime.error_count == 1
+    assert runtime.last_error_at is not None
+
+    release_reload.set()
+    selection = await select_task
+    assert selection.account is not None
+
+
+@pytest.mark.asyncio
 async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
     now = utcnow()

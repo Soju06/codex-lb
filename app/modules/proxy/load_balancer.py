@@ -144,51 +144,55 @@ class LoadBalancer:
                     routing_strategy=routing_strategy,
                 )
 
+                reload_selection_inputs = False
                 async with self._runtime_lock:
                     if any(
                         self._runtime.get(account.id, RuntimeState()).version != runtime_versions[account.id]
                         for account in selection_inputs.accounts
                     ):
-                        selection_inputs = await load_selection_inputs()
-                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
-                            return AccountSelection(
-                                account=None,
-                                error_message=selection_inputs.error_message,
-                                error_code=selection_inputs.error_code,
-                            )
-                        continue
-
-                    selected_account_map = account_map
-                    selected_states = []
-                    for state in states:
-                        account = account_map.get(state.account_id)
-                        if account is None:
-                            continue
-                        self._sync_runtime_state(
-                            account,
-                            state,
-                            selected=result.account is not None and state.account_id == result.account.account_id,
-                        )
-                        selected_states.append(state)
-                    if result.account is not None:
-                        selected = account_map.get(result.account.account_id)
-                        if selected is None:
-                            error_message = result.error_message
-                        else:
-                            selected_reset_at = selected.reset_at
-                            for state in selected_states:
-                                if state.account_id == result.account.account_id:
-                                    state.status = result.account.status
-                                    state.deactivation_reason = result.account.deactivation_reason
-                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
-                                    break
-                            selected_snapshot = _clone_account(selected)
-                            selected_snapshot.status = result.account.status
-                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
-                            selected_snapshot.reset_at = selected_reset_at
-                            selected_runtime_version = self._runtime.get(selected.id, RuntimeState()).version
+                        reload_selection_inputs = True
                     else:
-                        error_message = result.error_message
+                        selected_account_map = account_map
+                        selected_states = []
+                        for state in states:
+                            account = account_map.get(state.account_id)
+                            if account is None:
+                                continue
+                            self._sync_runtime_state(
+                                account,
+                                state,
+                                selected=result.account is not None and state.account_id == result.account.account_id,
+                            )
+                            selected_states.append(state)
+                        if result.account is not None:
+                            selected = account_map.get(result.account.account_id)
+                            if selected is None:
+                                error_message = result.error_message
+                            else:
+                                selected_reset_at = selected.reset_at
+                                for state in selected_states:
+                                    if state.account_id == result.account.account_id:
+                                        state.status = result.account.status
+                                        state.deactivation_reason = result.account.deactivation_reason
+                                        selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                        break
+                                selected_snapshot = _clone_account(selected)
+                                selected_snapshot.status = result.account.status
+                                selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                                selected_snapshot.reset_at = selected_reset_at
+                                selected_runtime_version = self._runtime.get(selected.id, RuntimeState()).version
+                        else:
+                            error_message = result.error_message
+
+                if reload_selection_inputs:
+                    selection_inputs = await load_selection_inputs()
+                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=selection_inputs.error_message,
+                            error_code=selection_inputs.error_code,
+                        )
+                    continue
 
                 async with self._repo_factory() as repos:
                     stale_account_ids = await self._persist_selection_state(

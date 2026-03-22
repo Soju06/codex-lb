@@ -1746,18 +1746,6 @@ class ProxyService:
         turn_state: str,
         settings: object,
     ) -> None:
-        promoted_key = _HTTPBridgeSessionKey(
-            affinity_kind="turn_state_header",
-            affinity_key=turn_state,
-            api_key_id=session.key.api_key_id,
-        )
-        current_key = session.key
-        if current_key != promoted_key:
-            current_session = self._http_bridge_sessions.get(current_key)
-            if current_session is session:
-                self._http_bridge_sessions.pop(current_key, None)
-            session.key = promoted_key
-            self._http_bridge_sessions[promoted_key] = session
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
         session.downstream_turn_state = turn_state

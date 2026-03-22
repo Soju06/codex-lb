@@ -36,16 +36,10 @@ async def _cleanup_http_bridge_sessions(app_instance):
     async with service._http_bridge_lock:
         sessions = list(service._http_bridge_sessions.values())
         service._http_bridge_sessions.clear()
-        inflight_futures = list(getattr(service, "_http_bridge_inflight_sessions", {}).values())
-        if hasattr(service, "_http_bridge_inflight_sessions"):
-            service._http_bridge_inflight_sessions.clear()
         service._http_bridge_turn_state_index.clear()
     for session in sessions:
         session.bridge_session_id = ""
         await service._close_http_bridge_session(session)
-    for inflight_future in inflight_futures:
-        if not inflight_future.done():
-            inflight_future.cancel()
     async with SessionLocal() as session:
         await session.execute(delete(HttpBridgeLease))
         await session.commit()

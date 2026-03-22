@@ -1470,7 +1470,10 @@ class ProxyService:
                                 ] = alias_session.key
                             key = alias_session.key
                     elif incoming_turn_state.startswith("http_turn_"):
-                        if previous_response_id is not None:
+                        key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                        if self._http_bridge_inflight_sessions.get(key) is not None:
+                            pass
+                        elif previous_response_id is not None:
                             raise ProxyResponseError(
                                 400,
                                 _http_bridge_previous_response_error_envelope(
@@ -1481,14 +1484,15 @@ class ProxyService:
                                     ),
                                 ),
                             )
-                        raise ProxyResponseError(
-                            409,
-                            openai_error(
-                                "bridge_instance_mismatch",
-                                "HTTP bridge turn-state reached an instance that does not own the live session",
-                                error_type="server_error",
-                            ),
-                        )
+                        else:
+                            raise ProxyResponseError(
+                                409,
+                                openai_error(
+                                    "bridge_instance_mismatch",
+                                    "HTTP bridge turn-state reached an instance that does not own the live session",
+                                    error_type="server_error",
+                                ),
+                            )
 
                 await self._prune_http_bridge_sessions_locked()
 
@@ -4864,8 +4868,6 @@ def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None)
 
 
 def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -> str | None:
-    if session.upstream_turn_state is not None:
-        return session.upstream_turn_state
     if (
         session.codex_session
         and session.downstream_turn_state is not None

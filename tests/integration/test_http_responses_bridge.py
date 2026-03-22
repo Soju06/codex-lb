@@ -1046,6 +1046,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     assert replayed.affinity.kind == proxy_module.StickySessionKind.CODEX_SESSION
     assert replayed.affinity.key == replay_turn_state
     assert replayed.idle_ttl_seconds == 600.0
+    replayed.upstream_turn_state = "upstream_turn_state_stale"
     request_state = proxy_module._WebSocketRequestState(
         request_id="req_owner_alias_reconnect",
         model=payload.model,
@@ -1057,6 +1058,42 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     await service._reconnect_http_bridge_session(replayed, request_state=request_state)
     assert connect_headers_seen[-1]["x-codex-turn-state"] == replay_turn_state
     await service._close_http_bridge_session(session)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_waits_for_inflight_recreation_on_missing_turn_state_alias(app_instance):
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+    service._http_bridge_inflight_sessions.clear()
+
+    replay_turn_state = "http_turn_inflight_replay"
+    replay_key = proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None)
+    expected_session = _make_dummy_bridge_session(replay_key)
+    inflight_future: asyncio.Future[SimpleNamespace] = asyncio.get_running_loop().create_future()
+    service._http_bridge_inflight_sessions[replay_key] = inflight_future
+
+    request_key = proxy_module._HTTPBridgeSessionKey("request", "derived-key", None)
+    try:
+        waiter = asyncio.create_task(
+            service._get_or_create_http_bridge_session(
+                request_key,
+                headers={"x-codex-turn-state": replay_turn_state},
+                affinity=proxy_module._AffinityPolicy(key="derived-key"),
+                api_key=None,
+                request_model="gpt-5.4",
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        inflight_future.set_result(expected_session)
+        returned = await waiter
+    finally:
+        service._http_bridge_inflight_sessions.clear()
+
+    assert returned is expected_session
 
 
 @pytest.mark.asyncio

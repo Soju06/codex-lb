@@ -1617,6 +1617,8 @@ class ProxyService:
                 except Exception:
                     continue
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
+                    session.request_model = request_model
+                    session.last_used_at = time.monotonic()
                     return session
                 continue
 

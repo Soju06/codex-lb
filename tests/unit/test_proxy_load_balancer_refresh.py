@@ -877,6 +877,41 @@ async def test_mark_quota_exceeded_keeps_selection_blocked_until_persisted(monke
 
 
 @pytest.mark.asyncio
+async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> None:
+    account = _make_account("acc-record-errors-race", "record-errors-race@example.com")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    original_persist_state_if_current = balancer._persist_state_if_current
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+
+    async def blocking_persist_state_if_current(
+        accounts_repo_arg: AccountsRepository,
+        account_arg: Account,
+        state_arg: Any,
+    ) -> bool:
+        persist_started.set()
+        await release_persist.wait()
+        return await original_persist_state_if_current(accounts_repo_arg, account_arg, state_arg)
+
+    monkeypatch.setattr(balancer, "_persist_state_if_current", blocking_persist_state_if_current)
+
+    record_task = asyncio.create_task(balancer.record_errors(account, 1))
+    await persist_started.wait()
+
+    await balancer.mark_permanent_failure(account, "refresh_token_expired")
+    release_persist.set()
+    await record_task
+
+    assert account.status == AccountStatus.DEACTIVATED
+    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
+    assert all(update["status"] != AccountStatus.ACTIVE for update in accounts_repo.status_updates)
+
+
+@pytest.mark.asyncio
 async def test_select_account_does_not_hold_runtime_lock_during_input_loading(monkeypatch) -> None:
     accounts_started = asyncio.Event()
     release_accounts = asyncio.Event()

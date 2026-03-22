@@ -1065,6 +1065,31 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
 
 
 @pytest.mark.asyncio
+async def test_sync_runtime_state_bumps_version_for_status_only_updates() -> None:
+    account = _make_account("acc-status-only-version", "status-only-version@example.com")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([]),
+            StubUsageRepository({}, {}),
+            StubStickySessionsRepository(),
+        )
+    )
+    runtime = balancer._runtime.setdefault(account.id, RuntimeState())
+    initial_version = runtime.version
+
+    state = load_balancer_module.AccountState(
+        account_id=account.id,
+        status=AccountStatus.DEACTIVATED,
+        deactivation_reason="Refresh token expired - re-login required",
+    )
+
+    updated = balancer._sync_runtime_state(account, state)
+
+    assert updated is True
+    assert balancer._runtime[account.id].version == initial_version + 1
+
+
+@pytest.mark.asyncio
 async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
     now = utcnow()

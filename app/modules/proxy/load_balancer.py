@@ -592,6 +592,10 @@ class LoadBalancer:
         if runtime.error_count != state.error_count:
             runtime.error_count = state.error_count
             dirty = True
+        if account.status != state.status:
+            dirty = True
+        if account.deactivation_reason != state.deactivation_reason:
+            dirty = True
         if selected:
             runtime.last_selected_at = time.time()
             dirty = True

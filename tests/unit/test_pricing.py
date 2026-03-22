@@ -139,30 +139,34 @@ def test_calculate_cost_from_usage_service_tier_trims_whitespace():
     assert flex_cost == pytest.approx(2.625)
 
 
+def test_calculate_cost_from_usage_legacy_gpt_5_service_tiers() -> None:
+    usage = UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0)
+
+    gpt_5_priority = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5"], service_tier="priority")
+    gpt_5_1_flex = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5.1"], service_tier="flex")
+    gpt_5_2_priority = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5.2"], service_tier="priority")
+    gpt_5_2_flex = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5.2"], service_tier="flex")
+
+    assert gpt_5_priority == pytest.approx(22.5)
+    assert gpt_5_1_flex == pytest.approx(5.625)
+    assert gpt_5_2_priority == pytest.approx(31.5)
+    assert gpt_5_2_flex == pytest.approx(7.875)
+
+
 def test_calculate_cost_from_usage_unsupported_tiers_fall_back_to_standard():
     usage = UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0)
     codex_mini = DEFAULT_PRICING_MODELS["gpt-5.1-codex-mini"]
-    gpt_5_1 = DEFAULT_PRICING_MODELS["gpt-5.1"]
-    gpt_5_2 = DEFAULT_PRICING_MODELS["gpt-5.2"]
     gpt_5_3_chat = DEFAULT_PRICING_MODELS["gpt-5.3-chat-latest"]
     gpt_5_2_chat = DEFAULT_PRICING_MODELS["gpt-5.2-chat-latest"]
 
     codex_mini_priority = calculate_cost_from_usage(usage, codex_mini, service_tier="priority")
     codex_mini_flex = calculate_cost_from_usage(usage, codex_mini, service_tier="flex")
-    gpt_5_1_priority = calculate_cost_from_usage(usage, gpt_5_1, service_tier="priority")
-    gpt_5_1_flex = calculate_cost_from_usage(usage, gpt_5_1, service_tier="flex")
-    gpt_5_2_priority = calculate_cost_from_usage(usage, gpt_5_2, service_tier="priority")
-    gpt_5_2_flex = calculate_cost_from_usage(usage, gpt_5_2, service_tier="flex")
     gpt_5_3_chat_priority = calculate_cost_from_usage(usage, gpt_5_3_chat, service_tier="priority")
     gpt_5_2_chat_priority = calculate_cost_from_usage(usage, gpt_5_2_chat, service_tier="priority")
     gpt_5_2_chat_flex = calculate_cost_from_usage(usage, gpt_5_2_chat, service_tier="flex")
 
     assert codex_mini_priority == pytest.approx(2.25)
     assert codex_mini_flex == pytest.approx(2.25)
-    assert gpt_5_1_priority == pytest.approx(11.25)
-    assert gpt_5_1_flex == pytest.approx(11.25)
-    assert gpt_5_2_priority == pytest.approx(15.75)
-    assert gpt_5_2_flex == pytest.approx(15.75)
     assert gpt_5_3_chat_priority == pytest.approx(15.75)
     assert gpt_5_2_chat_priority == pytest.approx(15.75)
     assert gpt_5_2_chat_flex == pytest.approx(15.75)

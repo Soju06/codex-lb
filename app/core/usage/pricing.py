@@ -132,6 +132,10 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.75,
         cached_input_per_1m=0.175,
         output_per_1m=14.0,
+        priority_multiplier=2.0,
+        flex_input_per_1m=0.875,
+        flex_cached_input_per_1m=0.0875,
+        flex_output_per_1m=7.0,
     ),
     "gpt-5.2-chat-latest": ModelPrice(
         input_per_1m=1.75,
@@ -142,6 +146,10 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
+        priority_multiplier=2.0,
+        flex_input_per_1m=0.625,
+        flex_cached_input_per_1m=0.0625,
+        flex_output_per_1m=5.0,
     ),
     "gpt-5.1-chat-latest": ModelPrice(
         input_per_1m=1.25,
@@ -152,6 +160,10 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         input_per_1m=1.25,
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
+        priority_multiplier=2.0,
+        flex_input_per_1m=0.625,
+        flex_cached_input_per_1m=0.0625,
+        flex_output_per_1m=5.0,
     ),
     "gpt-5-chat-latest": ModelPrice(
         input_per_1m=1.25,

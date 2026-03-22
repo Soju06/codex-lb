@@ -807,9 +807,7 @@ def _is_native_codex_originator(originator: object) -> bool:
     stripped = originator.strip()
     if not stripped:
         return False
-    if stripped in _NATIVE_CODEX_ORIGINATORS:
-        return True
-    return stripped.startswith("Codex ")
+    return stripped in _NATIVE_CODEX_ORIGINATORS
 
 
 def _resolve_stream_transport(

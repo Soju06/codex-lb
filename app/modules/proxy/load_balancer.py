@@ -119,6 +119,7 @@ class LoadBalancer:
             )
 
         selected_snapshot: Account | None = None
+        selected_runtime_version: int | None = None
         error_message: str | None = None
         selected_states: list[AccountState] = []
         selected_account_map: dict[str, Account] = {}
@@ -174,20 +175,47 @@ class LoadBalancer:
                         if selected is None:
                             error_message = result.error_message
                         else:
+                            selected_reset_at = selected.reset_at
                             for state in selected_states:
                                 if state.account_id == result.account.account_id:
                                     state.status = result.account.status
                                     state.deactivation_reason = result.account.deactivation_reason
+                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
                                     break
                             selected_snapshot = _clone_account(selected)
                             selected_snapshot.status = result.account.status
                             selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                            selected_snapshot.reset_at = selected_reset_at
+                            selected_runtime_version = self._runtime.get(selected.id, RuntimeState()).version
                     else:
                         error_message = result.error_message
-                    break
 
-            async with self._repo_factory() as repos:
-                await self._persist_selection_state(repos.accounts, selected_account_map, selected_states)
+                async with self._repo_factory() as repos:
+                    stale_account_ids = await self._persist_selection_state(
+                        repos.accounts,
+                        selected_account_map,
+                        selected_states,
+                    )
+                stale_account_ids = stale_account_ids or set()
+                if selected_snapshot is not None and selected_runtime_version is not None:
+                    async with self._runtime_lock:
+                        current_runtime = self._runtime.get(selected_snapshot.id)
+                        runtime_changed = current_runtime is None or current_runtime.version != selected_runtime_version
+                    if selected_snapshot.id in stale_account_ids or runtime_changed:
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        selected_snapshot = None
+                        selected_runtime_version = None
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        continue
+                break
         else:
             async with self._runtime_lock:
                 self._prune_runtime(selection_inputs.accounts)
@@ -225,14 +253,17 @@ class LoadBalancer:
                         if selected is None:
                             error_message = result.error_message
                         else:
+                            selected_reset_at = selected.reset_at
                             for state in selected_states:
                                 if state.account_id == result.account.account_id:
                                     state.status = result.account.status
                                     state.deactivation_reason = result.account.deactivation_reason
+                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
                                     break
                             selected_snapshot = _clone_account(selected)
                             selected_snapshot.status = result.account.status
                             selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                            selected_snapshot.reset_at = selected_reset_at
                     else:
                         error_message = result.error_message
 
@@ -620,11 +651,15 @@ class LoadBalancer:
         accounts_repo: AccountsRepository,
         account_map: dict[str, Account],
         states: list[AccountState],
-    ) -> None:
+    ) -> set[str]:
+        stale_account_ids: set[str] = set()
         for state in states:
             account = account_map.get(state.account_id)
             if account is not None:
-                await self._persist_state_if_current(accounts_repo, account, state)
+                persisted = await self._persist_state_if_current(accounts_repo, account, state)
+                if not persisted:
+                    stale_account_ids.add(account.id)
+        return stale_account_ids
 
     async def _persist_state(
         self,
@@ -653,7 +688,7 @@ class LoadBalancer:
         accounts_repo: AccountsRepository,
         account: Account,
         state: AccountState,
-    ) -> None:
+    ) -> bool:
         reset_at_int = int(state.reset_at) if state.reset_at else None
         status_changed = account.status != state.status
         reason_changed = account.deactivation_reason != state.deactivation_reason
@@ -673,6 +708,8 @@ class LoadBalancer:
                 account.status = state.status
                 account.deactivation_reason = state.deactivation_reason
                 account.reset_at = reset_at_int
+            return updated
+        return True
 
     async def _sync_state(
         self,
@@ -756,8 +793,6 @@ def _state_from_account(
         error_count=runtime.error_count,
         deactivation_reason=account.deactivation_reason,
     )
-
-
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
     allowed_plans = get_model_registry().plan_types_for_model(model)
     if allowed_plans is None:

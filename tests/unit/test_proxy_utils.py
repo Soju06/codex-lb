@@ -146,8 +146,26 @@ def test_has_native_codex_transport_headers_requires_allowlisted_originator():
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_atlas"}) is True
     assert proxy_module._has_native_codex_transport_headers({"originator": "Codex Desktop"}) is True
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_chatgpt_desktop"}) is True
-    assert proxy_module._has_native_codex_transport_headers({"originator": "Codex Chat"}) is True
+    assert proxy_module._has_native_codex_transport_headers({"originator": "Codex Chat"}) is False
+    assert proxy_module._has_native_codex_transport_headers({"originator": "Codex QA"}) is False
     assert proxy_module._has_native_codex_transport_headers({"originator": "other-client"}) is False
+
+
+def test_resolve_stream_transport_does_not_force_websocket_for_custom_codex_originator(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda _model: False),
+    )
+
+    transport = proxy_module._resolve_stream_transport(
+        transport="auto",
+        transport_override=None,
+        model="gpt-5.1",
+        headers={"originator": "Codex QA"},
+    )
+
+    assert transport == "http"
 
 
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():

@@ -61,6 +61,9 @@ class StubAccountsRepository(AccountsRepository):
         self._accounts = accounts
         self.status_updates: list[dict[str, Any]] = []
 
+    async def get_by_id(self, account_id: str) -> Account | None:
+        return self._find_account(account_id)
+
     async def list_accounts(self) -> list[Account]:
         return list(self._accounts)
 
@@ -702,6 +705,8 @@ async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) 
     sticky_repo = StubStickySessionsRepository()
 
     original_persist_selection_state = LoadBalancer._persist_selection_state
+    overlap_observed = asyncio.Event()
+    inflight_persist_calls = 0
 
     async def slow_persist_selection_state(
         self: LoadBalancer,
@@ -709,8 +714,15 @@ async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) 
         account_map: dict[str, Account],
         states: list[Any],
     ) -> None:
-        await asyncio.sleep(0.05)
-        await original_persist_selection_state(self, accounts_repo, account_map, states)
+        nonlocal inflight_persist_calls
+        inflight_persist_calls += 1
+        try:
+            if inflight_persist_calls >= 2:
+                overlap_observed.set()
+            await asyncio.sleep(0.05)
+            await original_persist_selection_state(self, accounts_repo, account_map, states)
+        finally:
+            inflight_persist_calls -= 1
 
     monkeypatch.setattr(LoadBalancer, "_persist_selection_state", slow_persist_selection_state)
 
@@ -731,7 +743,8 @@ async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) 
     elapsed = time.perf_counter() - started
 
     assert len(set(selected_ids)) == 2
-    assert elapsed < 0.09
+    assert overlap_observed.is_set()
+    assert elapsed < 0.13
 
 
 @pytest.mark.asyncio
@@ -1059,9 +1072,10 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
     await fail_task
 
     release_persist.set()
-    await select_task
+    selection = await select_task
 
     assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
+    assert selection.account is None
 
 
 @pytest.mark.asyncio

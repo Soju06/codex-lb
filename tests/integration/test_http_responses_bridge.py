@@ -3010,6 +3010,70 @@ async def test_v1_responses_http_bridge_refresh_failure_returns_proxy_error(asyn
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_transient_refresh_failure_returns_upstream_error(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_v1_http_bridge_refresh_transient_failure",
+        "v1-http-bridge-refresh-transient-failure@example.com",
+    )
+    account = await _get_account(account_id)
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fail_refresh(self, target, *, force=False, timeout_seconds):
+        del self, target, force, timeout_seconds
+        raise proxy_module.RefreshError("invalid_response", "temporary refresh failure", False)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fail_refresh)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
+    assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_before_request_admission(
     async_client,
     app_instance,
@@ -5394,7 +5458,13 @@ async def test_prepare_http_bridge_request_preserves_existing_client_metadata(ap
 
     token = set_request_id("req_http_bridge_existing")
     try:
-        request_state, text_data = service._prepare_http_bridge_request(
+        first_request_state, text_data = service._prepare_http_bridge_request(
+            payload,
+            {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
+            api_key=None,
+            api_key_reservation=None,
+        )
+        second_request_state, _ = service._prepare_http_bridge_request(
             payload,
             {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
             api_key=None,
@@ -5409,4 +5479,8 @@ async def test_prepare_http_bridge_request_preserves_existing_client_metadata(ap
         "nested": {"enabled": False},
         "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
     }
-    assert request_state.request_id == "req_http_bridge_existing"
+    assert first_request_state.request_log_id == "req_http_bridge_existing"
+    assert second_request_state.request_log_id == "req_http_bridge_existing"
+    assert first_request_state.request_id.startswith("ws_")
+    assert second_request_state.request_id.startswith("ws_")
+    assert first_request_state.request_id != second_request_state.request_id

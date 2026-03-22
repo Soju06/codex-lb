@@ -1111,7 +1111,7 @@ class ProxyService:
             include_type_field=True,
             attach_event_queue=True,
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
-            request_id=request_id or get_request_id() or ensure_request_id(None),
+            request_log_id=request_id or get_request_id() or ensure_request_id(None),
         )
 
     def _prepare_response_bridge_request_state(
@@ -1124,6 +1124,7 @@ class ProxyService:
         attach_event_queue: bool,
         client_metadata: Mapping[str, JsonValue] | None,
         request_id: str | None = None,
+        request_log_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         upstream_payload = dict(payload.to_payload())
         upstream_payload.pop("stream", None)
@@ -1135,6 +1136,7 @@ class ProxyService:
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         request_state = _WebSocketRequestState(
             request_id=request_id or f"ws_{uuid4().hex}",
+            request_log_id=request_log_id,
             model=payload.model,
             service_tier=forwarded_service_tier,
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
@@ -1170,7 +1172,7 @@ class ProxyService:
         try:
             selection = await self._select_account_with_budget(
                 deadline,
-                request_id=request_state.request_id,
+                request_id=request_state.request_log_id or request_state.request_id,
                 kind="websocket",
                 sticky_key=sticky_key,
                 sticky_kind=sticky_kind,
@@ -1778,7 +1780,7 @@ class ProxyService:
         settings = await get_settings_cache().get()
         selection = await self._select_account_with_budget(
             deadline,
-            request_id=request_state.request_id,
+            request_id=request_state.request_log_id or request_state.request_id,
             kind="http_bridge",
             sticky_key=affinity.key,
             sticky_kind=affinity.kind,
@@ -1809,14 +1811,15 @@ class ProxyService:
         except RefreshError as exc:
             if exc.is_permanent:
                 await self._load_balancer.mark_permanent_failure(account, exc.code)
-            raise ProxyResponseError(
-                401,
-                openai_error(
-                    "invalid_api_key",
-                    exc.message,
-                    error_type="authentication_error",
-                ),
-            ) from exc
+                raise ProxyResponseError(
+                    401,
+                    openai_error(
+                        "invalid_api_key",
+                        exc.message,
+                        error_type="authentication_error",
+                    ),
+                ) from exc
+            _raise_proxy_unavailable(exc.message or "Temporary upstream refresh failure")
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
         session = _HTTPBridgeSession(
@@ -2239,7 +2242,7 @@ class ProxyService:
         settings = await get_settings_cache().get()
         selection = await self._select_account_with_budget(
             deadline,
-            request_id=request_state.request_id,
+            request_id=request_state.request_log_id or request_state.request_id,
             kind="http_bridge",
             sticky_key=session.affinity.key,
             sticky_kind=session.affinity.kind,
@@ -2753,7 +2756,7 @@ class ProxyService:
         await self._write_request_log(
             account_id=account_id,
             api_key=api_key,
-            request_id=request_state.request_id,
+            request_id=request_state.request_log_id or request_state.request_id,
             model=request_state.model or "",
             latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
             status="error",
@@ -2871,7 +2874,7 @@ class ProxyService:
             await self._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
-                request_id=request_state.response_id or request_state.request_id,
+                request_id=request_state.response_id or request_state.request_log_id or request_state.request_id,
                 model=request_state.model or "",
                 latency_ms=latency_ms,
                 status="error",
@@ -4231,6 +4234,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    request_log_id: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None
     response_id: str | None = None

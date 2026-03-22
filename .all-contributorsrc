@@ -139,7 +139,9 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/2706884?v=4",
       "profile": "https://github.com/ink-splatters",
       "contributions": [
-        "doc"
+        "doc",
+        "code",
+        "bug"
       ]
     },
     {

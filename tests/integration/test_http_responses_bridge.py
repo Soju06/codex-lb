@@ -33,14 +33,15 @@ async def _cleanup_http_bridge_sessions(app_instance):
     service = get_proxy_service_for_app(app_instance)
     async with service._http_bridge_lock:
         sessions = list(service._http_bridge_sessions.values())
-        inflight_sessions = list(service._http_bridge_inflight_sessions.values())
         service._http_bridge_sessions.clear()
-        service._http_bridge_inflight_sessions.clear()
+        inflight_futures = list(getattr(service, "_http_bridge_inflight_sessions", {}).values())
+        if hasattr(service, "_http_bridge_inflight_sessions"):
+            service._http_bridge_inflight_sessions.clear()
         service._http_bridge_turn_state_index.clear()
     for session in sessions:
         session.bridge_session_id = ""
         await service._close_http_bridge_session(session)
-    for inflight_future in inflight_sessions:
+    for inflight_future in inflight_futures:
         if not inflight_future.done():
             inflight_future.cancel()
     async with SessionLocal() as session:
@@ -1192,6 +1193,125 @@ async def test_v1_responses_http_bridge_generated_turn_state_missing_local_alias
     assert session.key.affinity_kind == "turn_state_header"
     assert session.key.affinity_key == "http_turn_missing_alias"
     assert session.bridge_session_id.startswith("hbs_")
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_signed_turn_state_missing_local_alias_recovers_fresh_session(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-a",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_missing_signed_alias",
+        "http-bridge-missing-signed-alias@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_headers_seen: list[dict[str, str]] = []
+    session_id = "hbs_signed_missing_alias"
+    signed_turn_state = service._encode_http_bridge_turn_state(
+        session_id=session_id,
+        owner_instance_id="instance-a",
+        api_key_id=None,
+    )
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, account_id_header, base_url, session
+        connect_headers_seen.append(dict(headers))
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    async with SessionLocal() as db_session:
+        await db_session.execute(delete(HttpBridgeLease).where(HttpBridgeLease.session_id == session_id))
+        await db_session.commit()
+
+    async with service._repo_factory() as repos:
+        await repos.http_bridge_leases.upsert(
+            session_id=session_id,
+            affinity_kind="turn_state_header",
+            affinity_key=signed_turn_state,
+            api_key_scope="",
+            owner_instance_id="instance-a",
+            lease_expires_at=proxy_module._http_bridge_lease_expires_at(120.0),
+            account_id=account.id,
+            request_model="gpt-5.1",
+            codex_session=True,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state=signed_turn_state,
+        )
+
+    session = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", signed_turn_state, None),
+        headers={"x-codex-turn-state": signed_turn_state},
+        affinity=proxy_module._AffinityPolicy(
+            key=signed_turn_state,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.1",
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    assert session.key.affinity_kind == "turn_state_header"
+    assert session.bridge_session_id == session_id
+    assert connect_headers_seen[-1].get("x-codex-turn-state") is None
 
 
 @pytest.mark.asyncio
@@ -3137,6 +3257,118 @@ async def test_v1_responses_http_bridge_transient_refresh_failure_returns_upstre
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "upstream_unavailable"
     assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_early_error_preserves_turn_state_header(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+
+    async def fake_stream_http_responses(
+        self,
+        payload,
+        headers,
+        *,
+        response_headers_out=None,
+        **kwargs,
+    ):
+        del self, payload, headers, kwargs
+        assert response_headers_out is not None
+        response_headers_out["x-codex-turn-state"] = "http_turn_test_backend_error"
+        raise proxy_module.ProxyResponseError(
+            502,
+            {"error": {"message": "upstream unavailable", "type": "server_error", "code": "upstream_unavailable"}},
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_http_responses", fake_stream_http_responses)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
+    assert response.headers["x-codex-turn-state"] == "http_turn_test_backend_error"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_early_error_preserves_turn_state_header(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+
+    async def fake_stream_http_responses(
+        self,
+        payload,
+        headers,
+        *,
+        response_headers_out=None,
+        **kwargs,
+    ):
+        del self, payload, headers, kwargs
+        assert response_headers_out is not None
+        response_headers_out["x-codex-turn-state"] = "http_turn_test_v1_error"
+        raise proxy_module.ProxyResponseError(
+            502,
+            {"error": {"message": "upstream unavailable", "type": "server_error", "code": "upstream_unavailable"}},
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_http_responses", fake_stream_http_responses)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
+    assert response.headers["x-codex-turn-state"] == "http_turn_test_v1_error"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_empty_stream_preserves_turn_state_header(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+
+    async def fake_stream_http_responses(
+        self,
+        payload,
+        headers,
+        *,
+        response_headers_out=None,
+        **kwargs,
+    ):
+        del self, payload, headers, kwargs
+        assert response_headers_out is not None
+        response_headers_out["x-codex-turn-state"] = "http_turn_test_backend_empty"
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_http_responses", fake_stream_http_responses)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines()]
+
+    assert lines == []
+    assert response.headers["x-codex-turn-state"] == "http_turn_test_backend_empty"
 
 
 @pytest.mark.asyncio

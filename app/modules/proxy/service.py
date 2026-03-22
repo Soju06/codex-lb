@@ -1802,7 +1802,12 @@ class ProxyService:
                     if turn_state_token is not None:
                         delete_stale_turn_state_lease = True
 
-                if previous_response_id is not None:
+                if delete_stale_turn_state_lease and turn_state_token is not None:
+                    await self._delete_http_bridge_lease(turn_state_token.session_id)
+                    if previous_response_id is not None:
+                        continuity_error = self._expired_http_bridge_turn_state()
+
+                if continuity_error is None and previous_response_id is not None:
                     continuity_error = ProxyResponseError(
                         400,
                         _http_bridge_previous_response_error_envelope(
@@ -1813,12 +1818,8 @@ class ProxyService:
                             ),
                         ),
                     )
-                else:
-                    if delete_stale_turn_state_lease and turn_state_token is not None:
-                        await self._delete_http_bridge_lease(turn_state_token.session_id)
-                        if is_bridge_turn_state_replay:
-                            raise self._expired_http_bridge_turn_state()
 
+                if continuity_error is None:
                     inflight_future = self._http_bridge_inflight_sessions.get(key)
                     if inflight_future is None:
                         while (
@@ -1908,7 +1909,11 @@ class ProxyService:
             try:
                 session = await self._create_http_bridge_session(
                     key,
-                    headers=headers,
+                    headers=(
+                        _headers_without_local_http_bridge_turn_state(headers)
+                        if is_bridge_turn_state_replay or turn_state_token is not None
+                        else headers
+                    ),
                     affinity=affinity,
                     request_model=request_model,
                     idle_ttl_seconds=effective_idle_ttl_seconds,
@@ -2008,7 +2013,14 @@ class ProxyService:
                 self._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
                     session.key
                 )
-        await self._touch_http_bridge_lease(session)
+        try:
+            await self._touch_http_bridge_lease(session)
+        except Exception:
+            logger.warning(
+                "Failed to persist HTTP bridge lease after turn-state registration session_id=%s",
+                session.bridge_session_id,
+                exc_info=True,
+            )
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:
@@ -2038,7 +2050,6 @@ class ProxyService:
             session.idle_ttl_seconds,
             float(getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0)),
         )
-        session.headers = _headers_with_turn_state(session.headers, turn_state)
 
     async def _create_http_bridge_session(
         self,
@@ -5172,6 +5183,19 @@ def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None)
     forwarded = dict(headers)
     if turn_state:
         forwarded["x-codex-turn-state"] = turn_state
+    return forwarded
+
+
+def _headers_without_local_http_bridge_turn_state(headers: Mapping[str, str]) -> dict[str, str]:
+    forwarded = dict(headers)
+    for key, value in list(forwarded.items()):
+        if key.lower() != "x-codex-turn-state":
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith(_HTTP_BRIDGE_TURN_STATE_PREFIX) or stripped.startswith("http_turn_"):
+                forwarded.pop(key, None)
+        break
     return forwarded
 
 

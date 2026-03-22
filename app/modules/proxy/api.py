@@ -479,7 +479,7 @@ async def _stream_responses(
         return StreamingResponse(
             _prepend_first(None, stream),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **rate_limit_headers},
+            headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
         )
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
@@ -487,7 +487,7 @@ async def _stream_responses(
             request,
             exc.status_code,
             exc.payload,
-            headers=rate_limit_headers,
+            headers={**turn_state_headers, **rate_limit_headers},
         )
     return StreamingResponse(
         _prepend_first(first, stream),
@@ -555,7 +555,7 @@ async def _collect_responses(
             request,
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**turn_state_headers, **rate_limit_headers},
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":

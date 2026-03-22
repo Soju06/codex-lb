@@ -4079,9 +4079,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_waits_for_inflight_session_before_continuity_error(
-    app_instance, monkeypatch
-):
+async def test_v1_responses_http_bridge_waits_for_inflight_session_before_continuity_error(app_instance, monkeypatch):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
     service._http_bridge_inflight_sessions.clear()

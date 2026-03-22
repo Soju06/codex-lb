@@ -1702,6 +1702,7 @@ class ProxyService:
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
             delete_stale_turn_state_lease = False
+            matched_turn_state_alias = False
 
             async with self._http_bridge_lock:
                 if incoming_turn_state is not None:
@@ -1719,6 +1720,7 @@ class ProxyService:
                             self._http_bridge_turn_state_index[alias_index_key] = candidate_key
                             break
                     if alias_session is not None:
+                        matched_turn_state_alias = True
                         key = alias_key
                         self._promote_http_bridge_session_to_codex_affinity(
                             alias_session,
@@ -1739,7 +1741,15 @@ class ProxyService:
                                 api_key_id,
                             )
                         else:
-                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                            key = _HTTPBridgeSessionKey(
+                                "turn_state_header",
+                                self._encode_http_bridge_turn_state(
+                                    session_id=created_session_id,
+                                    owner_instance_id=current_instance,
+                                    api_key_id=api_key_id,
+                                ),
+                                api_key_id,
+                            )
                     elif incoming_turn_state.startswith("http_turn_") and self._has_http_bridge_turn_state_alias_conflict(
                         incoming_turn_state,
                         api_key_id=api_key_id,
@@ -1754,6 +1764,7 @@ class ProxyService:
                 owner_instance = _http_bridge_owner_instance(key, settings)
                 if (
                     not is_bridge_turn_state_replay
+                    and not matched_turn_state_alias
                     and active_turn_state_lease is None
                     and key.affinity_kind != "request"
                     and owner_instance is not None
@@ -2023,7 +2034,19 @@ class ProxyService:
             if session.closed:
                 return
             session.downstream_turn_state_aliases.add(turn_state)
-            session.downstream_turn_state = turn_state
+            if self._http_bridge_turn_state_matches_session(
+                turn_state,
+                session=session,
+                api_key_id=session.key.api_key_id,
+            ):
+                if session.downstream_turn_state is None:
+                    session.downstream_turn_state = turn_state
+            else:
+                self._promote_http_bridge_session_to_codex_affinity(
+                    session,
+                    turn_state=turn_state,
+                    settings=get_settings(),
+                )
             for alias in session.downstream_turn_state_aliases:
                 self._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
                     session.key
@@ -2057,6 +2080,18 @@ class ProxyService:
         turn_state: str,
         settings: object,
     ) -> None:
+        promoted_key = _HTTPBridgeSessionKey(
+            affinity_kind="turn_state_header",
+            affinity_key=turn_state,
+            api_key_id=session.key.api_key_id,
+        )
+        current_key = session.key
+        if current_key != promoted_key:
+            current_session = self._http_bridge_sessions.get(current_key)
+            if current_session is session:
+                self._http_bridge_sessions.pop(current_key, None)
+            session.key = promoted_key
+            self._http_bridge_sessions[promoted_key] = session
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
         session.downstream_turn_state = turn_state
@@ -5226,14 +5261,17 @@ def _headers_without_local_http_bridge_turn_state(headers: Mapping[str, str]) ->
 
 
 def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -> str | None:
+    if session.upstream_turn_state is not None:
+        return session.upstream_turn_state
     if (
         session.codex_session
         and session.downstream_turn_state is not None
+        and not session.downstream_turn_state.startswith(_HTTP_BRIDGE_TURN_STATE_PREFIX)
         and session.affinity.kind == StickySessionKind.CODEX_SESSION
         and session.affinity.key == session.downstream_turn_state
     ):
         return session.downstream_turn_state
-    return session.upstream_turn_state
+    return None
 
 
 def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -> tuple[str, str | None]:

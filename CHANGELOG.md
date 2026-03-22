@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/Soju06/codex-lb/compare/v1.8.0...v1.8.1) (2026-03-22)
+
+
+### Documentation
+
+* add ink-splatters as a contributor for code, and bug ([#247](https://github.com/Soju06/codex-lb/issues/247)) ([eb968b9](https://github.com/Soju06/codex-lb/commit/eb968b9d53b8fdd856f36d07714c93b4eb7dd61f))
+
 ## [1.8.0](https://github.com/Soju06/codex-lb/compare/v1.7.0...v1.8.0) (2026-03-21)
 
 

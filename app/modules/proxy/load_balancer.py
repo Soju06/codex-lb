@@ -93,19 +93,24 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
-        selection_inputs = await self._load_selection_inputs(
-            model=model,
-            additional_limit_name=additional_limit_name,
-        )
         excluded_ids = set(exclude_account_ids or ())
-        if excluded_ids and selection_inputs.accounts:
-            selection_inputs = _SelectionInputs(
-                accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],
-                latest_primary=selection_inputs.latest_primary,
-                latest_secondary=selection_inputs.latest_secondary,
-                error_message=selection_inputs.error_message,
-                error_code=selection_inputs.error_code,
+
+        async def load_selection_inputs() -> _SelectionInputs:
+            selection_inputs = await self._load_selection_inputs(
+                model=model,
+                additional_limit_name=additional_limit_name,
             )
+            if excluded_ids and selection_inputs.accounts:
+                selection_inputs = _SelectionInputs(
+                    accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],
+                    latest_primary=selection_inputs.latest_primary,
+                    latest_secondary=selection_inputs.latest_secondary,
+                    error_message=selection_inputs.error_message,
+                    error_code=selection_inputs.error_code,
+                )
+            return selection_inputs
+
+        selection_inputs = await load_selection_inputs()
         if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
                 account=None,
@@ -143,6 +148,13 @@ class LoadBalancer:
                         self._runtime.get(account.id, RuntimeState()).version != runtime_versions[account.id]
                         for account in selection_inputs.accounts
                     ):
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
                         continue
 
                     selected_account_map = account_map

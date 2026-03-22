@@ -306,6 +306,7 @@ class ProxyService:
             headers,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
+            request_id=request_id,
         )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
         session = await self._get_or_create_http_bridge_session(
@@ -1101,6 +1102,7 @@ class ProxyService:
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        request_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         return self._prepare_response_bridge_request_state(
             payload,
@@ -1109,6 +1111,7 @@ class ProxyService:
             include_type_field=True,
             attach_event_queue=True,
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            request_id=request_id or get_request_id() or ensure_request_id(None),
         )
 
     def _prepare_response_bridge_request_state(
@@ -1120,6 +1123,7 @@ class ProxyService:
         include_type_field: bool,
         attach_event_queue: bool,
         client_metadata: Mapping[str, JsonValue] | None,
+        request_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         upstream_payload = dict(payload.to_payload())
         upstream_payload.pop("stream", None)
@@ -1130,7 +1134,7 @@ class ProxyService:
             upstream_payload["client_metadata"] = client_metadata
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         request_state = _WebSocketRequestState(
-            request_id=f"ws_{uuid4().hex}",
+            request_id=request_id or f"ws_{uuid4().hex}",
             model=payload.model,
             service_tier=forwarded_service_tier,
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
@@ -1709,9 +1713,11 @@ class ProxyService:
             session.downstream_turn_state_aliases.add(turn_state)
             if session.downstream_turn_state is None:
                 session.downstream_turn_state = turn_state
-            self._http_bridge_turn_state_index[
-                _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
-            ] = session.key
+            self._promote_http_bridge_session_to_codex_affinity(session, turn_state=turn_state, settings=get_settings())
+            for alias in session.downstream_turn_state_aliases:
+                self._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
+                    session.key
+                )
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:
@@ -1733,6 +1739,18 @@ class ProxyService:
         turn_state: str,
         settings: object,
     ) -> None:
+        promoted_key = _HTTPBridgeSessionKey(
+            affinity_kind="turn_state_header",
+            affinity_key=turn_state,
+            api_key_id=session.key.api_key_id,
+        )
+        current_key = session.key
+        if current_key != promoted_key:
+            current_session = self._http_bridge_sessions.get(current_key)
+            if current_session is session:
+                self._http_bridge_sessions.pop(current_key, None)
+            session.key = promoted_key
+            self._http_bridge_sessions[promoted_key] = session
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
         session.downstream_turn_state = turn_state

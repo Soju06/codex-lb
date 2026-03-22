@@ -15,6 +15,7 @@ import pytest_asyncio
 from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
+from app.core.utils.request_id import reset_request_id, set_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
@@ -1013,9 +1014,25 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
         == "instance-b"
     )
     await service._register_http_bridge_turn_state(session, replay_turn_state)
+    replay_key = proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None)
+    assert service._http_bridge_sessions[replay_key] is session
+    assert key not in service._http_bridge_sessions
+    assert (
+        service._http_bridge_turn_state_index[
+            proxy_module._http_bridge_turn_state_alias_key(replay_turn_state, session.key.api_key_id)
+        ]
+        == replay_key
+    )
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        instance_id="instance-b",
+        instance_ring=["instance-a", "instance-b"],
+    )
 
     replayed = await service._get_or_create_http_bridge_session(
-        proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None),
+        replay_key,
         headers={"x-codex-turn-state": replay_turn_state},
         affinity=proxy_module._AffinityPolicy(key=replay_turn_state, kind=proxy_module.StickySessionKind.CODEX_SESSION),
         api_key=None,
@@ -5165,12 +5182,16 @@ async def test_prepare_http_bridge_request_preserves_existing_client_metadata(ap
         }
     )
 
-    _request_state, text_data = service._prepare_http_bridge_request(
-        payload,
-        {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
-        api_key=None,
-        api_key_reservation=None,
-    )
+    token = set_request_id("req_http_bridge_existing")
+    try:
+        request_state, text_data = service._prepare_http_bridge_request(
+            payload,
+            {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
+            api_key=None,
+            api_key_reservation=None,
+        )
+    finally:
+        reset_request_id(token)
 
     assert json.loads(text_data)["client_metadata"] == {
         "bool_flag": True,
@@ -5178,3 +5199,4 @@ async def test_prepare_http_bridge_request_preserves_existing_client_metadata(ap
         "nested": {"enabled": False},
         "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
     }
+    assert request_state.request_id == "req_http_bridge_existing"

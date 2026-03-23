@@ -1666,6 +1666,7 @@ class ProxyService:
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         turn_state_token = self._decode_http_bridge_turn_state(incoming_turn_state, api_key_id=api_key_id)
         is_bridge_turn_state_replay = bool(incoming_turn_state and incoming_turn_state.startswith("http_turn_"))
+        create_affinity = affinity
         active_turn_state_lease = await self._get_live_http_bridge_lease(
             turn_state_token.session_id if turn_state_token is not None else None
         )
@@ -1743,6 +1744,10 @@ class ProxyService:
                                 active_turn_state_lease.affinity_kind,
                                 active_turn_state_lease.affinity_key,
                                 api_key_id,
+                            )
+                            create_affinity = _affinity_policy_from_http_bridge_session_key(
+                                key,
+                                openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
                             )
                         else:
                             key = _HTTPBridgeSessionKey(
@@ -1956,7 +1961,7 @@ class ProxyService:
                         if is_bridge_turn_state_replay or turn_state_token is not None
                         else headers
                     ),
-                    affinity=affinity,
+                    affinity=create_affinity,
                     request_model=request_model,
                     idle_ttl_seconds=effective_idle_ttl_seconds,
                     bridge_session_id=created_session_id,
@@ -5394,6 +5399,31 @@ def _make_http_bridge_session_key(
         affinity_key=affinity_key,
         api_key_id=api_key.id if api_key is not None else None,
     )
+
+
+def _affinity_policy_from_http_bridge_session_key(
+    key: _HTTPBridgeSessionKey,
+    *,
+    openai_cache_affinity_max_age_seconds: int,
+) -> _AffinityPolicy:
+    if key.affinity_kind in {"turn_state_header", "session_header"}:
+        return _AffinityPolicy(
+            key=key.affinity_key,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+    if key.affinity_kind == StickySessionKind.PROMPT_CACHE.value:
+        return _AffinityPolicy(
+            key=key.affinity_key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=openai_cache_affinity_max_age_seconds,
+        )
+    if key.affinity_kind == StickySessionKind.STICKY_THREAD.value:
+        return _AffinityPolicy(
+            key=key.affinity_key,
+            kind=StickySessionKind.STICKY_THREAD,
+            reallocate_sticky=True,
+        )
+    return _AffinityPolicy()
 
 
 def _effective_http_bridge_idle_ttl_seconds(

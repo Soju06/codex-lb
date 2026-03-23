@@ -112,12 +112,21 @@ def _account_to_summary(
         secondary_used_percent,
         capacity_secondary,
     )
+    credits_has, credits_unlimited, credits_balance = _extract_credit_status(
+        effective_primary_usage,
+        effective_secondary_usage,
+        primary_usage,
+        secondary_usage,
+    )
     effective_status = _effective_status_from_usage(
         account,
         status_primary_usage,
         status_primary_used_percent,
         effective_secondary_usage,
         secondary_used_percent,
+        credits_has,
+        credits_unlimited,
+        credits_balance,
     )
     return AccountSummary(
         account_id=account.id,
@@ -139,6 +148,9 @@ def _account_to_summary(
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,
         remaining_credits_secondary=remaining_credits_secondary,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
         request_usage=request_usage,
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
@@ -169,6 +181,9 @@ def _effective_status_from_usage(
     primary_used_percent: float | None,
     secondary_usage: UsageHistory | None,
     secondary_used_percent: float | None,
+    credits_has: bool | None = None,
+    credits_unlimited: bool | None = None,
+    credits_balance: float | None = None,
 ) -> AccountStatus:
     status, _, _ = apply_usage_quota(
         status=account.status,
@@ -178,6 +193,9 @@ def _effective_status_from_usage(
         runtime_reset=float(account.reset_at) if account.reset_at else None,
         secondary_used=secondary_used_percent,
         secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
         if (
@@ -252,6 +270,22 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
+def _extract_credit_status(
+    *entries: UsageHistory | None,
+) -> tuple[bool | None, bool | None, float | None]:
+    for entry in entries:
+        if entry is None:
+            continue
+        if (
+            entry.credits_has is None
+            and entry.credits_unlimited is None
+            and entry.credits_balance is None
+        ):
+            continue
+        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
+    return None, None, None
 
 
 def build_account_usage_trends(

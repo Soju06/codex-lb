@@ -53,4 +53,16 @@ describe("AccountCard", () => {
     expect(screen.getByText("AWS Account MSP")).toBeInTheDocument();
     expect(container.querySelector(".privacy-blur")).not.toBeNull();
   });
+
+  it("renders the credits row", () => {
+    const account = createAccountSummary({
+      creditsBalance: 959,
+      remainingCreditsSecondary: 0,
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Credits:")).toBeInTheDocument();
+    expect(screen.getByText("959.00")).toBeInTheDocument();
+  });
 });

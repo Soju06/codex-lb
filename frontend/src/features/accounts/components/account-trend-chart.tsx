@@ -24,9 +24,17 @@ function mergePoints(
   secondary: UsageTrendPoint[],
 ): MergedPoint[] {
   const secondaryMap = new Map(secondary.map((p) => [p.t, p.v]));
-  return primary.map((p) => ({
+  const primaryMap = new Map(primary.map((p) => [p.t, p.v]));
+  
+  if (primary.length === 0 && secondary.length === 0) {
+    return [];
+  }
+  
+  const basePoints = primary.length > 0 ? primary : secondary;
+  
+  return basePoints.map((p) => ({
     t: p.t,
-    primary: p.v,
+    primary: primaryMap.get(p.t) ?? 0,
     secondary: secondaryMap.get(p.t) ?? 0,
   }));
 }
@@ -140,29 +148,33 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
           content={<CustomTooltip />}
           cursor={{ stroke: "hsl(var(--border))", strokeWidth: 1 }}
         />
-        <Area
-          type="monotone"
-          dataKey="primary"
-          stroke={c1}
-          strokeWidth={1.5}
-          fill="url(#trend-primary)"
-          dot={false}
-          activeDot={{ r: 3, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
-          isAnimationActive={!reducedMotion}
-          animationDuration={500}
-        />
-        <Area
-          type="monotone"
-          dataKey="secondary"
-          stroke={c2}
-          strokeWidth={1.5}
-          fill="url(#trend-secondary)"
-          dot={false}
-          activeDot={{ r: 3, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
-          isAnimationActive={!reducedMotion}
-          animationDuration={500}
-          animationBegin={100}
-        />
+        {primary.length > 0 && (
+          <Area
+            type="monotone"
+            dataKey="primary"
+            stroke={c1}
+            strokeWidth={1.5}
+            fill="url(#trend-primary)"
+            dot={false}
+            activeDot={{ r: 3, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
+            isAnimationActive={!reducedMotion}
+            animationDuration={500}
+          />
+        )}
+        {secondary.length > 0 && (
+          <Area
+            type="monotone"
+            dataKey="secondary"
+            stroke={c2}
+            strokeWidth={1.5}
+            fill="url(#trend-secondary)"
+            dot={false}
+            activeDot={{ r: 3, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
+            isAnimationActive={!reducedMotion}
+            animationDuration={500}
+            animationBegin={100}
+          />
+        )}
       </AreaChart>
     </ResponsiveContainer>
   );

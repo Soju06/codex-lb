@@ -179,7 +179,6 @@ describe("RequestLogsResponseSchema", () => {
           requestedAt: ISO,
           accountId: "acc-1",
           planType: "plus",
-          apiKeyName: "Key A",
           apiKeyId: "key-1",
           requestId: "req-legacy-cost-fields",
           model: "gpt-5.1",
@@ -201,6 +200,7 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.inputTokens).toBeNull();
     expect(parsed.requests[0]?.outputTokens).toBeNull();
     expect(parsed.requests[0]?.costBreakdown).toBeNull();
+    expect(parsed.requests[0]?.apiKeyName).toBeNull();
   });
 
   it("defaults omitted nested cost breakdown fields to null", () => {

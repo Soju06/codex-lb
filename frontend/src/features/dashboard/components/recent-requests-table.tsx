@@ -177,7 +177,7 @@ export function RecentRequestsTable({
           <TableBody>
             {requests.map((request) => {
               const time = formatTimeLong(request.requestedAt);
-              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
+              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "Unassigned";
               const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorPreview = request.errorMessage || request.errorCode || "-";
               const hasError = !!(request.errorCode || request.errorMessage);

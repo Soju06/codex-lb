@@ -138,7 +138,7 @@ export const RequestLogSchema = z.object({
   requestedAt: z.string().datetime({ offset: true }),
   accountId: z.string().nullable(),
   planType: z.string().nullable().optional().default(null),
-  apiKeyName: z.string().nullable(),
+  apiKeyName: z.string().nullable().optional().default(null),
   apiKeyId: z.string().nullable().optional().default(null),
   requestId: z.string(),
   model: z.string(),

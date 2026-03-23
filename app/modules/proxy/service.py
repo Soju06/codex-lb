@@ -1669,7 +1669,11 @@ class ProxyService:
         active_turn_state_lease = await self._get_live_http_bridge_lease(
             turn_state_token.session_id if turn_state_token is not None else None
         )
-        if active_turn_state_lease is not None and active_turn_state_lease.owner_instance_id != current_instance:
+        if (
+            active_turn_state_lease is not None
+            and active_turn_state_lease.owner_instance_id in ring
+            and active_turn_state_lease.owner_instance_id != current_instance
+        ):
             _log_http_bridge_event(
                 "owner_mismatch",
                 key,
@@ -1750,13 +1754,26 @@ class ProxyService:
                                 ),
                                 api_key_id,
                             )
-                    elif incoming_turn_state.startswith("http_turn_") and self._has_http_bridge_turn_state_alias_conflict(
-                        incoming_turn_state,
-                        api_key_id=api_key_id,
-                    ):
-                        raise self._invalid_http_bridge_turn_state()
-                    elif incoming_turn_state.startswith("http_turn_"):
-                        key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                    else:
+                        if previous_response_id is not None:
+                            raise ProxyResponseError(
+                                400,
+                                _http_bridge_previous_response_error_envelope(
+                                    previous_response_id,
+                                    (
+                                        "HTTP bridge continuity was lost. Replay x-codex-turn-state "
+                                        "or retry with a stable prompt_cache_key."
+                                    ),
+                                ),
+                            )
+                        raise ProxyResponseError(
+                            409,
+                            openai_error(
+                                "bridge_instance_mismatch",
+                                "HTTP bridge turn-state reached an instance that does not own the live session",
+                                error_type="server_error",
+                            ),
+                        )
 
                 await self._prune_http_bridge_sessions_locked()
 

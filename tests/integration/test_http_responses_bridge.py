@@ -1065,43 +1065,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_waits_for_inflight_recreation_on_missing_turn_state_alias(app_instance):
-    service = get_proxy_service_for_app(app_instance)
-    service._http_bridge_sessions.clear()
-    service._http_bridge_turn_state_index.clear()
-    service._http_bridge_inflight_sessions.clear()
-
-    replay_turn_state = "http_turn_inflight_replay"
-    replay_key = proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None)
-    expected_session = _make_dummy_bridge_session(replay_key)
-    inflight_future: asyncio.Future[SimpleNamespace] = asyncio.get_running_loop().create_future()
-    service._http_bridge_inflight_sessions[replay_key] = inflight_future
-
-    request_key = proxy_module._HTTPBridgeSessionKey("request", "derived-key", None)
-    try:
-        waiter = asyncio.create_task(
-            service._get_or_create_http_bridge_session(
-                request_key,
-                headers={"x-codex-turn-state": replay_turn_state},
-                affinity=proxy_module._AffinityPolicy(key="derived-key"),
-                api_key=None,
-                request_model="gpt-5.4",
-                idle_ttl_seconds=120.0,
-                max_sessions=8,
-            )
-        )
-        await asyncio.sleep(0)
-        assert not waiter.done()
-        inflight_future.set_result(expected_session)
-        returned = await waiter
-    finally:
-        service._http_bridge_inflight_sessions.clear()
-
-    assert returned is expected_session
-
-
-@pytest.mark.asyncio
-async def test_v1_responses_http_bridge_generated_turn_state_missing_local_alias_recovers_fresh_session(
+async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_without_local_alias(
     async_client,
     app_instance,
     monkeypatch,
@@ -1117,9 +1081,8 @@ async def test_v1_responses_http_bridge_generated_turn_state_missing_local_alias
         "acc_http_bridge_missing_alias",
         "http-bridge-missing-alias@example.com",
     )
-    account = await _get_account(account_id)
     service = get_proxy_service_for_app(app_instance)
-    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    account = await _get_account(account_id)
 
     async def fake_select_account_with_budget(
         self,
@@ -1154,41 +1117,25 @@ async def test_v1_responses_http_bridge_generated_turn_state_missing_local_alias
         )
         return AccountSelection(account=account, error_message=None, error_code=None)
 
-    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
-        del self, force, timeout_seconds
-        return target
-
-    async def fake_connect_responses_websocket(
-        headers,
-        access_token,
-        account_id_header,
-        *,
-        base_url=None,
-        session=None,
-    ):
-        del headers, access_token, account_id_header, base_url, session
-        return fake_upstream
-
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
-    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
-    session = await service._get_or_create_http_bridge_session(
-        proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_missing_alias", None),
-        headers={"x-codex-turn-state": "http_turn_missing_alias"},
-        affinity=proxy_module._AffinityPolicy(
-            key="http_turn_missing_alias",
-            kind=proxy_module.StickySessionKind.CODEX_SESSION,
-        ),
-        api_key=None,
-        request_model="gpt-5.1",
-        idle_ttl_seconds=120.0,
-        max_sessions=128,
-    )
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_missing_alias", None),
+            headers={"x-codex-turn-state": "http_turn_missing_alias"},
+            affinity=proxy_module._AffinityPolicy(
+                key="http_turn_missing_alias",
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.1",
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+        )
 
-    assert session.key.affinity_kind == "turn_state_header"
-    assert session.key.affinity_key == "http_turn_missing_alias"
-    assert session.bridge_session_id.startswith("hbs_")
+    exc = exc_info.value
+    assert exc.status_code == 409
+    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
 
 
 @pytest.mark.asyncio
@@ -1421,6 +1368,139 @@ async def test_v1_responses_http_bridge_signed_turn_state_owner_mismatch_rekeys_
     assert lease.owner_instance_id == "instance-a"
     assert lease.affinity_kind == "turn_state_header"
     assert lease.affinity_key == session.key.affinity_key
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_signed_turn_state_stale_owner_outside_ring_recovers(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-new",
+        instance_ring=[],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_missing_signed_alias_stale_owner",
+        "http-bridge-missing-signed-alias-stale-owner@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    stale_session_id = "hbs_signed_missing_alias_stale_owner"
+    signed_turn_state = service._encode_http_bridge_turn_state(
+        session_id=stale_session_id,
+        owner_instance_id="instance-old",
+        api_key_id=None,
+    )
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    async with SessionLocal() as db_session:
+        await db_session.execute(delete(HttpBridgeLease).where(HttpBridgeLease.session_id == stale_session_id))
+        await db_session.commit()
+
+    async with service._repo_factory() as repos:
+        await repos.http_bridge_leases.upsert(
+            session_id=stale_session_id,
+            affinity_kind="prompt_cache",
+            affinity_key="stale-owner-thread",
+            api_key_scope="",
+            owner_instance_id="instance-old",
+            lease_expires_at=proxy_module._http_bridge_lease_expires_at(120.0),
+            account_id=account.id,
+            request_model="gpt-5.1",
+            codex_session=True,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state=signed_turn_state,
+        )
+
+    recovered = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", signed_turn_state, None),
+        headers={"x-codex-turn-state": signed_turn_state},
+        affinity=proxy_module._AffinityPolicy(
+            key=signed_turn_state,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.1",
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    assert recovered.key.affinity_kind == "prompt_cache"
+    assert recovered.key.affinity_key == "stale-owner-thread"
+    assert recovered.bridge_session_id != stale_session_id
+    assert recovered.owner_instance_id == "instance-new"
+
+    async with SessionLocal() as db_session:
+        stale_lease = (
+            await db_session.execute(select(HttpBridgeLease).where(HttpBridgeLease.session_id == stale_session_id))
+        ).scalar_one_or_none()
+        new_lease = (
+            await db_session.execute(
+                select(HttpBridgeLease).where(HttpBridgeLease.session_id == recovered.bridge_session_id)
+            )
+        ).scalar_one()
+
+    assert stale_lease is None
+    assert new_lease.owner_instance_id == "instance-new"
+    assert new_lease.affinity_kind == "prompt_cache"
+    assert new_lease.affinity_key == "stale-owner-thread"
 
 
 @pytest.mark.asyncio

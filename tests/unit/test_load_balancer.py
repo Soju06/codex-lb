@@ -326,3 +326,43 @@ def test_apply_usage_quota_resets_to_active_if_runtime_reset_expired(monkeypatch
     assert status == AccountStatus.ACTIVE
     assert used_percent == 50.0
     assert reset_at is None
+
+
+def test_apply_usage_quota_allows_secondary_100_when_credits_exist():
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.ACTIVE,
+        primary_used=11.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=959.0,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 11.0
+    assert reset_at is None
+
+
+def test_apply_usage_quota_clears_quota_exceeded_when_credits_balance_positive(monkeypatch):
+    now = 1_700_000_000.0
+    future = now + 3600.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        primary_used=20.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=1.0,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 20.0
+    assert reset_at is None

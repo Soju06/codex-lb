@@ -50,6 +50,9 @@ class AccountSummary(DashboardModel):
     remaining_credits_primary: float | None = None
     capacity_credits_secondary: float | None = None
     remaining_credits_secondary: float | None = None
+    credits_has: bool | None = None
+    credits_unlimited: bool | None = None
+    credits_balance: float | None = None
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
 

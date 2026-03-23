@@ -86,6 +86,12 @@ def _account_to_summary(
         secondary_used_percent,
         capacity_secondary,
     )
+    credits_has, credits_unlimited, credits_balance = _extract_credit_status(
+        effective_primary_usage,
+        effective_secondary_usage,
+        primary_usage,
+        secondary_usage,
+    )
     return AccountSummary(
         account_id=account.id,
         email=account.email,
@@ -105,6 +111,9 @@ def _account_to_summary(
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,
         remaining_credits_secondary=remaining_credits_secondary,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
     )
@@ -180,6 +189,22 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
+def _extract_credit_status(
+    *entries: UsageHistory | None,
+) -> tuple[bool | None, bool | None, float | None]:
+    for entry in entries:
+        if entry is None:
+            continue
+        if (
+            entry.credits_has is None
+            and entry.credits_unlimited is None
+            and entry.credits_balance is None
+        ):
+            continue
+        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
+    return None, None, None
 
 
 def build_account_usage_trends(

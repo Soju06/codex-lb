@@ -37,6 +37,13 @@ export const AccountSummarySchema = z.object({
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
   windowMinutesPrimary: z.number().nullable().optional(),
   windowMinutesSecondary: z.number().nullable().optional(),
+  capacityCreditsPrimary: z.number().nullable().optional(),
+  remainingCreditsPrimary: z.number().nullable().optional(),
+  capacityCreditsSecondary: z.number().nullable().optional(),
+  remainingCreditsSecondary: z.number().nullable().optional(),
+  creditsHas: z.boolean().nullable().optional(),
+  creditsUnlimited: z.boolean().nullable().optional(),
+  creditsBalance: z.number().nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
 });
 

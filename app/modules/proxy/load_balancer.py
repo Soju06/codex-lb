@@ -1049,6 +1049,21 @@ def _state_from_account(
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
+    credits_has = (
+        primary_entry.credits_has
+        if primary_entry and primary_entry.credits_has is not None
+        else (effective_secondary_entry.credits_has if effective_secondary_entry else None)
+    )
+    credits_unlimited = (
+        primary_entry.credits_unlimited
+        if primary_entry and primary_entry.credits_unlimited is not None
+        else (effective_secondary_entry.credits_unlimited if effective_secondary_entry else None)
+    )
+    credits_balance = (
+        primary_entry.credits_balance
+        if primary_entry and primary_entry.credits_balance is not None
+        else (effective_secondary_entry.credits_balance if effective_secondary_entry else None)
+    )
 
     # If the usage window has reset (reset_at is in the past) but the last
     # recorded sample still shows 100 % usage, the data is stale.  Zero it
@@ -1120,6 +1135,9 @@ def _state_from_account(
         runtime_reset=effective_runtime_reset,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
 
     if status == AccountStatus.QUOTA_EXCEEDED:

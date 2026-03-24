@@ -11,7 +11,7 @@ from app.modules.shared.schemas import DashboardModel
 
 class StickySessionEntryResponse(DashboardModel):
     key: str
-    account_id: str
+    display_name: str
     kind: StickySessionKind
     created_at: datetime
     updated_at: datetime
@@ -22,6 +22,8 @@ class StickySessionEntryResponse(DashboardModel):
 class StickySessionsListResponse(DashboardModel):
     entries: list[StickySessionEntryResponse] = Field(default_factory=list)
     stale_prompt_cache_count: int = 0
+    total: int = 0
+    has_more: bool = False
 
 
 class StickySessionDeleteResponse(DashboardModel):

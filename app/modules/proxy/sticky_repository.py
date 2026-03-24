@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, select
@@ -10,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert, func
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import StickySession, StickySessionKind
+from app.db.models import Account, StickySession, StickySessionKind
+
+
+@dataclass(frozen=True, slots=True)
+class StickySessionListEntryRecord:
+    sticky_session: StickySession
+    display_name: str
 
 
 class StickySessionsRepository:
@@ -72,21 +79,31 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        offset: int = 0,
         limit: int | None = None,
-    ) -> Sequence[StickySession]:
-        statement = self._apply_filters(
-            select(StickySession),
-            kind=kind,
-            updated_before=updated_before,
-        ).order_by(
-            StickySession.updated_at.desc(),
-            StickySession.created_at.desc(),
-            StickySession.key.asc(),
+    ) -> Sequence[StickySessionListEntryRecord]:
+        statement = (
+            self._apply_filters(
+                select(StickySession, Account.email),
+                kind=kind,
+                updated_before=updated_before,
+            )
+            .join(Account, Account.id == StickySession.account_id)
+            .order_by(
+                StickySession.updated_at.desc(),
+                StickySession.created_at.desc(),
+                StickySession.key.asc(),
+            )
         )
+        if offset > 0:
+            statement = statement.offset(offset)
         if limit is not None:
             statement = statement.limit(limit)
         result = await self._session.execute(statement)
-        return result.scalars().all()
+        return [
+            StickySessionListEntryRecord(sticky_session=sticky_session, display_name=display_name)
+            for sticky_session, display_name in result.all()
+        ]
 
     async def count_entries(
         self,

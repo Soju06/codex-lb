@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -6,14 +7,21 @@ import {
   listStickySessions,
   purgeStickySessions,
 } from "@/features/sticky-sessions/api";
-import type { StickySessionIdentifier } from "@/features/sticky-sessions/schemas";
+import type { StickySessionIdentifier, StickySessionsListParams } from "@/features/sticky-sessions/schemas";
+
+const DEFAULT_STICKY_SESSIONS_LIMIT = 10;
 
 export function useStickySessions() {
   const queryClient = useQueryClient();
+  const [params, setParams] = useState<StickySessionsListParams>({
+    staleOnly: false,
+    offset: 0,
+    limit: DEFAULT_STICKY_SESSIONS_LIMIT,
+  });
 
   const stickySessionsQuery = useQuery({
-    queryKey: ["sticky-sessions", "list"],
-    queryFn: listStickySessions,
+    queryKey: ["sticky-sessions", "list", params],
+    queryFn: () => listStickySessions(params),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -21,6 +29,14 @@ export function useStickySessions() {
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
+  };
+
+  const setOffset = (offset: number) => {
+    setParams((current) => ({ ...current, offset }));
+  };
+
+  const setLimit = (limit: number) => {
+    setParams((current) => ({ ...current, limit, offset: 0 }));
   };
 
   const deleteMutation = useMutation({
@@ -46,6 +62,9 @@ export function useStickySessions() {
   });
 
   return {
+    params,
+    setOffset,
+    setLimit,
     stickySessionsQuery,
     deleteMutation,
     purgeMutation,

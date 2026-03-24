@@ -90,7 +90,7 @@ type MockState = {
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
     key: string;
-    accountId: string;
+    displayName: string;
     kind: "codex_session" | "sticky_thread" | "prompt_cache";
     createdAt: string;
     updatedAt: string;
@@ -421,13 +421,21 @@ export const handlers = [
   http.get("/api/sticky-sessions", ({ request }) => {
     const url = new URL(request.url);
     const staleOnly = url.searchParams.get("staleOnly") === "true";
-    const entries = staleOnly
+    const offset = Number(url.searchParams.get("offset") ?? "0");
+    const limit = Number(url.searchParams.get("limit") ?? "10");
+    const filteredEntries = staleOnly
       ? state.stickySessions.filter((entry) => entry.kind === "prompt_cache" && entry.isStale)
       : state.stickySessions;
+    const entries = filteredEntries.slice(offset, offset + limit);
     const stalePromptCacheCount = state.stickySessions.filter(
       (entry) => entry.kind === "prompt_cache" && entry.isStale,
     ).length;
-    return HttpResponse.json({ entries, stalePromptCacheCount });
+    return HttpResponse.json({
+      entries,
+      stalePromptCacheCount,
+      total: filteredEntries.length,
+      hasMore: offset + entries.length < filteredEntries.length,
+    });
   }),
 
   http.delete("/api/sticky-sessions/:kind/:key", ({ params }) => {

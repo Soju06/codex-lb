@@ -3,6 +3,7 @@ import { del, get, post } from "@/lib/api-client";
 import {
   StickySessionDeleteResponseSchema,
   StickySessionIdentifierSchema,
+  StickySessionsListParamsSchema,
   StickySessionsListResponseSchema,
   StickySessionsPurgeRequestSchema,
   StickySessionsPurgeResponseSchema,
@@ -10,8 +11,14 @@ import {
 
 const STICKY_SESSIONS_PATH = "/api/sticky-sessions";
 
-export function listStickySessions() {
-  return get(STICKY_SESSIONS_PATH, StickySessionsListResponseSchema);
+export function listStickySessions(params: unknown) {
+  const validated = StickySessionsListParamsSchema.parse(params);
+  const searchParams = new URLSearchParams({
+    staleOnly: String(validated.staleOnly),
+    offset: String(validated.offset),
+    limit: String(validated.limit),
+  });
+  return get(`${STICKY_SESSIONS_PATH}?${searchParams.toString()}`, StickySessionsListResponseSchema);
 }
 
 export function deleteStickySession(payload: unknown) {

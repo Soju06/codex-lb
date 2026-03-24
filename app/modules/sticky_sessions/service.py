@@ -4,15 +4,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import StickySession, StickySessionKind
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.db.models import StickySessionKind
+from app.modules.proxy.sticky_repository import StickySessionListEntryRecord, StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
 
 
 @dataclass(frozen=True, slots=True)
 class StickySessionEntryData:
     key: str
-    account_id: str
+    display_name: str
     kind: StickySessionKind
     created_at: datetime
     updated_at: datetime
@@ -24,6 +24,8 @@ class StickySessionEntryData:
 class StickySessionListData:
     entries: list[StickySessionEntryData]
     stale_prompt_cache_count: int
+    total: int
+    has_more: bool
 
 
 class StickySessionsService:
@@ -40,6 +42,7 @@ class StickySessionsService:
         *,
         kind: StickySessionKind | None = None,
         stale_only: bool = False,
+        offset: int = 0,
         limit: int = 100,
     ) -> StickySessionListData:
         settings = await self._settings_repository.get_or_create()
@@ -47,15 +50,30 @@ class StickySessionsService:
         stale_cutoff = utcnow() - timedelta(seconds=ttl_seconds)
         stale_prompt_cache_count = await self._count_stale_prompt_cache_entries(kind=kind, stale_cutoff=stale_cutoff)
         if stale_only and kind not in (None, StickySessionKind.PROMPT_CACHE):
-            return StickySessionListData(entries=[], stale_prompt_cache_count=stale_prompt_cache_count)
+            return StickySessionListData(
+                entries=[],
+                stale_prompt_cache_count=stale_prompt_cache_count,
+                total=0,
+                has_more=False,
+            )
         effective_kind = StickySessionKind.PROMPT_CACHE if stale_only else kind
+        total = await self._repository.count_entries(
+            kind=effective_kind,
+            updated_before=stale_cutoff if stale_only else None,
+        )
         rows = await self._repository.list_entries(
             kind=effective_kind,
             updated_before=stale_cutoff if stale_only else None,
+            offset=offset,
             limit=limit,
         )
         entries = [self._to_entry(row, ttl_seconds=ttl_seconds) for row in rows]
-        return StickySessionListData(entries=entries, stale_prompt_cache_count=stale_prompt_cache_count)
+        return StickySessionListData(
+            entries=entries,
+            stale_prompt_cache_count=stale_prompt_cache_count,
+            total=total,
+            has_more=offset + len(entries) < total,
+        )
 
     async def delete_entry(self, key: str, *, kind: StickySessionKind) -> bool:
         return await self._repository.delete(key, kind=kind)
@@ -65,18 +83,19 @@ class StickySessionsService:
         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
         return await self._repository.purge_prompt_cache_before(cutoff)
 
-    def _to_entry(self, row: StickySession, *, ttl_seconds: int) -> StickySessionEntryData:
+    def _to_entry(self, row: StickySessionListEntryRecord, *, ttl_seconds: int) -> StickySessionEntryData:
+        sticky_session = row.sticky_session
         expires_at: datetime | None = None
         is_stale = False
-        if row.kind == StickySessionKind.PROMPT_CACHE:
-            expires_at = to_utc_naive(row.updated_at) + timedelta(seconds=ttl_seconds)
+        if sticky_session.kind == StickySessionKind.PROMPT_CACHE:
+            expires_at = to_utc_naive(sticky_session.updated_at) + timedelta(seconds=ttl_seconds)
             is_stale = expires_at <= utcnow()
         return StickySessionEntryData(
-            key=row.key,
-            account_id=row.account_id,
-            kind=row.kind,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
+            key=sticky_session.key,
+            display_name=row.display_name,
+            kind=sticky_session.kind,
+            created_at=sticky_session.created_at,
+            updated_at=sticky_session.updated_at,
             expires_at=expires_at,
             is_stale=is_stale,
         )

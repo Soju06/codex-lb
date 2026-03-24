@@ -15,6 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { useStickySessions } from "@/features/sticky-sessions/hooks/use-sticky-sessions";
 import type { StickySessionIdentifier, StickySessionKind } from "@/features/sticky-sessions/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
@@ -33,7 +34,7 @@ function kindLabel(kind: StickySessionKind): string {
 }
 
 export function StickySessionsSection() {
-  const { stickySessionsQuery, deleteMutation, purgeMutation } = useStickySessions();
+  const { params, setLimit, setOffset, stickySessionsQuery, deleteMutation, purgeMutation } = useStickySessions();
   const deleteDialog = useDialogState<StickySessionIdentifier>();
   const purgeDialog = useDialogState();
 
@@ -47,7 +48,11 @@ export function StickySessionsSection() {
 
   const entries = stickySessionsQuery.data?.entries ?? [];
   const staleCount = stickySessionsQuery.data?.stalePromptCacheCount ?? 0;
+  const total = stickySessionsQuery.data?.total ?? 0;
+  const hasMore = stickySessionsQuery.data?.hasMore ?? false;
   const busy = deleteMutation.isPending || purgeMutation.isPending;
+  const hasEntries = entries.length > 0;
+  const hasAnyRows = total > 0;
 
   return (
     <section className="space-y-3 rounded-xl border bg-card p-5">
@@ -69,7 +74,7 @@ export function StickySessionsSection() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Visible rows</span>
-            <span className="text-sm font-medium tabular-nums">{entries.length}</span>
+            <span className="text-sm font-medium tabular-nums">{total}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Stale prompt-cache</span>
@@ -92,68 +97,100 @@ export function StickySessionsSection() {
         <div className="py-8">
           <SpinnerBlock />
         </div>
-      ) : entries.length === 0 ? (
+      ) : !hasAnyRows ? (
         <EmptyState
           icon={Pin}
           title="No sticky sessions"
           description="Sticky mappings appear here after routed requests create them."
         />
       ) : (
-        <div className="overflow-x-auto rounded-xl border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Key</TableHead>
-                <TableHead>Kind</TableHead>
-                <TableHead>Account</TableHead>
-                <TableHead>Updated</TableHead>
-                <TableHead>Expiry</TableHead>
-                <TableHead className="w-[96px] text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {entries.map((entry) => {
-                const updated = formatTimeLong(entry.updatedAt);
-                const expires = entry.expiresAt ? formatTimeLong(entry.expiresAt) : null;
-                return (
-                  <TableRow key={`${entry.kind}:${entry.key}`}>
-                    <TableCell className="max-w-[18rem] truncate font-mono text-xs" title={entry.key}>
-                      {entry.key}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{kindLabel(entry.kind)}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">{entry.accountId}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {updated.date} {updated.time}
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {entry.isStale ? (
-                        <Badge variant="secondary">Stale</Badge>
-                      ) : expires ? (
-                        `${expires.date} ${expires.time}`
-                      ) : (
-                        "Durable"
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="text-destructive hover:text-destructive"
-                        disabled={busy}
-                        onClick={() => deleteDialog.show({ key: entry.key, kind: entry.kind })}
-                      >
-                        Remove
-                      </Button>
-                    </TableCell>
+        <>
+          {hasEntries ? (
+            <div className="overflow-x-auto rounded-xl border">
+              <Table className="table-fixed">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[30%] min-w-[14rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                      Key
+                    </TableHead>
+                    <TableHead className="w-[14%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                      Kind
+                    </TableHead>
+                    <TableHead className="w-[18%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                      Account
+                    </TableHead>
+                    <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                      Updated
+                    </TableHead>
+                    <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                      Expiry
+                    </TableHead>
+                    <TableHead className="w-[6%] min-w-[4.5rem] pr-4 text-right align-middle text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                      Actions
+                    </TableHead>
                   </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </div>
+                </TableHeader>
+                <TableBody>
+                  {entries.map((entry) => {
+                    const updated = formatTimeLong(entry.updatedAt);
+                    const expires = entry.expiresAt ? formatTimeLong(entry.expiresAt) : null;
+                    return (
+                      <TableRow key={`${entry.kind}:${entry.key}`}>
+                        <TableCell className="max-w-[18rem] truncate pl-4 font-mono text-xs" title={entry.key}>
+                          {entry.key}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{kindLabel(entry.kind)}</Badge>
+                        </TableCell>
+                        <TableCell className="truncate text-xs">{entry.displayName}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {updated.date} {updated.time}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {entry.isStale ? (
+                            <Badge variant="secondary">Stale</Badge>
+                          ) : expires ? (
+                            `${expires.date} ${expires.time}`
+                          ) : (
+                            "Durable"
+                          )}
+                        </TableCell>
+                        <TableCell className="pr-4 text-right">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="text-destructive hover:text-destructive"
+                            disabled={busy}
+                            onClick={() => deleteDialog.show({ key: entry.key, kind: entry.kind })}
+                          >
+                            Remove
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <EmptyState
+              icon={Pin}
+              title="No sticky sessions on this page"
+              description="The current page is empty. Use pagination to navigate to another page."
+            />
+          )}
+          <div className="flex justify-end pt-3">
+            <PaginationControls
+              total={total}
+              limit={params.limit}
+              offset={params.offset}
+              hasMore={hasMore}
+              onLimitChange={setLimit}
+              onOffsetChange={setOffset}
+            />
+          </div>
+        </>
       )}
 
       <ConfirmDialog

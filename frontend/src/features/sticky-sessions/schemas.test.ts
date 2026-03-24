@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   StickySessionEntrySchema,
   StickySessionIdentifierSchema,
+  StickySessionsListParamsSchema,
   StickySessionsListResponseSchema,
   StickySessionsPurgeRequestSchema,
 } from "@/features/sticky-sessions/schemas";
@@ -11,7 +12,7 @@ describe("StickySessionEntrySchema", () => {
   it("parses sticky session metadata", () => {
     const parsed = StickySessionEntrySchema.parse({
       key: "thread_123",
-      accountId: "acc_1",
+      displayName: "sticky-a@example.com",
       kind: "prompt_cache",
       createdAt: "2026-03-10T12:00:00Z",
       updatedAt: "2026-03-10T12:05:00Z",
@@ -20,6 +21,7 @@ describe("StickySessionEntrySchema", () => {
     });
 
     expect(parsed.kind).toBe("prompt_cache");
+    expect(parsed.displayName).toBe("sticky-a@example.com");
     expect(parsed.expiresAt).toBe("2026-03-10T12:10:00Z");
   });
 });
@@ -29,6 +31,15 @@ describe("StickySessionsListResponseSchema", () => {
     const parsed = StickySessionsListResponseSchema.parse({});
     expect(parsed.entries).toEqual([]);
     expect(parsed.stalePromptCacheCount).toBe(0);
+    expect(parsed.total).toBe(0);
+    expect(parsed.hasMore).toBe(false);
+  });
+});
+
+describe("StickySessionsListParamsSchema", () => {
+  it("defaults pagination parameters", () => {
+    const parsed = StickySessionsListParamsSchema.parse({});
+    expect(parsed).toEqual({ staleOnly: false, offset: 0, limit: 10 });
   });
 });
 

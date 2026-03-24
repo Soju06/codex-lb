@@ -112,12 +112,17 @@ async def test_sticky_sessions_api_lists_metadata_and_purges_stale(async_client)
     assert response.status_code == 200
     payload = response.json()
     entries = {entry["key"]: entry for entry in payload["entries"]}
+    assert payload["total"] == 3
+    assert payload["hasMore"] is False
 
     assert entries["prompt-cache-stale"]["kind"] == "prompt_cache"
+    assert entries["prompt-cache-stale"]["displayName"] == "sticky-a@example.com"
     assert entries["prompt-cache-stale"]["isStale"] is True
     assert entries["prompt-cache-stale"]["expiresAt"] is not None
+    assert entries["prompt-cache-fresh"]["displayName"] == "sticky-a@example.com"
     assert entries["prompt-cache-fresh"]["isStale"] is False
     assert entries["codex-session-old"]["kind"] == "codex_session"
+    assert entries["codex-session-old"]["displayName"] == "sticky-b@example.com"
     assert entries["codex-session-old"]["isStale"] is False
     assert entries["codex-session-old"]["expiresAt"] is None
 
@@ -125,6 +130,8 @@ async def test_sticky_sessions_api_lists_metadata_and_purges_stale(async_client)
     assert response.status_code == 200
     stale_payload = response.json()
     assert [entry["key"] for entry in stale_payload["entries"]] == ["prompt-cache-stale"]
+    assert stale_payload["total"] == 1
+    assert stale_payload["hasMore"] is False
 
     response = await async_client.post("/api/sticky-sessions/purge", json={"staleOnly": True})
     assert response.status_code == 200
@@ -189,19 +196,25 @@ async def test_sticky_sessions_api_counts_hidden_stale_rows_and_deletes_by_kind(
         updated_at_offset_seconds=5,
     )
 
-    response = await async_client.get("/api/sticky-sessions")
+    response = await async_client.get("/api/sticky-sessions", params={"limit": "10", "offset": "0"})
     assert response.status_code == 200
     payload = response.json()
 
     assert payload["stalePromptCacheCount"] == 1
-    assert len(payload["entries"]) == 100
+    assert payload["total"] == 103
+    assert payload["hasMore"] is True
+    assert len(payload["entries"]) == 10
     assert not any(entry["key"] == "shared-key" and entry["kind"] == "prompt_cache" for entry in payload["entries"])
     assert any(entry["key"] == "shared-key" and entry["kind"] == "codex_session" for entry in payload["entries"])
 
-    response = await async_client.get("/api/sticky-sessions", params={"staleOnly": "true"})
+    response = await async_client.get(
+        "/api/sticky-sessions", params={"staleOnly": "true", "limit": "10", "offset": "0"}
+    )
     assert response.status_code == 200
     stale_payload = response.json()
     assert stale_payload["stalePromptCacheCount"] == 1
+    assert stale_payload["total"] == 1
+    assert stale_payload["hasMore"] is False
     assert [(entry["key"], entry["kind"]) for entry in stale_payload["entries"]] == [("shared-key", "prompt_cache")]
 
     response = await async_client.delete("/api/sticky-sessions/prompt_cache/shared-key")
@@ -211,7 +224,30 @@ async def test_sticky_sessions_api_counts_hidden_stale_rows_and_deletes_by_kind(
     assert response.status_code == 200
     after_delete = response.json()
     assert after_delete["stalePromptCacheCount"] == 0
+    assert after_delete["total"] == 102
     assert any(entry["key"] == "shared-key" and entry["kind"] == "codex_session" for entry in after_delete["entries"])
+
+
+@pytest.mark.asyncio
+async def test_sticky_sessions_api_applies_offset_before_returning_page(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+
+    for index in range(15):
+        await _insert_sticky_session(
+            key=f"page-session-{index:02d}",
+            account_id=accounts[index % len(accounts)].id,
+            kind=StickySessionKind.STICKY_THREAD,
+            updated_at_offset_seconds=index + 1,
+        )
+
+    response = await async_client.get("/api/sticky-sessions", params={"limit": "10", "offset": "10"})
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["total"] == 15
+    assert payload["hasMore"] is False
+    assert len(payload["entries"]) == 5
 
 
 @pytest.mark.asyncio

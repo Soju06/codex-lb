@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -31,7 +31,7 @@ describe("useStickySessions", () => {
     const entries = [
       {
         key: "thread_123",
-        accountId: "acc_1",
+        displayName: "sticky-a@example.com",
         kind: "prompt_cache",
         createdAt: "2026-03-10T12:00:00Z",
         updatedAt: "2026-03-10T12:05:00Z",
@@ -41,14 +41,18 @@ describe("useStickySessions", () => {
     ];
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    let seenUrl = "";
 
     server.use(
-      http.get("/api/sticky-sessions", () =>
-        HttpResponse.json({
+      http.get("/api/sticky-sessions", ({ request }) => {
+        seenUrl = request.url;
+        return HttpResponse.json({
           entries,
           stalePromptCacheCount: entries.filter((entry) => entry.isStale && entry.kind === "prompt_cache").length,
-        }),
-      ),
+          total: entries.length,
+          hasMore: false,
+        });
+      }),
       http.delete("/api/sticky-sessions/:kind/:key", ({ params }) => {
         const key = decodeURIComponent(String(params.key));
         const kind = String(params.kind);
@@ -67,6 +71,8 @@ describe("useStickySessions", () => {
 
     await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
     expect(result.current.stickySessionsQuery.data?.entries).toHaveLength(1);
+    expect(seenUrl).toContain("offset=0");
+    expect(seenUrl).toContain("limit=10");
 
     await result.current.deleteMutation.mutateAsync({ key: "thread_123", kind: "prompt_cache" });
     await waitFor(() => {
@@ -76,6 +82,21 @@ describe("useStickySessions", () => {
     await result.current.purgeMutation.mutateAsync(true);
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["sticky-sessions", "list"] });
+    });
+
+    act(() => {
+      result.current.setOffset(10);
+    });
+    await waitFor(() => {
+      expect(result.current.params.offset).toBe(10);
+    });
+
+    act(() => {
+      result.current.setLimit(25);
+    });
+    await waitFor(() => {
+      expect(result.current.params.limit).toBe(25);
+      expect(result.current.params.offset).toBe(0);
     });
   });
 

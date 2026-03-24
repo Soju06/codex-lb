@@ -86,6 +86,7 @@ name = "OpenAI"  # required — enables remote /responses/compact
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
+requires_openai_auth = true # required for codex app
 ```
 
 Optional: enable native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling:
@@ -122,6 +123,7 @@ base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
 supports_websockets = true
+requires_openai_auth = true # required for codex app
 ```
 
 ```bash

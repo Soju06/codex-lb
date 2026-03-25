@@ -895,6 +895,95 @@ async def test_v1_responses_http_bridge_unsigned_legacy_turn_state_preserves_pre
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_unsigned_legacy_turn_state_recovery_forwards_upstream_token(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_legacy_rebuild_forwarding",
+        "http-bridge-legacy-rebuild-forwarding@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_headers_seen: list[dict[str, str]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, account_id_header, base_url, session
+        connect_headers_seen.append(dict(headers))
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    legacy_turn_state = "http_turn_legacy_rebuild_forwarding"
+    session = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", legacy_turn_state, None),
+        headers={"x-codex-turn-state": legacy_turn_state},
+        affinity=proxy_module._AffinityPolicy(
+            key=legacy_turn_state,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.1",
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    assert session.key.affinity_kind == "turn_state_header"
+    assert session.key.affinity_key == legacy_turn_state
+    assert connect_headers_seen[-1]["x-codex-turn-state"] == legacy_turn_state
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owner_and_promotes_session(
     async_client,
     app_instance,
@@ -1019,6 +1108,14 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     )
     await service._register_http_bridge_turn_state(session, replay_turn_state)
     replay_key = proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None)
+    async with SessionLocal() as db_session:
+        lease = (
+            await db_session.execute(
+                select(HttpBridgeLease).where(HttpBridgeLease.session_id == session.bridge_session_id)
+            )
+        ).scalar_one()
+    assert lease.affinity_kind == "turn_state_header"
+    assert lease.affinity_key == replay_turn_state
     assert (
         service._http_bridge_turn_state_index[
             proxy_module._http_bridge_turn_state_alias_key(replay_turn_state, session.key.api_key_id)

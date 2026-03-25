@@ -1613,6 +1613,10 @@ class ProxyService:
             async with self._repo_factory() as repos:
                 touched = await repos.http_bridge_leases.touch(
                     session.bridge_session_id,
+                    affinity_kind=session.key.affinity_kind,
+                    affinity_key=session.key.affinity_key,
+                    api_key_scope=_http_bridge_api_key_scope(session.key.api_key_id),
+                    owner_instance_id=session.owner_instance_id,
                     lease_expires_at=_http_bridge_lease_expires_at(session.idle_ttl_seconds),
                     account_id=session.account.id,
                     request_model=session.request_model,
@@ -5461,7 +5465,7 @@ def _headers_without_local_http_bridge_turn_state(headers: Mapping[str, str]) ->
             continue
         if isinstance(value, str):
             stripped = value.strip()
-            if stripped.startswith(_HTTP_BRIDGE_TURN_STATE_PREFIX) or stripped.startswith("http_turn_"):
+            if stripped.startswith(_HTTP_BRIDGE_TURN_STATE_PREFIX):
                 forwarded.pop(key, None)
         break
     return forwarded

@@ -73,6 +73,10 @@ class HttpBridgeLeasesRepository:
         self,
         session_id: str,
         *,
+        affinity_kind: str,
+        affinity_key: str,
+        api_key_scope: str,
+        owner_instance_id: str,
         lease_expires_at: datetime,
         account_id: str | None,
         request_model: str | None,
@@ -87,6 +91,10 @@ class HttpBridgeLeasesRepository:
             update(HttpBridgeLease)
             .where(HttpBridgeLease.session_id == session_id)
             .values(
+                affinity_kind=affinity_kind,
+                affinity_key=affinity_key,
+                api_key_scope=api_key_scope,
+                owner_instance_id=owner_instance_id,
                 lease_expires_at=to_utc_naive(lease_expires_at),
                 account_id=account_id,
                 request_model=request_model,

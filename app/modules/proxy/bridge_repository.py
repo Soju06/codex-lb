@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +58,51 @@ class HttpBridgeLeasesRepository:
         row = await self.get_by_session_id(session_id)
         if row is None:
             raise RuntimeError(f"HttpBridgeLease upsert failed for session_id={session_id!r}")
+        await self._session.refresh(row)
+        return row
+
+    async def claim(
+        self,
+        *,
+        session_id: str,
+        affinity_kind: str,
+        affinity_key: str,
+        api_key_scope: str,
+        owner_instance_id: str,
+        lease_expires_at: datetime,
+        account_id: str | None,
+        request_model: str | None,
+        codex_session: bool,
+        idle_ttl_seconds: float,
+        upstream_turn_state: str | None,
+        downstream_turn_state: str | None,
+        replace_session_id: str | None,
+        expires_before: datetime,
+    ) -> HttpBridgeLease | None:
+        statement = self._build_claim_statement(
+            session_id=session_id,
+            affinity_kind=affinity_kind,
+            affinity_key=affinity_key,
+            api_key_scope=api_key_scope,
+            owner_instance_id=owner_instance_id,
+            lease_expires_at=lease_expires_at,
+            account_id=account_id,
+            request_model=request_model,
+            codex_session=codex_session,
+            idle_ttl_seconds=idle_ttl_seconds,
+            upstream_turn_state=upstream_turn_state,
+            downstream_turn_state=downstream_turn_state,
+            replace_session_id=replace_session_id,
+            expires_before=expires_before,
+        )
+        result = await self._session.execute(statement.returning(HttpBridgeLease.session_id))
+        await self._session.commit()
+        claimed_session_id = result.scalar_one_or_none()
+        if claimed_session_id != session_id:
+            return None
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            raise RuntimeError(f"HttpBridgeLease claim failed for session_id={session_id!r}")
         await self._session.refresh(row)
         return row
 
@@ -181,4 +226,67 @@ class HttpBridgeLeasesRepository:
                 "downstream_turn_state": downstream_turn_state,
                 "updated_at": func.now(),
             },
+        )
+
+    def _build_claim_statement(
+        self,
+        *,
+        session_id: str,
+        affinity_kind: str,
+        affinity_key: str,
+        api_key_scope: str,
+        owner_instance_id: str,
+        lease_expires_at: datetime,
+        account_id: str | None,
+        request_model: str | None,
+        codex_session: bool,
+        idle_ttl_seconds: float,
+        upstream_turn_state: str | None,
+        downstream_turn_state: str | None,
+        replace_session_id: str | None,
+        expires_before: datetime,
+    ) -> Insert:
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            insert_fn = pg_insert
+        elif dialect == "sqlite":
+            insert_fn = sqlite_insert
+        else:
+            raise RuntimeError(f"HttpBridgeLease claim unsupported for dialect={dialect!r}")
+        statement = insert_fn(HttpBridgeLease).values(
+            session_id=session_id,
+            affinity_kind=affinity_kind,
+            affinity_key=affinity_key,
+            api_key_scope=api_key_scope,
+            owner_instance_id=owner_instance_id,
+            lease_expires_at=to_utc_naive(lease_expires_at),
+            account_id=account_id,
+            request_model=request_model,
+            codex_session=codex_session,
+            idle_ttl_seconds=idle_ttl_seconds,
+            upstream_turn_state=upstream_turn_state,
+            downstream_turn_state=downstream_turn_state,
+        )
+        replace_condition = HttpBridgeLease.lease_expires_at < to_utc_naive(expires_before)
+        if replace_session_id is not None:
+            replace_condition = or_(replace_condition, HttpBridgeLease.session_id == replace_session_id)
+        return statement.on_conflict_do_update(
+            index_elements=[
+                HttpBridgeLease.affinity_kind,
+                HttpBridgeLease.affinity_key,
+                HttpBridgeLease.api_key_scope,
+            ],
+            set_={
+                "session_id": session_id,
+                "owner_instance_id": owner_instance_id,
+                "lease_expires_at": to_utc_naive(lease_expires_at),
+                "account_id": account_id,
+                "request_model": request_model,
+                "codex_session": codex_session,
+                "idle_ttl_seconds": idle_ttl_seconds,
+                "upstream_turn_state": upstream_turn_state,
+                "downstream_turn_state": downstream_turn_state,
+                "updated_at": func.now(),
+            },
+            where=replace_condition,
         )

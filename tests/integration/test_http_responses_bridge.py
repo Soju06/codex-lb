@@ -1922,6 +1922,81 @@ async def test_v1_responses_http_bridge_live_lease_lookup_rereads_after_refresh_
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_leases_claim_allows_only_one_stale_replacement():
+    stale_expiry = proxy_module.utcnow() + timedelta(seconds=120)
+
+    async with SessionLocal() as session:
+        repo = HttpBridgeLeasesRepository(session)
+        await repo.upsert(
+            session_id="hbs_stale_original",
+            affinity_kind="prompt_cache",
+            affinity_key="stable-claim-key",
+            api_key_scope="",
+            owner_instance_id="instance-a",
+            lease_expires_at=stale_expiry,
+            account_id=None,
+            request_model="gpt-5.1",
+            codex_session=False,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state=None,
+        )
+
+    async with SessionLocal() as session_one:
+        repo_one = HttpBridgeLeasesRepository(session_one)
+        claimed_one = await repo_one.claim(
+            session_id="hbs_claim_one",
+            affinity_kind="prompt_cache",
+            affinity_key="stable-claim-key",
+            api_key_scope="",
+            owner_instance_id="instance-a@worker-1",
+            lease_expires_at=stale_expiry,
+            account_id=None,
+            request_model="gpt-5.1",
+            codex_session=False,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state=None,
+            replace_session_id="hbs_stale_original",
+            expires_before=proxy_module.utcnow(),
+        )
+
+    async with SessionLocal() as session_two:
+        repo_two = HttpBridgeLeasesRepository(session_two)
+        claimed_two = await repo_two.claim(
+            session_id="hbs_claim_two",
+            affinity_kind="prompt_cache",
+            affinity_key="stable-claim-key",
+            api_key_scope="",
+            owner_instance_id="instance-a@worker-2",
+            lease_expires_at=stale_expiry,
+            account_id=None,
+            request_model="gpt-5.1",
+            codex_session=False,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state=None,
+            replace_session_id="hbs_stale_original",
+            expires_before=proxy_module.utcnow(),
+        )
+
+    assert (claimed_one is None) != (claimed_two is None)
+
+    async with SessionLocal() as session:
+        lease = (
+            await session.execute(
+                select(HttpBridgeLease).where(
+                    HttpBridgeLease.affinity_kind == "prompt_cache",
+                    HttpBridgeLease.affinity_key == "stable-claim-key",
+                    HttpBridgeLease.api_key_scope == "",
+                )
+            )
+        ).scalar_one()
+
+    assert lease.session_id in {"hbs_claim_one", "hbs_claim_two"}
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_signed_turn_state_live_lease_on_other_worker_is_wrong_instance(
     async_client,
     app_instance,
@@ -1986,6 +2061,7 @@ async def test_v1_responses_http_bridge_signed_turn_state_live_lease_on_other_wo
     exc = exc_info.value
     assert exc.status_code == 409
     assert exc.payload["error"].get("code") == "bridge_wrong_instance"
+    assert exc.payload["error"].get("message") == "HTTP responses session bridge turn-state is owned by another live instance"
 
 
 @pytest.mark.asyncio

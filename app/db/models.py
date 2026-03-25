@@ -160,6 +160,13 @@ class StickySession(Base):
 class HttpBridgeLease(Base):
     __tablename__ = "http_bridge_leases"
     __table_args__ = (
+        Index(
+            "ux_http_bridge_leases_affinity_scope",
+            "affinity_kind",
+            "affinity_key",
+            "api_key_scope",
+            unique=True,
+        ),
         Index("ix_http_bridge_leases_owner_expires", "owner_instance_id", "lease_expires_at"),
         Index("ix_http_bridge_leases_expires", "lease_expires_at"),
     )

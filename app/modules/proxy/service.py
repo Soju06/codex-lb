@@ -108,6 +108,10 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
+
+class _HTTPBridgeLeaseClaimLost(RuntimeError):
+    pass
+
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -1597,8 +1601,16 @@ class ProxyService:
             await repos.http_bridge_leases.delete(session_id)
 
     async def _persist_http_bridge_lease(self, session: "_HTTPBridgeSession") -> None:
+        await self._claim_http_bridge_lease(session, replace_session_id=None)
+
+    async def _claim_http_bridge_lease(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        replace_session_id: str | None,
+    ) -> None:
         async with self._repo_factory() as repos:
-            await repos.http_bridge_leases.upsert(
+            claimed = await repos.http_bridge_leases.claim(
                 session_id=session.bridge_session_id,
                 affinity_kind=session.key.affinity_kind,
                 affinity_key=session.key.affinity_key,
@@ -1611,6 +1623,12 @@ class ProxyService:
                 idle_ttl_seconds=session.idle_ttl_seconds,
                 upstream_turn_state=session.upstream_turn_state,
                 downstream_turn_state=session.downstream_turn_state,
+                replace_session_id=replace_session_id,
+                expires_before=utcnow(),
+            )
+        if claimed is None:
+            raise _HTTPBridgeLeaseClaimLost(
+                f"HTTP bridge lease claim lost for affinity={session.key.affinity_kind}:{session.key.affinity_key}"
             )
 
     async def _touch_http_bridge_lease(self, session: "_HTTPBridgeSession") -> None:
@@ -1635,7 +1653,7 @@ class ProxyService:
                 if not touched:
                     if session.closed:
                         return
-                    await repos.http_bridge_leases.upsert(
+                    claimed = await repos.http_bridge_leases.claim(
                         session_id=session.bridge_session_id,
                         affinity_kind=session.key.affinity_kind,
                         affinity_key=session.key.affinity_key,
@@ -1648,7 +1666,13 @@ class ProxyService:
                         idle_ttl_seconds=session.idle_ttl_seconds,
                         upstream_turn_state=session.upstream_turn_state,
                         downstream_turn_state=session.downstream_turn_state,
+                        replace_session_id=session.bridge_session_id,
+                        expires_before=utcnow(),
                     )
+                    if claimed is None:
+                        raise _HTTPBridgeLeaseClaimLost(
+                            "HTTP bridge lease claim lost while recreating missing lease row"
+                        )
 
     async def _invalidate_http_bridge_session_after_lease_failure(
         self,
@@ -1877,10 +1901,7 @@ class ProxyService:
                             409,
                             openai_error(
                                 "bridge_wrong_instance",
-                                (
-                                    "HTTP responses session bridge turn-state is owned by another live instance "
-                                    f"(expected {active_turn_state_lease.owner_instance_id}, got {current_owner})"
-                                ),
+                                "HTTP responses session bridge turn-state is owned by another live instance",
                                 error_type="server_error",
                             ),
                         )
@@ -2138,6 +2159,8 @@ class ProxyService:
                     create_kwargs["bridge_session_id"] = created_session_id
                 if accepts_extra_create_kwargs or "owner_instance_id" in create_signature.parameters:
                     create_kwargs["owner_instance_id"] = current_owner
+                if accepts_extra_create_kwargs or "replaced_bridge_session_id" in create_signature.parameters:
+                    create_kwargs["replaced_bridge_session_id"] = stale_turn_state_lease_session_id
                 session = await create_session(
                     session_key,
                     **create_kwargs,
@@ -2172,6 +2195,17 @@ class ProxyService:
                                 inflight_future.exception()
                 if session is not None and not session_registered:
                     await self._close_http_bridge_session(session)
+                if isinstance(exc, _HTTPBridgeLeaseClaimLost):
+                    return await self._get_or_create_http_bridge_session(
+                        key,
+                        headers=headers,
+                        affinity=affinity,
+                        api_key=api_key,
+                        request_model=request_model,
+                        idle_ttl_seconds=idle_ttl_seconds,
+                        max_sessions=max_sessions,
+                        previous_response_id=previous_response_id,
+                    )
                 raise
             _log_http_bridge_event(
                 "create",
@@ -2359,6 +2393,7 @@ class ProxyService:
         idle_ttl_seconds: float,
         bridge_session_id: str,
         owner_instance_id: str,
+        replaced_bridge_session_id: str | None = None,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -2441,7 +2476,7 @@ class ProxyService:
             downstream_turn_state=None,
         )
         try:
-            await self._persist_http_bridge_lease(session)
+            await self._claim_http_bridge_lease(session, replace_session_id=replaced_bridge_session_id)
         except BaseException:
             session.closed = True
             try:

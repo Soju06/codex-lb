@@ -18,9 +18,9 @@ class ProxyRepositories:
     usage: UsageRepository
     request_logs: RequestLogsRepository
     sticky_sessions: StickySessionsRepository
-    http_bridge_leases: HttpBridgeLeasesRepository
     api_keys: ApiKeysRepository
     additional_usage: AdditionalUsageRepository
+    http_bridge_leases: HttpBridgeLeasesRepository | None = None
 
 
 ProxyRepoFactory = Callable[[], AsyncContextManager[ProxyRepositories]]

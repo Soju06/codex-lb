@@ -1728,8 +1728,6 @@ class ProxyService:
                     if alias_session is not None:
                         matched_turn_state_alias = True
                         key = alias_key
-                        lookup_key = key
-                        session_key = key
                         self._promote_http_bridge_session_to_codex_affinity(
                             alias_session,
                             turn_state=incoming_turn_state,
@@ -1740,6 +1738,8 @@ class ProxyService:
                                 _http_bridge_turn_state_alias_key(alias, alias_session.key.api_key_id)
                             ] = alias_session.key
                         key = alias_session.key
+                        lookup_key = key
+                        session_key = key
                     elif turn_state_token is not None:
                         recovered_turn_state_replay = True
                         stale_turn_state_lease_session_id = (
@@ -2558,7 +2558,8 @@ class ProxyService:
                 break
         finally:
             session.closed = True
-            await self._delete_http_bridge_lease(session.bridge_session_id)
+            if not session.preserve_lease_during_reconnect:
+                await self._delete_http_bridge_lease(session.bridge_session_id)
 
     async def _retry_http_bridge_request_on_fresh_upstream(
         self,
@@ -2650,7 +2651,11 @@ class ProxyService:
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
+        new_upstream: UpstreamResponsesWebSocket | None = None
+        preserve_lease_during_reconnect = False
         if old_reader is not None:
+            session.preserve_lease_during_reconnect = True
+            preserve_lease_during_reconnect = True
             old_reader.cancel()
             if old_reader is not asyncio.current_task():
                 try:
@@ -2662,56 +2667,70 @@ class ProxyService:
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
 
-        deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
-        settings = await get_settings_cache().get()
-        selection = await self._select_account_with_budget(
-            deadline,
-            request_id=request_state.request_log_id or request_state.request_id,
-            kind="http_bridge",
-            sticky_key=session.affinity.key,
-            sticky_kind=session.affinity.kind,
-            reallocate_sticky=session.affinity.reallocate_sticky,
-            sticky_max_age_seconds=session.affinity.max_age_seconds,
-            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
-            routing_strategy=_routing_strategy(settings),
-            model=session.request_model,
-        )
-        account = selection.account
-        if account is None:
-            raise ProxyResponseError(
-                503,
-                openai_error(
-                    selection.error_code or "no_accounts",
-                    selection.error_message or "No active accounts available",
-                    error_type="server_error",
-                ),
-            )
-        account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
-        connect_headers = _headers_with_turn_state(
-            session.headers,
-            _preferred_http_bridge_reconnect_turn_state(session),
-        )
-        upstream = await self._open_upstream_websocket_with_budget(
-            account,
-            connect_headers,
-            timeout_seconds=_remaining_budget_seconds(deadline),
-        )
-        session.account = account
-        session.headers = connect_headers
-        session.upstream = upstream
-        session.upstream_control = _WebSocketUpstreamControl()
-        session.closed = False
-        session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
         try:
-            await self._touch_http_bridge_lease(session)
-        except Exception:
-            logger.warning(
-                "Failed to persist HTTP bridge lease after reconnect session_id=%s",
-                session.bridge_session_id,
-                exc_info=True,
+            deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
+            settings = await get_settings_cache().get()
+            selection = await self._select_account_with_budget(
+                deadline,
+                request_id=request_state.request_log_id or request_state.request_id,
+                kind="http_bridge",
+                sticky_key=session.affinity.key,
+                sticky_kind=session.affinity.kind,
+                reallocate_sticky=session.affinity.reallocate_sticky,
+                sticky_max_age_seconds=session.affinity.max_age_seconds,
+                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                routing_strategy=_routing_strategy(settings),
+                model=session.request_model,
             )
-        if restart_reader:
-            session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+            account = selection.account
+            if account is None:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        selection.error_code or "no_accounts",
+                        selection.error_message or "No active accounts available",
+                        error_type="server_error",
+                    ),
+                )
+            account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
+            connect_headers = _headers_with_turn_state(
+                session.headers,
+                _preferred_http_bridge_reconnect_turn_state(session),
+            )
+            new_upstream = await self._open_upstream_websocket_with_budget(
+                account,
+                connect_headers,
+                timeout_seconds=_remaining_budget_seconds(deadline),
+            )
+            session.account = account
+            session.headers = connect_headers
+            session.upstream = new_upstream
+            session.upstream_control = _WebSocketUpstreamControl()
+            session.closed = False
+            session.upstream_turn_state = _upstream_turn_state_from_socket(new_upstream) or session.upstream_turn_state
+            try:
+                await self._touch_http_bridge_lease(session)
+            except Exception:
+                logger.warning(
+                    "Failed to persist HTTP bridge lease after reconnect session_id=%s",
+                    session.bridge_session_id,
+                    exc_info=True,
+                )
+            if restart_reader:
+                session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+        except BaseException:
+            session.closed = True
+            if new_upstream is not None:
+                try:
+                    await new_upstream.close()
+                except Exception:
+                    logger.debug("Failed to close replacement HTTP bridge websocket after reconnect error", exc_info=True)
+            if preserve_lease_during_reconnect:
+                session.preserve_lease_during_reconnect = False
+                await self._delete_http_bridge_lease(session.bridge_session_id)
+            raise
+        if preserve_lease_during_reconnect:
+            session.preserve_lease_during_reconnect = False
         _log_http_bridge_event(
             "reconnect",
             session.key,
@@ -4735,6 +4754,7 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     upstream_reader: asyncio.Task[None] | None = None
+    preserve_lease_during_reconnect: bool = False
     closed: bool = False
 
 

@@ -2516,6 +2516,123 @@ async def test_v1_responses_http_bridge_reconnect_uses_last_upstream_turn_state(
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_reconnect_restart_reader_preserves_lease_until_touch(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_reconnect_lease_handoff",
+        "http-bridge-reconnect-lease-handoff@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    first_upstream = _FakeBridgeUpstreamWebSocket()
+    second_upstream = _FakeBridgeUpstreamWebSocket()
+    upstreams = [first_upstream, second_upstream]
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstreams.pop(0)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = proxy_module.ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    affinity = proxy_module._AffinityPolicy(
+        key="reconnect-lease-handoff",
+        kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+    )
+    session = await service._get_or_create_http_bridge_session(
+        proxy_module._make_http_bridge_session_key(
+            payload,
+            headers={},
+            affinity=affinity,
+            api_key=None,
+            request_id="req_reconnect_lease_handoff",
+        ),
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    call_order: list[str] = []
+
+    async def fake_delete_http_bridge_lease(self, session_id):
+        del self, session_id
+        call_order.append("delete")
+
+    async def fake_touch_http_bridge_lease(self, session):
+        del self, session
+        call_order.append("touch")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_delete_http_bridge_lease", fake_delete_http_bridge_lease)
+    monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", fake_touch_http_bridge_lease)
+
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req_reconnect_lease_restart",
+        model=payload.model,
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    await service._reconnect_http_bridge_session(session, request_state=request_state, restart_reader=True)
+
+    assert call_order == ["touch"]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_session_id_reconnect_keeps_upstream_turn_state(
     async_client,
     app_instance,

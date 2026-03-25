@@ -3,16 +3,21 @@ from __future__ import annotations
 import gzip
 import json
 import zlib
+from collections.abc import Awaitable, Callable
 
 import pytest
 import zstandard as zstd
 from fastapi import FastAPI, Request
+from fastapi.responses import Response
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import ClientDisconnect
+from typing import cast
 
 from app.core.middleware.request_decompression import add_request_decompression_middleware
 
 pytestmark = pytest.mark.unit
+
+_Dispatch = Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]
 
 
 def _build_echo_app(*, touch_headers: bool = False) -> FastAPI:
@@ -170,7 +175,7 @@ async def test_request_decompression_rejects_unsupported_encoding():
 async def test_request_decompression_propagates_client_disconnect():
     app = FastAPI()
     add_request_decompression_middleware(app)
-    dispatch = app.user_middleware[0].kwargs["dispatch"]
+    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
 
     async def receive() -> dict[str, object]:
         return {"type": "http.disconnect"}
@@ -203,7 +208,7 @@ async def test_request_decompression_propagates_client_disconnect():
 async def test_request_decompression_propagates_body_read_failures():
     app = FastAPI()
     add_request_decompression_middleware(app)
-    dispatch = app.user_middleware[0].kwargs["dispatch"]
+    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
 
     async def receive() -> dict[str, object]:
         raise RuntimeError("receive failed")

@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 import pytest
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from typing import cast
 
 from app.core.middleware.request_id import add_request_id_middleware
 from app.core.utils.request_id import get_request_id
 
 pytestmark = pytest.mark.unit
 
+_Dispatch = Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]
+
 
 @pytest.mark.asyncio
 async def test_request_id_middleware_resets_context_on_success():
     app = FastAPI()
     add_request_id_middleware(app)
-    dispatch = app.user_middleware[0].kwargs["dispatch"]
+    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
 
     request = Request(
         {

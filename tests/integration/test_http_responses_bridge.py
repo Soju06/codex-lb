@@ -2061,7 +2061,10 @@ async def test_v1_responses_http_bridge_signed_turn_state_live_lease_on_other_wo
     exc = exc_info.value
     assert exc.status_code == 409
     assert exc.payload["error"].get("code") == "bridge_wrong_instance"
-    assert exc.payload["error"].get("message") == "HTTP responses session bridge turn-state is owned by another live instance"
+    assert (
+        exc.payload["error"].get("message")
+        == "HTTP responses session bridge turn-state is owned by another live instance"
+    )
 
 
 @pytest.mark.asyncio
@@ -2238,7 +2241,9 @@ async def test_v1_responses_http_bridge_signed_turn_state_owner_mismatch_rekeys_
 
     async with SessionLocal() as db_session:
         lease = (
-            await db_session.execute(select(HttpBridgeLease).where(HttpBridgeLease.session_id == session.bridge_session_id))
+            await db_session.execute(
+                select(HttpBridgeLease).where(HttpBridgeLease.session_id == session.bridge_session_id)
+            )
         ).scalar_one()
     assert proxy_module._http_bridge_owner_instance_group(lease.owner_instance_id) == "instance-a"
     assert lease.affinity_kind == "turn_state_header"
@@ -3052,12 +3057,18 @@ async def test_v1_responses_http_bridge_legacy_replay_converges_to_signed_canoni
     assert signed_turn_state_repeat == signed_turn_state
     assert session.downstream_turn_state == signed_turn_state
     assert session.downstream_turn_state_aliases == {"http_turn_legacy_client", signed_turn_state}
-    assert service._http_bridge_turn_state_index[
-        proxy_module._http_bridge_turn_state_alias_key("http_turn_legacy_client", session.key.api_key_id)
-    ] == session.key
-    assert service._http_bridge_turn_state_index[
-        proxy_module._http_bridge_turn_state_alias_key(signed_turn_state, session.key.api_key_id)
-    ] == session.key
+    assert (
+        service._http_bridge_turn_state_index[
+            proxy_module._http_bridge_turn_state_alias_key("http_turn_legacy_client", session.key.api_key_id)
+        ]
+        == session.key
+    )
+    assert (
+        service._http_bridge_turn_state_index[
+            proxy_module._http_bridge_turn_state_alias_key(signed_turn_state, session.key.api_key_id)
+        ]
+        == session.key
+    )
 
     await service._close_http_bridge_session(session)
 
@@ -3177,7 +3188,7 @@ async def test_v1_responses_http_bridge_refreshes_lease_after_request_detach(app
     session.response_create_gate = asyncio.Semaphore(1)
 
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    await event_queue.put("data: {\"type\":\"response.completed\"}\n\n")
+    await event_queue.put('data: {"type":"response.completed"}\n\n')
     await event_queue.put(None)
     request_state = proxy_module._WebSocketRequestState(
         request_id="req_bridge_lease_refresh",
@@ -3229,14 +3240,18 @@ async def test_v1_responses_http_bridge_refreshes_lease_after_request_detach(app
         touch_points.append(session.last_used_at)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_prepare_http_bridge_request", fake_prepare_http_bridge_request)
-    monkeypatch.setattr(proxy_module.ProxyService, "_get_or_create_http_bridge_session", fake_get_or_create_http_bridge_session)
+    monkeypatch.setattr(
+        proxy_module.ProxyService, "_get_or_create_http_bridge_session", fake_get_or_create_http_bridge_session
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_resolve_http_bridge_downstream_turn_state",
         fake_resolve_http_bridge_downstream_turn_state,
     )
-    monkeypatch.setattr(proxy_module.ProxyService, "_register_http_bridge_turn_state", fake_register_http_bridge_turn_state)
+    monkeypatch.setattr(
+        proxy_module.ProxyService, "_register_http_bridge_turn_state", fake_register_http_bridge_turn_state
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", fake_touch_http_bridge_lease)
 
     events = [
@@ -3314,7 +3329,9 @@ async def test_v1_responses_http_bridge_turn_state_registration_failure_does_not
         raise RuntimeError("lease touch failed")
 
     monkeypatch.setattr(proxy_module.ProxyService, "_prepare_http_bridge_request", fake_prepare_http_bridge_request)
-    monkeypatch.setattr(proxy_module.ProxyService, "_get_or_create_http_bridge_session", fake_get_or_create_http_bridge_session)
+    monkeypatch.setattr(
+        proxy_module.ProxyService, "_get_or_create_http_bridge_session", fake_get_or_create_http_bridge_session
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(
         proxy_module.ProxyService,
@@ -3393,7 +3410,9 @@ async def test_v1_responses_http_bridge_keepalive_refresh_failure_closes_session
     service = get_proxy_service_for_app(app_instance)
     session = cast(
         proxy_module._HTTPBridgeSession,
-        _make_dummy_bridge_session(proxy_module._HTTPBridgeSessionKey("request", "bridge-lease-keepalive-failure", None)),
+        _make_dummy_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("request", "bridge-lease-keepalive-failure", None)
+        ),
     )
     session.bridge_session_id = "hbs_bridge_lease_keepalive_failure"
     session.idle_ttl_seconds = 0.5

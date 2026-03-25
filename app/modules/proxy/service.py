@@ -112,6 +112,7 @@ logger = logging.getLogger(__name__)
 class _HTTPBridgeLeaseClaimLost(RuntimeError):
     pass
 
+
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -2133,10 +2134,10 @@ class ProxyService:
                         "turn_state_header",
                         self._encode_http_bridge_turn_state(
                             session_id=created_session_id,
-                                owner_instance_id=current_owner,
-                                api_key_id=api_key_id,
-                            ),
-                            api_key_id,
+                            owner_instance_id=current_owner,
+                            api_key_id=api_key_id,
+                        ),
+                        api_key_id,
                     )
                     create_affinity = _AffinityPolicy(
                         key=session_key.affinity_key,
@@ -2285,6 +2286,7 @@ class ProxyService:
             except Exception:
                 logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
             await self._delete_http_bridge_lease(getattr(session, "bridge_session_id", None))
+
         if lease_lock is not None:
             async with lease_lock:
                 await _close_session()
@@ -2478,7 +2480,9 @@ class ProxyService:
             try:
                 await upstream.close()
             except Exception:
-                logger.debug("Failed to close HTTP bridge upstream websocket after lease persistence error", exc_info=True)
+                logger.debug(
+                    "Failed to close HTTP bridge upstream websocket after lease persistence error", exc_info=True
+                )
             raise
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         return session
@@ -2954,7 +2958,9 @@ class ProxyService:
                 try:
                     await new_upstream.close()
                 except Exception:
-                    logger.debug("Failed to close replacement HTTP bridge websocket after reconnect error", exc_info=True)
+                    logger.debug(
+                        "Failed to close replacement HTTP bridge websocket after reconnect error", exc_info=True
+                    )
             if preserve_lease_during_reconnect:
                 session.preserve_lease_during_reconnect = False
                 await self._delete_http_bridge_lease(session.bridge_session_id)

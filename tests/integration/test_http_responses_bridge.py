@@ -3445,9 +3445,13 @@ async def test_v1_responses_http_bridge_keepalive_refresh_failure_closes_session
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
     monkeypatch.setattr(proxy_module.ProxyService, "_release_websocket_reservation", fake_release_websocket_reservation)
 
+    assert request_state.event_queue is not None
     await service._ensure_http_bridge_lease_keepalive(session)
     failed_event = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
-    assert proxy_module.parse_sse_data_json(failed_event)["type"] == "response.failed"
+    assert failed_event is not None
+    failed_payload = proxy_module.parse_sse_data_json(failed_event)
+    assert failed_payload is not None
+    assert failed_payload["type"] == "response.failed"
     assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
     await asyncio.sleep(0)
     assert session.closed is True

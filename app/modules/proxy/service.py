@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
-from typing import AsyncIterator, Mapping, NoReturn, cast
+from typing import AsyncIterator, Mapping, NoReturn, TypedDict, cast
 from uuid import uuid4
 
 import aiohttp
@@ -1859,6 +1859,7 @@ class ProxyService:
                             break
                     if alias_session is not None:
                         matched_turn_state_alias = True
+                        assert alias_key is not None
                         key = alias_key
                         if incoming_turn_state is not None and (
                             turn_state_token is None
@@ -2149,7 +2150,7 @@ class ProxyService:
                     else headers
                 )
                 create_session = self._create_http_bridge_session
-                create_kwargs: dict[str, object] = {
+                create_kwargs: _HTTPBridgeCreateSessionKwargs = {
                     "headers": create_headers,
                     "affinity": create_affinity,
                     "request_model": request_model,
@@ -5018,6 +5019,16 @@ class _WebSocketReceiveTimeout:
     error_code: str
     error_message: str
     fail_all_pending: bool = False
+
+
+class _HTTPBridgeCreateSessionKwargs(TypedDict, total=False):
+    headers: dict[str, str]
+    affinity: "_AffinityPolicy"
+    request_model: str | None
+    idle_ttl_seconds: float
+    bridge_session_id: str
+    owner_instance_id: str
+    replaced_bridge_session_id: str | None
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

@@ -364,10 +364,9 @@ class ProxyService:
                 try:
                     await self._touch_http_bridge_lease(session)
                 except Exception:
-                    logger.warning(
-                        "Failed to persist HTTP bridge lease after request detach session_id=%s",
-                        session.bridge_session_id,
-                        exc_info=True,
+                    await self._invalidate_http_bridge_session_after_lease_failure(
+                        session,
+                        failure_message="Failed to persist HTTP bridge lease after request detach session_id=%s",
                     )
 
     async def compact_responses(
@@ -1640,6 +1639,26 @@ class ProxyService:
                         downstream_turn_state=session.downstream_turn_state,
                     )
 
+    async def _invalidate_http_bridge_session_after_lease_failure(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        failure_message: str,
+    ) -> None:
+        logger.warning(
+            failure_message,
+            session.bridge_session_id,
+            exc_info=True,
+        )
+        try:
+            await self._close_http_bridge_session(session)
+        except Exception:
+            logger.warning(
+                "Failed to invalidate HTTP bridge session after lease persistence failure session_id=%s",
+                session.bridge_session_id,
+                exc_info=True,
+            )
+
     async def _ensure_http_bridge_lease_keepalive(self, session: "_HTTPBridgeSession") -> None:
         task = getattr(session, "lease_keepalive_task", None)
         if task is not None and not task.done():
@@ -1660,11 +1679,13 @@ class ProxyService:
                     try:
                         await self._touch_http_bridge_lease(session)
                     except Exception:
-                        logger.warning(
+                        await self._invalidate_http_bridge_session_after_lease_failure(
+                            session,
+                            failure_message=(
                             "Failed to refresh HTTP bridge lease during active stream session_id=%s",
-                            session.bridge_session_id,
-                            exc_info=True,
+                            ),
                         )
+                        return
             except asyncio.CancelledError:
                 raise
 
@@ -2201,10 +2222,9 @@ class ProxyService:
         try:
             await self._touch_http_bridge_lease(session)
         except Exception:
-            logger.warning(
-                "Failed to persist HTTP bridge lease after turn-state registration session_id=%s",
-                session.bridge_session_id,
-                exc_info=True,
+            await self._invalidate_http_bridge_session_after_lease_failure(
+                session,
+                failure_message="Failed to persist HTTP bridge lease after turn-state registration session_id=%s",
             )
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
@@ -2801,10 +2821,9 @@ class ProxyService:
             try:
                 await self._touch_http_bridge_lease(session)
             except Exception:
-                logger.warning(
-                    "Failed to persist HTTP bridge lease after reconnect session_id=%s",
-                    session.bridge_session_id,
-                    exc_info=True,
+                await self._invalidate_http_bridge_session_after_lease_failure(
+                    session,
+                    failure_message="Failed to persist HTTP bridge lease after reconnect session_id=%s",
                 )
             if restart_reader:
                 session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
@@ -5672,7 +5691,11 @@ def _normalized_http_bridge_instance_ring(settings: object) -> tuple[str, tuple[
 
 def _http_bridge_current_owner_id(settings: object) -> str:
     instance_id, _ = _normalized_http_bridge_instance_ring(settings)
-    return f"{instance_id}@{os.getpid()}"
+    pid = os.getpid()
+    process_marker = _http_bridge_process_start_marker(pid)
+    if process_marker is None:
+        return f"{instance_id}@{pid}"
+    return f"{instance_id}@{pid}:{process_marker}"
 
 
 def _http_bridge_owner_instance_group(owner_id: str) -> str:
@@ -5683,11 +5706,39 @@ def _http_bridge_owner_pid(owner_id: str) -> int | None:
     owner_parts = owner_id.split("@", 1)
     if len(owner_parts) != 2:
         return None
+    pid_text, _, _ = owner_parts[1].partition(":")
     try:
-        pid = int(owner_parts[1])
+        pid = int(pid_text)
     except ValueError:
         return None
     return pid if pid > 0 else None
+
+
+def _http_bridge_owner_process_marker(owner_id: str) -> str | None:
+    owner_parts = owner_id.split("@", 1)
+    if len(owner_parts) != 2:
+        return None
+    _, separator, process_marker = owner_parts[1].partition(":")
+    if not separator or not process_marker:
+        return None
+    return process_marker
+
+
+def _http_bridge_process_start_marker(pid: int) -> str | None:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as process_stat:
+            payload = process_stat.read().strip()
+    except OSError:
+        return None
+    try:
+        _, stat_tail = payload.rsplit(") ", 1)
+    except ValueError:
+        return None
+    stat_fields = stat_tail.split()
+    if len(stat_fields) <= 19:
+        return None
+    process_marker = stat_fields[19].strip()
+    return process_marker or None
 
 
 def _http_bridge_process_exists(pid: int) -> bool:
@@ -5721,7 +5772,15 @@ def _http_bridge_owner_matches_current(
         return False
     if owner_pid == os.getpid():
         return True
-    return not _http_bridge_process_exists(owner_pid)
+    owner_process_marker = _http_bridge_owner_process_marker(owner_id)
+    if owner_process_marker is None:
+        return not _http_bridge_process_exists(owner_pid)
+    live_process_marker = _http_bridge_process_start_marker(owner_pid)
+    if live_process_marker is None:
+        return True
+    if live_process_marker != owner_process_marker:
+        return True
+    return False
 
 
 def _http_bridge_owner_instance(key: _HTTPBridgeSessionKey, settings: object) -> str | None:

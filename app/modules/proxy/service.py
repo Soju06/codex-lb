@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import inspect
 import json
 import logging
+import os
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -1793,37 +1795,6 @@ class ProxyService:
         active_turn_state_lease = await self._get_live_http_bridge_lease(
             turn_state_token.session_id if turn_state_token is not None else None
         )
-        if (
-            active_turn_state_lease is not None
-            and not _http_bridge_owner_matches_current(
-                active_turn_state_lease.owner_instance_id,
-                current_owner_id=current_owner,
-                current_instance_id=current_instance,
-            )
-            and _http_bridge_owner_instance_group(active_turn_state_lease.owner_instance_id) in ring
-        ):
-            _log_http_bridge_event(
-                "owner_mismatch",
-                key,
-                account_id=active_turn_state_lease.account_id,
-                model=request_model,
-                detail=(
-                    f"lease_session_id={active_turn_state_lease.session_id}, "
-                    f"expected_instance={active_turn_state_lease.owner_instance_id}, "
-                    f"current_instance={current_instance}"
-                ),
-            )
-            raise ProxyResponseError(
-                409,
-                openai_error(
-                    "bridge_wrong_instance",
-                    (
-                        "HTTP responses session bridge turn-state is owned by another live instance "
-                        f"(expected {active_turn_state_lease.owner_instance_id}, got {current_owner})"
-                    ),
-                    error_type="server_error",
-                ),
-            )
         created_session_id = self._new_http_bridge_session_id()
         while True:
             sessions_to_close: list[_HTTPBridgeSession] = []
@@ -1878,6 +1849,37 @@ class ProxyService:
                         key = alias_session.key
                         lookup_key = key
                         session_key = key
+                    elif (
+                        active_turn_state_lease is not None
+                        and not _http_bridge_owner_matches_current(
+                            active_turn_state_lease.owner_instance_id,
+                            current_owner_id=current_owner,
+                            current_instance_id=current_instance,
+                        )
+                        and _http_bridge_owner_instance_group(active_turn_state_lease.owner_instance_id) in ring
+                    ):
+                        _log_http_bridge_event(
+                            "owner_mismatch",
+                            key,
+                            account_id=active_turn_state_lease.account_id,
+                            model=request_model,
+                            detail=(
+                                f"lease_session_id={active_turn_state_lease.session_id}, "
+                                f"expected_instance={active_turn_state_lease.owner_instance_id}, "
+                                f"current_instance={current_instance}"
+                            ),
+                        )
+                        raise ProxyResponseError(
+                            409,
+                            openai_error(
+                                "bridge_wrong_instance",
+                                (
+                                    "HTTP responses session bridge turn-state is owned by another live instance "
+                                    f"(expected {active_turn_state_lease.owner_instance_id}, got {current_owner})"
+                                ),
+                                error_type="server_error",
+                            ),
+                        )
                     elif turn_state_token is not None:
                         recovered_turn_state_replay = True
                         stale_turn_state_lease_session_id = (
@@ -5761,11 +5763,70 @@ def _normalized_http_bridge_instance_ring(settings: object) -> tuple[str, tuple[
 
 def _http_bridge_current_owner_id(settings: object) -> str:
     instance_id, _ = _normalized_http_bridge_instance_ring(settings)
-    return instance_id
+    pid = os.getpid()
+    process_marker = _http_bridge_process_start_marker(pid)
+    if process_marker is None:
+        return f"{instance_id}@{pid}"
+    return f"{instance_id}@{pid}:{process_marker}"
 
 
 def _http_bridge_owner_instance_group(owner_id: str) -> str:
     return owner_id.split("@", 1)[0]
+
+
+def _http_bridge_owner_pid(owner_id: str) -> int | None:
+    owner_parts = owner_id.split("@", 1)
+    if len(owner_parts) != 2:
+        return None
+    pid_text, _, _ = owner_parts[1].partition(":")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _http_bridge_owner_process_marker(owner_id: str) -> str | None:
+    owner_parts = owner_id.split("@", 1)
+    if len(owner_parts) != 2:
+        return None
+    _, separator, process_marker = owner_parts[1].partition(":")
+    if not separator or not process_marker:
+        return None
+    return process_marker
+
+
+def _http_bridge_process_start_marker(pid: int) -> str | None:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as process_stat:
+            payload = process_stat.read().strip()
+    except OSError:
+        return None
+    try:
+        _, stat_tail = payload.rsplit(") ", 1)
+    except ValueError:
+        return None
+    stat_fields = stat_tail.split()
+    if len(stat_fields) <= 19:
+        return None
+    process_marker = stat_fields[19].strip()
+    return process_marker or None
+
+
+def _http_bridge_process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        if exc.errno == errno.EPERM:
+            return True
+        return True
+    return True
 
 
 def _http_bridge_owner_matches_current(
@@ -5776,7 +5837,22 @@ def _http_bridge_owner_matches_current(
 ) -> bool:
     if owner_id == current_owner_id or owner_id == current_instance_id:
         return True
-    return _http_bridge_owner_instance_group(owner_id) == current_instance_id
+    if _http_bridge_owner_instance_group(owner_id) != current_instance_id:
+        return False
+    owner_pid = _http_bridge_owner_pid(owner_id)
+    if owner_pid is None:
+        return False
+    if owner_pid == os.getpid():
+        return True
+    owner_process_marker = _http_bridge_owner_process_marker(owner_id)
+    if owner_process_marker is None:
+        return not _http_bridge_process_exists(owner_pid)
+    live_process_marker = _http_bridge_process_start_marker(owner_pid)
+    if live_process_marker is None:
+        return True
+    if live_process_marker != owner_process_marker:
+        return True
+    return False
 
 
 def _http_bridge_owner_instance(key: _HTTPBridgeSessionKey, settings: object) -> str | None:

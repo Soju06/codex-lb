@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -1638,6 +1639,49 @@ class ProxyService:
                         downstream_turn_state=session.downstream_turn_state,
                     )
 
+    async def _ensure_http_bridge_lease_keepalive(self, session: "_HTTPBridgeSession") -> None:
+        task = getattr(session, "lease_keepalive_task", None)
+        if task is not None and not task.done():
+            return
+
+        async def _keepalive() -> None:
+            interval_seconds = max(1.0, min(session.idle_ttl_seconds / 2.0, 60.0))
+            try:
+                while True:
+                    await asyncio.sleep(interval_seconds)
+                    if session.closed:
+                        return
+                    pending_count = await self._http_bridge_pending_count(session)
+                    if pending_count <= 0:
+                        return
+                    try:
+                        await self._touch_http_bridge_lease(session)
+                    except Exception:
+                        logger.warning(
+                            "Failed to refresh HTTP bridge lease during active stream session_id=%s",
+                            session.bridge_session_id,
+                            exc_info=True,
+                        )
+            except asyncio.CancelledError:
+                raise
+
+        session.lease_keepalive_task = asyncio.create_task(_keepalive())
+
+    async def _stop_http_bridge_lease_keepalive(self, session: "_HTTPBridgeSession") -> None:
+        task = getattr(session, "lease_keepalive_task", None)
+        if task is None:
+            return
+        session.lease_keepalive_task = None
+        if task.done():
+            return
+        task.cancel()
+        if task is asyncio.current_task():
+            return
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     async def _get_or_create_http_bridge_session(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -1653,6 +1697,7 @@ class ProxyService:
         settings = get_settings()
         api_key_id = api_key.id if api_key is not None else None
         current_instance, ring = _normalized_http_bridge_instance_ring(settings)
+        current_owner = _http_bridge_current_owner_id(settings)
         effective_idle_ttl_seconds = _effective_http_bridge_idle_ttl_seconds(
             affinity=affinity,
             idle_ttl_seconds=idle_ttl_seconds,
@@ -1671,8 +1716,12 @@ class ProxyService:
         )
         if (
             active_turn_state_lease is not None
-            and active_turn_state_lease.owner_instance_id in ring
-            and active_turn_state_lease.owner_instance_id != current_instance
+            and not _http_bridge_owner_matches_current(
+                active_turn_state_lease.owner_instance_id,
+                current_owner_id=current_owner,
+                current_instance_id=current_instance,
+            )
+            and _http_bridge_owner_instance_group(active_turn_state_lease.owner_instance_id) in ring
         ):
             _log_http_bridge_event(
                 "owner_mismatch",
@@ -1691,7 +1740,7 @@ class ProxyService:
                     "bridge_wrong_instance",
                     (
                         "HTTP responses session bridge turn-state is owned by another live instance "
-                        f"(expected {active_turn_state_lease.owner_instance_id}, got {current_instance})"
+                        f"(expected {active_turn_state_lease.owner_instance_id}, got {current_owner})"
                     ),
                     error_type="server_error",
                 ),
@@ -1779,6 +1828,7 @@ class ProxyService:
                 await self._prune_http_bridge_sessions_locked()
 
                 current_instance, ring = _normalized_http_bridge_instance_ring(settings)
+                current_owner = _http_bridge_current_owner_id(settings)
                 owner_instance = _http_bridge_owner_instance(lookup_key, settings)
                 if (
                     not matched_turn_state_alias
@@ -1955,10 +2005,10 @@ class ProxyService:
                         "turn_state_header",
                         self._encode_http_bridge_turn_state(
                             session_id=created_session_id,
-                            owner_instance_id=current_instance,
-                            api_key_id=api_key_id,
-                        ),
-                        api_key_id,
+                                owner_instance_id=current_owner,
+                                api_key_id=api_key_id,
+                            ),
+                            api_key_id,
                     )
                     create_affinity = _AffinityPolicy(
                         key=session_key.affinity_key,
@@ -1984,7 +2034,7 @@ class ProxyService:
                 if accepts_extra_create_kwargs or "bridge_session_id" in create_signature.parameters:
                     create_kwargs["bridge_session_id"] = created_session_id
                 if accepts_extra_create_kwargs or "owner_instance_id" in create_signature.parameters:
-                    create_kwargs["owner_instance_id"] = current_instance
+                    create_kwargs["owner_instance_id"] = current_owner
                 session = await create_session(
                     session_key,
                     **create_kwargs,
@@ -2068,6 +2118,7 @@ class ProxyService:
 
         async def _close_session() -> None:
             session.closed = True
+            await self._stop_http_bridge_lease_keepalive(session)
             if turn_state_lock_held:
                 self._unregister_http_bridge_turn_states_locked(session)
             else:
@@ -2317,6 +2368,7 @@ class ProxyService:
             async with session.pending_lock:
                 session.pending_requests.append(request_state)
             request_enqueued = True
+            await self._ensure_http_bridge_lease_keepalive(session)
             await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
         except asyncio.CancelledError:
@@ -2431,6 +2483,7 @@ class ProxyService:
                 async with session.pending_lock:
                     session.pending_requests.append(warmup_state)
                 request_enqueued = True
+                await self._ensure_http_bridge_lease_keepalive(session)
                 await session.upstream.send_text(warmup_text)
                 while True:
                     event_block = await event_queue.get()
@@ -2470,6 +2523,9 @@ class ProxyService:
             if request_enqueued and request_state in session.pending_requests:
                 session.pending_requests.remove(request_state)
             session.queued_request_count = max(0, session.queued_request_count - 1)
+            has_pending_requests = bool(session.pending_requests)
+        if not has_pending_requests:
+            await self._stop_http_bridge_lease_keepalive(session)
         if gate_acquired:
             _release_websocket_response_create_gate(request_state, session.response_create_gate)
 
@@ -2485,9 +2541,12 @@ class ProxyService:
                 session.pending_requests.remove(request_state)
                 session.queued_request_count = max(0, session.queued_request_count - 1)
                 removed = True
+            has_pending_requests = bool(session.pending_requests)
         request_state.event_queue = None
         if not removed:
             return False
+        if not has_pending_requests:
+            await self._stop_http_bridge_lease_keepalive(session)
         _release_websocket_response_create_gate(request_state, session.response_create_gate)
         await self._release_websocket_reservation(request_state.api_key_reservation)
         request_state.api_key_reservation = None
@@ -2558,6 +2617,7 @@ class ProxyService:
                 break
         finally:
             session.closed = True
+            await self._stop_http_bridge_lease_keepalive(session)
             if not session.preserve_lease_during_reconnect:
                 await self._delete_http_bridge_lease(session.bridge_session_id)
 
@@ -2793,6 +2853,9 @@ class ProxyService:
 
         if terminal_request_state is None:
             return
+
+        if await self._http_bridge_pending_count(session) <= 0:
+            await self._stop_http_bridge_lease_keepalive(session)
 
         if terminal_request_state is not matched_request_state and terminal_request_state.event_queue is not None:
             await terminal_request_state.event_queue.put(event_block)
@@ -4754,6 +4817,7 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     upstream_reader: asyncio.Task[None] | None = None
+    lease_keepalive_task: asyncio.Task[None] | None = None
     preserve_lease_during_reconnect: bool = False
     closed: bool = False
 
@@ -5574,6 +5638,24 @@ def _normalized_http_bridge_instance_ring(settings: object) -> tuple[str, tuple[
     if instance_id not in ring_entries:
         ring_entries.append(instance_id)
     return instance_id, tuple(sorted(set(ring_entries)))
+
+
+def _http_bridge_current_owner_id(settings: object) -> str:
+    instance_id, _ = _normalized_http_bridge_instance_ring(settings)
+    return f"{instance_id}@{os.getpid()}"
+
+
+def _http_bridge_owner_instance_group(owner_id: str) -> str:
+    return owner_id.split("@", 1)[0]
+
+
+def _http_bridge_owner_matches_current(
+    owner_id: str,
+    *,
+    current_owner_id: str,
+    current_instance_id: str,
+) -> bool:
+    return owner_id == current_owner_id or owner_id == current_instance_id
 
 
 def _http_bridge_owner_instance(key: _HTTPBridgeSessionKey, settings: object) -> str | None:

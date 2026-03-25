@@ -1273,7 +1273,7 @@ async def test_v1_responses_http_bridge_signed_turn_state_missing_local_alias_re
     recovered_token = service._decode_http_bridge_turn_state(session.key.affinity_key, api_key_id=None)
     assert recovered_token is not None
     assert recovered_token.session_id == session.bridge_session_id
-    assert recovered_token.owner_instance_id == "instance-a"
+    assert proxy_module._http_bridge_owner_instance_group(recovered_token.owner_instance_id) == "instance-a"
     assert connect_headers_seen[-1].get("x-codex-turn-state") is None
 
     async with SessionLocal() as db_session:
@@ -1289,6 +1289,73 @@ async def test_v1_responses_http_bridge_signed_turn_state_missing_local_alias_re
     assert stale_lease is None
     assert new_lease.affinity_kind == "turn_state_header"
     assert new_lease.affinity_key == session.key.affinity_key
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_signed_turn_state_live_lease_on_other_worker_is_wrong_instance(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-a",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_worker_owner_mismatch",
+        "http-bridge-worker-owner-mismatch@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    session_id = "hbs_signed_worker_owner_mismatch"
+    signed_turn_state = service._encode_http_bridge_turn_state(
+        session_id=session_id,
+        owner_instance_id="instance-a@worker-1",
+        api_key_id=None,
+    )
+
+    monkeypatch.setattr(proxy_module, "_http_bridge_current_owner_id", lambda settings: "instance-a@worker-2")
+
+    async with SessionLocal() as db_session:
+        await db_session.execute(delete(HttpBridgeLease).where(HttpBridgeLease.session_id == session_id))
+        await db_session.commit()
+
+    async with service._repo_factory() as repos:
+        await repos.http_bridge_leases.upsert(
+            session_id=session_id,
+            affinity_kind="turn_state_header",
+            affinity_key=signed_turn_state,
+            api_key_scope="",
+            owner_instance_id="instance-a@worker-1",
+            lease_expires_at=proxy_module._http_bridge_lease_expires_at(120.0),
+            account_id=account.id,
+            request_model="gpt-5.1",
+            codex_session=True,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state=signed_turn_state,
+        )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", signed_turn_state, None),
+            headers={"x-codex-turn-state": signed_turn_state},
+            affinity=proxy_module._AffinityPolicy(
+                key=signed_turn_state,
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.1",
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 409
+    assert exc.payload["error"].get("code") == "bridge_wrong_instance"
 
 
 @pytest.mark.asyncio
@@ -1393,13 +1460,13 @@ async def test_v1_responses_http_bridge_signed_turn_state_owner_mismatch_rekeys_
     recovered_token = service._decode_http_bridge_turn_state(session.key.affinity_key, api_key_id=None)
     assert recovered_token is not None
     assert recovered_token.session_id == session.bridge_session_id
-    assert recovered_token.owner_instance_id == "instance-a"
+    assert proxy_module._http_bridge_owner_instance_group(recovered_token.owner_instance_id) == "instance-a"
 
     async with SessionLocal() as db_session:
         lease = (
             await db_session.execute(select(HttpBridgeLease).where(HttpBridgeLease.session_id == session.bridge_session_id))
         ).scalar_one()
-    assert lease.owner_instance_id == "instance-a"
+    assert proxy_module._http_bridge_owner_instance_group(lease.owner_instance_id) == "instance-a"
     assert lease.affinity_kind == "turn_state_header"
     assert lease.affinity_key == session.key.affinity_key
 
@@ -1519,7 +1586,7 @@ async def test_v1_responses_http_bridge_signed_turn_state_stale_owner_outside_ri
     assert recovered.key.affinity_kind == "prompt_cache"
     assert recovered.key.affinity_key == "stale-owner-thread"
     assert recovered.bridge_session_id != stale_session_id
-    assert recovered.owner_instance_id == "instance-new"
+    assert proxy_module._http_bridge_owner_instance_group(recovered.owner_instance_id) == "instance-new"
 
     async with SessionLocal() as db_session:
         stale_lease = (
@@ -1532,7 +1599,7 @@ async def test_v1_responses_http_bridge_signed_turn_state_stale_owner_outside_ri
         ).scalar_one()
 
     assert stale_lease is None
-    assert new_lease.owner_instance_id == "instance-new"
+    assert proxy_module._http_bridge_owner_instance_group(new_lease.owner_instance_id) == "instance-new"
     assert new_lease.affinity_kind == "prompt_cache"
     assert new_lease.affinity_key == "stale-owner-thread"
 
@@ -2205,6 +2272,43 @@ async def test_v1_responses_http_bridge_refreshes_lease_after_request_detach(app
     assert touch_points[1] >= touch_points[0]
     assert session.last_used_at == touch_points[1]
     assert not session.pending_requests
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_keeps_lease_alive_while_request_is_active(app_instance, monkeypatch):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    session = cast(
+        proxy_module._HTTPBridgeSession,
+        _make_dummy_bridge_session(proxy_module._HTTPBridgeSessionKey("request", "bridge-lease-keepalive", None)),
+    )
+    session.bridge_session_id = "hbs_bridge_lease_keepalive"
+    session.idle_ttl_seconds = 2.0
+    session.response_create_gate = asyncio.Semaphore(1)
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req_bridge_lease_keepalive",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+
+    touch_points: list[float] = []
+
+    async def fake_touch_http_bridge_lease(self, session):
+        del self
+        touch_points.append(session.last_used_at)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", fake_touch_http_bridge_lease)
+
+    await service._ensure_http_bridge_lease_keepalive(session)
+    await asyncio.sleep(1.1)
+    await service._stop_http_bridge_lease_keepalive(session)
+
+    assert touch_points
 
 
 @pytest.mark.asyncio

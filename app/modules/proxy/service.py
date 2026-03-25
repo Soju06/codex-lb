@@ -2279,7 +2279,11 @@ class ProxyService:
                 session=session,
                 api_key_id=session.key.api_key_id,
             ):
-                if session.downstream_turn_state is None:
+                if session.downstream_turn_state is None or not self._http_bridge_turn_state_matches_session(
+                    session.downstream_turn_state,
+                    session=session,
+                    api_key_id=session.key.api_key_id,
+                ):
                     session.downstream_turn_state = turn_state
             else:
                 self._promote_http_bridge_session_to_codex_affinity(

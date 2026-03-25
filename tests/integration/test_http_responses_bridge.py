@@ -2786,6 +2786,55 @@ async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_legacy_replay_converges_to_signed_canonical_turn_state(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    session = cast(
+        proxy_module._HTTPBridgeSession,
+        _make_dummy_bridge_session(proxy_module._HTTPBridgeSessionKey("request", "legacy-canonical-convergence", None)),
+    )
+    session.bridge_session_id = "hbs_legacy_canonical_convergence"
+    session.owner_instance_id = "instance-a"
+
+    async def fake_touch_http_bridge_lease(self, session_arg):
+        del self, session_arg
+        return None
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", fake_touch_http_bridge_lease)
+
+    await service._register_http_bridge_turn_state(session, "http_turn_legacy_client")
+
+    signed_turn_state = service._resolve_http_bridge_downstream_turn_state(
+        session,
+        requested_turn_state="http_turn_legacy_client",
+        api_key_id=None,
+    )
+    await service._register_http_bridge_turn_state(session, signed_turn_state)
+
+    signed_turn_state_repeat = service._resolve_http_bridge_downstream_turn_state(
+        session,
+        requested_turn_state="http_turn_legacy_client",
+        api_key_id=None,
+    )
+    await service._register_http_bridge_turn_state(session, signed_turn_state_repeat)
+
+    assert signed_turn_state_repeat == signed_turn_state
+    assert session.downstream_turn_state == signed_turn_state
+    assert session.downstream_turn_state_aliases == {"http_turn_legacy_client", signed_turn_state}
+    assert service._http_bridge_turn_state_index[
+        proxy_module._http_bridge_turn_state_alias_key("http_turn_legacy_client", session.key.api_key_id)
+    ] == session.key
+    assert service._http_bridge_turn_state_index[
+        proxy_module._http_bridge_turn_state_alias_key(signed_turn_state, session.key.api_key_id)
+    ] == session.key
+
+    await service._close_http_bridge_session(session)
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_close_waits_for_turn_state_index_lock(
     async_client,
     app_instance,

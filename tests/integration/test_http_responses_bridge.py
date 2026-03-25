@@ -1276,6 +1276,19 @@ async def test_v1_responses_http_bridge_signed_turn_state_missing_local_alias_re
     assert proxy_module._http_bridge_owner_instance_group(recovered_token.owner_instance_id) == "instance-a"
     assert connect_headers_seen[-1].get("x-codex-turn-state") is None
 
+    replayed = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", signed_turn_state, None),
+        headers={"x-codex-turn-state": signed_turn_state},
+        affinity=proxy_module._AffinityPolicy(
+            key=signed_turn_state,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.1",
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
     async with SessionLocal() as db_session:
         stale_lease = (
             await db_session.execute(select(HttpBridgeLease).where(HttpBridgeLease.session_id == session_id))
@@ -1286,6 +1299,9 @@ async def test_v1_responses_http_bridge_signed_turn_state_missing_local_alias_re
             )
         ).scalar_one()
 
+    assert replayed is session
+    assert signed_turn_state in session.downstream_turn_state_aliases
+    assert connect_headers_seen and len(connect_headers_seen) == 1
     assert stale_lease is None
     assert new_lease.affinity_kind == "turn_state_header"
     assert new_lease.affinity_key == session.key.affinity_key
@@ -2401,7 +2417,7 @@ async def test_v1_responses_http_bridge_keeps_lease_alive_while_request_is_activ
         _make_dummy_bridge_session(proxy_module._HTTPBridgeSessionKey("request", "bridge-lease-keepalive", None)),
     )
     session.bridge_session_id = "hbs_bridge_lease_keepalive"
-    session.idle_ttl_seconds = 2.0
+    session.idle_ttl_seconds = 0.5
     session.response_create_gate = asyncio.Semaphore(1)
     request_state = proxy_module._WebSocketRequestState(
         request_id="req_bridge_lease_keepalive",
@@ -2415,15 +2431,17 @@ async def test_v1_responses_http_bridge_keeps_lease_alive_while_request_is_activ
     session.queued_request_count = 1
 
     touch_points: list[float] = []
+    touched = asyncio.Event()
 
     async def fake_touch_http_bridge_lease(self, session):
         del self
         touch_points.append(session.last_used_at)
+        touched.set()
 
     monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", fake_touch_http_bridge_lease)
 
     await service._ensure_http_bridge_lease_keepalive(session)
-    await asyncio.sleep(1.1)
+    await asyncio.wait_for(touched.wait(), timeout=0.4)
     await service._stop_http_bridge_lease_keepalive(session)
 
     assert touch_points

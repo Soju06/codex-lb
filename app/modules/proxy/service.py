@@ -1646,7 +1646,9 @@ class ProxyService:
             return
 
         async def _keepalive() -> None:
-            interval_seconds = max(1.0, min(session.idle_ttl_seconds / 2.0, 60.0))
+            interval_seconds = min(session.idle_ttl_seconds / 2.0, 60.0)
+            if interval_seconds <= 0:
+                interval_seconds = 0.001
             try:
                 while True:
                     await asyncio.sleep(interval_seconds)
@@ -1778,11 +1780,21 @@ class ProxyService:
                     if alias_session is not None:
                         matched_turn_state_alias = True
                         key = alias_key
-                        self._promote_http_bridge_session_to_codex_affinity(
-                            alias_session,
-                            turn_state=incoming_turn_state,
-                            settings=settings,
-                        )
+                        if incoming_turn_state is not None and (
+                            turn_state_token is None
+                            or self._http_bridge_turn_state_matches_session(
+                                incoming_turn_state,
+                                session=alias_session,
+                                api_key_id=alias_session.key.api_key_id,
+                            )
+                        ):
+                            self._promote_http_bridge_session_to_codex_affinity(
+                                alias_session,
+                                turn_state=incoming_turn_state,
+                                settings=settings,
+                            )
+                        else:
+                            alias_session.downstream_turn_state_aliases.add(incoming_turn_state)
                         for alias in alias_session.downstream_turn_state_aliases:
                             self._http_bridge_turn_state_index[
                                 _http_bridge_turn_state_alias_key(alias, alias_session.key.api_key_id)
@@ -1868,11 +1880,18 @@ class ProxyService:
                         )
                         == existing.key
                     ):
-                        self._promote_http_bridge_session_to_codex_affinity(
-                            existing,
-                            turn_state=incoming_turn_state,
-                            settings=settings,
-                        )
+                        if turn_state_token is None or self._http_bridge_turn_state_matches_session(
+                            incoming_turn_state,
+                            session=existing,
+                            api_key_id=existing.key.api_key_id,
+                        ):
+                            self._promote_http_bridge_session_to_codex_affinity(
+                                existing,
+                                turn_state=incoming_turn_state,
+                                settings=settings,
+                            )
+                        else:
+                            existing.downstream_turn_state_aliases.add(incoming_turn_state)
                     existing.request_model = request_model
                     existing.last_used_at = time.monotonic()
                     _log_http_bridge_event(
@@ -2046,6 +2065,15 @@ class ProxyService:
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(lookup_key, None)
                         self._http_bridge_sessions[session_key] = session
+                        if (
+                            rekey_recovered_turn_state
+                            and incoming_turn_state is not None
+                            and incoming_turn_state != session.key.affinity_key
+                        ):
+                            session.downstream_turn_state_aliases.add(incoming_turn_state)
+                            self._http_bridge_turn_state_index[
+                                _http_bridge_turn_state_alias_key(incoming_turn_state, session.key.api_key_id)
+                            ] = session.key
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():
                             inflight_future.set_result(session)

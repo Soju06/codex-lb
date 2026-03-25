@@ -1697,8 +1697,6 @@ class ProxyService:
                 ),
             )
         created_session_id = self._new_http_bridge_session_id()
-        if turn_state_token is not None and turn_state_token.owner_instance_id == current_instance:
-            created_session_id = turn_state_token.session_id
         while True:
             sessions_to_close: list[_HTTPBridgeSession] = []
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
@@ -1759,25 +1757,17 @@ class ProxyService:
                                 key,
                                 openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
                             )
+                            rekey_recovered_turn_state = key.affinity_kind == "turn_state_header"
                         else:
                             lookup_key = _HTTPBridgeSessionKey(
                                 "turn_state_header",
                                 turn_state_token.session_id,
                                 api_key_id,
                             )
-                            if turn_state_token.owner_instance_id == current_instance:
-                                key = _HTTPBridgeSessionKey(
-                                    "turn_state_header",
-                                    incoming_turn_state,
-                                    api_key_id,
-                                )
-                            else:
-                                rekey_recovered_turn_state = True
-                                key = lookup_key
+                            rekey_recovered_turn_state = True
+                            key = lookup_key
                             session_key = key
                     else:
-                        if incoming_turn_state.startswith("http_turn_"):
-                            raise self._invalid_http_bridge_turn_state()
                         key = _HTTPBridgeSessionKey(
                             "turn_state_header",
                             incoming_turn_state,
@@ -1791,8 +1781,7 @@ class ProxyService:
                 current_instance, ring = _normalized_http_bridge_instance_ring(settings)
                 owner_instance = _http_bridge_owner_instance(lookup_key, settings)
                 if (
-                    not is_bridge_turn_state_replay
-                    and not matched_turn_state_alias
+                    not matched_turn_state_alias
                     and active_turn_state_lease is None
                     and lookup_key.affinity_kind != "request"
                     and owner_instance is not None
@@ -2266,7 +2255,15 @@ class ProxyService:
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
         )
-        await self._persist_http_bridge_lease(session)
+        try:
+            await self._persist_http_bridge_lease(session)
+        except BaseException:
+            session.closed = True
+            try:
+                await upstream.close()
+            except Exception:
+                logger.debug("Failed to close HTTP bridge upstream websocket after lease persistence error", exc_info=True)
+            raise
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         return session
 

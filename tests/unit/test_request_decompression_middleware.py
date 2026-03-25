@@ -8,6 +8,7 @@ import pytest
 import zstandard as zstd
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import ClientDisconnect
 
 from app.core.middleware.request_decompression import add_request_decompression_middleware
 
@@ -163,3 +164,36 @@ async def test_request_decompression_rejects_unsupported_encoding():
     response_data = resp.json()
     assert response_data["error"]["code"] == "invalid_request"
     assert response_data["error"]["message"] == "Unsupported Content-Encoding"
+
+
+@pytest.mark.asyncio
+async def test_request_decompression_propagates_client_disconnect():
+    app = FastAPI()
+    add_request_decompression_middleware(app)
+    dispatch = app.user_middleware[0].kwargs["dispatch"]
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.disconnect"}
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/echo",
+            "raw_path": b"/echo",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-encoding", b"gzip"), (b"content-type", b"application/json")],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        },
+        receive=receive,
+    )
+
+    async def call_next(_: Request):
+        raise AssertionError("call_next should not run after client disconnect")
+
+    with pytest.raises(ClientDisconnect):
+        await dispatch(request, call_next)

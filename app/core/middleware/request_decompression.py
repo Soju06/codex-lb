@@ -9,6 +9,7 @@ from typing import Protocol
 import zstandard as zstd
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.requests import ClientDisconnect
 
 from app.core.config.settings import get_settings
 from app.core.errors import dashboard_error
@@ -125,11 +126,13 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
         encodings = [enc.strip().lower() for enc in content_encoding.split(",") if enc.strip()]
         if not encodings:
             return await call_next(request)
-        body = await request.body()
         settings = get_settings()
         max_size = settings.max_decompressed_body_bytes
         try:
+            body = await request.body()
             decompressed = _decompress_body(body, encodings, max_size)
+        except ClientDisconnect:
+            raise
         except _DecompressedBodyTooLarge:
             return JSONResponse(
                 status_code=413,

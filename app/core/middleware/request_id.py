@@ -20,8 +20,7 @@ def add_request_id_middleware(app: FastAPI) -> None:
         token = set_request_id(request_id)
         try:
             response = await call_next(request)
-        except Exception:
+            response.headers.setdefault("x-request-id", request_id)
+            return response
+        finally:
             reset_request_id(token)
-            raise
-        response.headers.setdefault("x-request-id", request_id)
-        return response

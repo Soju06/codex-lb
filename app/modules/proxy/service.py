@@ -2174,15 +2174,6 @@ class ProxyService:
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(lookup_key, None)
                         self._http_bridge_sessions[session_key] = session
-                        if (
-                            recovered_turn_state_replay
-                            and incoming_turn_state is not None
-                            and incoming_turn_state != session.key.affinity_key
-                        ):
-                            session.downstream_turn_state_aliases.add(incoming_turn_state)
-                            self._http_bridge_turn_state_index[
-                                _http_bridge_turn_state_alias_key(incoming_turn_state, session.key.api_key_id)
-                            ] = session.key
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():
                             inflight_future.set_result(session)

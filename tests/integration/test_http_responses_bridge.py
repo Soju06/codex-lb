@@ -2684,28 +2684,34 @@ async def test_v1_responses_http_bridge_keepalive_refresh_failure_closes_session
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
     )
     session.pending_requests.append(request_state)
     session.queued_request_count = 1
-
-    closed = asyncio.Event()
 
     async def fake_touch_http_bridge_lease(self, session):
         del self, session
         raise RuntimeError("lease touch failed")
 
-    async def fake_close_http_bridge_session(self, session):
-        del self
-        session.closed = True
-        closed.set()
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+        return None
+
+    async def fake_release_websocket_reservation(self, reservation):
+        del self, reservation
+        return None
 
     monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", fake_touch_http_bridge_lease)
-    monkeypatch.setattr(proxy_module.ProxyService, "_close_http_bridge_session", fake_close_http_bridge_session)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(proxy_module.ProxyService, "_release_websocket_reservation", fake_release_websocket_reservation)
 
     await service._ensure_http_bridge_lease_keepalive(session)
-    await asyncio.wait_for(closed.wait(), timeout=0.4)
-
+    failed_event = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert proxy_module.parse_sse_data_json(failed_event)["type"] == "response.failed"
+    assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+    await asyncio.sleep(0)
     assert session.closed is True
+    assert not session.pending_requests
 
 
 @pytest.mark.asyncio
@@ -3014,6 +3020,113 @@ async def test_v1_responses_http_bridge_reconnect_uses_last_upstream_turn_state(
     assert connect_headers_seen[0]["x-codex-turn-state"] == "local_turn_state"
     assert connect_headers_seen[1]["x-codex-turn-state"] == "upstream_turn_state_1"
     assert bridge_session.upstream_turn_state == "upstream_turn_state_2"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_reconnect_preserves_signed_turn_state_when_handshake_is_silent(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_signed_reconnect_fallback",
+        "http-bridge-signed-reconnect-fallback@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    connect_headers_seen: list[dict[str, str]] = []
+    upstreams = [_FakeBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
+    stale_signed_turn_state = service._encode_http_bridge_turn_state(
+        session_id="hbs_signed_reconnect_fallback_stale",
+        owner_instance_id="instance-a",
+        api_key_id=None,
+    )
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, account_id_header, base_url, session
+        connect_headers_seen.append(dict(headers))
+        return upstreams.pop(0)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    bridge_session = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", stale_signed_turn_state, None),
+        headers={"x-codex-turn-state": stale_signed_turn_state},
+        affinity=proxy_module._AffinityPolicy(
+            key=stale_signed_turn_state,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.1",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
+    await service._register_http_bridge_turn_state(bridge_session, bridge_session.key.affinity_key)
+
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-signed-turn-state-reconnect",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": []}),
+    )
+    await service._reconnect_http_bridge_session(bridge_session, request_state=request_state)
+
+    assert "x-codex-turn-state" not in connect_headers_seen[0]
+    assert connect_headers_seen[1]["x-codex-turn-state"] == bridge_session.key.affinity_key
+    assert bridge_session.upstream_turn_state is None
+    assert bridge_session.reconnect_turn_state == bridge_session.key.affinity_key
 
 
 @pytest.mark.asyncio

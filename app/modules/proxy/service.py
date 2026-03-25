@@ -1655,13 +1655,65 @@ class ProxyService:
             exc_info=True,
         )
         try:
-            await self._close_http_bridge_session(session)
+            await self._close_http_bridge_session(
+                session,
+                fail_pending_requests=True,
+                error_code="upstream_unavailable",
+                error_message="HTTP bridge session became unavailable",
+            )
         except Exception:
             logger.warning(
                 "Failed to invalidate HTTP bridge session after lease persistence failure session_id=%s",
                 session.bridge_session_id,
                 exc_info=True,
             )
+
+    async def _fail_pending_http_bridge_requests(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        error_code: str,
+        error_message: str,
+        error_type: str = "server_error",
+    ) -> None:
+        async with session.pending_lock:
+            remaining = list(session.pending_requests)
+            session.pending_requests.clear()
+            session.queued_request_count = 0
+
+        for request_state in remaining:
+            _release_websocket_response_create_gate(request_state, session.response_create_gate)
+            if request_state.event_queue is not None:
+                await request_state.event_queue.put(
+                    format_sse_event(
+                        response_failed_event(
+                            request_state.error_code_override or error_code,
+                            request_state.error_message_override or error_message,
+                            error_type=request_state.error_type_override or error_type,
+                            response_id=request_state.response_id or request_state.request_id,
+                            error_param=request_state.error_param_override,
+                        )
+                    )
+                )
+                await request_state.event_queue.put(None)
+            await self._release_websocket_reservation(request_state.api_key_reservation)
+            request_state.api_key_reservation = None
+            if session.account.id and not request_state.skip_request_log:
+                await self._write_request_log(
+                    account_id=session.account.id,
+                    api_key=request_state.api_key,
+                    request_id=request_state.response_id or request_state.request_log_id or request_state.request_id,
+                    model=request_state.model or "",
+                    latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
+                    status="error",
+                    error_code=request_state.error_code_override or error_code,
+                    error_message=request_state.error_message_override or error_message,
+                    reasoning_effort=request_state.reasoning_effort,
+                    transport=request_state.transport,
+                    service_tier=request_state.service_tier,
+                    requested_service_tier=request_state.requested_service_tier,
+                    actual_service_tier=request_state.actual_service_tier,
+                )
 
     async def _ensure_http_bridge_lease_keepalive(self, session: "_HTTPBridgeSession") -> None:
         task = getattr(session, "lease_keepalive_task", None)
@@ -1685,9 +1737,7 @@ class ProxyService:
                     except Exception:
                         await self._invalidate_http_bridge_session_after_lease_failure(
                             session,
-                            failure_message=(
-                            "Failed to refresh HTTP bridge lease during active stream session_id=%s",
-                            ),
+                            failure_message="Failed to refresh HTTP bridge lease during active stream session_id=%s",
                         )
                         return
             except asyncio.CancelledError:
@@ -1702,9 +1752,9 @@ class ProxyService:
         session.lease_keepalive_task = None
         if task.done():
             return
-        task.cancel()
         if task is asyncio.current_task():
             return
+        task.cancel()
         try:
             await task
         except asyncio.CancelledError:
@@ -2168,22 +2218,32 @@ class ProxyService:
         session: "_HTTPBridgeSession",
         *,
         turn_state_lock_held: bool = False,
+        fail_pending_requests: bool = False,
+        error_code: str = "upstream_unavailable",
+        error_message: str = "HTTP bridge session became unavailable",
     ) -> None:
         lease_lock = getattr(session, "lease_lock", None)
 
         async def _close_session() -> None:
             session.closed = True
             await self._stop_http_bridge_lease_keepalive(session)
+            if fail_pending_requests:
+                await self._fail_pending_http_bridge_requests(
+                    session,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
             if turn_state_lock_held:
                 self._unregister_http_bridge_turn_states_locked(session)
             else:
                 await self._unregister_http_bridge_turn_states(session)
             if session.upstream_reader is not None:
                 session.upstream_reader.cancel()
-                try:
-                    await session.upstream_reader
-                except asyncio.CancelledError:
-                    pass
+                if session.upstream_reader is not asyncio.current_task():
+                    try:
+                        await session.upstream_reader
+                    except asyncio.CancelledError:
+                        pass
             try:
                 await session.upstream.close()
             except Exception:
@@ -2205,6 +2265,7 @@ class ProxyService:
         async with self._http_bridge_lock:
             if session.closed:
                 return
+            session.reconnect_turn_state = turn_state
             session.downstream_turn_state_aliases.add(turn_state)
             if self._http_bridge_turn_state_matches_session(
                 turn_state,
@@ -2266,6 +2327,7 @@ class ProxyService:
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
         session.downstream_turn_state = turn_state
+        session.reconnect_turn_state = turn_state
         session.downstream_turn_state_aliases.add(turn_state)
         session.idle_ttl_seconds = max(
             session.idle_ttl_seconds,
@@ -2338,6 +2400,8 @@ class ProxyService:
             _raise_proxy_unavailable(exc.message or "Temporary upstream refresh failure")
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+        echoed_turn_state = _upstream_turn_state_from_socket(upstream)
+        reconnect_turn_state = echoed_turn_state or _sticky_key_from_turn_state_header(connect_headers)
         session = _HTTPBridgeSession(
             key=key,
             headers=connect_headers,
@@ -2357,7 +2421,8 @@ class ProxyService:
             owner_instance_id=owner_instance_id,
             codex_session=affinity.kind == StickySessionKind.CODEX_SESSION,
             prewarm_lock=anyio.Lock(),
-            upstream_turn_state=_upstream_turn_state_from_socket(upstream),
+            upstream_turn_state=echoed_turn_state,
+            reconnect_turn_state=reconnect_turn_state,
             downstream_turn_state=None,
         )
         try:
@@ -2807,9 +2872,10 @@ class ProxyService:
                     ),
                 )
             account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
+            preferred_turn_state = _preferred_http_bridge_reconnect_turn_state(session)
             connect_headers = _headers_with_turn_state(
                 session.headers,
-                _preferred_http_bridge_reconnect_turn_state(session),
+                preferred_turn_state,
             )
             new_upstream = await self._open_upstream_websocket_with_budget(
                 account,
@@ -2821,7 +2887,9 @@ class ProxyService:
             session.upstream = new_upstream
             session.upstream_control = _WebSocketUpstreamControl()
             session.closed = False
-            session.upstream_turn_state = _upstream_turn_state_from_socket(new_upstream) or session.upstream_turn_state
+            echoed_turn_state = _upstream_turn_state_from_socket(new_upstream)
+            session.upstream_turn_state = echoed_turn_state or session.upstream_turn_state
+            session.reconnect_turn_state = echoed_turn_state or preferred_turn_state
             try:
                 await self._touch_http_bridge_lease(session)
             except Exception:
@@ -4867,6 +4935,7 @@ class _HTTPBridgeSession:
     prewarmed: bool = False
     prewarm_lock: anyio.Lock | None = None
     upstream_turn_state: str | None = None
+    reconnect_turn_state: str | None = None
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     upstream_reader: asyncio.Task[None] | None = None
@@ -5474,15 +5543,7 @@ def _headers_without_local_http_bridge_turn_state(headers: Mapping[str, str]) ->
 def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -> str | None:
     if session.upstream_turn_state is not None:
         return session.upstream_turn_state
-    if (
-        session.codex_session
-        and session.downstream_turn_state is not None
-        and not session.downstream_turn_state.startswith(_HTTP_BRIDGE_TURN_STATE_PREFIX)
-        and session.affinity.kind == StickySessionKind.CODEX_SESSION
-        and session.affinity.key == session.downstream_turn_state
-    ):
-        return session.downstream_turn_state
-    return None
+    return session.reconnect_turn_state
 
 
 def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -> tuple[str, str | None]:

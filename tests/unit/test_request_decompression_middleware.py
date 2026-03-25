@@ -4,6 +4,7 @@ import gzip
 import json
 import zlib
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 import pytest
 import zstandard as zstd
@@ -11,7 +12,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import ClientDisconnect
-from typing import cast
 
 from app.core.middleware.request_decompression import add_request_decompression_middleware
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from typing import cast
 
 from app.core.middleware.request_id import add_request_id_middleware
 from app.core.utils.request_id import get_request_id

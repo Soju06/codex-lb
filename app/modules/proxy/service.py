@@ -1601,7 +1601,11 @@ class ProxyService:
             await repos.http_bridge_leases.delete(session_id)
 
     async def _persist_http_bridge_lease(self, session: "_HTTPBridgeSession") -> None:
-        await self._claim_http_bridge_lease(session, replace_session_id=None)
+        replace_session_id = session.pending_replaced_bridge_session_id
+        try:
+            await self._claim_http_bridge_lease(session, replace_session_id=replace_session_id)
+        finally:
+            session.pending_replaced_bridge_session_id = None
 
     async def _claim_http_bridge_lease(
         self,
@@ -2474,9 +2478,10 @@ class ProxyService:
             upstream_turn_state=echoed_turn_state,
             reconnect_turn_state=reconnect_turn_state,
             downstream_turn_state=None,
+            pending_replaced_bridge_session_id=replaced_bridge_session_id,
         )
         try:
-            await self._claim_http_bridge_lease(session, replace_session_id=replaced_bridge_session_id)
+            await self._persist_http_bridge_lease(session)
         except BaseException:
             session.closed = True
             try:
@@ -4991,6 +4996,7 @@ class _HTTPBridgeSession:
     reconnect_turn_state: str | None = None
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
+    pending_replaced_bridge_session_id: str | None = None
     upstream_reader: asyncio.Task[None] | None = None
     lease_keepalive_task: asyncio.Task[None] | None = None
     preserve_lease_during_reconnect: bool = False

@@ -3387,6 +3387,100 @@ async def test_v1_responses_http_bridge_creation_closes_upstream_when_lease_pers
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_creation_with_replacement_uses_persist_hook(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_lease_persist_failure_replace",
+        "http-bridge-lease-persist-failure-replace@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    persisted_replace_session_ids: list[str | None] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    async def fake_persist_http_bridge_lease(self, session):
+        del self
+        persisted_replace_session_ids.append(session.pending_replaced_bridge_session_id)
+        raise RuntimeError("lease persistence failed")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_persist_http_bridge_lease", fake_persist_http_bridge_lease)
+
+    with pytest.raises(RuntimeError, match="lease persistence failed"):
+        await service._create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", "replacement-hook", None),
+            headers={},
+            affinity=proxy_module._AffinityPolicy(
+                key="replacement-hook",
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            request_model="gpt-5.1",
+            idle_ttl_seconds=120.0,
+            bridge_session_id="hbs_lease_persist_failure_replace",
+            owner_instance_id="instance-a",
+            replaced_bridge_session_id="hbs_stale_replaced",
+        )
+
+    assert persisted_replace_session_ids == ["hbs_stale_replaced"]
+    assert fake_upstream.closed is True
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_allows_unstable_request_key_even_on_non_owner_instance(
     async_client,
     app_instance,

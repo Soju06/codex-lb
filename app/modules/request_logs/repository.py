@@ -8,6 +8,7 @@ from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, s
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.usage.logs import calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
@@ -54,6 +55,7 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
             .where(RequestLog.requested_at >= since)
             .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
@@ -71,6 +73,7 @@ class RequestLogsRepository:
                 output_tokens=int(row.output_tokens),
                 cached_input_tokens=int(row.cached_input_tokens),
                 reasoning_tokens=int(row.reasoning_tokens),
+                cost_usd=float(row.cost_usd or 0.0),
             )
             for row in result.all()
         ]
@@ -110,6 +113,7 @@ class RequestLogsRepository:
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
             reasoning_tokens=reasoning_tokens,
+            cost_usd=None,
             reasoning_effort=reasoning_effort,
             latency_ms=latency_ms,
             status=status,
@@ -117,6 +121,7 @@ class RequestLogsRepository:
             error_message=error_message,
             requested_at=requested_at or utcnow(),
         )
+        log.cost_usd = calculated_cost_from_log(log)
         self._session.add(log)
         try:
             await self._session.commit()

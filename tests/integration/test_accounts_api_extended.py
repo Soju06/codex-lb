@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
@@ -432,6 +433,37 @@ async def test_accounts_list_request_usage_cost_rollup_respects_service_tier(asy
     assert request_usage["totalTokens"] == 2_000_000
     assert request_usage["cachedInputTokens"] == 0
     assert request_usage["totalCostUsd"] == pytest.approx(35.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_request_usage_uses_persisted_cost(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_persisted_cost", "persisted-cost@example.com"))
+
+        log = await logs_repo.add_log(
+            account_id="acc_persisted_cost",
+            request_id="req_persisted_cost_1",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+        )
+        await session.execute(update(log.__class__).where(log.__class__.id == log.id).values(cost_usd=12.345678))
+        await session.commit()
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    request_usage = accounts["acc_persisted_cost"]["requestUsage"]
+    assert request_usage is not None
+    assert request_usage["totalCostUsd"] == pytest.approx(12.345678, abs=1e-6)
 
 
 @pytest.mark.asyncio

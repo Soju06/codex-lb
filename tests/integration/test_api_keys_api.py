@@ -6,7 +6,7 @@ import json
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
@@ -542,6 +542,81 @@ async def test_api_key_usage_summary_cost_respects_service_tier(async_client, mo
     assert usage_key_row is not None
     assert usage_key_row["usageSummary"] is not None
     assert usage_key_row["usageSummary"]["totalCostUsd"] == pytest.approx(35.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_api_key_usage_summary_uses_persisted_request_log_cost(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "persisted-usage-summary",
+            "limits": [
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 100_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_persisted_usage_summary", "persisted-usage-summary@example.com")
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        event = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_persisted_usage_summary",
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.api_key_id == key_id))
+        log = result.scalar_one()
+        await session.execute(update(RequestLog).where(RequestLog.id == log.id).values(cost_usd=7.654321))
+        await session.commit()
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    listed_rows = listed.json()
+    usage_key_row = next((row for row in listed_rows if row["id"] == key_id), None)
+    assert usage_key_row is not None
+    assert usage_key_row["usageSummary"] is not None
+    assert usage_key_row["usageSummary"]["totalCostUsd"] == pytest.approx(7.654321, abs=1e-6)
 
 
 @pytest.mark.asyncio

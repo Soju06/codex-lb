@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import update
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -492,6 +493,35 @@ async def test_request_logs_cost_uses_flex_service_tier(async_client, db_setup):
     assert entry["serviceTier"] == "flex"
     expected = round(_cost(300_000, 100_000, 50_000, input_rate=2.5, cached_rate=0.25, output_rate=11.25), 6)
     assert entry["costUsd"] == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+async def test_request_logs_cost_uses_persisted_cost_field(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_persisted_log_cost", "persisted-log-cost@example.com"))
+
+        log = await logs_repo.add_log(
+            account_id="acc_persisted_log_cost",
+            request_id="req_persisted_log_cost_1",
+            model="gpt-5.1",
+            input_tokens=1000,
+            output_tokens=500,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=now,
+        )
+        await session.execute(update(log.__class__).where(log.__class__.id == log.id).values(cost_usd=4.321234))
+        await session.commit()
+
+    response = await async_client.get("/api/request-logs?accountId=acc_persisted_log_cost&limit=1")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert len(payload) == 1
+    assert payload[0]["costUsd"] == pytest.approx(4.321234)
 
 
 @pytest.mark.asyncio

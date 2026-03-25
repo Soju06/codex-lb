@@ -8,16 +8,24 @@ from app.core.usage.pricing import UsageTokens, calculate_cost_from_usage, get_p
 class RequestLogLike(Protocol):
     @property
     def model(self) -> str | None: ...
+
     @property
     def service_tier(self) -> str | None: ...
+
     @property
     def input_tokens(self) -> int | None: ...
+
     @property
     def output_tokens(self) -> int | None: ...
+
     @property
     def cached_input_tokens(self) -> int | None: ...
+
     @property
     def reasoning_tokens(self) -> int | None: ...
+
+    @property
+    def cost_usd(self) -> float | None: ...
 
 
 def cached_input_tokens_from_log(log: RequestLogLike) -> int | None:
@@ -46,7 +54,7 @@ def usage_tokens_from_log(log: RequestLogLike) -> UsageTokens | None:
     )
 
 
-def cost_from_log(log: RequestLogLike, *, precision: int | None = None) -> float | None:
+def calculated_cost_from_log(log: RequestLogLike, *, precision: int | None = None) -> float | None:
     if not log.model:
         return None
     usage = usage_tokens_from_log(log)
@@ -62,6 +70,15 @@ def cost_from_log(log: RequestLogLike, *, precision: int | None = None) -> float
     if precision is None:
         return cost
     return round(cost, precision)
+
+
+def cost_from_log(log: RequestLogLike, *, precision: int | None = None) -> float | None:
+    cost = log.cost_usd
+    if cost is None:
+        return None
+    if precision is None:
+        return float(cost)
+    return round(float(cost), precision)
 
 
 def total_tokens_from_log(log: RequestLogLike) -> int | None:

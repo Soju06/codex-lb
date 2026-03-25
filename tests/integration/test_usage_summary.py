@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import update
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -105,3 +106,35 @@ async def test_usage_summary_metrics(db_setup):
         assert metrics.tokens_secondary_window == 35
         assert metrics.error_rate_7d == pytest.approx(0.5)
         assert metrics.top_error == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_usage_summary_uses_persisted_request_log_cost(db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        usage_repo = UsageRepository(session)
+        service = UsageService(usage_repo, logs_repo, accounts_repo)
+
+        await accounts_repo.upsert(_make_account("acc3", "persisted-cost@example.com"))
+
+        now = utcnow()
+        log = await logs_repo.add_log(
+            account_id="acc3",
+            request_id="req_summary_persisted_cost",
+            model="gpt-5.1",
+            input_tokens=1000,
+            output_tokens=500,
+            cached_input_tokens=200,
+            reasoning_tokens=None,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=5),
+        )
+        await session.execute(update(log.__class__).where(log.__class__.id == log.id).values(cost_usd=9.876543))
+        await session.commit()
+
+        summary = await service.get_usage_summary()
+
+        assert summary.cost.total_usd_7d == pytest.approx(9.876543)

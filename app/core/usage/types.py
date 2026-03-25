@@ -118,3 +118,4 @@ class BucketModelAggregate:
     output_tokens: int
     cached_input_tokens: int
     reasoning_tokens: int
+    cost_usd: float = 0.0

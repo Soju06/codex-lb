@@ -25,11 +25,12 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
             account_id="acc",
             request_id="req",
             model="gpt-5.2",
-            input_tokens=None,
-            output_tokens=None,
+            input_tokens=1000,
+            output_tokens=500,
             latency_ms=1,
             status="success",
             error_code=None,
         )
 
         assert log.request_id == "req"
+        assert log.cost_usd is not None

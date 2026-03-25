@@ -5,14 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
-from app.core.usage.logs import (
-    cached_input_tokens_from_log,
-    total_tokens_from_log,
-    usage_tokens_from_log,
-)
-from app.core.usage.pricing import CostItem, UsageTokens, calculate_costs
+from app.core.usage.logs import cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
 from app.core.usage.types import (
     BucketModelAggregate,
+    UsageCostByModel,
     UsageCostSummary,
     UsageMetricsSummary,
     UsageSummaryPayload,
@@ -57,12 +53,14 @@ def build_trends_from_buckets(
     bucket_requests: dict[int, int] = defaultdict(int)
     bucket_errors: dict[int, int] = defaultdict(int)
     bucket_tokens: dict[int, int] = defaultdict(int)
-    bucket_cost_items: dict[int, list[CostItem]] = defaultdict(list)
+    bucket_costs: dict[int, float] = defaultdict(float)
+    total_costs_by_model: dict[str, float] = defaultdict(float)
 
     total_requests = 0
     total_errors = 0
     total_tokens = 0
     total_cached_tokens = 0
+    total_cost_usd = 0.0
 
     for row in rows:
         epoch = row.bucket_epoch
@@ -71,22 +69,14 @@ def build_trends_from_buckets(
         bucket_requests[epoch] += row.request_count
         bucket_errors[epoch] += row.error_count
         bucket_tokens[epoch] += row.input_tokens + row.output_tokens
-        bucket_cost_items[epoch].append(
-            CostItem(
-                model=row.model,
-                service_tier=row.service_tier,
-                usage=UsageTokens(
-                    input_tokens=float(row.input_tokens),
-                    output_tokens=float(row.output_tokens),
-                    cached_input_tokens=float(row.cached_input_tokens),
-                ),
-            )
-        )
+        bucket_costs[epoch] += float(row.cost_usd)
+        total_costs_by_model[row.model] += float(row.cost_usd)
 
         total_requests += row.request_count
         total_errors += row.error_count
         total_tokens += row.input_tokens + row.output_tokens
         total_cached_tokens += row.cached_input_tokens
+        total_cost_usd += float(row.cost_usd)
 
     requests_points: list[TrendPoint] = []
     tokens_points: list[TrendPoint] = []
@@ -98,11 +88,7 @@ def build_trends_from_buckets(
         req = bucket_requests.get(epoch, 0)
         err = bucket_errors.get(epoch, 0)
         tok = bucket_tokens.get(epoch, 0)
-
-        cost_value = 0.0
-        if epoch in bucket_cost_items:
-            cost_summary = calculate_costs(bucket_cost_items[epoch])
-            cost_value = cost_summary.total_usd_7d
+        cost_value = bucket_costs.get(epoch, 0.0)
 
         err_rate = (err / req) if req > 0 else 0.0
 
@@ -130,21 +116,13 @@ def build_trends_from_buckets(
         top_error=None,
     )
 
-    # Compute total cost from all rows
-    all_cost_items = [
-        CostItem(
-            model=row.model,
-            service_tier=row.service_tier,
-            usage=UsageTokens(
-                input_tokens=float(row.input_tokens),
-                output_tokens=float(row.output_tokens),
-                cached_input_tokens=float(row.cached_input_tokens),
-            ),
-        )
-        for row in rows
-        if row.bucket_epoch in slot_set
-    ]
-    total_cost = calculate_costs(all_cost_items)
+    total_cost = UsageCostSummary(
+        currency="USD",
+        total_usd_7d=round(total_cost_usd, 6),
+        by_model=[
+            UsageCostByModel(model=model, usd=round(cost, 6)) for model, cost in sorted(total_costs_by_model.items())
+        ],
+    )
 
     return trends, metrics, total_cost
 
@@ -165,8 +143,7 @@ def build_usage_summary_response(
     if cost_override is not None:
         cost = cost_override
     else:
-        cost_items = [item for item in (_log_to_cost_item(log) for log in logs_secondary) if item]
-        cost = calculate_costs(cost_items)
+        cost = _cost_summary_from_logs(logs_secondary)
 
     metrics = metrics_override if metrics_override is not None else _usage_metrics(logs_secondary)
 
@@ -244,12 +221,20 @@ def _build_account_history(
     return results
 
 
-def _log_to_cost_item(log: RequestLog) -> CostItem | None:
-    model = log.model
-    usage = usage_tokens_from_log(log)
-    if not model or not usage:
-        return None
-    return CostItem(model=model, usage=usage, service_tier=log.service_tier)
+def _cost_summary_from_logs(logs: list[RequestLog]) -> UsageCostSummary:
+    total = 0.0
+    by_model: dict[str, float] = defaultdict(float)
+    for log in logs:
+        cost = cost_from_log(log)
+        if cost is None:
+            continue
+        total += cost
+        by_model[log.model] += cost
+    return UsageCostSummary(
+        currency="USD",
+        total_usd_7d=round(total, 6),
+        by_model=[UsageCostByModel(model=model, usd=round(cost, 6)) for model, cost in sorted(by_model.items())],
+    )
 
 
 def _usage_metrics(logs_secondary: list[RequestLog]) -> UsageMetricsSummary:

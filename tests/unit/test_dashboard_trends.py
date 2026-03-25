@@ -24,6 +24,7 @@ def _make_row(
     output_tokens: int = 200,
     cached_input_tokens: int = 50,
     reasoning_tokens: int = 0,
+    cost_usd: float = 0.123,
 ) -> BucketModelAggregate:
     return BucketModelAggregate(
         bucket_epoch=FIRST_SLOT_EPOCH + slot_index * BUCKET_SECONDS,
@@ -35,6 +36,7 @@ def _make_row(
         output_tokens=output_tokens,
         cached_input_tokens=cached_input_tokens,
         reasoning_tokens=reasoning_tokens,
+        cost_usd=cost_usd,
     )
 
 
@@ -115,11 +117,11 @@ class TestBuildTrendsFromBuckets:
                 input_tokens=1_000_000,
                 output_tokens=1_000_000,
                 cached_input_tokens=0,
+                cost_usd=11.25,
             ),
         ]
         _, _, cost = build_trends_from_buckets(rows, SINCE)
 
-        # gpt-5.1: $1.25/1M input + $10.0/1M output = $11.25
         assert cost.total_usd_7d == pytest.approx(11.25)
 
     def test_out_of_range_buckets_are_ignored(self):
@@ -134,6 +136,7 @@ class TestBuildTrendsFromBuckets:
                 output_tokens=0,
                 cached_input_tokens=0,
                 reasoning_tokens=0,
+                cost_usd=123.0,
             ),
         ]
         trends, metrics, _ = build_trends_from_buckets(rows, SINCE)
@@ -165,6 +168,7 @@ class TestBuildTrendsFromBuckets:
                 input_tokens=1_000_000,
                 output_tokens=1_000_000,
                 cached_input_tokens=0,
+                cost_usd=35.0,
             ),
         ]
         _, _, cost = build_trends_from_buckets(rows, SINCE)
@@ -179,9 +183,26 @@ class TestBuildTrendsFromBuckets:
                 input_tokens=1_000_000,
                 output_tokens=1_000_000,
                 cached_input_tokens=100_000,
+                cost_usd=5.2575,
             ),
         ]
         _, _, cost = build_trends_from_buckets(rows, SINCE)
 
-        expected = (900_000 / 1_000_000) * 0.75 + (100_000 / 1_000_000) * 0.075 + (1_000_000 / 1_000_000) * 4.5
-        assert cost.total_usd_7d == pytest.approx(expected)
+        assert cost.total_usd_7d == pytest.approx(5.2575)
+
+    def test_cost_uses_persisted_bucket_value(self):
+        rows = [
+            _make_row(
+                slot_index=0,
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                cached_input_tokens=0,
+                cost_usd=42.5,
+            ),
+        ]
+
+        trends, _, cost = build_trends_from_buckets(rows, SINCE)
+
+        assert trends.cost[0].v == pytest.approx(42.5)
+        assert cost.total_usd_7d == pytest.approx(42.5)

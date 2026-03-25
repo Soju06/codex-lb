@@ -1922,7 +1922,7 @@ class ProxyService:
                                 key,
                                 openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
                             )
-                            rekey_recovered_turn_state = key.affinity_kind == "turn_state_header"
+                            rekey_recovered_turn_state = True
                         else:
                             lookup_key = _HTTPBridgeSessionKey(
                                 "turn_state_header",
@@ -2881,10 +2881,9 @@ class ProxyService:
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         new_upstream: UpstreamResponsesWebSocket | None = None
-        preserve_lease_during_reconnect = False
+        preserve_lease_during_reconnect = True
+        session.preserve_lease_during_reconnect = True
         if old_reader is not None:
-            session.preserve_lease_during_reconnect = True
-            preserve_lease_during_reconnect = True
             old_reader.cancel()
             if old_reader is not asyncio.current_task():
                 try:

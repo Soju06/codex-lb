@@ -197,3 +197,36 @@ async def test_request_decompression_propagates_client_disconnect():
 
     with pytest.raises(ClientDisconnect):
         await dispatch(request, call_next)
+
+
+@pytest.mark.asyncio
+async def test_request_decompression_propagates_body_read_failures():
+    app = FastAPI()
+    add_request_decompression_middleware(app)
+    dispatch = app.user_middleware[0].kwargs["dispatch"]
+
+    async def receive() -> dict[str, object]:
+        raise RuntimeError("receive failed")
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/echo",
+            "raw_path": b"/echo",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-encoding", b"gzip"), (b"content-type", b"application/json")],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        },
+        receive=receive,
+    )
+
+    async def call_next(_: Request):
+        raise AssertionError("call_next should not run when body read fails")
+
+    with pytest.raises(RuntimeError, match="receive failed"):
+        await dispatch(request, call_next)

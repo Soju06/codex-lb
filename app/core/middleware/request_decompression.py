@@ -130,9 +130,10 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
         max_size = settings.max_decompressed_body_bytes
         try:
             body = await request.body()
-            decompressed = _decompress_body(body, encodings, max_size)
         except ClientDisconnect:
             raise
+        try:
+            decompressed = _decompress_body(body, encodings, max_size)
         except _DecompressedBodyTooLarge:
             return JSONResponse(
                 status_code=413,

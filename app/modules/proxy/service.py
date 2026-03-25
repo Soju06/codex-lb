@@ -1760,24 +1760,15 @@ class ProxyService:
                                 api_key_id,
                             )
                     else:
-                        if previous_response_id is not None:
-                            raise ProxyResponseError(
-                                400,
-                                _http_bridge_previous_response_error_envelope(
-                                    previous_response_id,
-                                    (
-                                        "HTTP bridge continuity was lost. Replay x-codex-turn-state "
-                                        "or retry with a stable prompt_cache_key."
-                                    ),
-                                ),
-                            )
-                        raise ProxyResponseError(
-                            409,
-                            openai_error(
-                                "bridge_instance_mismatch",
-                                "HTTP bridge turn-state reached an instance that does not own the live session",
-                                error_type="server_error",
-                            ),
+                        if incoming_turn_state.startswith("http_turn_") and self._has_http_bridge_turn_state_alias_conflict(
+                            incoming_turn_state,
+                            api_key_id=api_key_id,
+                        ):
+                            raise self._invalid_http_bridge_turn_state()
+                        key = _HTTPBridgeSessionKey(
+                            "turn_state_header",
+                            incoming_turn_state,
+                            api_key_id,
                         )
 
                 await self._prune_http_bridge_sessions_locked()
@@ -1954,18 +1945,30 @@ class ProxyService:
             session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
-                session = await self._create_http_bridge_session(
+                create_headers = (
+                    _headers_without_local_http_bridge_turn_state(headers)
+                    if is_bridge_turn_state_replay or turn_state_token is not None
+                    else headers
+                )
+                create_session = self._create_http_bridge_session
+                create_kwargs: dict[str, object] = {
+                    "headers": create_headers,
+                    "affinity": create_affinity,
+                    "request_model": request_model,
+                    "idle_ttl_seconds": effective_idle_ttl_seconds,
+                }
+                create_signature = inspect.signature(create_session)
+                accepts_extra_create_kwargs = any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in create_signature.parameters.values()
+                )
+                if accepts_extra_create_kwargs or "bridge_session_id" in create_signature.parameters:
+                    create_kwargs["bridge_session_id"] = created_session_id
+                if accepts_extra_create_kwargs or "owner_instance_id" in create_signature.parameters:
+                    create_kwargs["owner_instance_id"] = current_instance
+                session = await create_session(
                     key,
-                    headers=(
-                        _headers_without_local_http_bridge_turn_state(headers)
-                        if is_bridge_turn_state_replay or turn_state_token is not None
-                        else headers
-                    ),
-                    affinity=create_affinity,
-                    request_model=request_model,
-                    idle_ttl_seconds=effective_idle_ttl_seconds,
-                    bridge_session_id=created_session_id,
-                    owner_instance_id=current_instance,
+                    **create_kwargs,
                 )
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)

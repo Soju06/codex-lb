@@ -1796,6 +1796,29 @@ class ProxyService:
         except asyncio.CancelledError:
             pass
 
+    async def _delete_http_bridge_lease_after_reader_exit(self, session: "_HTTPBridgeSession") -> None:
+        if session.preserve_lease_during_reconnect or session.lease_cleanup_owned_by_close:
+            return
+        lease_lock = getattr(session, "lease_lock", None)
+        if lease_lock is None:
+            await self._delete_http_bridge_lease(session.bridge_session_id)
+            return
+        while True:
+            if session.preserve_lease_during_reconnect or session.lease_cleanup_owned_by_close:
+                return
+            try:
+                lease_lock.acquire_nowait()
+            except anyio.WouldBlock:
+                await asyncio.sleep(0)
+                continue
+            try:
+                if session.preserve_lease_during_reconnect or session.lease_cleanup_owned_by_close:
+                    return
+                await self._delete_http_bridge_lease(session.bridge_session_id)
+                return
+            finally:
+                lease_lock.release()
+
     async def _get_or_create_http_bridge_session(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -2264,6 +2287,7 @@ class ProxyService:
 
         async def _close_session() -> None:
             session.closed = True
+            session.lease_cleanup_owned_by_close = True
             await self._stop_http_bridge_lease_keepalive(session)
             if fail_pending_requests:
                 await self._fail_pending_http_bridge_requests(
@@ -2788,8 +2812,7 @@ class ProxyService:
         finally:
             session.closed = True
             await self._stop_http_bridge_lease_keepalive(session)
-            if not session.preserve_lease_during_reconnect:
-                await self._delete_http_bridge_lease(session.bridge_session_id)
+            await self._delete_http_bridge_lease_after_reader_exit(session)
 
     async def _retry_http_bridge_request_on_fresh_upstream(
         self,
@@ -4998,6 +5021,7 @@ class _HTTPBridgeSession:
     upstream_reader: asyncio.Task[None] | None = None
     lease_keepalive_task: asyncio.Task[None] | None = None
     preserve_lease_during_reconnect: bool = False
+    lease_cleanup_owned_by_close: bool = False
     closed: bool = False
 
 

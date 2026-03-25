@@ -143,11 +143,13 @@ def test_calculate_cost_from_usage_legacy_gpt_5_service_tiers() -> None:
     usage = UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0)
 
     gpt_5_priority = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5"], service_tier="priority")
+    gpt_5_1_priority = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5.1"], service_tier="priority")
     gpt_5_1_flex = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5.1"], service_tier="flex")
     gpt_5_2_priority = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5.2"], service_tier="priority")
     gpt_5_2_flex = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS["gpt-5.2"], service_tier="flex")
 
     assert gpt_5_priority == pytest.approx(22.5)
+    assert gpt_5_1_priority == pytest.approx(22.5)
     assert gpt_5_1_flex == pytest.approx(5.625)
     assert gpt_5_2_priority == pytest.approx(31.5)
     assert gpt_5_2_flex == pytest.approx(7.875)

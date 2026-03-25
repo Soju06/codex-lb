@@ -19,6 +19,7 @@ from app.modules.dashboard_auth.service import DashboardAuthService, get_dashboa
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallService
 from app.modules.oauth.service import OauthService
+from app.modules.proxy.bridge_repository import HttpBridgeLeasesRepository
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -151,6 +152,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             usage=UsageRepository(session),
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
+            http_bridge_leases=HttpBridgeLeasesRepository(session),
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
         )

@@ -2285,38 +2285,43 @@ class ProxyService:
     ) -> None:
         lease_lock = getattr(session, "lease_lock", None)
 
-        async def _close_session() -> None:
+        async def _claim_close_cleanup() -> None:
             session.closed = True
             session.lease_cleanup_owned_by_close = True
-            await self._stop_http_bridge_lease_keepalive(session)
-            if fail_pending_requests:
-                await self._fail_pending_http_bridge_requests(
-                    session,
-                    error_code=error_code,
-                    error_message=error_message,
-                )
-            if turn_state_lock_held:
-                self._unregister_http_bridge_turn_states_locked(session)
-            else:
-                await self._unregister_http_bridge_turn_states(session)
-            if session.upstream_reader is not None:
-                session.upstream_reader.cancel()
-                if session.upstream_reader is not asyncio.current_task():
-                    try:
-                        await session.upstream_reader
-                    except asyncio.CancelledError:
-                        pass
-            try:
-                await session.upstream.close()
-            except Exception:
-                logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
-            await self._delete_http_bridge_lease(getattr(session, "bridge_session_id", None))
 
         if lease_lock is not None:
             async with lease_lock:
-                await _close_session()
+                await _claim_close_cleanup()
         else:
-            await _close_session()
+            await _claim_close_cleanup()
+
+        await self._stop_http_bridge_lease_keepalive(session)
+        if fail_pending_requests:
+            await self._fail_pending_http_bridge_requests(
+                session,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        if turn_state_lock_held:
+            self._unregister_http_bridge_turn_states_locked(session)
+        else:
+            await self._unregister_http_bridge_turn_states(session)
+        if session.upstream_reader is not None:
+            session.upstream_reader.cancel()
+            if session.upstream_reader is not asyncio.current_task():
+                try:
+                    await session.upstream_reader
+                except asyncio.CancelledError:
+                    pass
+        try:
+            await session.upstream.close()
+        except Exception:
+            logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
+        if lease_lock is not None:
+            async with lease_lock:
+                await self._delete_http_bridge_lease(getattr(session, "bridge_session_id", None))
+        else:
+            await self._delete_http_bridge_lease(getattr(session, "bridge_session_id", None))
         _log_http_bridge_event(
             "close",
             session.key,

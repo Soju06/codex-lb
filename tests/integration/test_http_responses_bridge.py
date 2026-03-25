@@ -1924,6 +1924,74 @@ async def test_v1_responses_http_bridge_signed_turn_state_live_lease_on_other_wo
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_signed_turn_state_live_peer_with_unreadable_marker_is_wrong_instance(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-a",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_worker_owner_unreadable_marker",
+        "http-bridge-worker-owner-unreadable-marker@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    session_id = "hbs_signed_worker_owner_unreadable_marker"
+    signed_turn_state = service._encode_http_bridge_turn_state(
+        session_id=session_id,
+        owner_instance_id="instance-a@111:old-start",
+        api_key_id=None,
+    )
+    monkeypatch.setattr(proxy_module, "_http_bridge_current_owner_id", lambda settings: "instance-a@222:current-start")
+    monkeypatch.setattr(proxy_module, "_http_bridge_process_exists", lambda pid: True)
+    monkeypatch.setattr(proxy_module, "_http_bridge_process_start_marker", lambda pid: None)
+
+    async with SessionLocal() as db_session:
+        await db_session.execute(delete(HttpBridgeLease).where(HttpBridgeLease.session_id == session_id))
+        await db_session.commit()
+
+    async with service._repo_factory() as repos:
+        await repos.http_bridge_leases.upsert(
+            session_id=session_id,
+            affinity_kind="turn_state_header",
+            affinity_key=signed_turn_state,
+            api_key_scope="",
+            owner_instance_id="instance-a@111:old-start",
+            lease_expires_at=proxy_module._http_bridge_lease_expires_at(120.0),
+            account_id=account.id,
+            request_model="gpt-5.1",
+            codex_session=True,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state=signed_turn_state,
+        )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("turn_state_header", signed_turn_state, None),
+            headers={"x-codex-turn-state": signed_turn_state},
+            affinity=proxy_module._AffinityPolicy(
+                key=signed_turn_state,
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.1",
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 409
+    assert exc.payload["error"].get("code") == "bridge_wrong_instance"
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_signed_turn_state_owner_mismatch_rekeys_recovered_session(
     async_client,
     app_instance,

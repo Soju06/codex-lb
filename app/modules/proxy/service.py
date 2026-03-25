@@ -5849,7 +5849,7 @@ def _http_bridge_owner_matches_current(
         return not _http_bridge_process_exists(owner_pid)
     live_process_marker = _http_bridge_process_start_marker(owner_pid)
     if live_process_marker is None:
-        return True
+        return not _http_bridge_process_exists(owner_pid)
     if live_process_marker != owner_process_marker:
         return True
     return False

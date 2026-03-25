@@ -1571,11 +1571,15 @@ class ProxyService:
             if lease is None:
                 return None
             if to_utc_naive(lease.lease_expires_at) < utcnow():
-                await repos.http_bridge_leases.delete_if_expires_at(
+                deleted = await repos.http_bridge_leases.delete_if_expires_at(
                     session_id,
                     lease_expires_at=lease.lease_expires_at,
                 )
-                return None
+                if deleted:
+                    return None
+                lease = await repos.http_bridge_leases.get_by_session_id(session_id)
+                if lease is None or to_utc_naive(lease.lease_expires_at) < utcnow():
+                    return None
             return _HTTPBridgeLeaseSnapshot(
                 session_id=lease.session_id,
                 affinity_kind=lease.affinity_kind,
@@ -2144,7 +2148,7 @@ class ProxyService:
                         self._http_bridge_inflight_sessions.pop(lookup_key, None)
                         self._http_bridge_sessions[session_key] = session
                         if (
-                            rekey_recovered_turn_state
+                            recovered_turn_state_replay
                             and incoming_turn_state is not None
                             and incoming_turn_state != session.key.affinity_key
                         ):

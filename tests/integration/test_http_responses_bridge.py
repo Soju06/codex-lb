@@ -1857,6 +1857,71 @@ async def test_v1_responses_http_bridge_live_lease_lookup_does_not_delete_concur
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_live_lease_lookup_rereads_after_refresh_wins_delete_race(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_live_lease_reread",
+        "http-bridge-live-lease-reread@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    session_id = "hbs_bridge_live_lease_reread"
+    original_expiry = proxy_module.utcnow() - timedelta(seconds=1)
+    refreshed_expiry = proxy_module.utcnow() + timedelta(seconds=120)
+    original_delete_if_expires_at = HttpBridgeLeasesRepository.delete_if_expires_at
+
+    async def fake_delete_if_expires_at(self, session_id_arg, *, lease_expires_at):
+        row = await self.get_by_session_id(session_id_arg)
+        assert row is not None
+        await self.touch(
+            session_id_arg,
+            affinity_kind=row.affinity_kind,
+            affinity_key=row.affinity_key,
+            api_key_scope=row.api_key_scope,
+            owner_instance_id=row.owner_instance_id,
+            lease_expires_at=refreshed_expiry,
+            account_id=row.account_id,
+            request_model=row.request_model,
+            codex_session=row.codex_session,
+            idle_ttl_seconds=row.idle_ttl_seconds,
+            upstream_turn_state=row.upstream_turn_state,
+            downstream_turn_state=row.downstream_turn_state,
+        )
+        return False
+
+    monkeypatch.setattr(HttpBridgeLeasesRepository, "delete_if_expires_at", fake_delete_if_expires_at)
+
+    async with service._repo_factory() as repos:
+        await repos.http_bridge_leases.upsert(
+            session_id=session_id,
+            affinity_kind="turn_state_header",
+            affinity_key="signed-state",
+            api_key_scope="",
+            owner_instance_id="instance-a",
+            lease_expires_at=original_expiry,
+            account_id=account.id,
+            request_model="gpt-5.1",
+            codex_session=True,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state="signed-state",
+        )
+
+    snapshot = await service._get_live_http_bridge_lease(session_id)
+
+    monkeypatch.setattr(HttpBridgeLeasesRepository, "delete_if_expires_at", original_delete_if_expires_at)
+
+    assert snapshot is not None
+    assert snapshot.session_id == session_id
+    assert proxy_module.to_utc_naive(snapshot.lease_expires_at) == proxy_module.to_utc_naive(refreshed_expiry)
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_signed_turn_state_live_lease_on_other_worker_is_wrong_instance(
     async_client,
     app_instance,
@@ -2357,6 +2422,20 @@ async def test_v1_responses_http_bridge_signed_turn_state_recovery_preserves_sta
         kind=proxy_module.StickySessionKind.PROMPT_CACHE,
         max_age_seconds=300,
     )
+    assert signed_turn_state in recovered.downstream_turn_state_aliases
+
+    replayed = await service._get_or_create_http_bridge_session(
+        proxy_module._HTTPBridgeSessionKey("turn_state_header", signed_turn_state, None),
+        headers={"x-codex-turn-state": signed_turn_state},
+        affinity=proxy_module._AffinityPolicy(
+            key=signed_turn_state,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.1",
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
 
     reused = await service._get_or_create_http_bridge_session(
         proxy_module._HTTPBridgeSessionKey("prompt_cache", "stable-affinity-thread", None),
@@ -2383,6 +2462,7 @@ async def test_v1_responses_http_bridge_signed_turn_state_recovery_preserves_sta
     )
     await service._reconnect_http_bridge_session(recovered, request_state=request_state)
 
+    assert replayed is recovered
     assert reused is recovered
     assert connect_count == 2
     assert sticky_selections == [

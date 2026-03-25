@@ -1645,6 +1645,70 @@ async def test_v1_responses_http_bridge_signed_turn_state_live_lease_from_reused
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_live_lease_lookup_does_not_delete_concurrently_refreshed_row(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_live_lease_race",
+        "http-bridge-live-lease-race@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    session_id = "hbs_bridge_live_lease_race"
+    original_expiry = proxy_module.utcnow() - timedelta(seconds=1)
+    refreshed_expiry = proxy_module.utcnow() + timedelta(seconds=120)
+
+    async with service._repo_factory() as repos:
+        await repos.http_bridge_leases.upsert(
+            session_id=session_id,
+            affinity_kind="turn_state_header",
+            affinity_key="signed-state",
+            api_key_scope="",
+            owner_instance_id="instance-a",
+            lease_expires_at=original_expiry,
+            account_id=account.id,
+            request_model="gpt-5.1",
+            codex_session=True,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state="signed-state",
+        )
+        lease = await repos.http_bridge_leases.get_by_session_id(session_id)
+        assert lease is not None
+        stale_expiry = lease.lease_expires_at
+        await repos.http_bridge_leases.touch(
+            session_id,
+            affinity_kind="turn_state_header",
+            affinity_key="signed-state",
+            api_key_scope="",
+            owner_instance_id="instance-a",
+            lease_expires_at=refreshed_expiry,
+            account_id=account.id,
+            request_model="gpt-5.1",
+            codex_session=True,
+            idle_ttl_seconds=120.0,
+            upstream_turn_state=None,
+            downstream_turn_state="signed-state",
+        )
+        deleted = await repos.http_bridge_leases.delete_if_expires_at(
+            session_id,
+            lease_expires_at=stale_expiry,
+        )
+    async with SessionLocal() as db_session:
+        remaining = (
+            await db_session.execute(select(HttpBridgeLease).where(HttpBridgeLease.session_id == session_id))
+        ).scalar_one_or_none()
+
+    assert deleted is False
+    assert remaining is not None
+    assert proxy_module.to_utc_naive(remaining.lease_expires_at) == proxy_module.to_utc_naive(refreshed_expiry)
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_signed_turn_state_live_lease_on_other_worker_is_wrong_instance(
     async_client,
     app_instance,
@@ -3244,6 +3308,121 @@ async def test_v1_responses_http_bridge_reconnect_restart_reader_preserves_lease
     await service._reconnect_http_bridge_session(session, request_state=request_state, restart_reader=True)
 
     assert call_order == ["touch"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_reconnect_aborts_after_lease_refresh_failure(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_reconnect_lease_failure",
+        "http-bridge-reconnect-lease-failure@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    first_upstream = _FakeBridgeUpstreamWebSocket()
+    second_upstream = _FakeBridgeUpstreamWebSocket()
+    upstreams = [first_upstream, second_upstream]
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstreams.pop(0)
+
+    async def failing_touch_http_bridge_lease(self, session):
+        del self, session
+        raise RuntimeError("lease touch failed")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", failing_touch_http_bridge_lease)
+
+    payload = proxy_module.ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    affinity = proxy_module._AffinityPolicy(
+        key="reconnect-lease-failure",
+        kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+    )
+    session = await service._get_or_create_http_bridge_session(
+        proxy_module._make_http_bridge_session_key(
+            payload,
+            headers={},
+            affinity=affinity,
+            api_key=None,
+            request_id="req_reconnect_lease_failure",
+        ),
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=128,
+    )
+
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req_reconnect_lease_failure_retry",
+        model=payload.model,
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(session, request_state=request_state, restart_reader=True)
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.payload["error"].get("code") == "upstream_unavailable"
+    assert session.closed is True
+    assert session.upstream_reader is None or session.upstream_reader.done()
 
 
 @pytest.mark.asyncio

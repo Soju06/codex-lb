@@ -69,6 +69,17 @@ class HttpBridgeLeasesRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def delete_if_expires_at(self, session_id: str, *, lease_expires_at: datetime) -> bool:
+        if not session_id:
+            return False
+        statement = delete(HttpBridgeLease).where(
+            HttpBridgeLease.session_id == session_id,
+            HttpBridgeLease.lease_expires_at == to_utc_naive(lease_expires_at),
+        )
+        result = await self._session.execute(statement.returning(HttpBridgeLease.session_id))
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def touch(
         self,
         session_id: str,

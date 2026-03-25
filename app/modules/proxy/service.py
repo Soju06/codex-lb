@@ -1571,7 +1571,10 @@ class ProxyService:
             if lease is None:
                 return None
             if to_utc_naive(lease.lease_expires_at) < utcnow():
-                await repos.http_bridge_leases.delete(session_id)
+                await repos.http_bridge_leases.delete_if_expires_at(
+                    session_id,
+                    lease_expires_at=lease.lease_expires_at,
+                )
                 return None
             return _HTTPBridgeLeaseSnapshot(
                 session_id=lease.session_id,
@@ -2896,6 +2899,10 @@ class ProxyService:
                 await self._invalidate_http_bridge_session_after_lease_failure(
                     session,
                     failure_message="Failed to persist HTTP bridge lease after reconnect session_id=%s",
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error("upstream_unavailable", "HTTP bridge session became unavailable"),
                 )
             if restart_reader:
                 session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))

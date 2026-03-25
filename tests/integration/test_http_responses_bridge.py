@@ -2988,6 +2988,90 @@ async def test_v1_responses_http_bridge_refreshes_lease_after_request_detach(app
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_turn_state_registration_failure_does_not_emit_dead_header(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    payload = proxy_module.ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    session = cast(
+        proxy_module._HTTPBridgeSession,
+        _make_dummy_bridge_session(proxy_module._HTTPBridgeSessionKey("request", "register-turn-state-failure", None)),
+    )
+    session.bridge_session_id = "hbs_register_turn_state_failure"
+    session.response_create_gate = asyncio.Semaphore(1)
+    session.account = SimpleNamespace(id="acc_register_turn_state_failure", status=AccountStatus.ACTIVE)  # type: ignore[assignment]
+    response_headers_out: dict[str, str] = {}
+
+    def fake_prepare_http_bridge_request(self, *args, **kwargs):
+        del self, args, kwargs
+        return (
+            proxy_module._WebSocketRequestState(
+                request_id="req_register_turn_state_failure",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=time.monotonic(),
+                event_queue=asyncio.Queue(),
+            ),
+            json.dumps({"type": "response.create", "model": "gpt-5.1", "input": []}),
+        )
+
+    async def fake_get_or_create_http_bridge_session(self, *args, **kwargs):
+        del self, args, kwargs
+        return session
+
+    async def fake_submit_http_bridge_request(self, session_arg, *, request_state, text_data, queue_limit):
+        del session_arg, text_data, queue_limit
+        await request_state.event_queue.put('data: {"type":"response.completed"}\n\n')
+        await request_state.event_queue.put(None)
+
+    def fake_resolve_http_bridge_downstream_turn_state(self, session_arg, *, requested_turn_state, api_key_id):
+        del self, session_arg, requested_turn_state, api_key_id
+        return "http_turn_dead_header"
+
+    async def failing_touch_http_bridge_lease(self, session_arg):
+        del self, session_arg
+        raise RuntimeError("lease touch failed")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_prepare_http_bridge_request", fake_prepare_http_bridge_request)
+    monkeypatch.setattr(proxy_module.ProxyService, "_get_or_create_http_bridge_session", fake_get_or_create_http_bridge_session)
+    monkeypatch.setattr(proxy_module.ProxyService, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_http_bridge_downstream_turn_state",
+        fake_resolve_http_bridge_downstream_turn_state,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_touch_http_bridge_lease", failing_touch_http_bridge_lease)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=120.0,
+            max_sessions=8,
+            queue_limit=8,
+            response_headers_out=response_headers_out,
+        ):
+            pass
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.payload["error"].get("code") == "upstream_unavailable"
+    assert "x-codex-turn-state" not in response_headers_out
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_keeps_lease_alive_while_request_is_active(app_instance, monkeypatch):
     _install_bridge_settings_with_limits(monkeypatch, enabled=True)
     service = get_proxy_service_for_app(app_instance)

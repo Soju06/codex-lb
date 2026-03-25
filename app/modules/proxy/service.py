@@ -2298,6 +2298,10 @@ class ProxyService:
                 session,
                 failure_message="Failed to persist HTTP bridge lease after turn-state registration session_id=%s",
             )
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "HTTP bridge session became unavailable"),
+            )
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:

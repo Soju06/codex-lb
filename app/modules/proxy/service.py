@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import inspect
 import json
 import logging
@@ -1833,6 +1834,7 @@ class ProxyService:
                 if (
                     not matched_turn_state_alias
                     and active_turn_state_lease is None
+                    and turn_state_token is None
                     and lookup_key.affinity_kind != "request"
                     and owner_instance is not None
                     and len(ring) > 1
@@ -5649,13 +5651,49 @@ def _http_bridge_owner_instance_group(owner_id: str) -> str:
     return owner_id.split("@", 1)[0]
 
 
+def _http_bridge_owner_pid(owner_id: str) -> int | None:
+    owner_parts = owner_id.split("@", 1)
+    if len(owner_parts) != 2:
+        return None
+    try:
+        pid = int(owner_parts[1])
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _http_bridge_process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        if exc.errno == errno.EPERM:
+            return True
+        return True
+    return True
+
+
 def _http_bridge_owner_matches_current(
     owner_id: str,
     *,
     current_owner_id: str,
     current_instance_id: str,
 ) -> bool:
-    return owner_id == current_owner_id or owner_id == current_instance_id
+    if owner_id == current_owner_id or owner_id == current_instance_id:
+        return True
+    if _http_bridge_owner_instance_group(owner_id) != current_instance_id:
+        return False
+    owner_pid = _http_bridge_owner_pid(owner_id)
+    if owner_pid is None:
+        return False
+    if owner_pid == os.getpid():
+        return True
+    return not _http_bridge_process_exists(owner_pid)
 
 
 def _http_bridge_owner_instance(key: _HTTPBridgeSessionKey, settings: object) -> str | None:

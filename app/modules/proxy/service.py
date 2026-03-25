@@ -1630,15 +1630,6 @@ class ProxyService:
                         downstream_turn_state=session.downstream_turn_state,
                     )
 
-    def _has_http_bridge_turn_state_alias_conflict(self, turn_state: str, *, api_key_id: str | None) -> bool:
-        requested_alias_key = _http_bridge_turn_state_alias_key(turn_state, api_key_id)
-        for alias_key in self._http_bridge_turn_state_index:
-            if alias_key[0] != turn_state:
-                continue
-            if alias_key != requested_alias_key:
-                return True
-        return False
-
     async def _get_or_create_http_bridge_session(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -1706,7 +1697,8 @@ class ProxyService:
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
-            delete_stale_turn_state_lease = False
+            recovered_turn_state_replay = False
+            stale_turn_state_lease_session_id: str | None = None
             matched_turn_state_alias = False
 
             async with self._http_bridge_lock:
@@ -1738,7 +1730,10 @@ class ProxyService:
                             ] = alias_session.key
                         key = alias_session.key
                     elif turn_state_token is not None:
-                        delete_stale_turn_state_lease = True
+                        recovered_turn_state_replay = True
+                        stale_turn_state_lease_session_id = (
+                            active_turn_state_lease.session_id if active_turn_state_lease is not None else None
+                        )
                         if active_turn_state_lease is not None:
                             key = _HTTPBridgeSessionKey(
                                 active_turn_state_lease.affinity_kind,
@@ -1760,10 +1755,7 @@ class ProxyService:
                                 api_key_id,
                             )
                     else:
-                        if incoming_turn_state.startswith("http_turn_") and self._has_http_bridge_turn_state_alias_conflict(
-                            incoming_turn_state,
-                            api_key_id=api_key_id,
-                        ):
+                        if incoming_turn_state.startswith("http_turn_"):
                             raise self._invalid_http_bridge_turn_state()
                         key = _HTTPBridgeSessionKey(
                             "turn_state_header",
@@ -1838,12 +1830,13 @@ class ProxyService:
                     self._http_bridge_sessions.pop(key, None)
                     sessions_to_close.append(existing)
                     if turn_state_token is not None:
-                        delete_stale_turn_state_lease = True
+                        recovered_turn_state_replay = True
+                        stale_turn_state_lease_session_id = (
+                            active_turn_state_lease.session_id if active_turn_state_lease is not None else None
+                        )
 
-                if delete_stale_turn_state_lease and turn_state_token is not None:
-                    await self._delete_http_bridge_lease(turn_state_token.session_id)
-                    if previous_response_id is not None:
-                        continuity_error = self._expired_http_bridge_turn_state()
+                if recovered_turn_state_replay and previous_response_id is not None:
+                    continuity_error = self._expired_http_bridge_turn_state()
 
                 if continuity_error is None and previous_response_id is not None:
                     continuity_error = ProxyResponseError(
@@ -1998,6 +1991,21 @@ class ProxyService:
                 account_id=session.account.id,
                 model=session.request_model,
             )
+            if (
+                stale_turn_state_lease_session_id is not None
+                and stale_turn_state_lease_session_id != session.bridge_session_id
+            ):
+                try:
+                    await self._delete_http_bridge_lease(stale_turn_state_lease_session_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to delete stale HTTP bridge lease after replacement registration",
+                        extra={
+                            "stale_bridge_session_id": stale_turn_state_lease_session_id,
+                            "replacement_bridge_session_id": session.bridge_session_id,
+                        },
+                        exc_info=True,
+                    )
             return session
 
     async def _prune_http_bridge_sessions_locked(self) -> None:
@@ -2030,7 +2038,9 @@ class ProxyService:
         *,
         turn_state_lock_held: bool = False,
     ) -> None:
-        async with session.lease_lock:
+        lease_lock = getattr(session, "lease_lock", None)
+
+        async def _close_session() -> None:
             session.closed = True
             if turn_state_lock_held:
                 self._unregister_http_bridge_turn_states_locked(session)
@@ -2046,7 +2056,12 @@ class ProxyService:
                 await session.upstream.close()
             except Exception:
                 logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
-            await self._delete_http_bridge_lease(session.bridge_session_id)
+            await self._delete_http_bridge_lease(getattr(session, "bridge_session_id", None))
+        if lease_lock is not None:
+            async with lease_lock:
+                await _close_session()
+        else:
+            await _close_session()
         _log_http_bridge_event(
             "close",
             session.key,

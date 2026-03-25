@@ -856,7 +856,7 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_response_id_fails_closed(
+async def test_v1_responses_http_bridge_unsigned_legacy_turn_state_with_previous_response_id_fails_closed(
     app_instance,
     monkeypatch,
 ):
@@ -882,16 +882,8 @@ async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_r
         )
 
     exc = exc_info.value
-    assert exc.status_code == 400
-    assert exc.payload["error"] == {
-        "message": (
-            "Previous response with id 'resp_missing_alias' not found. "
-            "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-        ),
-        "type": "invalid_request_error",
-        "code": "previous_response_not_found",
-        "param": "previous_response_id",
-    }
+    assert exc.status_code == 409
+    assert exc.payload["error"].get("code") == "bridge_token_invalid"
 
 
 @pytest.mark.asyncio
@@ -1065,7 +1057,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_without_local_alias(
+async def test_v1_responses_http_bridge_unsigned_legacy_turn_state_fails_closed_without_local_alias(
     async_client,
     app_instance,
     monkeypatch,
@@ -1135,7 +1127,7 @@ async def test_v1_responses_http_bridge_generated_turn_state_fails_closed_withou
 
     exc = exc_info.value
     assert exc.status_code == 409
-    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
+    assert exc.payload["error"].get("code") == "bridge_token_invalid"
 
 
 @pytest.mark.asyncio

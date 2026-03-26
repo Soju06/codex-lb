@@ -1,7 +1,9 @@
+from datetime import timedelta
+
 import pytest
-from app.db.models import LimitType, LimitWindow
+
 from app.db.session import SessionLocal
-from app.modules.api_keys.repository import ApiKeysRepository, ApiKeyUsageSummary
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyRateLimitExceededError,
@@ -21,14 +23,10 @@ async def test_limit_enforcement_with_pre_exceeded_value():
         service = ApiKeysService(repo)
 
         # Create API key with limit of 1
-        from datetime import datetime, timedelta
-        from app.core.utils.time import utcnow
-
-        now = utcnow()
-
         created = await service.create_key(
             ApiKeyCreateData(
                 name="test-key",
+                allowed_models=None,
                 limits=[
                     LimitRuleInput(
                         limit_type="total_tokens",
@@ -65,15 +63,11 @@ async def test_cost_limit_enforcement_with_pre_exceeded_value():
         repo = ApiKeysRepository(session)
         service = ApiKeysService(repo)
 
-        from datetime import datetime, timedelta
-        from app.core.utils.time import utcnow
-
-        now = utcnow()
-
         # Create API key with cost limit of 10_000_000 microdollars ($0.01)
         created = await service.create_key(
             ApiKeyCreateData(
                 name="test-key",
+                allowed_models=None,
                 limits=[
                     LimitRuleInput(
                         limit_type="cost_usd",
@@ -111,7 +105,6 @@ async def test_limit_reset_allows_requests_after_expiration():
         repo = ApiKeysRepository(session)
         service = ApiKeysService(repo)
 
-        from datetime import datetime, timedelta
         from app.core.utils.time import utcnow
 
         now = utcnow()
@@ -120,6 +113,7 @@ async def test_limit_reset_allows_requests_after_expiration():
         created = await service.create_key(
             ApiKeyCreateData(
                 name="test-key",
+                allowed_models=None,
                 limits=[
                     LimitRuleInput(
                         limit_type="total_tokens",

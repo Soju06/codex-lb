@@ -79,7 +79,15 @@ describe("api keys flow integration", () => {
 
     // Verify limit summary is displayed for the first key (has limits)
     const defaultKeyRow = getParentRow(screen.getByText("Default key"));
-    expect(within(defaultKeyRow).getByText(/Tokens/)).toBeInTheDocument();
+    expect(within(defaultKeyRow).getByText("No Usage")).toBeInTheDocument();
+    expect(within(defaultKeyRow).getByText(/Tokens:/)).toBeInTheDocument();
+
+    const readOnlyKeyRow = getParentRow(screen.getByText("Read only key"));
+    expect(within(readOnlyKeyRow).getByText("No Usage")).toBeInTheDocument();
+    expect(within(readOnlyKeyRow).getByText("No Limit")).toBeInTheDocument();
+
+    expect(screen.getByRole("columnheader", { name: "Usage" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Limit" })).toBeInTheDocument();
 
     // Open create dialog and verify limit rules editor in basic mode
     await user.click(screen.getByRole("button", { name: "Create key" }));

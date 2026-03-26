@@ -326,7 +326,10 @@ async def stream_chat_chunks(
 ) -> AsyncIterator[str]:
     created = int(time.time())
     state = _ChatChunkState()
+    terminal_chunk_sent = False
     async for line in stream:
+        if terminal_chunk_sent:
+            continue
         for chunk in iter_chat_chunks(
             [line],
             model=model,
@@ -336,7 +339,8 @@ async def stream_chat_chunks(
         ):
             yield chunk
             if chunk.strip() == "data: [DONE]":
-                return
+                terminal_chunk_sent = True
+                break
 
 
 async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> ChatCompletionResult:

@@ -200,6 +200,28 @@ export function formatRelative(ms: number): string {
   return `in ${days}d`;
 }
 
+export function formatResetRelative(ms: number): string {
+  if (ms <= 60_000) {
+    return "in 1m";
+  }
+
+  const totalMinutes = Math.floor(ms / 60_000);
+  if (totalMinutes < 60) {
+    return `in ${totalMinutes}m`;
+  }
+
+  if (totalMinutes < 1440) {
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes > 0 ? `in ${hours}h ${minutes}m` : `in ${hours}h`;
+  }
+
+  const totalHours = Math.floor(ms / 3_600_000);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return hours > 0 ? `in ${days}d ${hours}h` : `in ${days}d`;
+}
+
 export function formatCountdown(seconds: number): string {
   const clamped = Math.max(0, Math.floor(seconds || 0));
   const minutes = Math.floor(clamped / 60);
@@ -216,7 +238,7 @@ export function formatQuotaResetLabel(resetAt: string | null | undefined): strin
   if (diffMs <= 0) {
     return "now";
   }
-  return formatRelative(diffMs);
+  return formatResetRelative(diffMs);
 }
 
 export function formatQuotaResetMeta(

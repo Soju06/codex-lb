@@ -9,6 +9,7 @@ import {
   formatCurrency,
   formatPercentNullable,
   formatQuotaResetLabel,
+  formatResetRelative,
   formatWindowLabel,
 } from "@/utils/formatters";
 
@@ -80,8 +81,7 @@ function formatResetCountdown(resetAt: number | null): string | null {
   if (resetAt === null) return null;
   const diffMs = resetAt * 1000 - Date.now();
   if (diffMs <= 0) return "Resetting...";
-  if (diffMs >= 3600000) return `Resets in ${Math.floor(diffMs / 3600000)}h ${Math.floor((diffMs % 3600000) / 60000)}m`;
-  return `Resets in ${Math.floor(diffMs / 60000)}m`;
+  return `Resets ${formatResetRelative(diffMs)}`;
 }
 
 function AdditionalQuotaRow({

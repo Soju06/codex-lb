@@ -55,6 +55,11 @@ docker run -d --name codex-lb \
 
 # or uvx
 uvx codex-lb
+
+# or Helm (Kubernetes)
+helm repo add icoretech https://icoretech.github.io/helm
+helm repo update
+helm upgrade --install codex-lb icoretech/codex-lb
 ```
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.

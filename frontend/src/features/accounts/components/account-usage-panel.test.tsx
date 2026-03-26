@@ -1,10 +1,19 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import { createAccountSummary } from "@/test/mocks/factories";
 
 describe("AccountUsagePanel", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("shows '--' for missing quota percent instead of 0%", () => {
     const account = createAccountSummary({
       usage: {
@@ -46,7 +55,7 @@ describe("AccountUsagePanel", () => {
           meteredFeature: "codex_bengalfox",
           primaryWindow: {
             usedPercent: 35,
-            resetAt: 1_762_400_000,
+            resetAt: Math.floor(new Date("2026-01-07T13:00:00.000Z").getTime() / 1000),
             windowMinutes: 300,
           },
           secondaryWindow: null,
@@ -59,6 +68,7 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("Additional Quotas")).toBeInTheDocument();
     expect(screen.getByText("GPT-5.3-Codex-Spark")).toBeInTheDocument();
     expect(screen.getByText(/35% used/)).toBeInTheDocument();
+    expect(screen.getByText("Resets in 6d 13h")).toBeInTheDocument();
   });
 
   it("renders request log usage summary when available", () => {

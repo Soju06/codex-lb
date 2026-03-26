@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.8.2](https://github.com/Soju06/codex-lb/compare/v1.8.1...v1.8.2) (2026-03-26)
+
+
+### Bug Fixes
+
+* **api-keys:** normalize timezone-aware expirations before persistence ([#249](https://github.com/Soju06/codex-lb/issues/249)) ([abf96f8](https://github.com/Soju06/codex-lb/commit/abf96f85a265cf3d45eed7f47ecfb10de6979b01))
+* graph do not render when primary = [], even secondary have data ([#253](https://github.com/Soju06/codex-lb/issues/253)) ([98434c4](https://github.com/Soju06/codex-lb/commit/98434c491698747c5c0dbb69f2f4c471affdd86a))
+* **middleware:** handle disconnects and body read failures ([#263](https://github.com/Soju06/codex-lb/issues/263)) ([8188c31](https://github.com/Soju06/codex-lb/commit/8188c31110b7e284a97d83777728ed54b7e83593))
+
+
+### Documentation
+
+* add huzky-v as a contributor for question, and maintenance ([#257](https://github.com/Soju06/codex-lb/issues/257)) ([337db69](https://github.com/Soju06/codex-lb/commit/337db69b7a138f43cae4dd857dd08196d06e4cff))
+* add yigitkonur as a contributor for bug, and code ([#258](https://github.com/Soju06/codex-lb/issues/258)) ([a5ffdf3](https://github.com/Soju06/codex-lb/commit/a5ffdf307f161672f74bd44e6ccbd286bbbe8faa))
+
 ## [1.8.1](https://github.com/Soju06/codex-lb/compare/v1.8.0...v1.8.1) (2026-03-22)
 
 

@@ -22,6 +22,7 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
+from app.core.openai.model_alias import parse_model_alias
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
@@ -393,7 +394,17 @@ async def v1_chat_completions(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    effective_model = _effective_model_for_api_key(api_key, payload.model)
+    canonical_model, alias_effort = parse_model_alias(payload.model)
+    payload.model = canonical_model
+    if alias_effort is not None:
+        extras = payload.model_extra or {}
+        has_reasoning = "reasoning" in extras or "reasoning_effort" in extras
+        if not has_reasoning:
+            if payload.__pydantic_extra__ is None:
+                payload.__pydantic_extra__ = {}
+            payload.__pydantic_extra__["reasoning_effort"] = alias_effort
+
+    effective_model = _effective_model_for_api_key(api_key, canonical_model)
     validate_model_access(api_key, effective_model)
 
     rate_limit_headers = await context.service.rate_limit_headers()

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Integer, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -489,6 +489,66 @@ class ApiKeysRepository:
                 cost_microdollars=cost_microdollars,
             )
         )
+
+    async def trends_by_key(
+        self,
+        key_id: str,
+        since: datetime,
+        bucket_seconds: int = 3600,
+    ) -> list[dict]:
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql":
+            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+        else:
+            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_col = bucket_expr.label("bucket_epoch")
+
+        stmt = (
+            select(
+                bucket_col,
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
+                func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("total_reasoning_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .where(
+                RequestLog.api_key_id == key_id,
+                RequestLog.requested_at >= since,
+            )
+            .group_by(bucket_col)
+            .order_by(bucket_col)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            {
+                "bucket_epoch": int(row.bucket_epoch),
+                "total_tokens": int((row.total_input_tokens or 0) + (row.total_output_tokens or 0)),
+                "total_cost_usd": round(float(row.total_cost_usd or 0.0), 6),
+            }
+            for row in result.all()
+        ]
+
+    async def usage_7d(self, key_id: str, since: datetime) -> dict:
+        stmt = select(
+            func.count(RequestLog.id).label("total_requests"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+        ).where(
+            RequestLog.api_key_id == key_id,
+            RequestLog.requested_at >= since,
+        )
+        result = await self._session.execute(stmt)
+        row = result.one()
+        return {
+            "total_requests": int(row.total_requests),
+            "total_tokens": int((row.total_input_tokens or 0) + (row.total_output_tokens or 0)),
+            "cached_input_tokens": int(row.cached_input_tokens or 0),
+            "total_cost_usd": round(float(row.total_cost_usd or 0.0), 6),
+        }
 
 
 def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:

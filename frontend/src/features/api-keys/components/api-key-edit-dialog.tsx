@@ -92,7 +92,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     if (hasLimitRuleChanges(initialLimitRules, limitRules)) {
       payload.limits = normalizedLimits;
     }
-    await onSubmit(payload);
+    try {
+      await onSubmit(payload);
+    } catch {
+      return;
+    }
     onClose();
   };
 
@@ -119,12 +123,12 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             />
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Allowed models</label>
+              <div className="text-sm font-medium">Allowed models</div>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced model</label>
+              <div className="text-sm font-medium">Enforced model</div>
               <Input
                 value={enforcedModel}
                 onChange={(e) => setEnforcedModel(e.target.value)}
@@ -134,7 +138,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced reasoning</label>
+              <div className="text-sm font-medium">Enforced reasoning</div>
               <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
                 <SelectTrigger>
                   <SelectValue placeholder="None" />
@@ -151,7 +155,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Expiry</label>
+              <div className="text-sm font-medium">Expiry</div>
               <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
             </div>
 
@@ -174,7 +178,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             {apiKey.limits.length > 0 ? (
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Current usage</label>
+                <div className="text-xs font-medium text-muted-foreground">Current usage</div>
                 <div className="space-y-1">
                   {apiKey.limits.map((limit) => (
                     <LimitUsageBar key={limit.id} limit={limit} />

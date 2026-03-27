@@ -61,7 +61,11 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
       expiresAt: expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
-    await onSubmit(payload);
+    try {
+      await onSubmit(payload);
+    } catch {
+      return;
+    }
     form.reset();
     setSelectedModels([]);
     setLimitRules([]);

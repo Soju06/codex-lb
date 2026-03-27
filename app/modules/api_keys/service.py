@@ -4,7 +4,7 @@ import json
 import secrets
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Protocol
 
@@ -17,12 +17,17 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyTrendBucket,
     ApiKeyUsageSummary,
+    ApiKeyUsageTotals,
     ReservationResult,
     UsageReservationData,
     UsageReservationItemData,
     _Unset,
 )
+
+_SPARKLINE_DAYS = 7
+_DETAIL_BUCKET_SECONDS = 3600
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -128,6 +133,20 @@ class ApiKeysRepositoryProtocol(Protocol):
         cached_input_tokens: int | None,
         cost_microdollars: int | None,
     ) -> None: ...
+
+    async def trends_by_key(
+        self,
+        key_id: str,
+        since: datetime,
+        until: datetime,
+        bucket_seconds: int = 3600,
+    ) -> list[ApiKeyTrendBucket]: ...
+
+    async def usage_7d(
+        self,
+        key_id: str,
+        since: datetime,
+    ) -> ApiKeyUsageTotals: ...
 
 
 class ApiKeyNotFoundError(ValueError):
@@ -622,6 +641,56 @@ class ApiKeysService:
             cost_microdollars=cost_microdollars,
         )
 
+    async def get_key_trends(self, key_id: str) -> ApiKeyTrendsData | None:
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            return None
+        now = utcnow()
+        since = now - timedelta(days=_SPARKLINE_DAYS)
+        buckets = await self._repository.trends_by_key(
+            key_id,
+            since,
+            now,
+            _DETAIL_BUCKET_SECONDS,
+        )
+        return _build_api_key_trends(key_id, buckets, since, now, _DETAIL_BUCKET_SECONDS)
+
+    async def get_key_usage_7d(self, key_id: str) -> ApiKeyUsage7DayData | None:
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            return None
+        since = utcnow() - timedelta(days=7)
+        data = await self._repository.usage_7d(key_id, since)
+        return ApiKeyUsage7DayData(
+            key_id=key_id,
+            total_tokens=data.total_tokens,
+            total_cost_usd=data.total_cost_usd,
+            total_requests=data.total_requests,
+            cached_input_tokens=data.cached_input_tokens,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyTrendsPoint:
+    t: datetime
+    v: float
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyTrendsData:
+    key_id: str
+    cost: list[ApiKeyTrendsPoint] = field(default_factory=list)
+    tokens: list[ApiKeyTrendsPoint] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyUsage7DayData:
+    key_id: str
+    total_tokens: int = 0
+    total_cost_usd: float = 0.0
+    total_requests: int = 0
+    cached_input_tokens: int = 0
+
 
 def _normalize_name(name: str) -> str:
     normalized = name.strip()
@@ -1005,3 +1074,37 @@ def _calculate_cost_microdollars(
     if cost_usd is None:
         return 0
     return int(cost_usd * 1_000_000)
+
+
+def _build_api_key_trends(
+    key_id: str,
+    buckets: list[ApiKeyTrendBucket],
+    since: datetime,
+    until: datetime,
+    bucket_seconds: int,
+) -> ApiKeyTrendsData:
+    since_utc = since.replace(tzinfo=timezone.utc) if since.tzinfo is None else since.astimezone(timezone.utc)
+    until_utc = until.replace(tzinfo=timezone.utc) if until.tzinfo is None else until.astimezone(timezone.utc)
+    if until_utc <= since_utc:
+        return ApiKeyTrendsData(key_id=key_id)
+
+    start_epoch = (int(since_utc.timestamp()) // bucket_seconds) * bucket_seconds
+    # The SQL window is exclusive of `until`, so step back one microsecond to find the last visible bucket.
+    end_epoch = (int((until_utc - timedelta(microseconds=1)).timestamp()) // bucket_seconds) * bucket_seconds
+    bucket_count = ((end_epoch - start_epoch) // bucket_seconds) + 1
+    time_grid = [start_epoch + i * bucket_seconds for i in range(bucket_count)]
+
+    cost_by_bucket: dict[int, float] = {}
+    tokens_by_bucket: dict[int, int] = {}
+    for b in buckets:
+        cost_by_bucket[b.bucket_epoch] = b.total_cost_usd
+        tokens_by_bucket[b.bucket_epoch] = b.total_tokens
+
+    cost_points: list[ApiKeyTrendsPoint] = []
+    tokens_points: list[ApiKeyTrendsPoint] = []
+    for epoch in time_grid:
+        dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        cost_points.append(ApiKeyTrendsPoint(t=dt, v=round(cost_by_bucket.get(epoch, 0.0), 6)))
+        tokens_points.append(ApiKeyTrendsPoint(t=dt, v=float(tokens_by_bucket.get(epoch, 0))))
+
+    return ApiKeyTrendsData(key_id=key_id, cost=cost_points, tokens=tokens_points)

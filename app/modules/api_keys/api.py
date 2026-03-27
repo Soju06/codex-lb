@@ -9,7 +9,9 @@ from app.modules.api_keys.schemas import (
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
     ApiKeyResponse,
+    ApiKeyTrendsResponse,
     ApiKeyUpdateRequest,
+    ApiKeyUsage7DayResponse,
     ApiKeyUsageSummaryResponse,
     LimitRuleResponse,
 )
@@ -192,4 +194,38 @@ async def regenerate_api_key(
     return ApiKeyCreateResponse(
         **resp.model_dump(),
         key=row.key,
+    )
+
+
+@router.get("/{key_id}/trends", response_model=ApiKeyTrendsResponse)
+async def get_api_key_trends(
+    key_id: str,
+    context: ApiKeysContext = Depends(get_api_keys_context),
+) -> ApiKeyTrendsResponse:
+    from app.modules.api_keys.schemas import ApiKeyTrendPoint
+
+    result = await context.service.get_key_trends(key_id)
+    if result is None:
+        raise DashboardNotFoundError(f"API key not found: {key_id}")
+    return ApiKeyTrendsResponse(
+        key_id=result.key_id,
+        cost=[ApiKeyTrendPoint(t=p.t, v=p.v) for p in result.cost],
+        tokens=[ApiKeyTrendPoint(t=p.t, v=p.v) for p in result.tokens],
+    )
+
+
+@router.get("/{key_id}/usage-7d", response_model=ApiKeyUsage7DayResponse)
+async def get_api_key_usage_7d(
+    key_id: str,
+    context: ApiKeysContext = Depends(get_api_keys_context),
+) -> ApiKeyUsage7DayResponse:
+    result = await context.service.get_key_usage_7d(key_id)
+    if result is None:
+        raise DashboardNotFoundError(f"API key not found: {key_id}")
+    return ApiKeyUsage7DayResponse(
+        key_id=result.key_id,
+        total_tokens=result.total_tokens,
+        total_cost_usd=result.total_cost_usd,
+        total_requests=result.total_requests,
+        cached_input_tokens=result.cached_input_tokens,
     )

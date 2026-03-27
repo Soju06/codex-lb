@@ -102,6 +102,34 @@ describe("ApiKeyEditDialog", () => {
       },
     ]);
   });
+
+  it("keeps the dialog open when submit fails", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockRejectedValue(new Error("boom update"));
+    const onOpenChange = vi.fn();
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey()}
+        onOpenChange={onOpenChange}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const nameInput = screen.getByLabelText("Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Edit API key" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("Renamed key");
+  });
 });
 
 describe("hasLimitRuleChanges", () => {

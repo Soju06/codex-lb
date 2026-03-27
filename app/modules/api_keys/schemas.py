@@ -70,3 +70,22 @@ class ApiKeyResponse(DashboardModel):
 
 class ApiKeyCreateResponse(ApiKeyResponse):
     key: str
+
+
+class ApiKeyTrendPoint(DashboardModel):
+    t: datetime
+    v: float
+
+
+class ApiKeyTrendsResponse(DashboardModel):
+    key_id: str
+    cost: list[ApiKeyTrendPoint] = Field(default_factory=list)
+    tokens: list[ApiKeyTrendPoint] = Field(default_factory=list)
+
+
+class ApiKeyUsage7DayResponse(DashboardModel):
+    key_id: str
+    total_tokens: int = 0
+    total_cost_usd: float = 0
+    total_requests: int = 0
+    cached_input_tokens: int = 0

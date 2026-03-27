@@ -1,108 +1,170 @@
+import { HttpResponse, http } from "msw";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
+import { createApiKey, createApiKeyUsage7Day } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
-function getParentRow(cell: HTMLElement): HTMLElement {
-  const row = cell.closest("tr");
-  if (!row) throw new Error("Expected element to be inside a table row");
-  return row;
+function getDialogFooterClose(dialog: HTMLElement): HTMLElement {
+	return within(dialog)
+		.getAllByRole("button", { name: "Close" })
+		.find((button) => button.getAttribute("data-slot") === "button") as HTMLElement;
 }
 
-async function openRowActions(user: ReturnType<typeof userEvent.setup>, row: HTMLElement) {
-  const actionsButton = within(row).getByRole("button", { name: "Actions" });
-  await user.click(actionsButton);
-}
+describe("apis page integration", () => {
+	beforeEach(() => {
+		window.history.pushState({}, "", "/apis");
+	});
 
-describe("api keys flow integration", () => {
-  it("creates, shows plain key dialog, edits, and deletes an api key", async () => {
-    const user = userEvent.setup();
-    const createdName = "Integration Key";
-    const updatedName = "Integration Key Updated";
+	it("loads the APIs page, selects by query param, and filters keys by search", async () => {
+		window.history.pushState({}, "", "/apis?selected=key_2");
+		const user = userEvent.setup();
+		renderWithProviders(<App />);
 
-    window.history.pushState({}, "", "/settings");
-    renderWithProviders(<App />);
+		expect(await screen.findByRole("heading", { name: "APIs" })).toBeInTheDocument();
+		expect(await screen.findByRole("heading", { name: "Read only key" })).toBeInTheDocument();
 
-    const createButton = await screen.findByRole("button", { name: "Create key" });
-    expect(createButton).toBeInTheDocument();
-    await user.click(createButton);
-    await user.type(screen.getByLabelText("Name"), createdName);
-    await user.click(screen.getByRole("button", { name: "Create" }));
+		const search = screen.getByPlaceholderText("Search API keys...");
+		await user.type(search, "Default");
 
-    const createdDialog = await screen.findByRole("dialog", { name: "API key created" });
-    expect(screen.getByText(/sk-test-generated/i)).toBeInTheDocument();
-    const closeCandidates = within(createdDialog).getAllByRole("button", {
-      name: "Close",
-    });
-    const closeButton =
-      closeCandidates.find((element) => element.getAttribute("data-slot") === "button") ??
-      closeCandidates[0];
-    await user.click(closeButton);
+		expect(screen.getByText("Default key")).toBeInTheDocument();
 
-    const createdRow = getParentRow(await screen.findByText(createdName));
+		await user.click(screen.getByRole("button", { name: /Default key/i }));
+		expect(await screen.findByRole("heading", { name: "Default key" })).toBeInTheDocument();
+	});
 
-    await openRowActions(user, createdRow);
-    await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
-    const nameInput = await screen.findByLabelText("Name");
-    await user.clear(nameInput);
-    await user.type(nameInput, updatedName);
-    await user.click(screen.getByRole("button", { name: "Save" }));
+	it("creates a key, shows the one-time key dialog, and refreshes the list", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<App />);
 
-    const updatedRow = getParentRow(await screen.findByText(updatedName));
+		await user.click(await screen.findByRole("button", { name: "Create API Key" }));
+		const createDialog = await screen.findByRole("dialog", { name: "Create API key" });
+		await user.type(within(createDialog).getByLabelText("Name"), "Created from APIs page");
+		await user.click(within(createDialog).getByRole("button", { name: "Create" }));
 
-    await openRowActions(user, updatedRow);
-    await user.click(await screen.findByRole("menuitem", { name: /Delete/ }));
-    const confirmTitle = await screen.findByText("Delete API key");
-    const confirmDialog = confirmTitle.closest("[role='alertdialog']");
-    expect(confirmDialog).not.toBeNull();
-    if (!confirmDialog) throw new Error("Expected confirm dialog");
-    await user.click(
-      within(confirmDialog as HTMLElement).getByRole("button", { name: "Delete" }),
-    );
+		const dialog = await screen.findByRole("dialog", { name: "API key created" });
+		expect(within(dialog).getByText(/sk-test-generated-/)).toBeInTheDocument();
+		expect(within(dialog).getByText(/It will not be shown again/)).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(screen.queryByText(updatedName)).not.toBeInTheDocument();
-    });
-  });
+		await user.click(getDialogFooterClose(dialog));
+		expect(await screen.findByText("Created from APIs page")).toBeInTheDocument();
+	});
 
-  it("displays existing api keys with limit summaries and shows limit rules editor in create dialog", async () => {
-    const user = userEvent.setup({ delay: null });
+	it("edits, toggles, regenerates, and deletes the selected key", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<App />);
 
-    window.history.pushState({}, "", "/settings");
-    renderWithProviders(<App />);
+		expect(await screen.findByRole("heading", { name: "Default key" })).toBeInTheDocument();
 
-    // Default mock keys are loaded — first key has a total_tokens weekly limit
-    expect(await screen.findByText("Default key")).toBeInTheDocument();
-    expect(await screen.findByText("Read only key")).toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Actions" }));
+		await user.click(screen.getByRole("menuitem", { name: "Edit" }));
 
-    // Verify limit summary is displayed for the first key (has limits)
-    const defaultKeyRow = getParentRow(screen.getByText("Default key"));
-    expect(within(defaultKeyRow).getByText(/Tokens/)).toBeInTheDocument();
+		const editDialog = await screen.findByRole("dialog", { name: "Edit API key" });
+		const nameInput = within(editDialog).getByLabelText("Name");
+		await user.clear(nameInput);
+		await user.type(nameInput, "Updated from APIs page");
+		await user.click(within(editDialog).getByRole("button", { name: "Save" }));
 
-    // Open create dialog and verify limit rules editor in basic mode
-    await user.click(screen.getByRole("button", { name: "Create key" }));
+		expect(await screen.findByRole("heading", { name: "Updated from APIs page" })).toBeInTheDocument();
 
-    const limitsElements = screen.getAllByText("Limits");
-    expect(limitsElements.length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("Weekly token limit")).toBeInTheDocument();
-    expect(screen.getByText("Weekly cost limit ($)")).toBeInTheDocument();
-    expect(screen.getByText("Allowed models")).toBeInTheDocument();
-  });
+		await user.click(screen.getByRole("button", { name: "Disable" }));
+		expect(await screen.findByRole("button", { name: "Enable" })).toBeInTheDocument();
 
-  it("shows usage bars when editing a key with limits", async () => {
-    const user = userEvent.setup({ delay: null });
+		await user.click(screen.getByRole("button", { name: "Actions" }));
+		await user.click(screen.getByRole("menuitem", { name: "Regenerate" }));
 
-    window.history.pushState({}, "", "/settings");
-    renderWithProviders(<App />);
+		const regeneratedDialog = await screen.findByRole("dialog", { name: "API key created" });
+		expect(within(regeneratedDialog).getByText(/sk-test-regenerated-key_1/)).toBeInTheDocument();
+		await user.click(getDialogFooterClose(regeneratedDialog));
 
-    expect(await screen.findByText("Default key")).toBeInTheDocument();
-    const defaultKeyRow = getParentRow(screen.getByText("Default key"));
-    await openRowActions(user, defaultKeyRow);
-    await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
+		await user.click(screen.getByRole("button", { name: "Delete" }));
+		const confirmDialog = await screen.findByRole("alertdialog", { name: "Delete API key" });
+		await user.click(within(confirmDialog).getByRole("button", { name: "Delete" }));
 
-    // Edit dialog should show current usage section
-    expect(await screen.findByText("Current usage")).toBeInTheDocument();
-  });
+		await waitFor(() => {
+			expect(screen.queryByText("Updated from APIs page")).not.toBeInTheDocument();
+		});
+	});
+
+	it("shows backend errors from API mutations in the page alert", async () => {
+		const user = userEvent.setup();
+		server.use(
+			http.post("/api/api-keys/", () => {
+				return HttpResponse.json(
+					{ error: { code: "invalid_api_key_payload", message: "Invalid create payload" } },
+					{ status: 400 },
+				);
+			}),
+		);
+
+		renderWithProviders(<App />);
+
+		await user.click(await screen.findByRole("button", { name: "Create API Key" }));
+		const createDialog = await screen.findByRole("dialog", { name: "Create API key" });
+		await user.type(within(createDialog).getByLabelText("Name"), "Broken create");
+		await user.click(within(createDialog).getByRole("button", { name: "Create" }));
+
+		expect(await screen.findByText("Invalid create payload")).toBeInTheDocument();
+	});
+
+	it("renders the empty detail state when the API list is empty", async () => {
+		server.use(
+			http.get("/api/api-keys/", () => HttpResponse.json([])),
+		);
+
+		renderWithProviders(<App />);
+
+		expect(await screen.findByRole("heading", { name: "APIs" })).toBeInTheDocument();
+		expect(await screen.findByText("No matching API keys")).toBeInTheDocument();
+		expect(screen.getByText("Select an API key")).toBeInTheDocument();
+	});
+
+	it("shows the correct detail view for trend and usage responses returned by the API", async () => {
+		server.use(
+			http.get("/api/api-keys/", () =>
+				HttpResponse.json([
+					createApiKey({
+						id: "key_custom",
+						name: "Custom analytics key",
+						allowedModels: null,
+						expiresAt: null,
+						usageSummary: {
+							requestCount: 42,
+							totalTokens: 12_000,
+							cachedInputTokens: 3_000,
+							totalCostUsd: 0.42,
+						},
+					}),
+				]),
+			),
+			http.get("/api/api-keys/:keyId/trends", ({ params }) => {
+				return HttpResponse.json({
+					keyId: String(params.keyId),
+					cost: [
+						{ t: "2026-01-01T00:00:00Z", v: 0.12 },
+						{ t: "2026-01-01T01:00:00Z", v: 0.3 },
+					],
+					tokens: [
+						{ t: "2026-01-01T00:00:00Z", v: 5000 },
+						{ t: "2026-01-01T01:00:00Z", v: 7000 },
+					],
+				});
+			}),
+			http.get("/api/api-keys/:keyId/usage-7d", ({ params }) => {
+				return HttpResponse.json(createApiKeyUsage7Day({ keyId: String(params.keyId) }));
+			}),
+		);
+
+		renderWithProviders(<App />);
+
+		expect(await screen.findByRole("heading", { name: "Custom analytics key" })).toBeInTheDocument();
+		expect(screen.getByText("All models")).toBeInTheDocument();
+		expect(screen.getByText(/12K tok/)).toBeInTheDocument();
+		expect(screen.getByText(/3K cached/)).toBeInTheDocument();
+		expect(screen.getByText(/42 req/)).toBeInTheDocument();
+		expect(screen.getByText(/\$0.42/)).toBeInTheDocument();
+	});
 });

@@ -1,12 +1,14 @@
 ## Why
-Codex CLI websocket/resume flows now send previous_response_id for incremental Responses requests. codex-lb still rejects that field, causing websocket-enabled exec/resume failures and leaving users stuck on websocket-off fallback paths with degraded cache behavior.
+The original `previous_response_id` work in `#211` mixed durable continuity improvements with an unwanted PostgreSQL-first backend rewrite. `codex-lb` still needs the continuity gains, but SQLite remains the default runtime and must stay first-class. We need to restore the remaining wins on the existing project-native database primitives.
 
 ## What Changes
-- Allow and forward previous_response_id on Responses requests where upstream accepts it.
-- Preserve conflict validation between conversation and previous_response_id.
-- Add regression coverage for websocket and HTTP forwarding paths.
-- Verify real cache behavior locally with docker compose across websocket on/off and /v1/responses variants.
+- Persist terminal Responses snapshots in the default database so `previous_response_id` can survive process restart and HTTP bridge loss.
+- Resolve `previous_response_id` from caller-scoped continuity state when live upstream continuity is unavailable, while preserving the conflict validation against `conversation`.
+- Prefer the originating upstream account for replay when that account is still eligible.
+- Retry one websocket request on early upstream disconnect before `response.created`.
+- Extend migration, HTTP bridge, websocket, and API-key scoping regression coverage and sync the specs.
 
 ## Impact
-- Restores compatibility with newer Codex CLI websocket flows.
-- Enables direct measurement of whether cache behavior returns to expected levels.
+- Restores durable `previous_response_id` compatibility for newer Codex CLI and OpenAI-style Responses flows without making PostgreSQL mandatory.
+- Preserves SQLite as the default runtime while keeping PostgreSQL optional.
+- Improves resilience for native websocket clients during early upstream disconnects.

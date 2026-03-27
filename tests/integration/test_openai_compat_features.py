@@ -95,31 +95,144 @@ async def test_v1_responses_rejects_input_file_id(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_accepts_previous_response_id(async_client, monkeypatch):
-    await _import_account(async_client, "acc_prev_response_id", "prev-response-id@example.com")
-    seen_previous_response_ids: list[str | None] = []
+async def test_v1_responses_replays_previous_response_after_restart(async_client, app_instance, monkeypatch):
+    await _import_account(async_client, "acc_prev_response", "prev-response@example.com")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
-        del headers, access_token, account_id, base_url, raise_for_status, _kw
-        seen_previous_response_ids.append(getattr(payload, "previous_response_id", None))
-        yield 'data: {"type":"response.completed","response":{"id":"resp_abc123"}}\n\n'
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, _kwargs
+        seen_inputs.append(payload.input)
+        if len(seen_inputs) == 1:
+            yield (
+                'data: {"type":"response.output_item.done","output_index":0,'
+                '"item":{"id":"msg_prev","type":"message","role":"assistant",'
+                '"content":[{"type":"output_text","text":"Prior answer"}]}}\n\n'
+            )
+            yield _completed_event("resp_prev")
+            return
+        yield _completed_event("resp_followup")
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {
-        "model": "gpt-5.2",
-        "previous_response_id": "resp_abc123",
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Continue."}],
-            }
+    first = await async_client.post("/v1/responses", json={"model": "gpt-5.2", "input": "Hello"})
+    assert first.status_code == 200
+
+    if hasattr(app_instance.state, "proxy_service"):
+        delattr(app_instance.state, "proxy_service")
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.2",
+            "previous_response_id": "resp_prev",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}],
+        },
+    )
+    assert second.status_code == 200
+    assert seen_inputs == [
+        [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "Prior answer"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
         ],
-        "stream": True,
-    }
-    resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 200
-    assert seen_previous_response_ids == ["resp_abc123"]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_previous_response_id_is_scoped_to_api_key(async_client, app_instance, monkeypatch):
+    await _import_account(async_client, "acc_prev_scoped", "prev-scoped@example.com")
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created_a = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "response-key-a"},
+    )
+    assert created_a.status_code == 200
+    key_a = created_a.json()["key"]
+
+    created_b = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "response-key-b"},
+    )
+    assert created_b.status_code == 200
+    key_b = created_b.json()["key"]
+
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, _kwargs
+        seen_inputs.append(payload.input)
+        if len(seen_inputs) == 1:
+            yield (
+                'data: {"type":"response.output_item.done","output_index":0,'
+                '"item":{"id":"msg_prev","type":"message","role":"assistant",'
+                '"content":[{"type":"output_text","text":"Prior answer"}]}}\n\n'
+            )
+            yield _completed_event("resp_prev_scoped")
+            return
+        yield _completed_event("resp_followup_scoped")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    first = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {key_a}"},
+        json={"model": "gpt-5.2", "input": "Hello"},
+    )
+    assert first.status_code == 200
+
+    if hasattr(app_instance.state, "proxy_service"):
+        delattr(app_instance.state, "proxy_service")
+
+    second = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {key_a}"},
+        json={
+            "model": "gpt-5.2",
+            "previous_response_id": "resp_prev_scoped",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}],
+        },
+    )
+    assert second.status_code == 200
+
+    if hasattr(app_instance.state, "proxy_service"):
+        delattr(app_instance.state, "proxy_service")
+
+    blocked = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {key_b}"},
+        json={
+            "model": "gpt-5.2",
+            "previous_response_id": "resp_prev_scoped",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}],
+        },
+    )
+    assert blocked.status_code == 400
+    error = blocked.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "previous_response_id"
+    assert error["message"] == "Unknown previous_response_id"
+
+    assert seen_inputs == [
+        [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "Prior answer"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
+        ],
+    ]
 
 
 @pytest.mark.asyncio

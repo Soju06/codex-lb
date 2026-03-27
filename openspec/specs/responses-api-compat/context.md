@@ -19,7 +19,9 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.
 - `truncation` is rejected.
-- `previous_response_id` is forwarded when `conversation` is absent, but the `conversation + previous_response_id` conflict remains rejected.
+- `previous_response_id` is accepted when `conversation` is absent, but the `conversation + previous_response_id` conflict remains rejected.
+- Live bridge/session continuity is preferred, but the service now persists caller-scoped response snapshots in the default database so `previous_response_id` can survive bridge loss and process restart without requiring PostgreSQL.
+- Persisted continuity is scoped by `api_key_id` when API key auth is enabled; requests from another API key fail closed instead of replaying the wrong caller's context.
 - HTTP `/v1/responses` and HTTP `/backend-api/codex/responses` now use a server-side upstream websocket session bridge by default so repeated compatible requests can keep upstream response/session continuity without forcing clients onto the public websocket route.
 - Codex-affinity HTTP bridge sessions can optionally use a conservative first-request prewarm (`generate=false`), but that behavior now stays behind an explicit flag so production defaults do not pay an extra upstream request unless operators opt in.
 - When operators configure a multi-instance bridge ring, each stable bridge key now has a deterministic owner replica; non-owner replicas fail closed with `bridge_instance_mismatch` instead of silently creating fragmented continuity on the wrong host. Unstable per-request bridge keys remain local and are allowed on any replica because there is no continuity to preserve.
@@ -46,9 +48,10 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - **Stream ends without terminal event:** Emit `response.failed` with `stream_incomplete`.
 - **Upstream error / no accounts:** Non-streaming responses return an OpenAI error envelope with 5xx status.
 - **Compact upstream transport/client failure:** Retry only inside `/codex/responses/compact` when the failure is safely retryable; otherwise return an explicit upstream error without surrogate fallback.
-- **HTTP bridge session closes or expires:** The next compatible HTTP `/v1/responses` or `/backend-api/codex/responses` request recreates a fresh upstream websocket bridge session; continuity is guaranteed only within the lifetime of one active bridged session.
+- **HTTP bridge session closes or expires:** The next compatible HTTP `/v1/responses` or `/backend-api/codex/responses` request can replay from persisted caller-scoped snapshots when `previous_response_id` is known; otherwise continuity still fails closed with `previous_response_not_found`.
 - **Multi-instance routing without bridge owner policy:** if operators do not configure a bridge ring or front-door affinity, continuity can still fragment across replicas; with a configured bridge ring, wrong-replica requests now fail closed instead of silently forking bridge state.
 - **Codex websocket reconnects:** Reconnect continuity now depends on the client replaying the accepted `x-codex-turn-state`; generated turn-state is emitted on accept for backend Codex routes and echoed back when the client already supplies one.
+- **Early upstream websocket disconnects:** when the upstream drops before `response.created` and only one request is pending, the proxy retries that request once on another eligible account; later disconnects still surface as stream failures.
 - **Websocket handshake forbidden/not-found:** Auto transport now fails loud on `403` / `404` instead of silently hiding the websocket regression behind HTTP fallback.
 - **Invalid request payloads:** Return 4xx with `invalid_request_error`.
 

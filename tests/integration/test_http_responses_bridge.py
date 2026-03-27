@@ -98,6 +98,16 @@ async def _get_account(account_id: str) -> Account:
         return account
 
 
+def _completed_response_event(response_id: str, *, text: str = "OK") -> str:
+    return (
+        'data: {"type":"response.completed","response":{"id":"'
+        + response_id
+        + '","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"'
+        + text
+        + '"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}\n\n'
+    )
+
+
 class _SettingsCache:
     def __init__(self, settings: object) -> None:
         self._settings = settings
@@ -2301,7 +2311,7 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_requires_live_session_for_previous_response_id(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_replays_previous_response_after_bridge_loss(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -2311,6 +2321,7 @@ async def test_v1_responses_http_bridge_requires_live_session_for_previous_respo
     account = await _get_account(account_id)
     fake_upstream = _FakeBridgeUpstreamWebSocket()
     connect_count = 0
+    seen_inputs: list[object] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -2362,9 +2373,15 @@ async def test_v1_responses_http_bridge_requires_live_session_for_previous_respo
         connect_count += 1
         return fake_upstream
 
+    async def fake_legacy_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del headers, access_token, account_id, base_url, raise_for_status, _kw
+        seen_inputs.append(payload.input)
+        yield _completed_response_event("resp_bridge_replayed")
+
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_legacy_stream)
 
     first = await async_client.post(
         "/v1/responses",
@@ -2389,19 +2406,16 @@ async def test_v1_responses_http_bridge_requires_live_session_for_previous_respo
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": (
-                f"Previous response with id '{first_body['id']}' not found. "
-                "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-            ),
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_bridge_replayed"
     assert connect_count == 1
+    assert seen_inputs == [
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "OK"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "hello-again"}]},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -2893,7 +2907,10 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous_response_id(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_replays_previous_response_without_opening_fresh_session(
+    async_client,
+    monkeypatch,
+):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -2905,6 +2922,7 @@ async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous
     second_upstream = _FakeBridgeUpstreamWebSocket()
     upstreams = [first_upstream, second_upstream]
     connect_count = 0
+    seen_inputs: list[object] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -2957,9 +2975,15 @@ async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous
         connect_count += 1
         return upstream
 
+    async def fake_legacy_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del headers, access_token, account_id, base_url, raise_for_status, _kw
+        seen_inputs.append(payload.input)
+        yield _completed_response_event("resp_bridge_replayed")
+
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_legacy_stream)
 
     first = await async_client.post(
         "/v1/responses",
@@ -2984,19 +3008,16 @@ async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": (
-                f"Previous response with id '{first_body['id']}' not found. "
-                "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-            ),
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_bridge_replayed"
     assert connect_count == 1
+    assert seen_inputs == [
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "OK"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "hello-again"}]},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -3985,7 +4006,7 @@ async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client,
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_send_failure_returns_previous_response_not_found(
+async def test_v1_responses_http_bridge_send_failure_replays_previous_response_from_snapshot(
     async_client,
     app_instance,
     monkeypatch,
@@ -4000,6 +4021,7 @@ async def test_v1_responses_http_bridge_send_failure_returns_previous_response_n
     fake_upstream = _FakeBridgeUpstreamWebSocket()
     failing_upstream = _FailingSendThenCloseUpstreamWebSocket()
     connect_count = 0
+    seen_inputs: list[object] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -4051,9 +4073,15 @@ async def test_v1_responses_http_bridge_send_failure_returns_previous_response_n
         connect_count += 1
         return fake_upstream if connect_count == 1 else failing_upstream
 
+    async def fake_legacy_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del headers, access_token, account_id, base_url, raise_for_status, _kw
+        seen_inputs.append(payload.input)
+        yield _completed_response_event("resp_bridge_replayed")
+
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_legacy_stream)
 
     first = await async_client.post(
         "/v1/responses",
@@ -4083,24 +4111,20 @@ async def test_v1_responses_http_bridge_send_failure_returns_previous_response_n
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": (
-                f"Previous response with id '{first_body['id']}' not found. "
-                "HTTP bridge continuity was lost before the request reached upstream. "
-                "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-            ),
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_bridge_replayed"
     assert connect_count == 1
+    assert seen_inputs == [
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "OK"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "hello-again"}]},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_response_not_found(
+async def test_v1_responses_http_bridge_precreated_disconnect_replays_previous_response_from_snapshot(
     async_client,
     app_instance,
     monkeypatch,
@@ -4115,6 +4139,7 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_r
     fake_upstream = _FakeBridgeUpstreamWebSocket()
     precreated_close_upstream = _PrecreatedCloseUpstreamWebSocket()
     connect_count = 0
+    seen_inputs: list[object] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -4166,9 +4191,15 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_r
         connect_count += 1
         return fake_upstream if connect_count == 1 else precreated_close_upstream
 
+    async def fake_legacy_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del headers, access_token, account_id, base_url, raise_for_status, _kw
+        seen_inputs.append(payload.input)
+        yield _completed_response_event("resp_bridge_replayed")
+
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_legacy_stream)
 
     first = await async_client.post(
         "/v1/responses",
@@ -4198,20 +4229,16 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_r
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": (
-                f"Previous response with id '{first_body['id']}' not found. "
-                "HTTP bridge continuity was lost before upstream created the next response. "
-                "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-            ),
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_bridge_replayed"
     assert connect_count == 1
+    assert seen_inputs == [
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "OK"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "hello-again"}]},
+        ]
+    ]
 
 
 @pytest.mark.asyncio

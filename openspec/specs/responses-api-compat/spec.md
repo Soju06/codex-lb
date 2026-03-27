@@ -16,7 +16,7 @@ The service MUST accept POST requests to `/v1/responses` with a JSON body and MU
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 ### Requirement: Support Responses input types and conversation constraints
-The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST accept `previous_response_id` when `conversation` is absent and MUST continue to reject requests that include both `conversation` and `previous_response_id`.
+The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. The service MUST accept `previous_response_id` when `conversation` is absent, MUST prefer live upstream continuity when available, and otherwise MUST attempt caller-scoped replay from persisted response snapshots before forwarding upstream. The service MUST continue to reject requests that include both `conversation` and `previous_response_id`.
 
 #### Scenario: String input
 - **WHEN** the client sends `input` as a string
@@ -32,7 +32,13 @@ The service MUST accept `input` as either a string or an array of input items. W
 
 #### Scenario: previous_response_id provided
 - **WHEN** the client provides `previous_response_id` without `conversation`
-- **THEN** the service accepts the request and forwards `previous_response_id` upstream unchanged
+- **THEN** the service accepts the request
+- **AND** it either preserves live upstream continuity for that response id or rebuilds the request locally from persisted continuity state before forwarding upstream
+
+#### Scenario: previous_response_id is unknown for the caller scope
+- **WHEN** the client provides `previous_response_id` without `conversation`
+- **AND** the service cannot find matching continuity state for that same caller scope
+- **THEN** the service returns a 4xx OpenAI error envelope on `previous_response_id`
 
 ### Requirement: Reject input_file file_id in Responses
 The service MUST reject `input_file.file_id` in Responses input items and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
@@ -212,10 +218,18 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **WHEN** a client sends a later HTTP `/backend-api/codex/responses` request with `previous_response_id` that references a response created earlier on the same bridged session
 - **THEN** the service forwards that request through the same upstream websocket session so upstream can resolve the referenced prior response
 
-#### Scenario: HTTP previous_response_id fails closed when bridged continuity is unavailable
+#### Scenario: HTTP previous_response_id falls back to persisted replay when bridged continuity is unavailable
 - **WHEN** a client sends HTTP `/v1/responses` or `/backend-api/codex/responses` with `previous_response_id`
 - **AND** there is no matching live bridged upstream websocket session for that continuity key
-- **THEN** the service MUST fail the request without opening a fresh upstream session
+- **AND** caller-scoped persisted continuity state exists for that response id
+- **THEN** the service rebuilds the request locally from persisted snapshots and completes it through a fresh upstream request
+- **AND** it MUST NOT open a replacement bridge session solely to forward the old `previous_response_id` upstream unchanged
+
+#### Scenario: HTTP previous_response_id still fails closed when persisted continuity is unavailable
+- **WHEN** a client sends HTTP `/v1/responses` or `/backend-api/codex/responses` with `previous_response_id`
+- **AND** there is no matching live bridged upstream websocket session for that continuity key
+- **AND** caller-scoped persisted continuity state does not exist for that response id
+- **THEN** the service MUST fail the request without opening a fresh upstream session that forwards `previous_response_id` upstream
 - **AND** it MUST return `previous_response_not_found` on `previous_response_id`
 
 #### Scenario: bridged HTTP requests keep external HTTP transport logging
@@ -273,6 +287,19 @@ When serving websocket Responses endpoints, the service MUST advertise an `x-cod
 - **WHEN** a client opens a websocket Responses route and provides `x-codex-turn-state`
 - **THEN** the websocket accept response echoes that same turn-state
 - **AND** the proxy uses that same turn-state as the Codex session affinity key
+
+### Requirement: Websocket responses retry one early-disconnect request
+When an upstream Responses websocket disconnects before `response.created`, the service MUST retry at most one in-flight request on another eligible account when exactly one request is pending and that request has not yet been acknowledged upstream. The retry MUST preserve the downstream websocket contract and SHOULD prefer the account associated with persisted continuity when one is known.
+
+#### Scenario: upstream disconnects before response.created
+- **WHEN** exactly one websocket `response.create` request is pending
+- **AND** the upstream disconnects before emitting `response.created`
+- **THEN** the service retries that request once on another eligible account
+- **AND** the downstream websocket still receives the eventual terminal response events for the retried request
+
+#### Scenario: upstream disconnect after response.created does not trigger replay retry
+- **WHEN** the upstream disconnects after emitting `response.created`
+- **THEN** the service does not silently replay the same request again on another account
 
 ### Requirement: Auto websocket fallback remains narrow and explicit
 When automatic upstream transport selection prefers websocket, the service MUST only downgrade to HTTP automatically on `426 Upgrade Required`. Handshake failures such as `403 Forbidden` or `404 Not Found` MUST surface as upstream errors instead of silently falling back to HTTP.

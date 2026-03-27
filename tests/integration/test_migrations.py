@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -29,6 +30,7 @@ from app.db.migrate import (
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.response_snapshots_repository import ResponseSnapshotsRepository
 
 try:
     from app.db.migrate import check_migration_policy
@@ -85,6 +87,70 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
 
     rerun = await run_startup_migrations(_DATABASE_URL)
     assert rerun.current_revision == _HEAD_REVISION
+
+
+@pytest.mark.asyncio
+async def test_run_startup_migrations_creates_response_snapshots_table(db_setup):
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async_engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with async_engine.begin() as conn:
+            columns = await conn.run_sync(lambda sync_conn: sa.inspect(sync_conn).get_columns("response_snapshots"))
+    finally:
+        await async_engine.dispose()
+
+    assert [column["name"] for column in columns] == [
+        "response_id",
+        "parent_response_id",
+        "account_id",
+        "api_key_id",
+        "model",
+        "input_items_json",
+        "response_json",
+        "created_at",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_response_snapshots_repository_scopes_by_api_key_and_preserves_created_at(db_setup):
+    async with SessionLocal() as session:
+        repo = ResponseSnapshotsRepository(session)
+        inserted = await repo.upsert(
+            response_id="resp_scoped",
+            parent_response_id=None,
+            account_id="acc_a",
+            api_key_id="key_a",
+            model="gpt-5.2",
+            input_items=[{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            response_payload={
+                "id": "resp_scoped",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}],
+            },
+        )
+        created_at = inserted.created_at
+
+        updated = await repo.upsert(
+            response_id="resp_scoped",
+            parent_response_id="resp_parent",
+            account_id="acc_a",
+            api_key_id="key_a",
+            model="gpt-5.2",
+            input_items=[{"role": "user", "content": [{"type": "input_text", "text": "hello again"}]}],
+            response_payload={
+                "id": "resp_scoped",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi again"}]}],
+            },
+        )
+
+        assert updated.created_at == created_at
+        assert updated.parent_response_id == "resp_parent"
+        assert await repo.get("resp_scoped", api_key_id="key_a") is not None
+        assert await repo.get("resp_scoped", api_key_id="key_b") is None
+        assert await repo.get("resp_scoped", api_key_id=None) is None
 
 
 @pytest.mark.asyncio

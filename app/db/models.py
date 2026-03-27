@@ -131,6 +131,22 @@ class RequestLog(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ResponseSnapshot(Base):
+    __tablename__ = "response_snapshots"
+    __table_args__ = (
+        Index("idx_response_snapshots_parent_created_at", "parent_response_id", "created_at"),
+    )
+
+    response_id: Mapped[str] = mapped_column(String, primary_key=True)
+    parent_response_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    input_items_json: Mapped[str] = mapped_column(Text, nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 

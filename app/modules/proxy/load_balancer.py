@@ -90,6 +90,7 @@ class LoadBalancer:
         routing_strategy: RoutingStrategy = "usage_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        preferred_account_id: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
@@ -134,6 +135,7 @@ class LoadBalancer:
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
+                    preferred_account_id=preferred_account_id,
                     sticky_repo=repos.sticky_sessions,
                 )
                 if result.account is not None:
@@ -347,8 +349,20 @@ class LoadBalancer:
         sticky_max_age_seconds: int | None,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
+        preferred_account_id: str | None,
         sticky_repo: StickySessionsRepository | None,
     ) -> SelectionResult:
+        if preferred_account_id:
+            preferred_state = next((state for state in states if state.account_id == preferred_account_id), None)
+            if preferred_state is not None:
+                preferred_result = select_account(
+                    [preferred_state],
+                    prefer_earlier_reset=prefer_earlier_reset_accounts,
+                    routing_strategy=routing_strategy,
+                    allow_backoff_fallback=False,
+                )
+                if preferred_result.account is not None:
+                    return preferred_result
         if not sticky_key or not sticky_repo:
             return select_account(
                 states,

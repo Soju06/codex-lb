@@ -107,6 +107,21 @@ The system SHALL create a SQLite backup before applying startup migrations when 
 - **THEN** the system creates a pre-migration backup file
 - **AND** enforces configured retention on backup files
 
+### Requirement: Durable response snapshot continuity storage
+
+Startup migrations SHALL create and preserve the durable storage required for replaying `previous_response_id` across bridge loss and restart. This storage SHALL include a `response_snapshots` table with caller-scoping metadata and serialized request/response continuity data.
+
+#### Scenario: Startup creates response snapshot storage
+
+- **WHEN** startup migrations upgrade a database that does not yet include response continuity storage
+- **THEN** the migrated schema includes `response_snapshots`
+- **AND** that table includes `response_id`, `parent_response_id`, `account_id`, `api_key_id`, `model`, `input_items_json`, `response_json`, and `created_at`
+
+#### Scenario: Startup repairs partial response snapshot storage
+
+- **WHEN** startup migrations encounter an existing `response_snapshots` table missing the caller-scoping column or continuity index
+- **THEN** the migration adds the missing `api_key_id` column and required continuity index without requiring manual intervention
+
 ### Requirement: Migration policy and drift guard in CI
 
 The project SHALL fail CI when migration policy is violated or ORM metadata and migrated schema diverge.

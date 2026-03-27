@@ -126,6 +126,10 @@ def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     return sanitized_input
 
 
+def sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    return _sanitize_input_items(input_items)
+
+
 def _sanitize_interleaved_reasoning_input_item(item: JsonValue) -> JsonValue | None:
     item_mapping = _json_mapping_or_none(item)
     if item_mapping is None:

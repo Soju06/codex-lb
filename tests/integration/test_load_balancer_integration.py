@@ -14,6 +14,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.response_snapshots_repository import ResponseSnapshotsRepository
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -31,6 +32,7 @@ async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
+            response_snapshots=ResponseSnapshotsRepository(session),
         )
 
 
@@ -427,3 +429,118 @@ async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_s
 
     assert selection.account is not None
     assert selection.account.id == eligible_account.id
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_prefers_preferred_account_when_eligible(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    reset_at = now_epoch + 3600
+
+    preferred = Account(
+        id="acc_preferred_hit",
+        email="preferred-hit@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("preferred-hit-access"),
+        refresh_token_encrypted=encryptor.encrypt("preferred-hit-refresh"),
+        id_token_encrypted=encryptor.encrypt("preferred-hit-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    other = Account(
+        id="acc_preferred_other",
+        email="preferred-other@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("other-access"),
+        refresh_token_encrypted=encryptor.encrypt("other-refresh"),
+        id_token_encrypted=encryptor.encrypt("other-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(preferred)
+        await accounts_repo.upsert(other)
+        await usage_repo.add_entry(
+            account_id=preferred.id,
+            used_percent=85.0,
+            window="primary",
+            reset_at=reset_at,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=other.id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=reset_at,
+            window_minutes=300,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account(preferred_account_id=preferred.id)
+
+    assert selection.account is not None
+    assert selection.account.id == preferred.id
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_falls_back_when_preferred_account_unavailable(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    reset_at = now_epoch + 3600
+
+    preferred = Account(
+        id="acc_preferred_blocked",
+        email="preferred-blocked@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("preferred-blocked-access"),
+        refresh_token_encrypted=encryptor.encrypt("preferred-blocked-refresh"),
+        id_token_encrypted=encryptor.encrypt("preferred-blocked-id"),
+        last_refresh=now,
+        status=AccountStatus.RATE_LIMITED,
+        deactivation_reason=None,
+        reset_at=reset_at,
+    )
+    fallback = Account(
+        id="acc_preferred_fallback",
+        email="preferred-fallback@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("fallback-access"),
+        refresh_token_encrypted=encryptor.encrypt("fallback-refresh"),
+        id_token_encrypted=encryptor.encrypt("fallback-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(preferred)
+        await accounts_repo.upsert(fallback)
+        await usage_repo.add_entry(
+            account_id=preferred.id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=reset_at,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=fallback.id,
+            used_percent=40.0,
+            window="primary",
+            reset_at=reset_at,
+            window_minutes=300,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account(preferred_account_id=preferred.id)
+
+    assert selection.account is not None
+    assert selection.account.id == fallback.id

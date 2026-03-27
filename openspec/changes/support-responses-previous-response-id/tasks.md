@@ -1,5 +1,6 @@
-- [x] Update Responses request validation/serialization to support previous_response_id
-- [x] Add unit and integration regression coverage for websocket and HTTP forwarding
-- [x] Bring up local docker compose with preserved codex-lb-data auth state
-- [x] Measure cache behavior matrix across websocket on/off and /v1/responses variants
-- [x] Sync relevant spec updates and verify implementation
+- [x] Persist response snapshots in the default database with caller/API-key scoping.
+- [x] Resolve `previous_response_id` from persisted continuity state when live bridge continuity is unavailable.
+- [x] Prefer the originating account for replay when that account is still eligible.
+- [x] Retry one websocket request after an upstream disconnect before `response.created`.
+- [x] Add migration, HTTP, websocket, and API-key scoping regression coverage.
+- [x] Sync the Responses and database-migrations specs with the SQLite-first continuity design.

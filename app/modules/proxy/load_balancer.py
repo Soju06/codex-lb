@@ -26,6 +26,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -73,6 +74,9 @@ class _SelectionInputs:
     error_code: str | None = None
 
 
+SelectionInputs = _SelectionInputs
+
+
 class LoadBalancer:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
@@ -80,6 +84,7 @@ class LoadBalancer:
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._account_locks_registry_lock = asyncio.Lock()
+        self._selection_inputs_cache = get_account_selection_cache()
 
     async def select_account(
         self,
@@ -291,6 +296,10 @@ class LoadBalancer:
         model: str | None,
         additional_limit_name: str | None = None,
     ) -> _SelectionInputs:
+        cached = await self._selection_inputs_cache.get()
+        if cached is not None:
+            return _clone_selection_inputs(cached)
+
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
@@ -299,18 +308,22 @@ class LoadBalancer:
                 accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:
                 if not all_accounts:
-                    return _SelectionInputs(
+                    selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
                     )
-                return _SelectionInputs(
+                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                    return selection_inputs
+                selection_inputs = _SelectionInputs(
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
+                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                return selection_inputs
 
             if effective_limit_name:
                 accounts, error_code, error_message = await self._filter_accounts_for_additional_limit(
@@ -320,25 +333,29 @@ class LoadBalancer:
                     repos=repos,
                 )
                 if not accounts:
-                    return _SelectionInputs(
+                    selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
                         error_message=error_message,
                         error_code=error_code,
                     )
+                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                    return selection_inputs
             if not accounts:
-                return _SelectionInputs(
+                selection_inputs = _SelectionInputs(
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
                 )
+                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                return selection_inputs
 
             latest_primary, latest_secondary = await asyncio.gather(
                 repos.usage.latest_by_account(),
                 repos.usage.latest_by_account(window="secondary"),
             )
-            return _SelectionInputs(
+            selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
                 latest_primary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
@@ -347,6 +364,8 @@ class LoadBalancer:
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
             )
+            await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+            return selection_inputs
 
     async def _filter_accounts_for_additional_limit(
         self,
@@ -872,6 +891,20 @@ def _clone_account(account: Account) -> Account:
 def _clone_usage_history(entry: UsageHistory) -> UsageHistory:
     data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
     return UsageHistory(**data)
+
+
+def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
+    return _SelectionInputs(
+        accounts=[_clone_account(account) for account in selection_inputs.accounts],
+        latest_primary={
+            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_primary.items()
+        },
+        latest_secondary={
+            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+        },
+        error_message=selection_inputs.error_message,
+        error_code=selection_inputs.error_code,
+    )
 
 
 async def _latest_additional_by_key(

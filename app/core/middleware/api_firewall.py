@@ -2,20 +2,23 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from typing import cast
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
+from app.core.middleware.firewall_cache import get_firewall_ip_cache
 from app.db.session import get_background_session
 from app.modules.firewall.repository import FirewallRepository
-from app.modules.firewall.service import FirewallService
+from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 
 
 def add_api_firewall_middleware(app: FastAPI) -> None:
     settings = get_settings()
     trusted_proxy_networks = _parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
+    firewall_cache = get_firewall_ip_cache()
 
     @app.middleware("http")
     async def api_firewall_middleware(
@@ -32,9 +35,16 @@ def add_api_firewall_middleware(app: FastAPI) -> None:
             trust_proxy_headers=settings.firewall_trust_proxy_headers,
             trusted_proxy_networks=trusted_proxy_networks,
         )
-        async with get_background_session() as session:
-            service = FirewallService(FirewallRepository(session))
-            is_allowed = await service.is_ip_allowed(client_ip)
+        cached_decision = await firewall_cache.is_allowed(client_ip) if client_ip is not None else None
+        if cached_decision is not None:
+            is_allowed = cached_decision
+        else:
+            async with get_background_session() as session:
+                repository = cast(FirewallRepositoryPort, FirewallRepository(session))
+                service = FirewallService(repository)
+                is_allowed = await service.is_ip_allowed(client_ip)
+            if client_ip is not None:
+                await firewall_cache.set(client_ip, is_allowed)
 
         if is_allowed:
             return await call_next(request)

@@ -394,7 +394,7 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     mock_usage_repo = AsyncMock()
 
     async def slow_query():
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
         return {}
 
     mock_usage_repo.latest_by_account = AsyncMock(side_effect=slow_query)
@@ -413,9 +413,9 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     result = await balancer._load_selection_inputs(model=None)
     elapsed = time.time() - start
 
-    # If queries were sequential, elapsed would be ~0.1s (0.05 + 0.05)
-    # If queries are parallel, elapsed should be ~0.05s
-    # We use a threshold of 0.08s to account for overhead
-    assert elapsed < 0.08, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.08s)"
+    # If queries were sequential, elapsed would be ~0.4s (0.2 + 0.2)
+    # If queries are parallel, elapsed should be ~0.2s
+    # We use a generous threshold of 0.35s to account for test environment overhead
+    assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
     assert result.latest_primary == {}
     assert result.latest_secondary == {}

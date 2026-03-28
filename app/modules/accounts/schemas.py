@@ -101,6 +101,23 @@ class AccountDeleteResponse(DashboardModel):
     status: str
 
 
+class AccountExportTokens(DashboardModel):
+    id_token: str
+    access_token: str
+    refresh_token: str
+    account_id: str | None = None
+
+
+class AccountExportEntry(DashboardModel):
+    email: str
+    status: str
+    auth_json: dict
+
+
+class AccountExportResponse(DashboardModel):
+    accounts: List[AccountExportEntry] = Field(default_factory=list)
+
+
 class AccountTrendsResponse(DashboardModel):
     account_id: str
     primary: list[UsageTrendPoint] = Field(default_factory=list)

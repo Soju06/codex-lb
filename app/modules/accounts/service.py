@@ -22,6 +22,8 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
+    AccountExportEntry,
+    AccountExportResponse,
     AccountImportResponse,
     AccountRequestUsage,
     AccountSummary,
@@ -175,6 +177,36 @@ class AccountsService:
             plan_type=saved.plan_type,
             status=saved.status,
         )
+
+    async def export_accounts(self) -> AccountExportResponse:
+        accounts = await self._repo.list_accounts()
+        entries: list[AccountExportEntry] = []
+        for account in accounts:
+            try:
+                access_token = self._encryptor.decrypt(account.access_token_encrypted)
+                refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+                id_token = self._encryptor.decrypt(account.id_token_encrypted)
+            except Exception:
+                continue
+
+            last_refresh = account.last_refresh.isoformat() + "Z" if account.last_refresh else None
+            auth_json = {
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": None,
+                "tokens": {
+                    "id_token": id_token,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "account_id": account.chatgpt_account_id,
+                },
+                "last_refresh": last_refresh,
+            }
+            entries.append(AccountExportEntry(
+                email=account.email,
+                status=account.status.value if hasattr(account.status, "value") else str(account.status),
+                auth_json=auth_json,
+            ))
+        return AccountExportResponse(accounts=entries)
 
     async def reactivate_account(self, account_id: str) -> bool:
         return await self._repo.update_status(account_id, AccountStatus.ACTIVE, None)

@@ -12,7 +12,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, cast
+from typing import Any, AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 import aiohttp
@@ -31,6 +31,7 @@ from app.core.openai.parsing import (
     parse_sse_event,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.resilience.circuit_breaker import CircuitBreakerOpenError, get_circuit_breaker
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
@@ -152,6 +153,16 @@ _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = conte
     "transcribe_total_timeout_override",
     default=None,
 )
+
+R = TypeVar("R")
+
+
+async def _call_with_service_circuit_breaker(request: Awaitable[R], *, settings: object | None = None) -> R:
+    effective_settings = settings or get_settings()
+    circuit_breaker = get_circuit_breaker(effective_settings)
+    if circuit_breaker is None:
+        return await request
+    return await circuit_breaker.call(request)
 
 
 class StreamIdleTimeoutError(Exception):
@@ -881,12 +892,14 @@ async def _open_upstream_websocket(
 
     timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
     request_fn = cast(Any, request)
-    resp = await request_fn(
-        hdrs.METH_GET,
-        url,
-        headers=request_headers,
-        timeout=timeout,
-        read_until_eof=False,
+    resp = await _call_with_service_circuit_breaker(
+        request_fn(
+            hdrs.METH_GET,
+            url,
+            headers=request_headers,
+            timeout=timeout,
+            read_until_eof=False,
+        )
     )
 
     async def _raise_handshake_error(message: str) -> None:
@@ -1416,12 +1429,17 @@ async def stream_responses(
     ) -> AsyncIterator[str]:
         nonlocal status_code, error_code, error_message, seen_terminal
 
-        async with client_session.post(
-            url,
-            json=payload_dict,
-            headers=current_headers,
-            timeout=current_timeout,
-        ) as resp:
+        resp = await _call_with_service_circuit_breaker(
+            client_session.request(
+                "POST",
+                url,
+                json=payload_dict,
+                headers=current_headers,
+                timeout=current_timeout,
+            ),
+            settings=settings,
+        )
+        async with resp:
             status_code = resp.status
             if resp.status >= 400:
                 if raise_for_status:
@@ -1567,6 +1585,13 @@ async def stream_responses(
                 str(exc),
                 response_id=get_request_id(),
             ),
+        )
+        return
+    except CircuitBreakerOpenError:
+        error_code = "upstream_unavailable"
+        error_message = "Upstream circuit breaker is open"
+        yield format_sse_event(
+            response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
         )
         return
     except aiohttp.ClientError as exc:
@@ -1804,12 +1829,17 @@ class _CompactCommandTransport:
             else None,
         )
         try:
-            async with self.session.post(
-                url,
-                json=payload_dict,
-                headers=upstream_headers,
-                timeout=timeout,
-            ) as resp:
+            resp = await _call_with_service_circuit_breaker(
+                self.session.request(
+                    "POST",
+                    url,
+                    json=payload_dict,
+                    headers=upstream_headers,
+                    timeout=timeout,
+                ),
+                settings=settings,
+            )
+            async with resp:
                 status_code = resp.status
                 if resp.status >= 400:
                     error_payload = await _error_payload_from_response(resp)
@@ -1882,6 +1912,21 @@ class _CompactCommandTransport:
             if retryable_same_contract is None:
                 retryable_same_contract = exc.retryable_same_contract
             raise
+        except CircuitBreakerOpenError as exc:
+            error_code = "upstream_unavailable"
+            error_message = "Upstream circuit breaker is open"
+            failure_phase = "connect"
+            failure_detail = str(exc)
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
+            raise ProxyResponseError(
+                503,
+                openai_error("upstream_unavailable", error_message),
+                failure_phase=failure_phase,
+                retryable_same_contract=retryable_same_contract,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+            ) from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             message = str(exc) or "Request to upstream timed out"
             error_code = "upstream_unavailable"
@@ -1986,12 +2031,17 @@ async def transcribe_audio(
         else None,
     )
     try:
-        async with client_session.post(
-            url,
-            data=form,
-            headers=upstream_headers,
-            timeout=timeout,
-        ) as resp:
+        resp = await _call_with_service_circuit_breaker(
+            client_session.request(
+                "POST",
+                url,
+                data=form,
+                headers=upstream_headers,
+                timeout=timeout,
+            ),
+            settings=settings,
+        )
+        async with resp:
             status_code = resp.status
             if resp.status >= 400:
                 error_payload = await _error_payload_from_response(resp)
@@ -2024,6 +2074,13 @@ async def transcribe_audio(
         if error_code is None and error_message is None:
             error_code, error_message = _error_details_from_envelope(exc.payload)
         raise
+    except CircuitBreakerOpenError as exc:
+        error_code = "upstream_unavailable"
+        error_message = "Upstream circuit breaker is open"
+        raise ProxyResponseError(
+            503,
+            openai_error("upstream_unavailable", error_message),
+        ) from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         message = str(exc) or "Request to upstream timed out"
         error_code = "upstream_unavailable"

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from importlib import import_module
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from starlette.responses import Response
 
 from app.core.clients.http import close_http_client, init_http_client
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
 from app.core.middleware import (
@@ -33,11 +38,32 @@ from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_c
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
+logger = logging.getLogger(__name__)
+
+
+def add_in_flight_middleware(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def in_flight_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        shutdown_state = import_module("app.core.shutdown")
+
+        shutdown_state.increment_in_flight()
+        try:
+            return await call_next(request)
+        finally:
+            shutdown_state.decrement_in_flight()
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     import app.core.startup as startup_module
 
+    shutdown_state = import_module("app.core.shutdown")
+
+    startup_module._startup_complete = False
+    shutdown_state.set_draining(False)
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
@@ -49,10 +75,17 @@ async def lifespan(_: FastAPI):
     await usage_scheduler.start()
     await model_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
+    startup_module._startup_complete = True
 
     try:
         yield
     finally:
+        shutdown_state.set_draining(True)
+        settings = get_settings()
+        drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
+        if not drained:
+            logger.warning("Drain timeout reached, proceeding with shutdown")
+
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await usage_scheduler.stop()
@@ -60,8 +93,6 @@ async def lifespan(_: FastAPI):
             await close_http_client()
         finally:
             await close_db()
-
-    startup_module._startup_complete = True
 
 
 def create_app() -> FastAPI:
@@ -72,6 +103,7 @@ def create_app() -> FastAPI:
         swagger_ui_parameters={"persistAuthorization": True},
     )
 
+    add_in_flight_middleware(app)
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)

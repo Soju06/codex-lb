@@ -113,6 +113,37 @@ class Settings(BaseSettings):
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
 
+    # --- Multi-replica & production settings ---
+    # Prometheus metrics
+    metrics_enabled: bool = False
+    metrics_port: int = 9090
+
+    # Logging
+    log_format: str = "text"  # "text" or "json"
+
+    # Leader election
+    leader_election_enabled: bool = False
+    leader_election_ttl_seconds: int = 30
+
+    # Circuit breaker
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_timeout_seconds: int = 60
+
+    # Backpressure
+    backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
+
+    # OpenTelemetry
+    otel_enabled: bool = False
+    otel_exporter_endpoint: str = ""
+
+    # Shutdown drain
+    shutdown_drain_timeout_seconds: int = 30
+
+    # HTTP connector limits
+    http_connector_limit: int = 100
+    http_connector_limit_per_host: int = 50
+
     @field_validator("database_url")
     @classmethod
     def _expand_database_url(cls, value: str) -> str:
@@ -210,6 +241,12 @@ class Settings(BaseSettings):
                 "http_responses_session_bridge_instance_id must be explicitly present in "
                 "http_responses_session_bridge_instance_ring"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_metrics_port(self) -> "Settings":
+        if self.metrics_port == 2455:
+            raise ValueError("metrics_port must not be 2455 (main application port)")
         return self
 
 

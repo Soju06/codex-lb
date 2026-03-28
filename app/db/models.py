@@ -353,6 +353,15 @@ class ApiKeyUsageReservationItem(Base):
     limit: Mapped[ApiKeyLimit] = relationship("ApiKeyLimit")
 
 
+class RateLimitAttempt(Base):
+    __tablename__ = "rate_limit_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False)
+    type: Mapped[str] = mapped_column(String(50), nullable=False)
+
+
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
@@ -404,6 +413,12 @@ Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
 Index("ix_additional_usage_history_account_id", AdditionalUsageHistory.account_id)
 Index("ix_additional_usage_history_recorded_at", AdditionalUsageHistory.recorded_at)
+Index(
+    "ix_rate_limit_attempts_type_key_attempted_at",
+    RateLimitAttempt.type,
+    RateLimitAttempt.key,
+    RateLimitAttempt.attempted_at,
+)
 Index(
     "ix_additional_usage_history_composite",
     AdditionalUsageHistory.account_id,

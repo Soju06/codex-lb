@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import delete
 
-from app.modules.dashboard_auth.service import get_password_rate_limiter
+from app.db.models import RateLimitAttempt
+from app.db.session import get_background_session
 
 pytestmark = pytest.mark.integration
+
+
+async def _clear_password_rate_limit_attempts() -> None:
+    async with get_background_session() as session:
+        await session.execute(delete(RateLimitAttempt).where(RateLimitAttempt.type == "password"))
+        await session.commit()
 
 
 @pytest.mark.asyncio
@@ -96,8 +104,7 @@ async def test_password_endpoints_setup_login_change_remove(async_client):
 
 @pytest.mark.asyncio
 async def test_password_login_rate_limit(async_client):
-    limiter = get_password_rate_limiter()
-    limiter._failures.clear()  # noqa: SLF001
+    await _clear_password_rate_limit_attempts()
 
     setup = await async_client.post(
         "/api/dashboard-auth/password/setup",
@@ -120,7 +127,7 @@ async def test_password_login_rate_limit(async_client):
     assert limited.status_code == 429
     assert "Retry-After" in limited.headers
 
-    limiter._failures.clear()  # noqa: SLF001
+    await _clear_password_rate_limit_attempts()
     success = await async_client.post(
         "/api/dashboard-auth/password/login",
         json={"password": "password123"},

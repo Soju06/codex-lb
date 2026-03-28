@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-from collections import deque
 from dataclasses import dataclass
 from io import BytesIO
 from time import time
@@ -13,6 +12,7 @@ import segno
 
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.crypto import TokenEncryptor
+from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
 from app.modules.dashboard_auth.schemas import DashboardAuthSessionResponse, TotpSetupStartResponse
 
 DASHBOARD_SESSION_COOKIE = "codex_lb_dashboard_session"
@@ -138,44 +138,6 @@ class DashboardSessionStore:
     def delete(self, session_id: str | None) -> None:
         # Stateless: deletion is handled by clearing the cookie client-side.
         return
-
-
-class TotpRateLimiter:
-    def __init__(self, *, max_failures: int, window_seconds: int) -> None:
-        if max_failures <= 0:
-            raise ValueError("max_failures must be positive")
-        if window_seconds <= 0:
-            raise ValueError("window_seconds must be positive")
-        self._max_failures = max_failures
-        self._window_seconds = window_seconds
-        self._failures: dict[str, deque[int]] = {}
-
-    def check(self, key: str) -> int | None:
-        now = int(time())
-        failures = self._failures.get(key)
-        if failures is None:
-            return None
-        cutoff = now - self._window_seconds
-        while failures and failures[0] <= cutoff:
-            failures.popleft()
-        if not failures:
-            self._failures.pop(key, None)
-            return None
-        if len(failures) >= self._max_failures:
-            retry_after = failures[0] + self._window_seconds - now
-            return max(1, retry_after)
-        return None
-
-    def record_failure(self, key: str) -> None:
-        now = int(time())
-        failures = self._failures.setdefault(key, deque())
-        failures.append(now)
-        cutoff = now - self._window_seconds
-        while failures and failures[0] <= cutoff:
-            failures.popleft()
-
-    def reset(self, key: str) -> None:
-        self._failures.pop(key, None)
 
 
 class DashboardAuthService:
@@ -310,19 +272,19 @@ class DashboardAuthService:
 
 
 _dashboard_session_store = DashboardSessionStore()
-_totp_rate_limiter = TotpRateLimiter(max_failures=8, window_seconds=60)
-_password_rate_limiter = TotpRateLimiter(max_failures=8, window_seconds=60)
+_totp_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="totp")
+_password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
 
 
 def get_dashboard_session_store() -> DashboardSessionStore:
     return _dashboard_session_store
 
 
-def get_totp_rate_limiter() -> TotpRateLimiter:
+def get_totp_rate_limiter() -> DatabaseRateLimiter:
     return _totp_rate_limiter
 
 
-def get_password_rate_limiter() -> TotpRateLimiter:
+def get_password_rate_limiter() -> DatabaseRateLimiter:
     return _password_rate_limiter
 
 

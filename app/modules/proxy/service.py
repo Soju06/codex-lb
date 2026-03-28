@@ -3073,8 +3073,10 @@ class ProxyService:
                 return headers
 
             account_map = {account.id: account for account in selected_accounts}
-            primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
-            secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
+            primary_rows_raw, secondary_rows_raw = await asyncio.gather(
+                self._latest_usage_rows(repos, account_map, "primary"),
+                self._latest_usage_rows(repos, account_map, "secondary"),
+            )
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,
                 secondary_rows_raw,
@@ -3100,8 +3102,10 @@ class ProxyService:
                 return RateLimitStatusPayloadData(plan_type="guest")
 
             account_map = {account.id: account for account in selected_accounts}
-            primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
-            secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
+            primary_rows_raw, secondary_rows_raw = await asyncio.gather(
+                self._latest_usage_rows(repos, account_map, "primary"),
+                self._latest_usage_rows(repos, account_map, "secondary"),
+            )
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,
                 secondary_rows_raw,

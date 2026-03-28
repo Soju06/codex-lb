@@ -377,3 +377,45 @@ def test_error_backoff_expired_account_does_not_immediately_relock():
     result2 = select_account([state], now=now + 2)
     assert result2.account is not None
     assert result2.account.account_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_load_selection_inputs_parallelizes_usage_queries():
+    """Verify that independent usage queries are parallelized with asyncio.gather()."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    # Create mock repositories
+    mock_accounts_repo = AsyncMock()
+    mock_accounts_repo.list_accounts = AsyncMock(return_value=[])
+
+    mock_usage_repo = AsyncMock()
+
+    async def slow_query():
+        await asyncio.sleep(0.05)
+        return {}
+
+    mock_usage_repo.latest_by_account = AsyncMock(side_effect=slow_query)
+
+    mock_repos = MagicMock()
+    mock_repos.accounts = mock_accounts_repo
+    mock_repos.usage = mock_usage_repo
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+
+    # Create LoadBalancer with mocked repo factory
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+
+    # Measure execution time
+    start = time.time()
+    result = await balancer._load_selection_inputs(model=None)
+    elapsed = time.time() - start
+
+    # If queries were sequential, elapsed would be ~0.1s (0.05 + 0.05)
+    # If queries are parallel, elapsed should be ~0.05s
+    # We use a threshold of 0.08s to account for overhead
+    assert elapsed < 0.08, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.08s)"
+    assert result.latest_primary == {}
+    assert result.latest_secondary == {}

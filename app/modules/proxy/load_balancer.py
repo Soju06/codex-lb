@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Collection
@@ -381,8 +382,10 @@ class LoadBalancer:
                     latest_secondary={},
                 )
 
-            latest_primary = await repos.usage.latest_by_account()
-            latest_secondary = await repos.usage.latest_by_account(window="secondary")
+            latest_primary, latest_secondary = await asyncio.gather(
+                repos.usage.latest_by_account(),
+                repos.usage.latest_by_account(window="secondary"),
+            )
             return _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
                 latest_primary={

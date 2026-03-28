@@ -46,10 +46,10 @@ def _make_upstream_model(slug: str, *, supported_in_api: bool = True) -> Upstrea
     )
 
 
-def _populate_test_registry() -> None:
+async def _populate_test_registry() -> None:
     registry = get_model_registry()
     models = [_make_upstream_model(slug) for slug in _TEST_MODELS]
-    registry.update({"plus": models, "pro": models})
+    await registry.update({"plus": models, "pro": models})
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -195,7 +195,7 @@ async def test_api_keys_update_limits(async_client):
 
 @pytest.mark.asyncio
 async def test_api_key_model_restriction_and_models_filter(async_client):
-    _populate_test_registry()
+    await _populate_test_registry()
     model_ids = sorted(_TEST_MODELS)
     assert len(model_ids) >= 2
     allowed_model = model_ids[0]
@@ -252,7 +252,7 @@ async def test_api_key_rejects_enforced_model_outside_allowed_models(async_clien
 
 @pytest.mark.asyncio
 async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, monkeypatch):
-    _populate_test_registry()
+    await _populate_test_registry()
     model_ids = sorted(_TEST_MODELS)
     forced_model = model_ids[0]
     requested_model = model_ids[1]
@@ -326,7 +326,7 @@ async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
 async def test_api_key_enforces_model_and_reasoning_for_compact_responses(async_client, monkeypatch, endpoint):
-    _populate_test_registry()
+    await _populate_test_registry()
     model_ids = sorted(_TEST_MODELS)
     forced_model = model_ids[0]
     requested_model = model_ids[1]
@@ -1360,7 +1360,7 @@ async def test_model_scoped_limit_allows_other_models(async_client, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_model_scoped_limit_does_not_block_v1_models(async_client):
-    _populate_test_registry()
+    await _populate_test_registry()
 
     enable = await async_client.put(
         "/api/settings",
@@ -1596,7 +1596,7 @@ async def test_allowed_but_unsupported_model_is_exposed(async_client):
         _make_upstream_model(_TEST_MODELS[0], supported_in_api=True),
         _make_upstream_model(_HIDDEN_MODEL, supported_in_api=False),
     ]
-    registry.update({"plus": models, "pro": models})
+    await registry.update({"plus": models, "pro": models})
 
     enable = await async_client.put(
         "/api/settings",

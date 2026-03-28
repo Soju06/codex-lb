@@ -74,7 +74,7 @@ class ModelRefreshScheduler:
 
                 if per_plan_results:
                     registry = get_model_registry()
-                    registry.update(per_plan_results)
+                    await registry.update(per_plan_results)
                     snapshot = registry.get_snapshot()
                     total_models = len(snapshot.models) if snapshot else 0
                     logger.info(

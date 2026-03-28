@@ -357,7 +357,7 @@ async def test_transcription_model_scoped_limit_applies(async_client):
 async def test_transcription_routing_ignores_model_registry_filter(async_client, monkeypatch):
     await _import_account(async_client, "acc_transcribe_registry", "registry-transcribe@example.com")
     registry = get_model_registry()
-    registry.update({"plus": [_make_upstream_model("gpt-5.1")]})
+    await registry.update({"plus": [_make_upstream_model("gpt-5.1")]})
 
     async def fake_transcribe(
         audio_bytes: bytes,

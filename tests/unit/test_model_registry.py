@@ -32,27 +32,31 @@ def _model(slug: str) -> UpstreamModel:
     )
 
 
-def test_initial_snapshot_is_none():
+@pytest.mark.asyncio
+async def test_initial_snapshot_is_none():
     registry = ModelRegistry(ttl_seconds=60.0)
     assert registry.get_snapshot() is None
 
 
-def test_plan_types_for_model_returns_none_when_uninitialized():
+@pytest.mark.asyncio
+async def test_plan_types_for_model_returns_none_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
     result = registry.plan_types_for_model("some-model")
     assert result is None
 
 
-def test_plan_types_for_model_returns_empty_for_unknown_model():
+@pytest.mark.asyncio
+async def test_plan_types_for_model_returns_empty_for_unknown_model():
     registry = ModelRegistry(ttl_seconds=60.0)
-    registry.update({"plus": [_model("model-a")]})
+    await registry.update({"plus": [_model("model-a")]})
     result = registry.plan_types_for_model("unknown-model")
     assert result == frozenset()
 
 
-def test_plan_types_for_model_returns_plans():
+@pytest.mark.asyncio
+async def test_plan_types_for_model_returns_plans():
     registry = ModelRegistry(ttl_seconds=60.0)
-    registry.update(
+    await registry.update(
         {
             "plus": [_model("model-a"), _model("model-b")],
             "pro": [_model("model-a"), _model("model-c")],
@@ -64,10 +68,11 @@ def test_plan_types_for_model_returns_plans():
     assert registry.plan_types_for_model("model-c") == frozenset({"pro"})
 
 
-def test_prefers_websockets_uses_snapshot_value():
+@pytest.mark.asyncio
+async def test_prefers_websockets_uses_snapshot_value():
     registry = ModelRegistry(ttl_seconds=60.0)
     preferred = replace(_model("model-ws"), prefer_websockets=True)
-    registry.update({"plus": [preferred]})
+    await registry.update({"plus": [preferred]})
 
     assert registry.prefers_websockets("model-ws") is True
     assert registry.prefers_websockets("unknown-model") is False
@@ -81,9 +86,10 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     assert registry.prefers_websockets("gpt-5.1") is False
 
 
-def test_update_merges_models_across_plans():
+@pytest.mark.asyncio
+async def test_update_merges_models_across_plans():
     registry = ModelRegistry(ttl_seconds=60.0)
-    registry.update(
+    await registry.update(
         {
             "plus": [_model("shared"), _model("plus-only")],
             "pro": [_model("shared"), _model("pro-only")],
@@ -97,11 +103,12 @@ def test_update_merges_models_across_plans():
     assert snapshot.plan_models["pro"] == frozenset({"shared", "pro-only"})
 
 
-def test_partial_update_preserves_stale_plans():
+@pytest.mark.asyncio
+async def test_partial_update_preserves_stale_plans():
     registry = ModelRegistry(ttl_seconds=60.0)
 
     # First full update with both plans
-    registry.update(
+    await registry.update(
         {
             "plus": [_model("shared"), _model("plus-only")],
             "pro": [_model("shared"), _model("pro-only")],
@@ -109,7 +116,7 @@ def test_partial_update_preserves_stale_plans():
     )
 
     # Partial update: only plus succeeds, pro fails (not in per_plan_results)
-    registry.update(
+    await registry.update(
         {
             "plus": [_model("shared"), _model("plus-new")],
         }
@@ -135,15 +142,17 @@ def test_needs_refresh_true_initially():
     assert registry.needs_refresh() is True
 
 
-def test_needs_refresh_false_after_update():
+@pytest.mark.asyncio
+async def test_needs_refresh_false_after_update():
     registry = ModelRegistry(ttl_seconds=60.0)
-    registry.update({"plus": [_model("a")]})
+    await registry.update({"plus": [_model("a")]})
     assert registry.needs_refresh() is False
 
 
-def test_needs_refresh_true_after_ttl(monkeypatch):
+@pytest.mark.asyncio
+async def test_needs_refresh_true_after_ttl(monkeypatch):
     registry = ModelRegistry(ttl_seconds=1.0)
-    registry.update({"plus": [_model("a")]})
+    await registry.update({"plus": [_model("a")]})
     assert registry.needs_refresh() is False
 
     # Simulate time passage by adjusting fetched_at
@@ -153,9 +162,10 @@ def test_needs_refresh_true_after_ttl(monkeypatch):
     assert registry.needs_refresh() is True
 
 
-def test_empty_update_is_noop():
+@pytest.mark.asyncio
+async def test_empty_update_is_noop():
     registry = ModelRegistry(ttl_seconds=60.0)
-    registry.update({})
+    await registry.update({})
     assert registry.get_snapshot() is None
 
 
@@ -166,9 +176,10 @@ def test_ttl_must_be_positive():
         ModelRegistry(ttl_seconds=-1.0)
 
 
-def test_plan_models_reverse_index():
+@pytest.mark.asyncio
+async def test_plan_models_reverse_index():
     registry = ModelRegistry(ttl_seconds=60.0)
-    registry.update(
+    await registry.update(
         {
             "plus": [_model("a"), _model("b")],
             "pro": [_model("b"), _model("c")],

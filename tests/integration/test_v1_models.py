@@ -29,18 +29,18 @@ def _make_upstream_model(slug: str, *, supported_in_api: bool = True) -> Upstrea
     )
 
 
-def _populate_test_registry() -> None:
+async def _populate_test_registry() -> None:
     registry = get_model_registry()
     models = [
         _make_upstream_model("gpt-5.2"),
         _make_upstream_model("gpt-5.3-codex"),
     ]
-    registry.update({"plus": models, "pro": models})
+    await registry.update({"plus": models, "pro": models})
 
 
 @pytest.mark.asyncio
 async def test_v1_models_list(async_client):
-    _populate_test_registry()
+    await _populate_test_registry()
     resp = await async_client.get("/v1/models")
     assert resp.status_code == 200
     payload = resp.json()

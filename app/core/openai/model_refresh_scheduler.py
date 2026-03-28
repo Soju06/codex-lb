@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import logging
 from dataclasses import dataclass, field
+from typing import Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
@@ -16,6 +18,15 @@ from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 
 logger = logging.getLogger(__name__)
+
+
+class _LeaderElectionLike(Protocol):
+    async def try_acquire(self) -> bool: ...
+
+
+def _get_leader_election() -> _LeaderElectionLike:
+    module = importlib.import_module("app.core.scheduling.leader_election")
+    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)
@@ -51,6 +62,8 @@ class ModelRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
+        if not await _get_leader_election().try_acquire():
+            return
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
@@ -106,8 +119,8 @@ async def _fetch_with_failover(
     accounts_repo: AccountsRepository,
 ) -> list[UpstreamModel] | None:
     for account in candidates:
+        auth_manager = AuthManager(accounts_repo)
         try:
-            auth_manager = AuthManager(accounts_repo)
             account = await auth_manager.ensure_fresh(account)
             access_token = encryptor.decrypt(account.access_token_encrypted)
             account_id = account.chatgpt_account_id

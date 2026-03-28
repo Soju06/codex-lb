@@ -144,6 +144,15 @@ class AuditLog(Base):
     request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
+class SchedulerLeader(Base):
+    __tablename__ = "scheduler_leader"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    leader_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 

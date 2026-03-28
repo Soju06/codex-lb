@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import logging
 from dataclasses import dataclass, field
+from typing import Protocol, cast
 
 from app.core.config.settings import get_settings
 from app.db.session import get_background_session
@@ -14,6 +16,15 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
+
+
+class _LeaderElectionLike(Protocol):
+    async def try_acquire(self) -> bool: ...
+
+
+def _get_leader_election() -> _LeaderElectionLike:
+    module = importlib.import_module("app.core.scheduling.leader_election")
+    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)
@@ -50,6 +61,8 @@ class UsageRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
+        if not await _get_leader_election().try_acquire():
+            return
         async with self._lock:
             try:
                 async with get_background_session() as session:

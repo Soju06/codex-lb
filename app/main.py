@@ -36,6 +36,8 @@ from app.modules.usage.additional_quota_keys import reload_additional_quota_regi
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    import app.core.startup as startup_module
+
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
@@ -58,6 +60,8 @@ async def lifespan(_: FastAPI):
             await close_http_client()
         finally:
             await close_db()
+
+    startup_module._startup_complete = True
 
 
 def create_app() -> FastAPI:

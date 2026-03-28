@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import text
 
-from app.modules.health.schemas import HealthResponse
+from app.db.session import get_session
+from app.modules.health.schemas import HealthCheckResponse, HealthResponse
 
 router = APIRouter(tags=["health"])
 
@@ -10,3 +12,52 @@ router = APIRouter(tags=["health"])
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+@router.get("/health/live", response_model=HealthCheckResponse)
+async def health_live() -> HealthCheckResponse:
+    return HealthCheckResponse(status="ok")
+
+
+@router.get("/health/ready", response_model=HealthCheckResponse)
+async def health_ready() -> HealthCheckResponse:
+    draining = False
+    try:
+        import app.core.draining as draining_module  # type: ignore[import-not-found]
+
+        draining = getattr(draining_module, "_draining", False)
+    except (ImportError, AttributeError):
+        pass
+
+    if draining:
+        raise HTTPException(status_code=503, detail="Service is draining")
+
+    try:
+        async for session in get_session():
+            try:
+                await session.execute(text("SELECT 1"))
+                return HealthCheckResponse(status="ok", checks={"database": "ok"})
+            except Exception:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Service unavailable",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Service unavailable",
+        )
+
+    raise HTTPException(status_code=503, detail="Service unavailable")
+
+
+@router.get("/health/startup", response_model=HealthCheckResponse)
+async def health_startup() -> HealthCheckResponse:
+    import app.core.startup as startup_module
+
+    if startup_module._startup_complete:
+        return HealthCheckResponse(status="ok")
+    else:
+        raise HTTPException(status_code=503, detail="Service is starting")

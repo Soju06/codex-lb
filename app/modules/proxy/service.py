@@ -339,6 +339,8 @@ class ProxyService:
                 event_block = await event_queue.get()
                 if event_block is None:
                     break
+                if request_state.latency_first_token_ms is None:
+                    request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
                 yield event_block
         finally:
             with anyio.CancelScope(shield=True):
@@ -1637,6 +1639,7 @@ class ProxyService:
                     raise
                 except Exception:
                     continue
+                assert session is not None
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     session.request_model = request_model
                     session.last_used_at = time.monotonic()
@@ -2759,6 +2762,7 @@ class ProxyService:
                 service_tier=response_service_tier,
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
+                latency_first_token_ms=request_state.latency_first_token_ms,
             )
 
     async def _write_websocket_connect_failure(
@@ -2786,6 +2790,7 @@ class ProxyService:
             service_tier=request_state.service_tier,
             requested_service_tier=request_state.requested_service_tier,
             actual_service_tier=request_state.actual_service_tier,
+            latency_first_token_ms=request_state.latency_first_token_ms,
         )
 
     async def _emit_websocket_connect_failure(
@@ -2904,6 +2909,7 @@ class ProxyService:
                 service_tier=request_state.service_tier,
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
+                latency_first_token_ms=request_state.latency_first_token_ms,
             )
 
     async def _emit_websocket_terminal_error(
@@ -3366,6 +3372,7 @@ class ProxyService:
                                 headers,
                                 request_id,
                                 allow_retry_flag,
+                                request_started_at=start,
                                 allow_transient_retry=(
                                     transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1 or allow_retry_flag
                                 ),
@@ -3541,6 +3548,7 @@ class ProxyService:
                                 headers,
                                 request_id,
                                 False,
+                                request_started_at=start,
                                 api_key=api_key,
                                 settlement=settlement,
                                 suppress_text_done_events=suppress_text_done_events,
@@ -3657,6 +3665,7 @@ class ProxyService:
         request_id: str,
         allow_retry: bool,
         *,
+        request_started_at: float,
         allow_transient_retry: bool = False,
         api_key: ApiKeyData | None,
         settlement: _StreamSettlement,
@@ -3678,6 +3687,7 @@ class ProxyService:
         error_message = None
         usage = None
         saw_text_delta = False
+        latency_first_token_ms: int | None = None
 
         try:
             if upstream_stream_transport is not None:
@@ -3755,6 +3765,7 @@ class ProxyService:
                 suppress_text_done_events=suppress_text_done_events,
                 saw_text_delta=saw_text_delta,
             ):
+                latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
@@ -3796,6 +3807,8 @@ class ProxyService:
                         usage = event.response.usage if event.response else None
                         if event_type == "response.incomplete":
                             status = "error"
+                if latency_first_token_ms is None:
+                    latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 yield line
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -3843,6 +3856,7 @@ class ProxyService:
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
+                latency_first_token_ms=latency_first_token_ms,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",
@@ -3859,6 +3873,7 @@ class ProxyService:
         model: str | None,
         latency_ms: int,
         status: str,
+        latency_first_token_ms: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
         input_tokens: int | None = None,
@@ -3889,6 +3904,7 @@ class ProxyService:
                         requested_service_tier=requested_service_tier,
                         actual_service_tier=actual_service_tier,
                         latency_ms=latency_ms,
+                        latency_first_token_ms=latency_first_token_ms,
                         status=status,
                         error_code=error_code,
                         error_message=error_message,
@@ -4257,6 +4273,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    latency_first_token_ms: int | None = None
     request_log_id: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None

@@ -58,7 +58,7 @@ _SSE_EVENT_TYPE_ALIASES = {
     "response.audio_transcript.delta": "response.output_audio_transcript.delta",
 }
 
-_SSE_READ_CHUNK_SIZE = 8 * 1024
+_SSE_READ_CHUNK_SIZE = 1 * 1024
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
@@ -408,7 +408,7 @@ def _error_payload_from_websocket_handshake_error(exc: aiohttp.WSServerHandshake
     if extracted is not None:
         error = parse_error_payload(extracted)
         if error is not None:
-            return {"error": error.model_dump(exclude_none=True)}
+            return cast(OpenAIErrorEnvelope, {"error": error.model_dump(exclude_none=True)})
 
     code = _infer_websocket_handshake_error_code(exc.status, message)
     if code == "invalid_api_key":
@@ -694,7 +694,7 @@ async def _error_payload_from_response(resp: ErrorResponse) -> OpenAIErrorEnvelo
     if isinstance(data, dict):
         error = parse_error_payload(data)
         if error:
-            return {"error": error.model_dump(exclude_none=True)}
+            return cast(OpenAIErrorEnvelope, {"error": error.model_dump(exclude_none=True)})
         message = _extract_upstream_message(data)
         if message:
             return openai_error("upstream_error", message)
@@ -730,6 +730,9 @@ def _normalize_sse_data_line(line: str) -> str:
 
 def _normalize_sse_event_block(event_block: str) -> str:
     if not event_block:
+        return event_block
+
+    if '"type":' not in event_block:
         return event_block
 
     if event_block.endswith("\r\n\r\n"):
@@ -877,7 +880,8 @@ async def _open_upstream_websocket(
     request_headers[hdrs.SEC_WEBSOCKET_KEY] = sec_key
 
     timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
-    resp = await request(
+    request_fn = cast(Any, request)
+    resp = await request_fn(
         hdrs.METH_GET,
         url,
         headers=request_headers,
@@ -910,7 +914,8 @@ async def _open_upstream_websocket(
             await _raise_handshake_error("Invalid connection header")
 
         response_key = resp.headers.get(hdrs.SEC_WEBSOCKET_ACCEPT, "")
-        expected_key = base64.b64encode(hashlib.sha1(sec_key.encode() + aiohttp.client.WS_KEY).digest()).decode()
+        client_module = cast(Any, aiohttp.client)
+        expected_key = base64.b64encode(hashlib.sha1(sec_key.encode() + client_module.WS_KEY).digest()).decode()
         if response_key != expected_key:
             await _raise_handshake_error("Invalid challenge response")
 
@@ -922,9 +927,9 @@ async def _open_upstream_websocket(
 
         transport = conn.transport
         assert transport is not None
-        reader = aiohttp.client.WebSocketDataQueue(conn_proto, 2**16, loop=session._loop)
-        conn_proto.set_parser(aiohttp.client.WebSocketReader(reader, max_msg_size), reader)
-        writer = aiohttp.client.WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
+        reader = client_module.WebSocketDataQueue(conn_proto, 2**16, loop=session._loop)
+        conn_proto.set_parser(client_module.WebSocketReader(reader, max_msg_size), reader)
+        writer = client_module.WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
     except BaseException:
         resp.close()
         raise

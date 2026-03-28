@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import cast as typing_cast
 
 import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.usage.logs import calculated_cost_from_log
+from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
@@ -88,6 +89,7 @@ class RequestLogsRepository:
         latency_ms: int | None,
         status: str,
         error_code: str | None,
+        latency_first_token_ms: int | None = None,
         error_message: str | None = None,
         requested_at: datetime | None = None,
         cached_input_tokens: int | None = None,
@@ -116,12 +118,13 @@ class RequestLogsRepository:
             cost_usd=None,
             reasoning_effort=reasoning_effort,
             latency_ms=latency_ms,
+            latency_first_token_ms=latency_first_token_ms,
             status=status,
             error_code=error_code,
             error_message=error_message,
             requested_at=requested_at or utcnow(),
         )
-        log.cost_usd = calculated_cost_from_log(log)
+        log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
         self._session.add(log)
         try:
             await self._session.commit()

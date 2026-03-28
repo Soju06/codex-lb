@@ -25,6 +25,7 @@ class RequestLogEntry(DashboardModel):
     reasoning_effort: str | None = None
     cost_usd: float | None = None
     latency_ms: int | None = None
+    latency_first_token_ms: int | None = None
 
 
 class RequestLogsResponse(DashboardModel):

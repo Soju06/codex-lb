@@ -56,6 +56,9 @@ dependencies = [
     "zstandard>=0.25.0",
 ]
 
+[project.optional-dependencies]
+metrics = ["prometheus-client>=0.20"]
+
 [dependency-groups]
 dev = [
     "pre-commit>=4.5.1",

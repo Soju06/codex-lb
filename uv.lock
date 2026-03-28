@@ -393,6 +393,11 @@ dependencies = [
     { name = "zstandard" },
 ]
 
+[package.optional-dependencies]
+metrics = [
+    { name = "prometheus-client" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
@@ -416,6 +421,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=46.0.3" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.128.0" },
     { name = "greenlet", specifier = ">=3.3.0" },
+    { name = "prometheus-client", marker = "extra == 'metrics'", specifier = ">=0.20" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.12" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
@@ -427,6 +433,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=16.0" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]
+provides-extras = ["metrics"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1161,6 +1168,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/40/f1/6d86a29246dfd2e9b6237f0b5823717f60cad94d47ddc26afa916d21f525/pre_commit-4.5.1.tar.gz", hash = "sha256:eb545fcff725875197837263e977ea257a402056661f09dae08e4b149b030a61", size = 198232 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5d/19/fd3ef348460c80af7bb4669ea7926651d1f95c23ff2df18b9d24bab4f3fa/pre_commit-4.5.1-py2.py3-none-any.whl", hash = "sha256:3b3afd891e97337708c1674210f8eba659b52a38ea5f822ff142d10786221f77", size = 226437 },
+]
+
+[[package]]
+name = "prometheus-client"
+version = "0.24.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/58/a794d23feb6b00fc0c72787d7e87d872a6730dd9ed7c7b3e954637d8f280/prometheus_client-0.24.1.tar.gz", hash = "sha256:7e0ced7fbbd40f7b84962d5d2ab6f17ef88a72504dcf7c0b40737b43b2a461f9", size = 85616 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/c3/24a2f845e3917201628ecaba4f18bab4d18a337834c1df2a159ee9d22a42/prometheus_client-0.24.1-py3-none-any.whl", hash = "sha256:150db128af71a5c2482b36e588fc8a6b95e498750da4b17065947c16070f4055", size = 64057 },
 ]
 
 [[package]]

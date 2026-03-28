@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from importlib import import_module
 from pathlib import Path
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -14,6 +16,8 @@ from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
+from app.core.metrics.middleware import MetricsMiddleware
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE
 from app.core.middleware import (
     add_api_firewall_middleware,
     add_request_decompression_middleware,
@@ -62,6 +66,8 @@ async def lifespan(_: FastAPI):
     import app.core.startup as startup_module
 
     shutdown_state = import_module("app.core.shutdown")
+    metrics_server = None
+    metrics_server_task: asyncio.Task[None] | None = None
 
     startup_module._startup_complete = False
     shutdown_state.set_draining(False)
@@ -76,16 +82,32 @@ async def lifespan(_: FastAPI):
     await usage_scheduler.start()
     await model_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
+    settings = get_settings()
+    if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
+        import uvicorn
+
+        from app.core.metrics.prometheus import REGISTRY
+
+        prometheus_module = import_module("prometheus_client")
+        make_asgi_app = getattr(prometheus_module, "make_asgi_app")
+        metrics_app = make_asgi_app(registry=REGISTRY)
+        config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
+        metrics_server = uvicorn.Server(config)
+        metrics_server_task = asyncio.create_task(metrics_server.serve())
+    elif settings.metrics_enabled:
+        logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
     startup_module._startup_complete = True
 
     try:
         yield
     finally:
         shutdown_state.set_draining(True)
-        settings = get_settings()
         drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
         if not drained:
             logger.warning("Drain timeout reached, proceeding with shutdown")
+
+        if metrics_server is not None:
+            metrics_server.should_exit = True
 
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
@@ -93,10 +115,19 @@ async def lifespan(_: FastAPI):
         try:
             await close_http_client()
         finally:
-            await close_db()
+            try:
+                if metrics_server_task is not None:
+                    await asyncio.wait_for(metrics_server_task, timeout=5)
+            except TimeoutError:
+                logger.warning("Timed out waiting for metrics server shutdown")
+            except Exception:
+                logger.exception("Metrics server stopped with an error")
+            finally:
+                await close_db()
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
     app = FastAPI(
         title="codex-lb",
         version="0.1.0",
@@ -108,6 +139,7 @@ def create_app() -> FastAPI:
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)
+    app.add_middleware(cast(Any, MetricsMiddleware), enabled=settings.metrics_enabled)
     add_exception_handlers(app)
 
     app.include_router(proxy_api.router)

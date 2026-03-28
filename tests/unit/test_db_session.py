@@ -298,3 +298,55 @@ async def test_init_db_skips_sqlite_check_when_disabled(monkeypatch, tmp_path) -
     monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
 
     await session_module.init_db()
+
+
+@pytest.mark.asyncio
+async def test_init_background_db_creates_separate_engine() -> None:
+    session_module.init_background_db("sqlite+aiosqlite:///:memory:")
+
+    assert session_module._background_engine is not None
+    assert session_module._background_session_factory is not None
+
+    await session_module._background_engine.dispose()
+    session_module._background_engine = None
+    session_module._background_session_factory = None
+
+
+@pytest.mark.asyncio
+async def test_init_background_db_uses_smaller_pool_for_postgres() -> None:
+    session_module.init_background_db("postgresql+asyncpg://user:pass@localhost/db")
+
+    assert session_module._background_engine is not None
+    assert session_module._background_session_factory is not None
+
+    pool = session_module._background_engine.pool
+    assert pool.size() == 3  # type: ignore[attr-defined]
+
+    if session_module._background_engine is not None:
+        await session_module._background_engine.dispose()
+    session_module._background_engine = None
+    session_module._background_session_factory = None
+
+
+@pytest.mark.asyncio
+async def test_get_background_session_uses_background_pool_when_initialized() -> None:
+    session_module.init_background_db("sqlite+aiosqlite:///:memory:")
+
+    async with session_module.get_background_session() as session:
+        assert session is not None
+        assert isinstance(session, session_module.AsyncSession)
+
+    if session_module._background_engine is not None:
+        await session_module._background_engine.dispose()
+    session_module._background_engine = None
+    session_module._background_session_factory = None
+
+
+@pytest.mark.asyncio
+async def test_get_background_session_falls_back_to_main_pool_when_not_initialized() -> None:
+    session_module._background_engine = None
+    session_module._background_session_factory = None
+
+    async with session_module.get_background_session() as session:
+        assert session is not None
+        assert isinstance(session, session_module.AsyncSession)

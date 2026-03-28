@@ -23,7 +23,15 @@ async def init_http_client() -> HttpClient:
     if _http_client is not None:
         return _http_client
     settings = get_settings()
-    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), trust_env=True)
+    connector = aiohttp.TCPConnector(
+        limit=settings.http_connector_limit,
+        limit_per_host=settings.http_connector_limit_per_host,
+    )
+    session = aiohttp.ClientSession(
+        connector=connector,
+        timeout=aiohttp.ClientTimeout(total=None),
+        trust_env=True,
+    )
     try:
         # Match Codex CLI's direct websocket transport by avoiding env proxies unless operators
         # explicitly opt in for websocket handshakes.

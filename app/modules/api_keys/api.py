@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, Response
+from fastapi import APIRouter, Body, Depends, Request, Response
 
+from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
@@ -97,6 +98,7 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
 
 @router.post("/", response_model=ApiKeyCreateResponse)
 async def create_api_key(
+    request: Request,
     payload: ApiKeyCreateRequest = Body(...),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse:
@@ -116,6 +118,11 @@ async def create_api_key(
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     resp = _to_response(created)
+    AuditService.log_async(
+        "api_key_created",
+        actor_ip=request.client.host if request.client else None,
+        details={"key_id": created.id},
+    )
     return ApiKeyCreateResponse(
         **resp.model_dump(),
         key=created.key,
@@ -132,6 +139,7 @@ async def list_api_keys(
 
 @router.patch("/{key_id}", response_model=ApiKeyResponse)
 async def update_api_key(
+    request: Request,
     key_id: str,
     payload: ApiKeyUpdateRequest = Body(...),
     context: ApiKeysContext = Depends(get_api_keys_context),
@@ -164,11 +172,18 @@ async def update_api_key(
         raise DashboardNotFoundError(str(exc)) from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
+    if "is_active" in fields and payload.is_active is False and row.is_active is False:
+        AuditService.log_async(
+            "api_key_revoked",
+            actor_ip=request.client.host if request.client else None,
+            details={"key_id": row.id},
+        )
     return _to_response(row)
 
 
 @router.delete("/{key_id}")
 async def delete_api_key(
+    request: Request,
     key_id: str,
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> Response:
@@ -176,6 +191,11 @@ async def delete_api_key(
         await context.service.delete_key(key_id)
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
+    AuditService.log_async(
+        "api_key_revoked",
+        actor_ip=request.client.host if request.client else None,
+        details={"key_id": key_id},
+    )
     return Response(status_code=204)
 
 

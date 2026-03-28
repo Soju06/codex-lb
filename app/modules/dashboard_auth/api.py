@@ -120,7 +120,9 @@ async def login_password(
         ) from exc
 
     try:
-        await context.service.verify_password(payload.password)
+        await context.service.verify_password(
+            payload.password, actor_ip=request.client.host if request.client else None
+        )
     except InvalidCredentialsError as exc:
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
     except PasswordNotConfiguredError as exc:
@@ -215,7 +217,12 @@ async def confirm_totp_setup(
 
     try:
         session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-        await context.service.confirm_totp_setup(session_id=session_id, secret=payload.secret, code=payload.code)
+        await context.service.confirm_totp_setup(
+            session_id=session_id,
+            secret=payload.secret,
+            code=payload.code,
+            actor_ip=request.client.host if request.client else None,
+        )
     except PasswordSessionRequiredError as exc:
         raise DashboardAuthError(str(exc)) from exc
     except TotpInvalidCodeError as exc:
@@ -247,7 +254,11 @@ async def verify_totp(
         ) from exc
     try:
         current_session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-        session_id = await context.service.verify_totp(session_id=current_session_id, code=payload.code)
+        session_id = await context.service.verify_totp(
+            session_id=current_session_id,
+            code=payload.code,
+            actor_ip=request.client.host if request.client else None,
+        )
     except PasswordSessionRequiredError as exc:
         raise DashboardAuthError(str(exc)) from exc
     except TotpInvalidCodeError as exc:
@@ -279,7 +290,11 @@ async def disable_totp(
         ) from exc
     try:
         session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-        await context.service.disable_totp(session_id=session_id, code=payload.code)
+        await context.service.disable_totp(
+            session_id=session_id,
+            code=payload.code,
+            actor_ip=request.client.host if request.client else None,
+        )
     except PasswordSessionRequiredError as exc:
         raise DashboardAuthError(str(exc)) from exc
     except TotpInvalidCodeError as exc:

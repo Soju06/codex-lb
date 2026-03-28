@@ -24,6 +24,7 @@ from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
+from app.modules.audit import api as audit_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.firewall import api as firewall_api
@@ -115,6 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
     app.include_router(proxy_api.usage_router)
+    app.include_router(audit_api.router)
     app.include_router(accounts_api.router)
     app.include_router(dashboard_api.router)
     app.include_router(usage_api.router)

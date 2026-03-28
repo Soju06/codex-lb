@@ -10,6 +10,7 @@ from typing import Protocol
 import bcrypt
 import segno
 
+from app.core.audit.service import AuditService
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.crypto import TokenEncryptor
 from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
@@ -174,12 +175,16 @@ class DashboardAuthService:
         if not setup_ok:
             raise PasswordAlreadyConfiguredError("Password is already configured")
 
-    async def verify_password(self, password: str) -> None:
+    async def verify_password(self, password: str, *, actor_ip: str | None = None) -> None:
         current = await self._repository.get_password_hash()
         if current is None:
             raise PasswordNotConfiguredError("Password is not configured")
         if not _check_password(password, current):
+            AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "password"})
             raise InvalidCredentialsError("Invalid credentials")
+        settings = await self._repository.get_settings()
+        if not settings.totp_required_on_login or settings.totp_secret_encrypted is None:
+            AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "password"})
 
     async def change_password(self, current_password: str, new_password: str) -> None:
         await self.verify_password(current_password)
@@ -217,7 +222,14 @@ class DashboardAuthService:
             qr_svg_data_uri=_qr_svg_data_uri(otpauth_uri),
         )
 
-    async def confirm_totp_setup(self, *, session_id: str | None, secret: str, code: str) -> None:
+    async def confirm_totp_setup(
+        self,
+        *,
+        session_id: str | None,
+        secret: str,
+        code: str,
+        actor_ip: str | None = None,
+    ) -> None:
         current = await self._require_active_password_session(session_id)
         if current.totp_secret_encrypted is not None:
             raise TotpAlreadyConfiguredError("TOTP is already configured. Disable it before setting a new secret")
@@ -228,8 +240,9 @@ class DashboardAuthService:
         if not verification.is_valid:
             raise TotpInvalidCodeError("Invalid TOTP code")
         await self._repository.set_totp_secret(self._encryptor.encrypt(secret))
+        AuditService.log_async("totp_enabled", actor_ip=actor_ip)
 
-    async def verify_totp(self, *, session_id: str | None, code: str) -> str:
+    async def verify_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> str:
         settings = await self._require_active_password_session(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
@@ -242,13 +255,16 @@ class DashboardAuthService:
             last_verified_step=settings.totp_last_verified_step,
         )
         if not verification.is_valid or verification.matched_step is None:
+            AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "totp"})
             raise TotpInvalidCodeError("Invalid TOTP code")
         updated = await self._repository.try_advance_totp_last_verified_step(verification.matched_step)
         if not updated:
+            AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "totp"})
             raise TotpInvalidCodeError("Invalid TOTP code")
+        AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "totp"})
         return self._session_store.create(password_verified=True, totp_verified=True)
 
-    async def disable_totp(self, *, session_id: str | None, code: str) -> None:
+    async def disable_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> None:
         settings = await self._require_totp_verified_session(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
@@ -266,6 +282,7 @@ class DashboardAuthService:
         if not updated:
             raise TotpInvalidCodeError("Invalid TOTP code")
         await self._repository.set_totp_secret(None)
+        AuditService.log_async("totp_disabled", actor_ip=actor_ip)
 
     def logout(self, session_id: str | None) -> None:
         self._session_store.delete(session_id)

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 
+from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AccountsContext, get_accounts_context
@@ -44,12 +45,19 @@ async def get_account_trends(
 
 @router.post("/import", response_model=AccountImportResponse)
 async def import_account(
+    request: Request,
     auth_json: UploadFile = File(...),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountImportResponse:
     raw = await auth_json.read()
     try:
-        return await context.service.import_account(raw)
+        response = await context.service.import_account(raw)
+        AuditService.log_async(
+            "account_created",
+            actor_ip=request.client.host if request.client else None,
+            details={"account_id": response.account_id},
+        )
+        return response
     except InvalidAuthJsonError as exc:
         raise DashboardBadRequestError("Invalid auth.json payload", code="invalid_auth_json") from exc
     except AccountIdentityConflictError as exc:
@@ -80,10 +88,16 @@ async def pause_account(
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)
 async def delete_account(
+    request: Request,
     account_id: str,
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountDeleteResponse:
     success = await context.service.delete_account(account_id)
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_deleted",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id},
+    )
     return AccountDeleteResponse(status="deleted")

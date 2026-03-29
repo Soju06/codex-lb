@@ -401,6 +401,42 @@ def test_apply_usage_quota_resets_to_active_if_runtime_reset_expired(monkeypatch
     assert reset_at is None
 
 
+def test_select_account_resets_used_percent_when_rate_limit_expires():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.RATE_LIMITED,
+        used_percent=100.0,
+        reset_at=now - 10,
+    )
+
+    result = select_account([state], now=now)
+
+    assert result.account is not None
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 0.0
+    assert state.reset_at is None
+
+
+def test_select_account_resets_secondary_used_percent_when_quota_exceeded_expires():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        secondary_used_percent=100.0,
+        reset_at=now - 10,
+    )
+
+    result = select_account([state], now=now)
+
+    assert result.account is not None
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 0.0
+    assert state.secondary_used_percent == 0.0
+    assert state.reset_at is None
+
+
 def test_apply_usage_quota_clears_quota_exceeded_when_runtime_reset_is_none(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
@@ -505,6 +541,48 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     from datetime import timezone
 
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
+
+
+def test_state_from_account_zeroes_stale_exhausted_primary_usage_after_reset(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=int(now - 10),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.used_percent == 0.0
+    assert state.reset_at is None
+
+
+def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=None,
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=100.0,
+            reset_at=int(now - 10),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.secondary_used_percent == 0.0
+    assert state.secondary_reset_at is None
 
 
 def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(

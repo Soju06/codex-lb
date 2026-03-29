@@ -530,16 +530,27 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                pinned_result = select_account(
-                    [pinned],
-                    prefer_earlier_reset=prefer_earlier_reset_accounts,
-                    routing_strategy=routing_strategy,
-                    allow_backoff_fallback=False,
+                # Check if pinned account has insufficient budget (< 5% remaining)
+                # or rate limit is far away (reset_at more than 10 minutes away)
+                budget_threshold_pct = 95.0
+                now = time.time()
+                budget_exhausted = pinned.used_percent is not None and pinned.used_percent >= budget_threshold_pct
+                rate_limit_far_away = (
+                    pinned.reset_at is not None and pinned.reset_at - now >= 600  # 10 minutes
                 )
-                if pinned_result.account is not None:
-                    if not reallocate_sticky and sticky_max_age_seconds is not None:
-                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                    return pinned_result
+                if not (budget_exhausted or rate_limit_far_away):
+                    pinned_result = select_account(
+                        [pinned],
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        allow_backoff_fallback=False,
+                    )
+                    if pinned_result.account is not None:
+                        if sticky_max_age_seconds is not None:
+                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
+                        return pinned_result
+                else:
+                    reallocate_sticky = True
                 # Grace period: if the pinned account is rate-limited with a
                 # known reset time within a short window, retry selection
                 # with a small time advance to preserve prompt cache.

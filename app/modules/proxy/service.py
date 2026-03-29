@@ -244,6 +244,9 @@ class ProxyService:
             codex_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0),
             max_sessions=getattr(settings, "http_responses_session_bridge_max_sessions", 256),
             queue_limit=getattr(settings, "http_responses_session_bridge_queue_limit", 8),
+            prompt_cache_idle_ttl_seconds=getattr(
+                settings, "http_responses_session_bridge_prompt_cache_idle_ttl_seconds", 3600.0
+            ),
             downstream_turn_state=downstream_turn_state,
         ):
             yield line
@@ -263,6 +266,7 @@ class ProxyService:
         codex_idle_ttl_seconds: float,
         max_sessions: int,
         queue_limit: int,
+        prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
     ) -> AsyncIterator[str]:
         del propagate_http_errors, suppress_text_done_events
@@ -319,6 +323,7 @@ class ProxyService:
                 affinity=affinity,
                 idle_ttl_seconds=idle_ttl_seconds,
                 codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
             ),
             max_sessions=max_sessions,
             previous_response_id=request_state.previous_response_id,
@@ -1435,6 +1440,11 @@ class ProxyService:
                 settings,
                 "http_responses_session_bridge_codex_idle_ttl_seconds",
                 900.0,
+            ),
+            prompt_cache_idle_ttl_seconds=getattr(
+                settings,
+                "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
+                3600.0,
             ),
         )
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
@@ -4603,11 +4613,12 @@ def _maybe_log_proxy_request_shape(
     header_keys = _interesting_header_keys(headers)
     session_header_present = _sticky_key_from_session_header(headers) is not None
     tools_hash = _tools_hash(payload)
+    model_class = _extract_model_class(payload.model)
 
     logger.warning(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
         "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
-        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s session_header_present=%s tools_hash=%s",
+        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s session_header_present=%s tools_hash=%s model_class=%s",
         request_id,
         kind,
         payload.model,
@@ -4623,6 +4634,7 @@ def _maybe_log_proxy_request_shape(
         prompt_cache_key_set,
         session_header_present,
         tools_hash,
+        model_class,
     )
 
 
@@ -4739,18 +4751,39 @@ def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCo
     return None
 
 
+def _extract_model_class(model: str) -> str:
+    """Extract model class from model name for cache key prefix.
+
+    Classification:
+    - "mini" for gpt-5.4-mini
+    - "codex" for gpt-5.3-codex* (any variant)
+    - "std" for all others
+    """
+    if "mini" in model:
+        return "mini"
+    if "codex" in model:
+        return "codex"
+    return "std"
+
+
 def _derive_prompt_cache_key(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
 ) -> str:
     """Derive a stable, session-scoped prompt_cache_key when the client does not provide one.
 
-    The generated key is scoped to (api-key, instructions-prefix, first-user-input) so that:
+    The generated key is scoped to (model-class, api-key, instructions-prefix, first-user-input) so that:
+    - Different model classes get *different* keys (prevents cache pollution).
     - Parallel sessions from the same API key get *different* keys (different first input).
     - Successive turns within one session get the *same* key (first input stays constant).
     - Different API keys never collide.
     """
     parts: list[str] = []
+
+    # Add model class prefix
+    model = getattr(payload, "model", None)
+    if isinstance(model, str) and model:
+        parts.append(_extract_model_class(model))
 
     if api_key is not None:
         parts.append(api_key.id[:12])
@@ -4995,9 +5028,12 @@ def _effective_http_bridge_idle_ttl_seconds(
     affinity: _AffinityPolicy,
     idle_ttl_seconds: float,
     codex_idle_ttl_seconds: float,
+    prompt_cache_idle_ttl_seconds: float | None = None,
 ) -> float:
     if affinity.kind == StickySessionKind.CODEX_SESSION:
         return max(idle_ttl_seconds, codex_idle_ttl_seconds)
+    if affinity.kind == StickySessionKind.PROMPT_CACHE and prompt_cache_idle_ttl_seconds is not None:
+        return prompt_cache_idle_ttl_seconds
     return idle_ttl_seconds
 
 
@@ -5093,6 +5129,8 @@ def _log_http_bridge_event(
     model: str | None,
     pending_count: int | None = None,
     detail: str | None = None,
+    cache_key_family: str | None = None,
+    model_class: str | None = None,
 ) -> None:
     level = logging.INFO
     if event in {
@@ -5109,7 +5147,7 @@ def _log_http_bridge_event(
         level = logging.WARNING
     logger.log(
         level,
-        "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s pending=%s detail=%s",
+        "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s pending=%s detail=%s cache_key_family=%s model_class=%s",
         event,
         key.affinity_kind,
         _hash_identifier(key.affinity_key),
@@ -5117,6 +5155,8 @@ def _log_http_bridge_event(
         model,
         pending_count,
         detail,
+        cache_key_family,
+        model_class,
     )
 
 

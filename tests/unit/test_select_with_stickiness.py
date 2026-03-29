@@ -79,15 +79,26 @@ async def _select_with_stickiness(
     if existing:
         pinned = next((s for s in states if s.account_id == existing), None)
         if pinned is not None:
-            pinned_result = select_account(
-                [pinned],
-                routing_strategy="usage_weighted",
-                allow_backoff_fallback=False,
+            # Check if pinned account has insufficient budget (< 5% remaining)
+            # or rate limit is far away (reset_at more than 10 minutes away)
+            budget_threshold_pct = 95.0
+            now = time.time()
+            budget_exhausted = pinned.used_percent is not None and pinned.used_percent >= budget_threshold_pct
+            rate_limit_far_away = (
+                pinned.reset_at is not None and pinned.reset_at - now >= 600  # 10 minutes
             )
-            if pinned_result.account is not None:
-                if not reallocate_sticky and sticky_max_age_seconds is not None:
-                    await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                return pinned_result
+            if not (budget_exhausted or rate_limit_far_away):
+                pinned_result = select_account(
+                    [pinned],
+                    routing_strategy="usage_weighted",
+                    allow_backoff_fallback=False,
+                )
+                if pinned_result.account is not None:
+                    if sticky_max_age_seconds is not None:
+                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
+                    return pinned_result
+            else:
+                reallocate_sticky = True
             if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
                 grace_copy = replace(pinned)
                 grace_result = select_account(
@@ -474,3 +485,46 @@ async def test_codex_session_persists_fallback_during_outage():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION)
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_triggers_reallocation():
+    """When the pinned account has < 5% budget remaining (used_percent >= 95%),
+    it should be reallocated to a different account."""
+    acc_a = _active("a", used_percent=96.0)  # 96% used = < 4% remaining
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _select_with_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_far_away_triggers_reallocation():
+    """When the pinned account's rate limit reset is more than 10 minutes away,
+    it should be reallocated to avoid waiting."""
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 900)  # resets in 15 minutes > 10 min threshold
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _select_with_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)

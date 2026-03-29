@@ -151,7 +151,7 @@ async def test_health_ready_reports_degraded_when_circuit_breaker_open() -> None
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock()
 
-    with patch("app.modules.health.api.get_session") as mock_get_session:
+    with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
         with patch("app.modules.health.api.get_settings", return_value=SimpleNamespace(circuit_breaker_enabled=True)):
             with patch(
                 "app.modules.health.api.get_circuit_breaker",

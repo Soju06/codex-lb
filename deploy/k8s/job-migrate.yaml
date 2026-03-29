@@ -1,0 +1,19 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codex-lb-migrate
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: migrate
+        image: ghcr.io/soju06/codex-lb:__IMAGE_TAG__
+        command: ["python", "-m", "app.db.migrate", "upgrade"]
+        envFrom:
+        - configMapRef:
+            name: codex-lb-config
+        - secretRef:
+            name: codex-lb-secrets
+      serviceAccountName: default

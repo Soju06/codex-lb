@@ -1,7 +1,12 @@
 #!/bin/sh
 set -eu
 
-python -m app.db.migrate upgrade
+if [ "${CODEX_LB_DATABASE_MIGRATE_ON_STARTUP:-false}" = "true" ]; then
+  python -m app.db.migrate upgrade
+fi
 
+# Disable app-level startup migration so app/db/session.py init_db() does not
+# run migrations again inside the app process.
 export CODEX_LB_DATABASE_MIGRATE_ON_STARTUP=false
+
 exec fastapi run --host 0.0.0.0 --port 2455

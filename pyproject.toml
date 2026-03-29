@@ -58,6 +58,14 @@ dependencies = [
 
 [project.optional-dependencies]
 metrics = ["prometheus-client>=0.20"]
+tracing = [
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp>=1.25",
+    "opentelemetry-instrumentation-fastapi>=0.46",
+    "opentelemetry-instrumentation-aiohttp-client>=0.46",
+    "opentelemetry-instrumentation-sqlalchemy>=0.46",
+]
 
 [dependency-groups]
 dev = [

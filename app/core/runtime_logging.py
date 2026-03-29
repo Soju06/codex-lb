@@ -39,6 +39,18 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
+        try:
+            from app.core.tracing.otel import get_current_span_id, get_current_trace_id
+
+            trace_id = get_current_trace_id()
+            span_id = get_current_span_id()
+            if trace_id:
+                log_entry["trace_id"] = trace_id
+            if span_id:
+                log_entry["span_id"] = span_id
+        except Exception:
+            pass
+
         excluded_keys = {
             "name",
             "msg",

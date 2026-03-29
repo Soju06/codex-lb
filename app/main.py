@@ -75,6 +75,11 @@ async def lifespan(_: FastAPI):
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
+    settings = get_settings()
+    if settings.otel_enabled:
+        from app.core.tracing.otel import init_tracing
+
+        init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint)
     await init_db()
     await init_http_client()
     usage_scheduler = build_usage_refresh_scheduler()
@@ -83,7 +88,6 @@ async def lifespan(_: FastAPI):
     await usage_scheduler.start()
     await model_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
-    settings = get_settings()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 

@@ -1,0 +1,36 @@
+# Production Docker Compose — PostgreSQL backend
+# Usage:
+#   cp .env.example .env.local   # fill in secrets
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Requires external PostgreSQL. Set CODEX_LB_DATABASE_URL in .env.local:
+#   CODEX_LB_DATABASE_URL=postgresql+asyncpg://user:password@host:5432/codexlb
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.local
+    ports:
+      - "2455:2455"
+      - "1455:1455"
+    volumes:
+      - codex-lb-data:/var/lib/codex-lb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:2455/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+volumes:
+  codex-lb-data:
+    name: codex-lb-data

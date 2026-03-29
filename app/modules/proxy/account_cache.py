@@ -17,12 +17,13 @@ class _CachedSelectionInputs:
 
 
 class AccountSelectionCache:
-    def __init__(self, ttl_seconds: int = 5) -> None:
-        # Disable cache in test environments to prevent cross-test contamination
-        import sys
+    def __init__(self, ttl_seconds: int | None = None) -> None:
+        # Default TTL: 0 (disabled) in test mode, 5s in production
+        # Passing an explicit ttl_seconds bypasses test mode detection
+        if ttl_seconds is None:
+            import sys
 
-        if "pytest" in sys.modules:
-            ttl_seconds = 0
+            ttl_seconds = 0 if "pytest" in sys.modules else 5
         if ttl_seconds < 0:
             raise ValueError("ttl_seconds must be non-negative")
         self._ttl_seconds = ttl_seconds

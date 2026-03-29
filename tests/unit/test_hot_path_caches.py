@@ -199,7 +199,12 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
     def _repo_factory() -> _Repos:
         return _Repos(accounts_repo, usage_repo)
 
+    # Create cache with explicit TTL > 0 (not the global singleton which may be disabled in tests)
+    from app.modules.proxy.account_cache import AccountSelectionCache
+
+    cache = AccountSelectionCache(ttl_seconds=5)
     balancer = LoadBalancer(cast(ProxyRepoFactory, _repo_factory))
+    balancer._selection_inputs_cache = cache  # Override with test-specific cache
 
     for _ in range(10):
         inputs = await balancer._load_selection_inputs(model=None)
@@ -210,7 +215,7 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
     assert usage_repo.primary_calls == 1
     assert usage_repo.secondary_calls == 1
 
-    get_account_selection_cache().invalidate()
+    cache.invalidate()
     refreshed = await balancer._load_selection_inputs(model=None)
     assert len(refreshed.accounts) == 1
     assert refreshed.accounts[0].id == account.id

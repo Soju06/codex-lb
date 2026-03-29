@@ -809,6 +809,20 @@ def _state_from_account(
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
 
+    # If the usage window has reset (reset_at is in the past) but the last
+    # recorded sample still shows 100 % usage, the data is stale.  Zero it
+    # out so the account is not incorrectly blocked or deprioritised while
+    # waiting for the next usage refresh to fetch fresh numbers.
+    now_epoch = int(time.time())
+    if primary_used is not None and primary_used >= 100.0:
+        if primary_reset is not None and primary_reset <= now_epoch:
+            primary_used = 0.0
+            primary_reset = None
+    if secondary_used is not None and secondary_used >= 100.0:
+        if secondary_reset is not None and secondary_reset <= now_epoch:
+            secondary_used = 0.0
+            secondary_reset = None
+
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
     db_reset_at = float(account.reset_at) if account.reset_at else None

@@ -63,6 +63,7 @@ def select_account(
         if state.status == AccountStatus.RATE_LIMITED:
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
+                state.used_percent = 0.0
                 state.error_count = 0
                 state.reset_at = None
             else:
@@ -71,6 +72,7 @@ def select_account(
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.used_percent = 0.0
+                state.secondary_used_percent = 0.0
                 state.reset_at = None
             else:
                 continue

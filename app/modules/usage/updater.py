@@ -188,7 +188,11 @@ class UsageUpdater:
                 continue
             latest = latest_usage.get(account.id)
             if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
-                continue
+                # Still force a refresh when the account is blocked with an
+                # expired reset — the fresh primary entry does not capture
+                # that the upstream window has turned over.
+                if not _account_needs_post_reset_refresh(account, now):
+                    continue
             # Additional-only accounts have no main UsageHistory entry.
             # Check DB-backed freshness (works across workers/restarts)
             # with process-local cache as a fast path.
@@ -636,7 +640,18 @@ def _latest_usage_is_fresh(
     now: datetime,
     interval_seconds: int,
 ) -> bool:
-    return latest is not None and (now - latest.recorded_at).total_seconds() < interval_seconds
+    if latest is None:
+        return False
+    if (now - latest.recorded_at).total_seconds() >= interval_seconds:
+        return False
+    # If the usage window has reset since this entry was recorded, the
+    # recorded percentage is stale — force a re-fetch so the scheduler
+    # picks up the new (lower) usage from the upstream API promptly.
+    if latest.reset_at is not None:
+        now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+        if now_epoch >= latest.reset_at:
+            return False
+    return True
 
 
 def _parse_credits_balance(value: str | int | float | None) -> float | None:
@@ -650,6 +665,21 @@ def _parse_credits_balance(value: str | int | float | None) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _account_needs_post_reset_refresh(account: Account, now: datetime) -> bool:
+    """Return True when the account is blocked with an expired reset time.
+
+    This catches the case where only the *secondary* window has reset (the
+    primary entry may still look fresh) but the account is still persisted as
+    RATE_LIMITED or QUOTA_EXCEEDED from the previous cycle.
+    """
+    if account.status not in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED):
+        return False
+    if account.reset_at is None:
+        return False
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    return now_epoch >= account.reset_at
 
 
 def _window_minutes(limit_seconds: int | None) -> int | None:

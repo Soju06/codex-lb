@@ -13,7 +13,12 @@ from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
-from app.modules.usage.updater import UsageUpdater, _last_successful_refresh
+from app.modules.usage.updater import (
+    UsageUpdater,
+    _account_needs_post_reset_refresh,
+    _last_successful_refresh,
+    _latest_usage_is_fresh,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -1521,3 +1526,109 @@ async def test_additional_rate_limits_no_credits_passed(monkeypatch) -> None:
     assert not hasattr(entry, "credits_has")
     assert not hasattr(entry, "credits_unlimited")
     assert not hasattr(entry, "credits_balance")
+
+
+# ---------------------------------------------------------------------------
+# _latest_usage_is_fresh — reset boundary awareness
+# ---------------------------------------------------------------------------
+
+
+def test_latest_usage_is_fresh_returns_true_when_recent_no_reset():
+    now = datetime(2024, 6, 1, 12, 0, 30)
+    entry = UsageHistory(
+        id=1,
+        account_id="a",
+        used_percent=50.0,
+        recorded_at=datetime(2024, 6, 1, 12, 0, 0),
+        window="primary",
+        reset_at=None,
+        window_minutes=300,
+    )
+    assert _latest_usage_is_fresh(entry, now=now, interval_seconds=60) is True
+
+
+def test_latest_usage_is_fresh_returns_false_when_old():
+    now = datetime(2024, 6, 1, 12, 1, 30)
+    entry = UsageHistory(
+        id=1,
+        account_id="a",
+        used_percent=50.0,
+        recorded_at=datetime(2024, 6, 1, 12, 0, 0),
+        window="primary",
+        reset_at=None,
+        window_minutes=300,
+    )
+    assert _latest_usage_is_fresh(entry, now=now, interval_seconds=60) is False
+
+
+def test_latest_usage_is_fresh_returns_false_when_reset_at_has_passed():
+    """Data recorded recently but the usage window has already reset."""
+    # recorded_at is 10s ago → within interval.  But reset_at was 5s ago.
+    reset_epoch = int(datetime(2024, 6, 1, 12, 0, 25).replace(tzinfo=timezone.utc).timestamp())
+    now = datetime(2024, 6, 1, 12, 0, 30)
+    entry = UsageHistory(
+        id=1,
+        account_id="a",
+        used_percent=100.0,
+        recorded_at=datetime(2024, 6, 1, 12, 0, 20),
+        window="primary",
+        reset_at=reset_epoch,
+        window_minutes=300,
+    )
+    assert _latest_usage_is_fresh(entry, now=now, interval_seconds=60) is False
+
+
+def test_latest_usage_is_fresh_returns_true_when_reset_at_is_in_future():
+    """Data recorded recently and the reset hasn't happened yet."""
+    reset_epoch = int(datetime(2024, 6, 1, 12, 5, 0).replace(tzinfo=timezone.utc).timestamp())
+    now = datetime(2024, 6, 1, 12, 0, 30)
+    entry = UsageHistory(
+        id=1,
+        account_id="a",
+        used_percent=100.0,
+        recorded_at=datetime(2024, 6, 1, 12, 0, 20),
+        window="primary",
+        reset_at=reset_epoch,
+        window_minutes=300,
+    )
+    assert _latest_usage_is_fresh(entry, now=now, interval_seconds=60) is True
+
+
+# ---------------------------------------------------------------------------
+# _account_needs_post_reset_refresh
+# ---------------------------------------------------------------------------
+
+
+def test_account_needs_refresh_active_account_returns_false():
+    acc = _make_account("a", "ws_a")
+    acc.status = AccountStatus.ACTIVE
+    acc.reset_at = int(datetime(2024, 6, 1, 11, 0, 0).replace(tzinfo=timezone.utc).timestamp())
+    assert _account_needs_post_reset_refresh(acc, datetime(2024, 6, 1, 12, 0, 0)) is False
+
+
+def test_account_needs_refresh_quota_exceeded_future_reset_returns_false():
+    acc = _make_account("a", "ws_a")
+    acc.status = AccountStatus.QUOTA_EXCEEDED
+    acc.reset_at = int(datetime(2024, 6, 1, 13, 0, 0).replace(tzinfo=timezone.utc).timestamp())
+    assert _account_needs_post_reset_refresh(acc, datetime(2024, 6, 1, 12, 0, 0)) is False
+
+
+def test_account_needs_refresh_quota_exceeded_past_reset_returns_true():
+    acc = _make_account("a", "ws_a")
+    acc.status = AccountStatus.QUOTA_EXCEEDED
+    acc.reset_at = int(datetime(2024, 6, 1, 11, 0, 0).replace(tzinfo=timezone.utc).timestamp())
+    assert _account_needs_post_reset_refresh(acc, datetime(2024, 6, 1, 12, 0, 0)) is True
+
+
+def test_account_needs_refresh_rate_limited_past_reset_returns_true():
+    acc = _make_account("a", "ws_a")
+    acc.status = AccountStatus.RATE_LIMITED
+    acc.reset_at = int(datetime(2024, 6, 1, 11, 0, 0).replace(tzinfo=timezone.utc).timestamp())
+    assert _account_needs_post_reset_refresh(acc, datetime(2024, 6, 1, 12, 0, 0)) is True
+
+
+def test_account_needs_refresh_no_reset_at_returns_false():
+    acc = _make_account("a", "ws_a")
+    acc.status = AccountStatus.QUOTA_EXCEEDED
+    acc.reset_at = None
+    assert _account_needs_post_reset_refresh(acc, datetime(2024, 6, 1, 12, 0, 0)) is False

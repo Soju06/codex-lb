@@ -29,7 +29,7 @@ spec:
           defaultMode: 0444
       containers:
       - name: codex-lb
-        image: ghcr.io/soju06/codex-lb:latest
+        image: ghcr.io/soju06/codex-lb:__IMAGE_TAG__
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 2455

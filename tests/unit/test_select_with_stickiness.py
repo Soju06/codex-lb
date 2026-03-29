@@ -8,14 +8,14 @@ Covers:
 from __future__ import annotations
 
 import time
-from dataclasses import replace
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.balancer import AccountState, select_account
 from app.db.models import AccountStatus, StickySessionKind
-from app.modules.proxy.load_balancer import _RECOVERABLE_STATUSES, _STICKY_GRACE_PERIOD_SECONDS
+from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = pytest.mark.unit
 
@@ -56,74 +56,30 @@ async def _select_with_stickiness(
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
 ):
-    """Inline replica of LoadBalancer._select_with_stickiness for unit testing.
+    """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
-    WARNING: This is a copy of the logic in LoadBalancer._select_with_stickiness.
-    If the original method changes, this replica must be updated to match.
-    Integration tests in test_proxy_sticky_sessions.py cover the real code path.
+    This delegates to the real implementation in LoadBalancer to avoid
+    maintaining a replica that can drift from production.
     """
 
-    if not sticky_key or not sticky_repo:
-        return select_account(states)
+    @asynccontextmanager
+    async def mock_repo_factory():
+        yield AsyncMock()
 
+    lb = LoadBalancer(mock_repo_factory)
     account_map = {s.account_id: True for s in states}
 
-    existing = await sticky_repo.get_account_id(
-        sticky_key,
-        kind=sticky_kind,
-        max_age_seconds=sticky_max_age_seconds,
+    return await lb._select_with_stickiness(
+        states=states,
+        account_map=account_map,
+        sticky_key=sticky_key,
+        sticky_kind=sticky_kind,
+        reallocate_sticky=reallocate_sticky,
+        sticky_max_age_seconds=sticky_max_age_seconds,
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        sticky_repo=sticky_repo,
     )
-
-    persist_fallback = True
-
-    if existing:
-        pinned = next((s for s in states if s.account_id == existing), None)
-        if pinned is not None:
-            # Check if pinned account has insufficient budget (< 5% remaining)
-            # or rate limit is far away (reset_at more than 10 minutes away)
-            budget_threshold_pct = 95.0
-            now = time.time()
-            budget_exhausted = pinned.used_percent is not None and pinned.used_percent >= budget_threshold_pct
-            rate_limit_far_away = (
-                pinned.reset_at is not None and pinned.reset_at - now >= 600  # 10 minutes
-            )
-            if not (budget_exhausted or rate_limit_far_away):
-                pinned_result = select_account(
-                    [pinned],
-                    routing_strategy="usage_weighted",
-                    allow_backoff_fallback=False,
-                )
-                if pinned_result.account is not None:
-                    if sticky_max_age_seconds is not None:
-                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                    return pinned_result
-            else:
-                reallocate_sticky = True
-            if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
-                grace_copy = replace(pinned)
-                grace_result = select_account(
-                    [grace_copy],
-                    now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
-                    routing_strategy="usage_weighted",
-                    allow_backoff_fallback=False,
-                )
-                if grace_result.account is not None:
-                    if sticky_max_age_seconds is not None:
-                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                    return grace_result
-            if reallocate_sticky:
-                await sticky_repo.delete(sticky_key, kind=sticky_kind)
-            elif pinned.status not in _RECOVERABLE_STATUSES:
-                pass
-            elif sticky_max_age_seconds is not None:
-                persist_fallback = False
-        else:
-            await sticky_repo.delete(sticky_key, kind=sticky_kind)
-
-    chosen = select_account(states, routing_strategy="usage_weighted")
-    if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
-        await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
-    return chosen
 
 
 # ---------------------------------------------------------------------------

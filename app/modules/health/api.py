@@ -26,7 +26,7 @@ async def health_live() -> HealthCheckResponse:
 async def health_ready() -> HealthCheckResponse:
     draining = False
     try:
-        import app.core.draining as draining_module  # type: ignore[import-not-found]
+        import app.core.draining as draining_module
 
         draining = getattr(draining_module, "_draining", False)
     except (ImportError, AttributeError):

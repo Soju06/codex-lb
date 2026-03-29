@@ -133,6 +133,12 @@ class Settings(BaseSettings):
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
 
+    bulkhead_proxy_limit: int = 200
+    bulkhead_dashboard_limit: int = 50
+
+    memory_warning_threshold_mb: int = 0
+    memory_reject_threshold_mb: int = 0
+
     # OpenTelemetry
     otel_enabled: bool = False
     otel_exporter_endpoint: str = ""

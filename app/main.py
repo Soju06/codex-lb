@@ -25,6 +25,8 @@ from app.core.middleware import (
 )
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
+from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
+from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
@@ -133,6 +135,10 @@ async def lifespan(_: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    configure_memory_monitor(
+        warning_threshold_mb=settings.memory_warning_threshold_mb,
+        reject_threshold_mb=settings.memory_reject_threshold_mb,
+    )
     app = FastAPI(
         title="codex-lb",
         version="0.1.0",
@@ -150,6 +156,13 @@ def create_app() -> FastAPI:
             cast(Any, BackpressureMiddleware),
             max_concurrent=settings.backpressure_max_concurrent_requests,
         )
+    app.add_middleware(
+        cast(Any, BulkheadMiddleware),
+        bulkhead=get_bulkhead(
+            proxy_limit=settings.bulkhead_proxy_limit,
+            dashboard_limit=settings.bulkhead_dashboard_limit,
+        ),
+    )
     add_exception_handlers(app)
 
     app.include_router(proxy_api.router)

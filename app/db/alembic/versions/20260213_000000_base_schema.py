@@ -178,6 +178,18 @@ def upgrade() -> None:
                 nullable=False,
                 server_default=sa.text("CURRENT_TIMESTAMP"),
             ),
+            sa.Column(
+                "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
+                sa.Integer(),
+                nullable=False,
+                server_default=sa.text("3600"),
+            ),
+            sa.Column(
+                "sticky_reallocation_budget_threshold_pct",
+                sa.Float(),
+                nullable=False,
+                server_default=sa.text("95.0"),
+            ),
         )
 
     created_api_keys = not _table_exists(bind, "api_keys")

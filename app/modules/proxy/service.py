@@ -244,9 +244,7 @@ class ProxyService:
             codex_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0),
             max_sessions=getattr(settings, "http_responses_session_bridge_max_sessions", 256),
             queue_limit=getattr(settings, "http_responses_session_bridge_queue_limit", 8),
-            prompt_cache_idle_ttl_seconds=getattr(
-                settings, "http_responses_session_bridge_prompt_cache_idle_ttl_seconds", 3600.0
-            ),
+            prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
             downstream_turn_state=downstream_turn_state,
         ):
             yield line

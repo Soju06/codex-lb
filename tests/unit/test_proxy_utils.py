@@ -374,6 +374,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
         upstream_stream_transport="default",
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,
@@ -387,6 +388,13 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         log_proxy_request_shape_raw_cache_key=False,
         log_proxy_service_tier_trace=log_proxy_service_tier_trace,
     )
+
+
+@pytest.fixture(autouse=True)
+def _install_default_proxy_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
 
 
 def _make_account(account_id: str) -> Account:

@@ -1,8 +1,47 @@
 from __future__ import annotations
 
+import base64
+import json
+from datetime import timezone
+
 import pytest
 
+import app.modules.proxy.service as proxy_module
+from app.core.utils.time import utcnow
+from app.db.session import SessionLocal
+from app.modules.usage.repository import UsageRepository
+
 pytestmark = pytest.mark.integration
+
+
+def _encode_jwt(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return f"header.{body}.sig"
+
+
+def _make_auth_json(account_id: str, email: str) -> dict:
+    payload = {
+        "email": email,
+        "chatgpt_account_id": account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    return {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access-token",
+            "refreshToken": "refresh-token",
+            "accountId": account_id,
+        },
+    }
+
+
+async def _import_account(async_client, account_id: str, email: str) -> str:
+    auth_json = _make_auth_json(account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+    return response.json()["accountId"]
 
 
 def test_mini_and_large_requests_use_different_cache_keys():
@@ -104,3 +143,78 @@ def test_model_class_extraction_for_all_model_types():
     assert _extract_model_class("gpt-5.4") == "std"
     assert _extract_model_class("gpt-4") == "std"
     assert _extract_model_class("gpt-4-turbo") == "std"
+
+
+@pytest.mark.asyncio
+async def test_prompt_cache_reallocates_when_usage_exceeds_configured_budget_threshold(async_client, monkeypatch):
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "stickyReallocationBudgetThresholdPct": 80.0,
+            "preferEarlierResetAccounts": False,
+        },
+    )
+    assert settings_response.status_code == 200
+
+    acc_a_id = await _import_account(async_client, "acc_budget_a", "budget_a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_budget_b", "budget_b@example.com")
+
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_budget"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "prompt_cache_key": "budget-threshold-key",
+    }
+
+    first = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert first.status_code == 200
+    assert seen == ["acc_budget_a"]
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=85.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    second = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert second.status_code == 200
+    assert seen == ["acc_budget_a", "acc_budget_b"]

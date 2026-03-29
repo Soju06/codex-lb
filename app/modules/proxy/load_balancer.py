@@ -991,7 +991,7 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
 
 def _is_upstream_circuit_breaker_open() -> bool:
     settings = get_settings()
-    if not settings.circuit_breaker_enabled:
+    if not getattr(settings, "circuit_breaker_enabled", False):
         return False
     circuit_breaker = get_circuit_breaker(settings)
     return circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN

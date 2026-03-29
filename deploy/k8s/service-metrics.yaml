@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: codex-lb-metrics
+  labels:
+    app: codex-lb
+spec:
+  selector:
+    app: codex-lb
+  ports:
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+  type: ClusterIP

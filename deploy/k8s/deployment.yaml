@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codex-lb
+  labels:
+    app: codex-lb
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: codex-lb
+  template:
+    metadata:
+      labels:
+        app: codex-lb
+    spec:
+      containers:
+      - name: codex-lb
+        image: ghcr.io/soju06/codex-lb:latest
+        ports:
+        - containerPort: 2455
+          name: http
+        - containerPort: 9090
+          name: metrics
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: codex-lb-config
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 2455
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 2455
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health/startup
+            port: 2455
+          initialDelaySeconds: 5
+          periodSeconds: 2
+          failureThreshold: 30
+        lifecycle:
+          preStop:
+            exec:
+              command: ["python", "-c", "import time; time.sleep(15)"]
+      terminationGracePeriodSeconds: 60

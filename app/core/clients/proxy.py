@@ -11,6 +11,7 @@ import logging
 import os
 import socket
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import ParseResult, urlparse, urlunparse
@@ -31,7 +32,7 @@ from app.core.openai.parsing import (
     parse_sse_event,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
-from app.core.resilience.circuit_breaker import CircuitBreakerOpenError, get_circuit_breaker
+from app.core.resilience.circuit_breaker import CircuitBreakerOpenError, CircuitState, get_circuit_breaker
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
@@ -163,6 +164,28 @@ async def _call_with_service_circuit_breaker(request: Awaitable[R], *, settings:
     if circuit_breaker is None:
         return await request
     return await circuit_breaker.call(request)
+
+
+@asynccontextmanager
+async def _service_circuit_breaker_context(
+    cm: AsyncContextManager[aiohttp.ClientResponse], *, settings: object | None = None
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """Wrap an async context manager with circuit breaker protection."""
+    effective_settings = settings or get_settings()
+    cb = get_circuit_breaker(effective_settings)
+    if cb is not None and cb.state == CircuitState.OPEN:
+        raise CircuitBreakerOpenError("Circuit breaker is OPEN")
+    try:
+        async with cm as resp:
+            yield resp
+        if cb is not None:
+            await cb._record_success()
+    except CircuitBreakerOpenError:
+        raise
+    except Exception as e:
+        if cb is not None:
+            await cb._record_failure(e)
+        raise
 
 
 class StreamIdleTimeoutError(Exception):
@@ -1429,7 +1452,7 @@ async def stream_responses(
     ) -> AsyncIterator[str]:
         nonlocal status_code, error_code, error_message, seen_terminal
 
-        resp = await _call_with_service_circuit_breaker(
+        async with _service_circuit_breaker_context(
             client_session.post(
                 url,
                 json=payload_dict,
@@ -1437,8 +1460,7 @@ async def stream_responses(
                 timeout=current_timeout,
             ),
             settings=settings,
-        )
-        async with resp:
+        ) as resp:
             status_code = resp.status
             if resp.status >= 400:
                 if raise_for_status:
@@ -1828,7 +1850,7 @@ class _CompactCommandTransport:
             else None,
         )
         try:
-            resp = await _call_with_service_circuit_breaker(
+            async with _service_circuit_breaker_context(
                 self.session.post(
                     url,
                     json=payload_dict,
@@ -1836,8 +1858,7 @@ class _CompactCommandTransport:
                     timeout=timeout,
                 ),
                 settings=settings,
-            )
-            async with resp:
+            ) as resp:
                 status_code = resp.status
                 if resp.status >= 400:
                     error_payload = await _error_payload_from_response(resp)
@@ -2029,7 +2050,7 @@ async def transcribe_audio(
         else None,
     )
     try:
-        resp = await _call_with_service_circuit_breaker(
+        async with _service_circuit_breaker_context(
             client_session.post(
                 url,
                 data=form,
@@ -2037,8 +2058,7 @@ async def transcribe_audio(
                 timeout=timeout,
             ),
             settings=settings,
-        )
-        async with resp:
+        ) as resp:
             status_code = resp.status
             if resp.status >= 400:
                 error_payload = await _error_payload_from_response(resp)

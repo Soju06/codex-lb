@@ -89,7 +89,7 @@ def get_current_trace_id() -> str | None:
         if ctx and ctx.is_valid:
             return format(ctx.trace_id, "032x")
     except Exception:
-        pass
+        logger.debug("Failed to get current trace ID", exc_info=True)
     return None
 
 
@@ -102,5 +102,5 @@ def get_current_span_id() -> str | None:
         if ctx and ctx.is_valid:
             return format(ctx.span_id, "016x")
     except Exception:
-        pass
+        logger.debug("Failed to get current span ID", exc_info=True)
     return None

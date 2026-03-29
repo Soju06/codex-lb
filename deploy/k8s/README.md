@@ -271,17 +271,73 @@ CODEX_LB_LEADER_ELECTION_ENABLED: "true"
 
 ---
 
+## Session Bridge (Multi-Replica Routing)
+
+Codex turn-state (`previous_response_id`) is managed by HTTP bridge sessions that are **per-process**. In a multi-replica deployment, a request with `previous_response_id` may hit a different pod than the one that owns that session, causing a 409 session-not-found error.
+
+### How the instance ring works
+
+Set `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING` in the ConfigMap to control which pod owns each session:
+
+- **Empty ring (default)**: Single-instance mode — each pod routes all sessions to itself. The normalization function (`service.py:5087-5088`) auto-appends the pod's own hostname to the ring, so `_http_bridge_owner_instance` always returns `self`. **Safe for single-replica, causes session misses in multi-replica.**
+- **Populated ring**: Set a comma-separated list of pod hostnames for consistent-hash routing, so each `previous_response_id` maps to a stable owner pod.
+
+> **Note**: The current `deployment.yaml` uses a Deployment (not StatefulSet), so pod hostnames are not stable across restarts by default. A pod named `codex-lb-abc123` will get a different suffix after rescheduling.
+
+### Multi-replica options
+
+Choose one of these approaches when running more than one replica:
+
+1. **Switch to StatefulSet** — gives stable pod names (e.g., `codex-lb-0`, `codex-lb-1`, `codex-lb-2`). Populate the ring:
+   ```yaml
+   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: "codex-lb-0,codex-lb-1,codex-lb-2"
+   ```
+
+2. **Sticky sessions at ingress/LB level** — configure your ingress controller so the same client always hits the same pod. Examples:
+   - Nginx: `upstream hash $remote_addr consistent;`
+   - Kubernetes `Service`: `sessionAffinity: ClientIP`
+   This requires no ring configuration.
+
+3. **Accept occasional session misses** — the proxy handles 409 errors gracefully (client can retry). Suitable for low-volume deployments where session affinity is not critical.
+
+> **Validator note**: `settings.py:242-249` requires the instance ID to be present in the ring if the ring is non-empty. Do not set a ring that omits the current pod's hostname.
+
+---
+
+## Pre-Deployment Validation
+
+Before applying manifests to your cluster, run the validation script to catch common misconfigurations:
+
+```bash
+bash scripts/validate-deploy.sh
+```
+
+The script checks (from the project root directory):
+
+| Check | Pass | Fail |
+|-------|------|------|
+| All manifest files present | ✅ All 9 files found | ❌ Missing file |
+| YAML syntax valid | ✅ All manifests parse | ❌ Parse error |
+| No `:latest` tag | ✅ No latest tag | ❌ `:latest` found |
+| `__IMAGE_TAG__` placeholder | ⚠️ WARN (expected in source) | — |
+| `DATABASE_URL` not in configmap | ✅ Not in configmap | ❌ Found in configmap |
+| Circuit breaker status | ✅ Disabled (safe default) | ⚠️ WARN if enabled |
+
+Exit code 0 = all checks passed. Exit code 1 = one or more FAILs.
+
+> The `__IMAGE_TAG__` check always produces a WARN — that placeholder is intentional in the source template. Substitute it with `sed` before applying to the cluster (see Step 4 of the rollout sequence above).
+
+---
+
 ## Known Limitations
 
-1. **Access log JSON format**: The uvicorn access logger always emits text-format logs even when `CODEX_LB_LOG_FORMAT=json`. Application-level logs (startup, requests, errors) are JSON. Access log JSON is deferred to a future release.
+1. **WebSocket drain timeout**: The preStop hook sleeps 15 s and `CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS=30` drains HTTP. Active WebSocket connections may be abruptly closed at `terminationGracePeriodSeconds=60`.
 
-2. **WebSocket drain timeout**: The preStop hook sleeps 15 s and `CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS=30` drains HTTP. Active WebSocket connections may be abruptly closed at `terminationGracePeriodSeconds=60`.
+2. **Per-pod backpressure**: `CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS` is per-process. Effective cluster-wide limit = setting × replica count. Use the HPA to keep per-pod load in check.
 
-3. **Per-pod backpressure**: `CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS` is per-process. Effective cluster-wide limit = setting × replica count. Use the HPA to keep per-pod load in check.
+3. **Circuit breaker scope**: The circuit breaker is process-global (one breaker for all upstream accounts). It trips on consecutive failures and opens `/health/ready` → K8s removes the pod from the Service. Keep disabled until you have tuned thresholds.
 
-4. **Circuit breaker scope**: The circuit breaker is process-global (one breaker for all upstream accounts). It trips on consecutive failures and opens `/health/ready` → K8s removes the pod from the Service. Keep disabled until you have tuned thresholds.
-
-5. **Encryption key rotation**: There is no automated re-encryption. Key rotation requires a manual process and re-authentication of all accounts.
+4. **Encryption key rotation**: There is no automated re-encryption. Key rotation requires a manual process and re-authentication of all accounts.
 
 ---
 

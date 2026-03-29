@@ -154,6 +154,8 @@ def _install_bridge_settings_with_limits(
         http_responses_session_bridge_queue_limit=queue_limit,
         http_responses_session_bridge_instance_id=instance_id,
         http_responses_session_bridge_instance_ring=list(instance_ring or []),
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        sticky_reallocation_budget_threshold_pct=95.0,
     )
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)

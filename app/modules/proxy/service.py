@@ -1519,6 +1519,8 @@ class ProxyService:
                         account_id=None,
                         model=request_model,
                         detail=f"expected_instance={owner_instance}, current_instance={current_instance}",
+                        cache_key_family=key.affinity_kind,
+                        model_class=_extract_model_class(request_model) if request_model else None,
                     )
                     raise ProxyResponseError(
                         409,
@@ -1542,6 +1544,8 @@ class ProxyService:
                         account_id=existing.account.id,
                         model=existing.request_model,
                         pending_count=await self._http_bridge_pending_count(existing),
+                        cache_key_family=key.affinity_kind,
+                        model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
                     )
                     return existing
 
@@ -1551,6 +1555,8 @@ class ProxyService:
                         key,
                         account_id=existing.account.id,
                         model=existing.request_model,
+                        cache_key_family=key.affinity_kind,
+                        model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
                     )
                     self._http_bridge_sessions.pop(key, None)
                     sessions_to_close.append(existing)
@@ -1590,6 +1596,10 @@ class ProxyService:
                                 lru_key,
                                 account_id=lru_session.account.id,
                                 model=lru_session.request_model,
+                                cache_key_family=lru_key.affinity_kind,
+                                model_class=_extract_model_class(lru_session.request_model)
+                                if lru_session.request_model
+                                else None,
                             )
                             self._http_bridge_sessions.pop(lru_key, None)
                             sessions_to_close.append(lru_session)
@@ -1605,6 +1615,8 @@ class ProxyService:
                                     pending_count=(
                                         len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
                                     ),
+                                    cache_key_family=key.affinity_kind,
+                                    model_class=_extract_model_class(request_model) if request_model else None,
                                 )
                                 raise ProxyResponseError(
                                     429,
@@ -1688,6 +1700,8 @@ class ProxyService:
                 key,
                 account_id=session.account.id,
                 model=session.request_model,
+                cache_key_family=key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             return session
 
@@ -1712,6 +1726,8 @@ class ProxyService:
                     key,
                     account_id=session.account.id,
                     model=session.request_model,
+                    cache_key_family=key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
                 await self._close_http_bridge_session(session, turn_state_lock_held=True)
 
@@ -1741,6 +1757,8 @@ class ProxyService:
             session.key,
             account_id=session.account.id,
             model=session.request_model,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
 
     async def _register_http_bridge_turn_state(self, session: "_HTTPBridgeSession", turn_state: str) -> None:
@@ -1885,6 +1903,8 @@ class ProxyService:
                 session.key,
                 account_id=session.account.id,
                 model=session.request_model,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             raise ProxyResponseError(
                 502,
@@ -1905,6 +1925,8 @@ class ProxyService:
                     account_id=session.account.id,
                     model=session.request_model,
                     pending_count=session.queued_request_count,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
                 raise ProxyResponseError(
                     429,
@@ -1938,6 +1960,8 @@ class ProxyService:
                 account_id=session.account.id,
                 model=session.request_model,
                 detail=str(exc) or None,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             retried = await self._retry_http_bridge_request_on_fresh_upstream(
                 session,
@@ -2188,6 +2212,8 @@ class ProxyService:
             account_id=session.account.id,
             model=session.request_model,
             pending_count=1,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
             await self._reconnect_http_bridge_session(
@@ -2227,21 +2253,23 @@ class ProxyService:
                 return False
             request_text = request_state.request_text
             request_state.replay_count += 1
-        _log_http_bridge_event(
-            "retry_precreated",
-            session.key,
-            account_id=session.account.id,
-            model=session.request_model,
-            pending_count=1,
-        )
-        try:
-            await self._reconnect_http_bridge_session(session, request_state=request_state)
-            await session.upstream.send_text(request_text)
-            session.last_used_at = time.monotonic()
-            return True
-        except Exception:
-            logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
-            return False
+            _log_http_bridge_event(
+                "retry_precreated",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                pending_count=1,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            try:
+                await self._reconnect_http_bridge_session(session, request_state=request_state)
+                await session.upstream.send_text(request_text)
+                session.last_used_at = time.monotonic()
+                return True
+            except Exception:
+                logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
+                return False
 
     async def _reconnect_http_bridge_session(
         self,
@@ -2313,6 +2341,8 @@ class ProxyService:
             account_id=account.id,
             model=session.request_model,
             detail=f"previous_account={old_account_id}",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
 
     async def _process_http_bridge_upstream_text(
@@ -2390,6 +2420,8 @@ class ProxyService:
                 model=session.request_model,
                 detail=error_code,
                 pending_count=await self._http_bridge_pending_count(session),
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
 
         await self._finalize_websocket_request_state(

@@ -60,6 +60,12 @@ class _JsonResponse:
     async def json(self, *, content_type=None):
         return self._payload
 
+    def __await__(self):
+        async def _return_self():
+            return self
+
+        return _return_self().__await__()
+
 
 class _JsonSession:
     def __init__(self, response: _JsonResponse) -> None:

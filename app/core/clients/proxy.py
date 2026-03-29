@@ -1430,8 +1430,7 @@ async def stream_responses(
         nonlocal status_code, error_code, error_message, seen_terminal
 
         resp = await _call_with_service_circuit_breaker(
-            client_session.request(
-                "POST",
+            client_session.post(
                 url,
                 json=payload_dict,
                 headers=current_headers,
@@ -1830,8 +1829,7 @@ class _CompactCommandTransport:
         )
         try:
             resp = await _call_with_service_circuit_breaker(
-                self.session.request(
-                    "POST",
+                self.session.post(
                     url,
                     json=payload_dict,
                     headers=upstream_headers,
@@ -2032,8 +2030,7 @@ async def transcribe_audio(
     )
     try:
         resp = await _call_with_service_circuit_breaker(
-            client_session.request(
-                "POST",
+            client_session.post(
                 url,
                 data=form,
                 headers=upstream_headers,

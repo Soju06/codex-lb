@@ -534,7 +534,7 @@ class LoadBalancer:
                 # or rate limit is far away (reset_at more than 10 minutes away)
                 budget_threshold_pct = 95.0
                 now = time.time()
-                budget_exhausted = pinned.used_percent is not None and pinned.used_percent >= budget_threshold_pct
+                budget_exhausted = pinned.used_percent is not None and pinned.used_percent > budget_threshold_pct
                 rate_limit_far_away = (
                     pinned.reset_at is not None and pinned.reset_at - now >= 600  # 10 minutes
                 )

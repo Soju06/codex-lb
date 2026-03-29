@@ -24,6 +24,7 @@ from app.core.middleware import (
     add_request_id_middleware,
 )
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
+from app.core.resilience.backpressure import BackpressureMiddleware
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import close_db, init_db
 from app.modules.accounts import api as accounts_api
@@ -140,6 +141,11 @@ def create_app() -> FastAPI:
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)
     app.add_middleware(cast(Any, MetricsMiddleware), enabled=settings.metrics_enabled)
+    if settings.backpressure_max_concurrent_requests > 0:
+        app.add_middleware(
+            cast(Any, BackpressureMiddleware),
+            max_concurrent=settings.backpressure_max_concurrent_requests,
+        )
     add_exception_handlers(app)
 
     app.include_router(proxy_api.router)

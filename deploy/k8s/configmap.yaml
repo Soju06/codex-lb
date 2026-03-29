@@ -15,4 +15,9 @@ data:
   CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: "30"
   CODEX_LB_HTTP_CONNECTOR_LIMIT: "100"
   CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST: "50"
+  # Session bridge: pods auto-use hostname as instance ID (socket.gethostname()).
+  # Empty ring = single-instance mode (each pod routes all sessions to itself).
+  # For multi-replica: set a comma-separated list of pod hostnames so consistent
+  # hashing routes each session to a stable owner pod.
+  # Example: "codex-lb-0,codex-lb-1,codex-lb-2" (StatefulSet pod names)
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: ""

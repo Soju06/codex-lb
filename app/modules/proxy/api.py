@@ -296,14 +296,14 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     created = int(time.time())
 
     registry = get_model_registry()
-    snapshot = registry.get_snapshot()
+    models = registry.get_models_with_fallback()
 
-    if snapshot is None:
+    if not models:
         await _release_reservation(reservation)
         return JSONResponse(content=ModelListResponse(data=[]).model_dump(mode="json"))
 
     items: list[ModelListItem] = []
-    for slug, model in snapshot.models.items():
+    for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
         items.append(

@@ -21,6 +21,9 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
+from app.core.resilience.circuit_breaker import CircuitState, get_circuit_breaker
+from app.core.resilience.degradation import get_status as get_degradation_status
+from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
@@ -117,6 +120,12 @@ class LoadBalancer:
             return selection_inputs
 
         selection_inputs = await load_selection_inputs()
+        circuit_breaker_open = _is_upstream_circuit_breaker_open()
+        if selection_inputs.accounts and not circuit_breaker_open:
+            set_normal()
+        elif circuit_breaker_open:
+            set_degraded("upstream circuit breaker is open")
+
         if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
                 account=None,
@@ -280,6 +289,9 @@ class LoadBalancer:
             )
 
         if selected_snapshot is None:
+            if error_message == "No available accounts":
+                set_degraded("all upstream accounts are unavailable")
+                error_message = _format_degraded_error_message(error_message)
             return AccountSelection(account=None, error_message=error_message, error_code=None)
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
@@ -975,3 +987,18 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
     if entry.reset_at is not None and int(entry.reset_at) <= int(time.time()):
         return False
     return float(entry.used_percent) >= 100.0
+
+
+def _is_upstream_circuit_breaker_open() -> bool:
+    settings = get_settings()
+    if not settings.circuit_breaker_enabled:
+        return False
+    circuit_breaker = get_circuit_breaker(settings)
+    return circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN
+
+
+def _format_degraded_error_message(message: str | None) -> str:
+    degradation_status = get_degradation_status()
+    reason = degradation_status.get("reason") or "upstream capacity is currently unavailable"
+    base_message = message or "Upstream unavailable"
+    return f"{base_message}. Service is operating in degraded mode: {reason}"

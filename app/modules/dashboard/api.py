@@ -24,12 +24,12 @@ async def get_overview(
 @router.get("/models")
 async def list_models() -> dict:
     registry = get_model_registry()
-    snapshot = registry.get_snapshot()
-    if snapshot is None:
+    models_by_slug = registry.get_models_with_fallback()
+    if not models_by_slug:
         return {"models": []}
     models = [
         {"id": slug, "name": model.display_name or slug}
-        for slug, model in snapshot.models.items()
+        for slug, model in models_by_slug.items()
         if is_public_model(model, None)
     ]
     return {"models": models}

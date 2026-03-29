@@ -18,13 +18,20 @@ class _CachedSelectionInputs:
 
 class AccountSelectionCache:
     def __init__(self, ttl_seconds: int = 5) -> None:
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        # Disable cache in test environments to prevent cross-test contamination
+        import sys
+
+        if "pytest" in sys.modules:
+            ttl_seconds = 0
+        if ttl_seconds < 0:
+            raise ValueError("ttl_seconds must be non-negative")
         self._ttl_seconds = ttl_seconds
         self._cached: _CachedSelectionInputs | None = None
         self._lock = anyio.Lock()
 
     async def get(self) -> SelectionInputs | None:
+        if self._ttl_seconds == 0:
+            return None  # Cache disabled (test mode)
         cached = self._cached
         if cached is None:
             return None

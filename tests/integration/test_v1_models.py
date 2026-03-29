@@ -75,7 +75,7 @@ async def test_v1_models_includes_supported_in_api_false_models(async_client):
         _make_upstream_model("gpt-5.3-codex"),
         _make_upstream_model("gpt-hidden", supported_in_api=False),
     ]
-    registry.update({"plus": models, "pro": models})
+    await registry.update({"plus": models, "pro": models})
 
     resp = await async_client.get("/v1/models")
     assert resp.status_code == 200
@@ -91,7 +91,7 @@ async def test_backend_codex_models_include_supported_in_api_false_models(async_
         _make_upstream_model("gpt-5.3-codex"),
         _make_upstream_model("gpt-hidden", supported_in_api=False),
     ]
-    registry.update({"plus": models, "pro": models})
+    await registry.update({"plus": models, "pro": models})
 
     resp = await async_client.get("/backend-api/codex/models")
     assert resp.status_code == 200

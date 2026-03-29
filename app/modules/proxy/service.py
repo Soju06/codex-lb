@@ -1446,6 +1446,7 @@ class ProxyService:
             ),
         )
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
+        old_account_id: str | None = None
         while True:
             sessions_to_close: list[_HTTPBridgeSession] = []
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
@@ -1550,6 +1551,7 @@ class ProxyService:
                     return existing
 
                 if existing is not None:
+                    old_account_id = existing.account.id
                     _log_http_bridge_event(
                         "discard_stale",
                         key,
@@ -1665,10 +1667,10 @@ class ProxyService:
                     return session
                 continue
 
-            session: _HTTPBridgeSession | None = None
+            created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
-                session = await self._create_http_bridge_session(
+                created_session = await self._create_http_bridge_session(
                     key,
                     headers=headers,
                     affinity=affinity,
@@ -1679,10 +1681,10 @@ class ProxyService:
                     current_future = self._http_bridge_inflight_sessions.get(key)
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(key, None)
-                        self._http_bridge_sessions[key] = session
+                        self._http_bridge_sessions[key] = created_session
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():
-                            inflight_future.set_result(session)
+                            inflight_future.set_result(created_session)
             except BaseException as exc:
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -1694,18 +1696,33 @@ class ProxyService:
                             else:
                                 inflight_future.set_exception(exc)
                                 inflight_future.exception()
-                if session is not None and not session_registered:
-                    await self._close_http_bridge_session(session)
+                if created_session is not None and not session_registered:
+                    await self._close_http_bridge_session(created_session)
                 raise
+            assert created_session is not None
             _log_http_bridge_event(
                 "create",
                 key,
-                account_id=session.account.id,
-                model=session.request_model,
+                account_id=created_session.account.id,
+                model=created_session.request_model,
                 cache_key_family=key.affinity_kind,
-                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                model_class=_extract_model_class(created_session.request_model)
+                if created_session.request_model
+                else None,
             )
-            return session
+            if old_account_id is not None and old_account_id != created_session.account.id:
+                _log_http_bridge_event(
+                    "reallocation_orphan",
+                    key,
+                    account_id=created_session.account.id,
+                    model=created_session.request_model,
+                    detail=f"old_account={old_account_id}",
+                    cache_key_family=key.affinity_kind,
+                    model_class=_extract_model_class(created_session.request_model)
+                    if created_session.request_model
+                    else None,
+                )
+            return created_session
 
     async def _prune_http_bridge_sessions_locked(self) -> None:
         now = time.monotonic()
@@ -5177,6 +5194,7 @@ def _log_http_bridge_event(
         "terminal_error",
         "capacity_exhausted_active_sessions",
         "owner_mismatch",
+        "reallocation_orphan",
     }:
         level = logging.WARNING
     logger.log(

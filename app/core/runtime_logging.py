@@ -90,6 +90,20 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(log_entry, default=str)
 
 
+class JsonAccessFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry: dict[str, object] = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "level": record.levelname,
+            "logger": record.name,
+            "type": "access",
+            "client": getattr(record, "client_addr", None),
+            "request": getattr(record, "request_line", None),
+            "status": getattr(record, "status_code", None),
+        }
+        return json.dumps(log_entry, default=str)
+
+
 type LogConfigValue = str | bool | None | dict[str, "LogConfigValue"]
 type LogConfig = dict[str, LogConfigValue]
 
@@ -113,12 +127,17 @@ def build_log_config() -> LogConfig:
             "use_colors": None,
         }
 
-    formatters["access"] = {
-        "()": "app.core.runtime_logging.UtcAccessFormatter",
-        "fmt": '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
-        "datefmt": "%Y-%m-%dT%H:%M:%SZ",
-        "use_colors": None,
-    }
+    if settings.log_format == "json":
+        formatters["access"] = {
+            "()": "app.core.runtime_logging.JsonAccessFormatter",
+        }
+    else:
+        formatters["access"] = {
+            "()": "app.core.runtime_logging.UtcAccessFormatter",
+            "fmt": '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+            "datefmt": "%Y-%m-%dT%H:%M:%SZ",
+            "use_colors": None,
+        }
     return cast(LogConfig, config)
 
 

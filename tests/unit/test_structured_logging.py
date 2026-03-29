@@ -5,7 +5,11 @@ import logging
 
 import pytest
 
-from app.core.runtime_logging import JsonFormatter, UtcDefaultFormatter
+from app.core.runtime_logging import (
+    JsonFormatter,
+    UtcDefaultFormatter,
+    build_log_config,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -180,3 +184,36 @@ def test_json_formatter_timestamp_is_iso_format(json_formatter):
     timestamp = parsed["timestamp"]
     assert "T" in timestamp
     assert "+" in timestamp or "Z" in timestamp or timestamp.endswith("00:00")
+
+
+def test_build_log_config_uses_json_access_formatter_when_json(monkeypatch):
+    """build_log_config() should use JsonAccessFormatter when log_format == 'json'."""
+    from typing import cast
+
+    monkeypatch.setenv("CODEX_LB_LOG_FORMAT", "json")
+    # Clear lru_cache so the setting is re-read
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    config = build_log_config()
+    formatters = cast(dict, config.get("formatters", {}))
+    access_formatter = cast(dict, formatters.get("access", {}))
+    assert access_formatter.get("()") == "app.core.runtime_logging.JsonAccessFormatter"
+    # Restore
+    get_settings.cache_clear()
+
+
+def test_build_log_config_uses_utc_access_formatter_when_text(monkeypatch):
+    """build_log_config() should use UtcAccessFormatter when log_format == 'text'."""
+    from typing import cast
+
+    monkeypatch.setenv("CODEX_LB_LOG_FORMAT", "text")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    config = build_log_config()
+    formatters = cast(dict, config.get("formatters", {}))
+    access_formatter = cast(dict, formatters.get("access", {}))
+    assert access_formatter.get("()") == "app.core.runtime_logging.UtcAccessFormatter"
+    # Restore
+    get_settings.cache_clear()

@@ -92,6 +92,7 @@ class LoadBalancer:
         model: str | None = None,
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
+        budget_threshold_pct: float = 95.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
 
@@ -256,6 +257,7 @@ class LoadBalancer:
                             sticky_kind=sticky_kind,
                             reallocate_sticky=reallocate_sticky,
                             sticky_max_age_seconds=sticky_max_age_seconds,
+                            budget_threshold_pct=budget_threshold_pct,
                             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
                             sticky_repo=repos.sticky_sessions,
@@ -500,6 +502,7 @@ class LoadBalancer:
         sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
+        budget_threshold_pct: float = 95.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
@@ -532,7 +535,6 @@ class LoadBalancer:
             if pinned is not None:
                 # Check if pinned account has insufficient budget (< 5% remaining)
                 # or rate limit is far away (reset_at more than 10 minutes away)
-                budget_threshold_pct = 95.0
                 now = time.time()
                 budget_exhausted = pinned.used_percent is not None and pinned.used_percent > budget_threshold_pct
                 rate_limit_far_away = (
@@ -871,7 +873,10 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
     snapshot = get_snapshot()
     if snapshot is None:
         return False
-    return model.strip().lower() in snapshot.model_plans
+    model_plans = getattr(snapshot, "model_plans", None)
+    if not isinstance(model_plans, dict):
+        return False
+    return model.strip().lower() in model_plans
 
 
 def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:

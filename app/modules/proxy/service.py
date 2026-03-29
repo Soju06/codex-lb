@@ -1657,6 +1657,8 @@ class ProxyService:
                     raise
                 except Exception:
                     continue
+                if session is None:
+                    continue
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     session.request_model = request_model
                     session.last_used_at = time.monotonic()
@@ -4170,6 +4172,7 @@ class ProxyService:
         model: str | None = None,
         additional_limit_name: str | None = None,
     ) -> AccountSelection:
+        settings = await get_settings_cache().get()
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
             logger.warning(
@@ -4187,6 +4190,7 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,
+                    budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                 )
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)

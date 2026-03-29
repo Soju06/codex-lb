@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.balancer import AccountState, select_account
-from app.db.models import AccountStatus, StickySessionKind
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = pytest.mark.unit
@@ -55,6 +56,7 @@ async def _select_with_stickiness(
     sticky_kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
+    budget_threshold_pct: float = 95.0,
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
@@ -67,7 +69,7 @@ async def _select_with_stickiness(
         yield AsyncMock()
 
     lb = LoadBalancer(mock_repo_factory)
-    account_map = {s.account_id: True for s in states}
+    account_map = {s.account_id: cast(Account, AsyncMock()) for s in states}
 
     return await lb._select_with_stickiness(
         states=states,
@@ -76,6 +78,7 @@ async def _select_with_stickiness(
         sticky_kind=sticky_kind,
         reallocate_sticky=reallocate_sticky,
         sticky_max_age_seconds=sticky_max_age_seconds,
+        budget_threshold_pct=budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
         sticky_repo=sticky_repo,
@@ -462,6 +465,46 @@ async def test_budget_exhaustion_triggers_reallocation():
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_80_triggers_at_85_percent():
+    acc_a = _active("a", used_percent=85.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _select_with_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+        budget_threshold_pct=80.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_95_no_reallocation_at_85_percent():
+    acc_a = _active("a", used_percent=85.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _select_with_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
 
 
 @pytest.mark.asyncio

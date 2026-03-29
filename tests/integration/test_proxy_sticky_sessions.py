@@ -81,12 +81,14 @@ def _install_proxy_settings_cache(
     sticky_threads_enabled: bool,
     prefer_earlier_reset_accounts: bool = False,
     openai_cache_affinity_max_age_seconds: int = 300,
+    sticky_reallocation_budget_threshold_pct: float = 95.0,
     openai_prompt_cache_key_derivation_enabled: bool = True,
 ) -> None:
     settings = SimpleNamespace(
         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
         sticky_threads_enabled=sticky_threads_enabled,
         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+        sticky_reallocation_budget_threshold_pct=sticky_reallocation_budget_threshold_pct,
         openai_prompt_cache_key_derivation_enabled=openai_prompt_cache_key_derivation_enabled,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,

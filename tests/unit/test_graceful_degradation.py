@@ -146,6 +146,8 @@ async def test_health_ready_reports_degraded_status() -> None:
 
 @pytest.mark.asyncio
 async def test_health_ready_reports_degraded_when_circuit_breaker_open() -> None:
+    from fastapi import HTTPException
+
     from app.modules.health.api import health_ready
 
     mock_session = AsyncMock()
@@ -162,14 +164,12 @@ async def test_health_ready_reports_degraded_when_circuit_breaker_open() -> None
                     yield mock_session
 
                 mock_get_session.return_value = mock_get_session_context()
-                response = await health_ready()
 
-    assert response.status == "degraded"
-    assert response.checks == {
-        "database": "ok",
-        "upstream": "degraded",
-        "upstream_reason": "upstream circuit breaker is open",
-    }
+                with pytest.raises(HTTPException) as exc_info:
+                    await health_ready()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Circuit breaker open — upstream unavailable"
 
 
 @pytest.mark.asyncio

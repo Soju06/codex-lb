@@ -51,11 +51,11 @@ async def health_ready() -> HealthCheckResponse:
                     settings = get_settings()
                     circuit_breaker = get_circuit_breaker(settings) if settings.circuit_breaker_enabled else None
                     if circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN:
-                        checks["upstream"] = "degraded"
-                        checks["upstream_reason"] = "upstream circuit breaker is open"
-                        status = "degraded"
+                        raise HTTPException(status_code=503, detail="Circuit breaker open — upstream unavailable")
 
                 return HealthCheckResponse(status=status, checks=checks)
+            except HTTPException:
+                raise
             except Exception:
                 raise HTTPException(
                     status_code=503,

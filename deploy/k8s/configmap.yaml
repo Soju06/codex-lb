@@ -3,7 +3,6 @@ kind: ConfigMap
 metadata:
   name: codex-lb-config
 data:
-  CODEX_LB_DATABASE_URL: "postgresql+asyncpg://user:password@postgres:5432/codexlb"
   CODEX_LB_METRICS_ENABLED: "true"
   CODEX_LB_METRICS_PORT: "9090"
   CODEX_LB_LOG_FORMAT: "json"

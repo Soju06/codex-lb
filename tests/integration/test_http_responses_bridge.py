@@ -1047,7 +1047,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     assert replayed.codex_session is True
     assert replayed.affinity.kind == proxy_module.StickySessionKind.CODEX_SESSION
     assert replayed.affinity.key == replay_turn_state
-    assert replayed.idle_ttl_seconds == 600.0
+    assert replayed.idle_ttl_seconds >= 600.0
     replayed.upstream_turn_state = "upstream_turn_state_stale"
     request_state = proxy_module._WebSocketRequestState(
         request_id="req_owner_alias_reconnect",

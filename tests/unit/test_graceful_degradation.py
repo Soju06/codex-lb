@@ -127,7 +127,7 @@ async def test_health_ready_reports_degraded_status() -> None:
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock()
 
-    with patch("app.modules.health.api.get_session") as mock_get_session:
+    with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
 
         async def mock_get_session_context():
             yield mock_session

@@ -67,7 +67,7 @@ class InFlightMiddleware:
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
 
     shutdown_state = import_module("app.core.shutdown")
@@ -79,6 +79,7 @@ async def lifespan(_: FastAPI):
 
     startup_module._startup_complete = False
     shutdown_state.set_draining(False)
+    shutdown_state.set_bridge_drain_active(False)
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
@@ -135,10 +136,18 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        shutdown_state.set_bridge_drain_active(True)
         shutdown_state.set_draining(True)
         drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
         if not drained:
             logger.warning("Drain timeout reached, proceeding with shutdown")
+
+        proxy_service = getattr(app.state, "proxy_service", None)
+        if proxy_service is not None and hasattr(proxy_service, "close_all_http_bridge_sessions"):
+            try:
+                await proxy_service.close_all_http_bridge_sessions()
+            except Exception:
+                logger.warning("Failed to close HTTP bridge sessions during shutdown", exc_info=True)
 
         # Cancel heartbeat and unregister from ring
         if heartbeat_task is not None:

@@ -4,12 +4,22 @@ import asyncio
 import time
 
 _draining: bool = False
+_bridge_drain_active: bool = False
 _in_flight: int = 0
 
 
 def set_draining(val: bool = True) -> None:
     global _draining
     _draining = val
+
+
+def set_bridge_drain_active(val: bool = True) -> None:
+    global _bridge_drain_active
+    _bridge_drain_active = val
+
+
+def is_bridge_drain_active() -> bool:
+    return _bridge_drain_active
 
 
 def increment_in_flight() -> None:

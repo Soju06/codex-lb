@@ -17,6 +17,7 @@ import anyio
 from fastapi import WebSocket
 from pydantic import ValidationError
 
+from app.core import shutdown as shutdown_state
 from app.core import usage as usage_core
 from app.core.auth.refresh import (
     RefreshError,
@@ -1449,6 +1450,16 @@ class ProxyService:
             continuity_error: ProxyResponseError | None = None
 
             async with self._http_bridge_lock:
+                if shutdown_state.is_bridge_drain_active():
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(
+                            "bridge_drain_active",
+                            "HTTP bridge is draining — new sessions not accepted during shutdown",
+                            error_type="server_error",
+                        ),
+                    )
+
                 if incoming_turn_state is not None:
                     alias_index_key = _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
                     alias_key = self._http_bridge_turn_state_index.get(alias_index_key)
@@ -1713,6 +1724,15 @@ class ProxyService:
                     else None,
                 )
             return created_session
+
+    async def close_all_http_bridge_sessions(self) -> None:
+        async with self._http_bridge_lock:
+            sessions_to_close = list(self._http_bridge_sessions.values())
+            self._http_bridge_sessions.clear()
+            self._http_bridge_inflight_sessions.clear()
+
+        for session in sessions_to_close:
+            await self._close_http_bridge_session(session)
 
     async def _prune_http_bridge_sessions_locked(self) -> None:
         now = time.monotonic()

@@ -241,11 +241,9 @@ jobs:
           else
             RANGE="${TAG_NAME}"
           fi
-          {
-            echo "tag_name=${TAG_NAME}"
-            echo "prev_tag=${PREV_TAG}"
-            echo "range=${RANGE}"
-          } >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "range=${RANGE}" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes (GitHub)
         id: notes

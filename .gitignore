@@ -20,6 +20,7 @@ __pycache__/
 build/
 dist/
 app/static/
+deploy/helm/*/charts/
 
 # Node
 node_modules/

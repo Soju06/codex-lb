@@ -1,0 +1,337 @@
+# @section Global parameters
+global:
+  # @param global.imageRegistry Global Docker image registry override
+  imageRegistry: ""
+  # @param global.imagePullSecrets Global Docker registry pull secrets
+  imagePullSecrets: []
+  # @param global.storageClass Global storage class for PVCs
+  storageClass: ""
+
+# @section Common parameters
+# @param nameOverride Override the chart name
+nameOverride: ""
+# @param fullnameOverride Override the full release name
+fullnameOverride: ""
+# @param commonLabels Labels to add to all deployed resources
+commonLabels: {}
+# @param commonAnnotations Annotations to add to all deployed resources
+commonAnnotations: {}
+# @param revisionHistoryLimit Number of old ReplicaSets to keep
+revisionHistoryLimit: 3
+
+# @section Image parameters
+image:
+  # @param image.registry Container image registry
+  registry: ghcr.io
+  # @param image.repository Container image repository
+  repository: soju06/codex-lb
+  # @param image.tag Container image tag (defaults to appVersion)
+  tag: ""
+  # @param image.digest Container image digest (overrides tag when set)
+  digest: ""
+  # @param image.pullPolicy Container image pull policy
+  pullPolicy: IfNotPresent
+  # @param image.pullSecrets Container image pull secrets
+  pullSecrets: []
+
+# @section Deployment parameters
+# @param replicaCount Number of replicas
+replicaCount: 2
+updateStrategy:
+  # @param updateStrategy.type Rolling update strategy type
+  type: RollingUpdate
+  rollingUpdate:
+    # @param updateStrategy.rollingUpdate.maxSurge Max surge pods during update
+    maxSurge: 1
+    # @param updateStrategy.rollingUpdate.maxUnavailable Max unavailable pods during update
+    maxUnavailable: 0
+# @param terminationGracePeriodSeconds Pod termination grace period seconds
+terminationGracePeriodSeconds: 60
+# @param preStopSleepSeconds Seconds to sleep in preStop lifecycle hook
+preStopSleepSeconds: 15
+resources:
+  requests:
+    # @param resources.requests.cpu CPU request
+    cpu: 200m
+    # @param resources.requests.memory Memory request
+    memory: 256Mi
+  limits:
+    # @param resources.limits.cpu CPU limit
+    cpu: 1000m
+    # @param resources.limits.memory Memory limit
+    memory: 1Gi
+# @param extraEnv Additional environment variables (list of {name, value} or {name, valueFrom})
+extraEnv: []
+# @param extraEnvFrom Additional envFrom sources (ConfigMap or Secret refs)
+extraEnvFrom: []
+# @param extraVolumes Additional volumes to mount in the pod
+extraVolumes: []
+# @param extraVolumeMounts Additional volume mounts in the container
+extraVolumeMounts: []
+
+# @section Security parameters
+podSecurityContext:
+  # @param podSecurityContext.runAsNonRoot Require non-root user
+  runAsNonRoot: true
+  # @param podSecurityContext.runAsUser UID to run the container as
+  runAsUser: 1000
+  # @param podSecurityContext.fsGroup FSGroup for volume ownership
+  fsGroup: 1000
+  seccompProfile:
+    # @param podSecurityContext.seccompProfile.type Seccomp profile type
+    type: RuntimeDefault
+containerSecurityContext:
+  # @param containerSecurityContext.allowPrivilegeEscalation Prevent privilege escalation
+  allowPrivilegeEscalation: false
+  # @param containerSecurityContext.readOnlyRootFilesystem Use read-only root filesystem
+  readOnlyRootFilesystem: true
+  capabilities:
+    # @param containerSecurityContext.capabilities.drop Capabilities to drop
+    drop:
+      - ALL
+serviceAccount:
+  # @param serviceAccount.create Create a ServiceAccount for the pod
+  create: true
+  # @param serviceAccount.name Override the ServiceAccount name
+  name: ""
+  # @param serviceAccount.annotations Annotations to add to the ServiceAccount
+  annotations: {}
+
+# @section Application parameters
+# Maps to CODEX_LB_* environment variables. Only ~17 K8s-relevant vars are templated here.
+# Use extraEnv for all other settings.
+config:
+  # @param config.databaseMigrateOnStartup Disable auto-migration (migration Job handles it)
+  databaseMigrateOnStartup: false
+  # @param config.databasePoolSize SQLAlchemy connection pool size
+  databasePoolSize: 15
+  # @param config.databaseMaxOverflow SQLAlchemy connection pool max overflow
+  databaseMaxOverflow: 10
+  # @param config.upstreamBaseUrl Override OpenAI upstream base URL (empty = default)
+  upstreamBaseUrl: ""
+  # @param config.upstreamConnectTimeout Upstream connection timeout seconds
+  upstreamConnectTimeout: 30
+  # @param config.upstreamStreamTransport Upstream streaming transport (auto|websocket|http)
+  upstreamStreamTransport: auto
+  # @param config.logFormat Log output format (json|text)
+  logFormat: json
+  # @param config.leaderElectionEnabled Enable DB-based leader election
+  leaderElectionEnabled: true
+  # @param config.leaderElectionTtlSeconds Leader election TTL in seconds
+  leaderElectionTtlSeconds: 30
+  # @param config.circuitBreakerEnabled Enable circuit breaker for upstream requests
+  circuitBreakerEnabled: false
+  # @param config.circuitBreakerFailureThreshold Number of failures before opening circuit
+  circuitBreakerFailureThreshold: 5
+  # @param config.circuitBreakerRecoveryTimeoutSeconds Seconds before half-open state
+  circuitBreakerRecoveryTimeoutSeconds: 60
+  # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
+  backpressureMaxConcurrentRequests: 500
+  # @param config.shutdownDrainTimeoutSeconds Graceful shutdown drain timeout
+  shutdownDrainTimeoutSeconds: 30
+  # @param config.httpConnectorLimit Global HTTP connection pool limit
+  httpConnectorLimit: 100
+  # @param config.httpConnectorLimitPerHost Per-host HTTP connection pool limit
+  httpConnectorLimitPerHost: 50
+  # @param config.sessionBridgeInstanceRing Comma-separated pod hostnames for session routing
+  sessionBridgeInstanceRing: ""
+
+# @section Authentication parameters
+auth:
+  # @param auth.existingSecret Name of existing Secret containing database-url and encryption-key
+  existingSecret: ""
+  secretKeys:
+    # @param auth.secretKeys.databaseUrl Key in the Secret for the database URL
+    databaseUrl: database-url
+    # @param auth.secretKeys.encryptionKey Key in the Secret for the Fernet encryption key
+    encryptionKey: encryption-key
+externalSecrets:
+  # @param externalSecrets.enabled Enable ExternalSecrets Operator integration
+  enabled: false
+  # @param externalSecrets.secretStoreRef.name Name of the SecretStore or ClusterSecretStore
+  secretStoreRef:
+    name: ""
+    kind: SecretStore
+  # @param externalSecrets.refreshInterval How often to refresh the secret
+  refreshInterval: 1h
+
+# @section Availability parameters
+pdb:
+  # @param pdb.create Create a PodDisruptionBudget
+  create: true
+  # @param pdb.maxUnavailable Maximum unavailable pods (string or integer)
+  maxUnavailable: 1
+  # @param pdb.minAvailable Minimum available pods (overrides maxUnavailable if set)
+  minAvailable: ""
+autoscaling:
+  # @param autoscaling.enabled Enable HorizontalPodAutoscaler
+  enabled: false
+  # @param autoscaling.minReplicas Minimum replicas
+  minReplicas: 2
+  # @param autoscaling.maxReplicas Maximum replicas
+  maxReplicas: 10
+  # @param autoscaling.targetCPUUtilizationPercentage Target CPU utilization percentage
+  targetCPUUtilizationPercentage: 70
+  # @param autoscaling.targetMemoryUtilizationPercentage Target memory utilization percentage (0 = disabled)
+  targetMemoryUtilizationPercentage: 0
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+affinity:
+  # @param affinity.podAntiAffinity Pod anti-affinity mode (soft|hard|none)
+  podAntiAffinity: soft
+# @param topologySpreadConstraints Topology spread constraints for zone distribution
+topologySpreadConstraints: []
+# @param nodeSelector Node selector labels
+nodeSelector: {}
+# @param tolerations Pod tolerations
+tolerations: []
+# @param priorityClassName Pod priority class name
+priorityClassName: ""
+
+# @section Network parameters
+networkPolicy:
+  # @param networkPolicy.enabled Enable NetworkPolicy with default-deny + whitelist
+  enabled: false
+  # @param networkPolicy.ingressNSMatchLabels Labels to match for ingress controller namespace
+  ingressNSMatchLabels: {}
+  # @param networkPolicy.extraIngress Additional ingress rules
+  extraIngress: []
+  # @param networkPolicy.extraEgress Additional egress rules
+  extraEgress: []
+
+# @section Ingress parameters
+ingress:
+  # @param ingress.enabled Enable standard Kubernetes Ingress
+  enabled: false
+  # @param ingress.ingressClassName Ingress class name (e.g. nginx)
+  ingressClassName: ""
+  # @param ingress.annotations Ingress annotations
+  annotations: {}
+  # @param ingress.hosts Ingress host rules
+  hosts:
+    - host: codex-lb.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # @param ingress.tls TLS configuration
+  tls: []
+  certManager:
+    # @param ingress.certManager.enabled Add cert-manager annotations
+    enabled: false
+    # @param ingress.certManager.clusterIssuer cert-manager cluster issuer name
+    clusterIssuer: letsencrypt-prod
+  nginx:
+    # @param ingress.nginx.enabled Add nginx-specific annotations
+    enabled: false
+
+# @section Gateway API parameters
+gatewayApi:
+  # @param gatewayApi.enabled Enable Gateway API HTTPRoute
+  enabled: false
+  # @param gatewayApi.parentRefs Gateway parent references
+  parentRefs:
+    - name: gateway
+      namespace: gateway-system
+  # @param gatewayApi.hostnames HTTPRoute hostnames
+  hostnames: []
+  # @param gatewayApi.annotations HTTPRoute annotations
+  annotations: {}
+
+# @section Observability parameters
+metrics:
+  # @param metrics.enabled Enable Prometheus metrics endpoint (CODEX_LB_METRICS_ENABLED)
+  enabled: true
+  # @param metrics.port Metrics server port (CODEX_LB_METRICS_PORT)
+  port: 9090
+  serviceMonitor:
+    # @param metrics.serviceMonitor.enabled Create a ServiceMonitor for Prometheus Operator
+    enabled: false
+    # @param metrics.serviceMonitor.interval Metrics scrape interval
+    interval: 30s
+    # @param metrics.serviceMonitor.scrapeTimeout Metrics scrape timeout
+    scrapeTimeout: ""
+    # @param metrics.serviceMonitor.additionalLabels Additional labels for Prometheus Operator selector
+    additionalLabels: {}
+    # @param metrics.serviceMonitor.relabelings Relabeling rules
+    relabelings: []
+  prometheusRule:
+    # @param metrics.prometheusRule.enabled Create PrometheusRule for alerting
+    enabled: false
+    # @param metrics.prometheusRule.additionalLabels Additional labels for PrometheusRule
+    additionalLabels: {}
+    # @param metrics.prometheusRule.additionalRules Additional alert rules to append
+    additionalRules: []
+  grafanaDashboard:
+    # @param metrics.grafanaDashboard.enabled Create Grafana dashboard ConfigMap for sidecar
+    enabled: false
+    # @param metrics.grafanaDashboard.folder Grafana dashboard folder label
+    folder: codex-lb
+
+# @section Tracing parameters
+tracing:
+  # @param tracing.enabled Enable OpenTelemetry tracing (OTLP gRPC port 4317)
+  enabled: false
+  # @param tracing.endpoint OTLP gRPC endpoint (e.g. http://jaeger:4317)
+  endpoint: ""
+
+# @section Database parameters
+postgresql:
+  # @param postgresql.enabled Deploy Bitnami PostgreSQL sub-chart (set false for external DB)
+  enabled: true
+  auth:
+    # @param postgresql.auth.username PostgreSQL username
+    username: codexlb
+    # @param postgresql.auth.password PostgreSQL password (change in production!)
+    password: changeme
+    # @param postgresql.auth.database PostgreSQL database name
+    database: codexlb
+  primary:
+    persistence:
+      # @param postgresql.primary.persistence.enabled Enable persistent storage for PostgreSQL
+      enabled: true
+      # @param postgresql.primary.persistence.size PostgreSQL PVC size
+      size: 8Gi
+externalDatabase:
+  # @param externalDatabase.url Full external database URL (postgresql+asyncpg://...)
+  url: ""
+  # @param externalDatabase.host External database host (used if url is empty)
+  host: ""
+  # @param externalDatabase.port External database port
+  port: 5432
+  # @param externalDatabase.database External database name
+  database: codexlb
+  # @param externalDatabase.user External database username
+  user: codexlb
+  # @param externalDatabase.existingSecret Secret containing external DB credentials
+  existingSecret: ""
+
+# @section Migration parameters
+migration:
+  # @param migration.enabled Run database migration Job on install/upgrade
+  enabled: true
+  # @param migration.backoffLimit Maximum retries before marking Job failed
+  backoffLimit: 3
+  # @param migration.activeDeadlineSeconds Maximum Job duration in seconds
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      # @param migration.resources.requests.cpu Migration Job CPU request
+      cpu: 100m
+      # @param migration.resources.requests.memory Migration Job memory request
+      memory: 128Mi
+    limits:
+      # @param migration.resources.limits.cpu Migration Job CPU limit
+      cpu: 500m
+      # @param migration.resources.limits.memory Migration Job memory limit
+      memory: 256Mi

@@ -1,0 +1,9 @@
+codex-lb has been installed successfully.
+
+  Release name: {{ .Release.Name }}
+  Namespace:    {{ .Release.Namespace }}
+
+Run the following to access codex-lb:
+  kubectl port-forward svc/{{ include "codex-lb.fullname" . }} 2455:2455 -n {{ .Release.Namespace }}
+
+For full instructions, see the chart README.

@@ -1,0 +1,6 @@
+# Helm chart packaging ignores
+values-*.yaml
+*.md
+.git/
+.gitignore
+*.txt.bak

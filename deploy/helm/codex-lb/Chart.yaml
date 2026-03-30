@@ -1,0 +1,23 @@
+apiVersion: v2
+name: codex-lb
+description: Production-grade Helm chart for codex-lb — OpenAI API load balancer with usage tracking, account pooling, and observability
+type: application
+version: 0.1.0
+appVersion: "1.8.2"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/soju06/codex-lb
+sources:
+  - https://github.com/soju06/codex-lb
+keywords:
+  - load-balancer
+  - openai
+  - proxy
+  - codex
+maintainers:
+  - name: Soju06
+    email: qlskssk@gmail.com
+dependencies:
+  - name: postgresql
+    version: "18.5.14"
+    repository: "oci://registry-1.docker.io/bitnamicharts"
+    condition: postgresql.enabled

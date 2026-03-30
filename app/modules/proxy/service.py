@@ -1512,7 +1512,7 @@ class ProxyService:
                 await self._prune_http_bridge_sessions_locked()
 
                 owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
-                current_instance, ring = _normalized_http_bridge_instance_ring(settings)
+                current_instance, ring = await _active_http_bridge_instance_ring(settings, self._ring_membership)
                 if (
                     key.affinity_kind != "request"
                     and owner_instance is not None

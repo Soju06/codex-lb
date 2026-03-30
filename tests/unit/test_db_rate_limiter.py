@@ -106,34 +106,23 @@ def test_migration_upgrade_downgrade_upgrade_is_reversible(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="BUG: check_and_record is called for both success and failure, so 8 successful logins cause lockout",
-)
 async def test_successful_login_not_counted_toward_lockout(
     async_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """8 successful logins should NOT cause lockout. Currently they do (bug)."""
+    """8 successful logins must NOT cause lockout; only failures count."""
     limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
 
     async with async_session_factory() as session:
-        # Simulate 8 "successful" logins — currently check_and_record is called for all
+        # Simulate 8 successful logins: check (no record) then clear on success
         for _ in range(8):
-            await limiter.check_and_record("ip:success-test", session)
+            await limiter.check("ip:success-test", session)
+            await limiter.clear_for_key("ip:success-test", session)
 
-        # After 8 successful logins, the user should still be able to log in
-        # But currently they're blocked (this is the bug)
-        # With correct behavior: successful login would reset the counter
-        # Here we prove that after 8 check_and_records, the 9th fails
-        # The test FAILS (xfail) because currently successes are counted
-        await limiter.check_and_record("ip:success-test", session)  # Should NOT raise if successes reset counter
+        # A 9th successful login must still be allowed — counter stays at 0
+        await limiter.check("ip:success-test", session)
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="clear_for_key method not yet implemented — needed to reset counter on successful login",
-)
 async def test_clear_for_key_resets_lockout(
     async_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -153,10 +142,6 @@ async def test_clear_for_key_resets_lockout(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="check() method not yet implemented — needed to check without incrementing counter",
-)
 async def test_check_only_does_not_increment_counter(
     async_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -173,10 +158,6 @@ async def test_check_only_does_not_increment_counter(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="record_failure() method not yet implemented — needed to record only failures",
-)
 async def test_record_failure_only_counts_failures(
     async_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

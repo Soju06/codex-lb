@@ -111,7 +111,7 @@ async def login_password(
     limiter = get_password_rate_limiter()
     rate_key = _session_client_key(request, prefix="password_login")
     try:
-        await limiter.check_and_record(rate_key, context.session)
+        await limiter.check(rate_key, context.session)  # read-only: block locked accounts before any work
     except DashboardRateLimitError as exc:
         raise DashboardRateLimitError(
             f"Too many attempts. Try again in {exc.retry_after} seconds.",
@@ -124,9 +124,12 @@ async def login_password(
             payload.password, actor_ip=request.client.host if request.client else None
         )
     except InvalidCredentialsError as exc:
+        await limiter.record_failure(rate_key, context.session)  # count only failures
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
     except PasswordNotConfiguredError as exc:
         raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
+
+    await limiter.clear_for_key(rate_key, context.session)  # reset counter on success
 
     session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
     response = await context.service.get_session_state(session_id)

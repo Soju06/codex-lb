@@ -100,3 +100,99 @@ def test_migration_upgrade_downgrade_upgrade_is_reversible(tmp_path: Path) -> No
         assert inspector.has_table("rate_limit_attempts") is True
     finally:
         engine.dispose()
+
+
+# RED (xfail) tests proving the bug: successful logins are counted toward lockout
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="BUG: check_and_record is called for both success and failure, so 8 successful logins cause lockout",
+)
+async def test_successful_login_not_counted_toward_lockout(
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """8 successful logins should NOT cause lockout. Currently they do (bug)."""
+    limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
+
+    async with async_session_factory() as session:
+        # Simulate 8 "successful" logins — currently check_and_record is called for all
+        for _ in range(8):
+            await limiter.check_and_record("ip:success-test", session)
+
+        # After 8 successful logins, the user should still be able to log in
+        # But currently they're blocked (this is the bug)
+        # With correct behavior: successful login would reset the counter
+        # Here we prove that after 8 check_and_records, the 9th fails
+        # The test FAILS (xfail) because currently successes are counted
+        await limiter.check_and_record("ip:success-test", session)  # Should NOT raise if successes reset counter
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="clear_for_key method not yet implemented — needed to reset counter on successful login",
+)
+async def test_clear_for_key_resets_lockout(
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Successful login should reset the rate limit counter via clear_for_key."""
+    limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
+
+    async with async_session_factory() as session:
+        # Record 8 failed attempts
+        for _ in range(8):
+            await limiter.check_and_record("ip:clear-test", session)
+
+        # clear_for_key doesn't exist yet — this will raise AttributeError (xfail)
+        await limiter.clear_for_key("ip:clear-test", session)  # type: ignore[attr-defined]
+
+        # After clearing, should be able to attempt again
+        await limiter.check_and_record("ip:clear-test", session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="check() method not yet implemented — needed to check without incrementing counter",
+)
+async def test_check_only_does_not_increment_counter(
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """check() should only read, not write to the attempts table."""
+    limiter = DatabaseRateLimiter(max_attempts=2, window_seconds=60, type="password")
+
+    async with async_session_factory() as session:
+        # check() without recording — 10 checks should NOT block
+        for _ in range(10):
+            await limiter.check("ip:check-only", session)  # type: ignore[attr-defined]
+
+        # Still able to record
+        await limiter.check_and_record("ip:check-only", session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="record_failure() method not yet implemented — needed to record only failures",
+)
+async def test_record_failure_only_counts_failures(
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """record_failure() should be the method called only when authentication fails."""
+    limiter = DatabaseRateLimiter(max_attempts=3, window_seconds=60, type="password")
+
+    async with async_session_factory() as session:
+        # 2 failures recorded explicitly
+        await limiter.record_failure("ip:failure-test", session)  # type: ignore[attr-defined]
+        await limiter.record_failure("ip:failure-test", session)  # type: ignore[attr-defined]
+
+        # 1 success (clear) in between
+        await limiter.clear_for_key("ip:failure-test", session)  # type: ignore[attr-defined]
+
+        # 1 more failure after success — should only be 1 total
+        await limiter.record_failure("ip:failure-test", session)  # type: ignore[attr-defined]
+
+        # Should NOT be blocked (only 1 failure since last success)
+        await limiter.check("ip:failure-test", session)  # type: ignore[attr-defined]

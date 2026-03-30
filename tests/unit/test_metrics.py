@@ -123,6 +123,8 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
     assert prometheus_module.requests_total.name == "codex_lb_requests_total"
     assert prometheus_module.request_duration_seconds.name == "codex_lb_request_duration_seconds"
     assert prometheus_module.active_connections.name == "codex_lb_active_connections"
+    assert prometheus_module.bridge_instance_mismatch_total.name == "codex_lb_bridge_instance_mismatch_total"
+    assert prometheus_module.bridge_instance_mismatch_total.labelnames == ("outcome",)
 
 
 @pytest.mark.asyncio
@@ -172,3 +174,27 @@ async def test_metrics_middleware_noops_without_prometheus_client(monkeypatch: p
     assert response.json() == {"status": "ok"}
     assert prometheus_module.PROMETHEUS_AVAILABLE is False
     assert prometheus_module.requests_total is None
+
+
+def test_bridge_instance_mismatch_counter_increments(monkeypatch: pytest.MonkeyPatch) -> None:
+    prometheus_module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
+
+    assert prometheus_module.PROMETHEUS_AVAILABLE is True
+    counter = prometheus_module.bridge_instance_mismatch_total
+    assert counter is not None
+
+    fallback_sample = counter.labels(outcome="fallback")
+    assert fallback_sample.value == 0.0
+
+    fallback_sample.inc()
+    assert fallback_sample.value == 1.0
+
+    fallback_sample.inc()
+    assert fallback_sample.value == 2.0
+
+
+def test_bridge_instance_mismatch_counter_noop_without_prometheus(monkeypatch: pytest.MonkeyPatch) -> None:
+    prometheus_module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=None)
+
+    assert prometheus_module.PROMETHEUS_AVAILABLE is False
+    assert prometheus_module.bridge_instance_mismatch_total is None

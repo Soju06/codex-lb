@@ -50,6 +50,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
 from app.core.exceptions import AppError, ProxyAuthError, ProxyRateLimitError
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_instance_mismatch_total
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
@@ -1518,6 +1519,9 @@ class ProxyService:
                         cache_key_family=key.affinity_kind,
                         model_class=_extract_model_class(request_model) if request_model else None,
                     )
+                    # Increment mismatch counter
+                    if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
+                        bridge_instance_mismatch_total.labels(outcome="fallback").inc()
                     # Graceful fallback: fall through to normal session creation on this pod.
                     # The session creation below uses the same account from Layer 1 DB sticky lookup.
 

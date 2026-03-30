@@ -66,6 +66,12 @@ if PROMETHEUS_AVAILABLE:
         ["status"],
         registry=REGISTRY,
     )
+    bridge_instance_mismatch_total = Counter(
+        "codex_lb_bridge_instance_mismatch_total",
+        "Total bridge instance mismatches handled via graceful fallback",
+        ["outcome"],
+        registry=REGISTRY,
+    )
 else:
     REGISTRY: Any = None
     requests_total: Any = None
@@ -76,6 +82,7 @@ else:
     rate_limit_hits_total: Any = None
     circuit_breaker_state: Any = None
     accounts_total: Any = None
+    bridge_instance_mismatch_total: Any = None
 
 
 __all__ = [
@@ -83,6 +90,7 @@ __all__ = [
     "REGISTRY",
     "active_connections",
     "accounts_total",
+    "bridge_instance_mismatch_total",
     "circuit_breaker_state",
     "prometheus_client",
     "rate_limit_hits_total",

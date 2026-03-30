@@ -120,7 +120,7 @@ async def lifespan(app: FastAPI):
             while True:
                 await asyncio.sleep(30)
                 try:
-                    await svc.register(iid)
+                    await svc.heartbeat(iid)
                 except Exception:
                     logger.warning("Ring heartbeat failed", exc_info=True)
 

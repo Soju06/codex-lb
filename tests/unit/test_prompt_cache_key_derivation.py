@@ -189,6 +189,15 @@ class TestDerivePromptCacheKey:
         assert isinstance(key, str)
         assert len(key) > 0
 
+    def test_empty_requests_without_api_key_remain_unique(self):
+        payload = ResponsesRequest(model="gpt-5.4", instructions="", input=[])
+        key1 = _derive_prompt_cache_key(payload, None)
+        key2 = _derive_prompt_cache_key(payload, None)
+
+        assert key1 != key2
+        assert key1.startswith("std-")
+        assert key2.startswith("std-")
+
     def test_key_is_deterministic(self):
         payload = ResponsesRequest(
             model="gpt-5.4",

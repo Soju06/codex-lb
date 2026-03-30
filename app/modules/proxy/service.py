@@ -4829,11 +4829,8 @@ def _derive_prompt_cache_key(
     - Different API keys never collide.
     """
     parts: list[str] = []
-
-    # Add model class prefix
     model = getattr(payload, "model", None)
-    if isinstance(model, str) and model:
-        parts.append(_extract_model_class(model))
+    model_class = _extract_model_class(model) if isinstance(model, str) and model else None
 
     if api_key is not None:
         parts.append(api_key.id[:12])
@@ -4846,7 +4843,11 @@ def _derive_prompt_cache_key(
     if first_user_text:
         parts.append(sha256(first_user_text[:512].encode()).hexdigest()[:12])
 
-    return "-".join(parts) if parts else uuid4().hex[:24]
+    if not parts:
+        random_suffix = uuid4().hex[:24]
+        return f"{model_class}-{random_suffix}" if model_class is not None else random_suffix
+
+    return "-".join([model_class, *parts]) if model_class is not None else "-".join(parts)
 
 
 def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:

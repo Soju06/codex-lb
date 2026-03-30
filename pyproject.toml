@@ -91,6 +91,7 @@ markers = [
 testpaths = ["tests"]
 filterwarnings = [
     "ignore::DeprecationWarning:sqlalchemy",
+    "ignore::DeprecationWarning:aiosqlite",
     "ignore::ResourceWarning",
 ]
 

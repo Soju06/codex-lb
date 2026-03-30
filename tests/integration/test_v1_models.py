@@ -107,7 +107,7 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
         _make_upstream_model("gpt-5.3-codex"),
         _make_upstream_model("gpt-hidden", supported_in_api=False),
     ]
-    registry.update({"plus": models, "pro": models})
+    await registry.update({"plus": models, "pro": models})
 
     dashboard = await async_client.get("/api/models")
     v1 = await async_client.get("/v1/models")

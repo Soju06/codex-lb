@@ -265,11 +265,13 @@ def _text_format_from_parsed(parsed: ChatResponseFormat) -> ResponsesTextFormat:
         json_schema = parsed.json_schema
         if json_schema is None:
             raise ValueError("'response_format.json_schema' is required when type is 'json_schema'.")
-        return ResponsesTextFormat(
-            type=parsed.type,
-            schema_=json_schema.schema_,
-            name=json_schema.name,
-            strict=json_schema.strict,
+        return ResponsesTextFormat.model_validate(
+            {
+                "type": parsed.type,
+                "schema": json_schema.schema_,
+                "name": json_schema.name,
+                "strict": json_schema.strict,
+            }
         )
     if parsed.type in ("json_object", "text"):
         return ResponsesTextFormat(type=parsed.type)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +17,7 @@ class FirewallRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_entries(self) -> list[ApiFirewallAllowlist]:
+    async def list_entries(self) -> Sequence[ApiFirewallAllowlist]:
         result = await self._session.execute(
             select(ApiFirewallAllowlist).order_by(ApiFirewallAllowlist.created_at, ApiFirewallAllowlist.ip_address)
         )

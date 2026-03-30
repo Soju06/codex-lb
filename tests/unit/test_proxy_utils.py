@@ -4,8 +4,9 @@ import asyncio
 import json
 import logging
 from collections import deque
+from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import Protocol, Self, cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -25,10 +26,16 @@ from app.core.utils.request_id import get_request_id, reset_request_id, set_requ
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
 
@@ -36,6 +43,14 @@ pytestmark = pytest.mark.unit
 def _assert_proxy_response_error(exc: BaseException) -> proxy_module.ProxyResponseError:
     assert isinstance(exc, proxy_module.ProxyResponseError)
     return exc
+
+
+def _proxy_error_code(exc: proxy_module.ProxyResponseError) -> str | None:
+    return exc.payload["error"].get("code")
+
+
+def _proxy_error_message(exc: proxy_module.ProxyResponseError) -> str | None:
+    return exc.payload["error"].get("message")
 
 
 def test_filter_inbound_headers_strips_auth_and_account():
@@ -274,17 +289,33 @@ def test_pop_sse_event_returns_first_event_and_mutates_buffer():
     assert bytes(buffer) == b"data: two\n\n"
 
 
-class _DummyContent:
-    def __init__(self, chunks: list[bytes]) -> None:
-        self._chunks = chunks
+class _DummyChunkIterator:
+    def __init__(self, chunks: Sequence[bytes]) -> None:
+        self._chunks = iter(chunks)
 
-    async def iter_chunked(self, size: int):
-        for chunk in self._chunks:
-            yield chunk
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return next(self._chunks)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
-class _DummyResponse:
-    def __init__(self, chunks: list[bytes]) -> None:
+class _DummyContent(proxy_module.SSEContentProtocol):
+    def __init__(self, chunks: Sequence[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    def iter_chunked(self, size: int) -> _DummyChunkIterator:
+        del size
+        return _DummyChunkIterator(self._chunks)
+
+
+class _DummyResponse(proxy_module.SSEResponseProtocol):
+    content: proxy_module.SSEContentProtocol
+
+    def __init__(self, chunks: Sequence[bytes]) -> None:
         self.content = _DummyContent(chunks)
 
 
@@ -354,16 +385,23 @@ class _RequestLogsRecorder:
 
 class _RepoContext:
     def __init__(self, request_logs: _RequestLogsRecorder) -> None:
-        self._repos = SimpleNamespace(request_logs=request_logs)
+        self._repos = ProxyRepositories(
+            accounts=cast(AccountsRepository, AsyncMock()),
+            usage=cast(UsageRepository, AsyncMock()),
+            request_logs=cast(RequestLogsRepository, request_logs),
+            sticky_sessions=cast(StickySessionsRepository, AsyncMock()),
+            api_keys=cast(ApiKeysRepository, AsyncMock()),
+            additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+        )
 
-    async def __aenter__(self) -> object:
+    async def __aenter__(self) -> ProxyRepositories:
         return self._repos
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
 
 
-def _repo_factory(request_logs: _RequestLogsRecorder):
+def _repo_factory(request_logs: _RequestLogsRecorder) -> proxy_service.ProxyRepoFactory:
     def factory() -> _RepoContext:
         return _RepoContext(request_logs)
 
@@ -432,9 +470,13 @@ class _JsonCompactResponse:
 
 class _CompactSession:
     class _CompactResponseLike(Protocol):
-        async def __aenter__(self): ...
-        async def __aexit__(self, exc_type, exc, tb): ...
-        async def json(self, *, content_type=None): ...
+        status: int
+
+        async def __aenter__(self) -> Self: ...
+
+        async def __aexit__(self, exc_type: object | None, exc: BaseException | None, tb: object | None) -> bool: ...
+
+        async def json(self, *, content_type: str | None = None) -> dict[str, object]: ...
 
     def __init__(self, response: _CompactResponseLike) -> None:
         self._response = response
@@ -506,15 +548,15 @@ class _TimeoutCompactSession:
 
 
 class _WsConnection:
-    def __init__(self, messages: list[object]) -> None:
+    def __init__(self, messages: Sequence[object]) -> None:
         self._messages = list(messages)
         self.sent_json: list[dict[str, object]] = []
         self.closed = False
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type: object | None, exc: BaseException | None, tb: object | None) -> bool:
         self.closed = True
         return False
 
@@ -539,7 +581,7 @@ def _ws_text_message(payload: dict[str, object]) -> SimpleNamespace:
 
 
 class _WsResponse:
-    def __init__(self, messages: list[object], *, status: int = 101) -> None:
+    def __init__(self, messages: Sequence[object], *, status: int = 101) -> None:
         self._messages = messages
         self._index = 0
         self._response = SimpleNamespace(status=status)
@@ -547,14 +589,14 @@ class _WsResponse:
         self.sent_json: list[dict[str, object]] = []
         self.sent: list[str] = []
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type: object | None, exc: BaseException | None, tb: object | None) -> bool:
         self.closed = True
         return False
 
-    def __aiter__(self):
+    def __aiter__(self) -> Self:
         return self
 
     async def __anext__(self):
@@ -647,8 +689,9 @@ async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big()
     large_data = "A" * (200 * 1024)
     event = f'data: {{"type":"response.output_text.delta","delta":"{large_data}"}}\n\n'.encode("utf-8")
     response = _DummyResponse([event[:4096], event[4096:]])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 512 * 1024)
 
-    chunks = [chunk async for chunk in proxy_module._iter_sse_events(response, 1.0, 512 * 1024)]
+    chunks = [chunk async for chunk in stream]
 
     assert len(chunks) == 1
     assert chunks[0].startswith("data: ")
@@ -661,7 +704,7 @@ async def test_iter_sse_events_raises_on_event_size_limit():
     response = _DummyResponse([b"data: ", large_data])
 
     with pytest.raises(proxy_module.StreamEventTooLargeError):
-        async for _ in proxy_module._iter_sse_events(response, 1.0, 256):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 256):
             pass
 
 
@@ -677,7 +720,7 @@ async def test_iter_sse_events_raises_idle_timeout(monkeypatch):
     monkeypatch.setattr(proxy_module.asyncio, "wait", fake_wait)
 
     with pytest.raises(proxy_module.StreamIdleTimeoutError):
-        async for _ in proxy_module._iter_sse_events(response, 1.0, 1024):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 1024):
             pass
 
 
@@ -694,7 +737,7 @@ async def test_iter_sse_events_propagates_upstream_timeout():
             self.content = _TimeoutContent()
 
     with pytest.raises(asyncio.TimeoutError):
-        async for _ in proxy_module._iter_sse_events(_TimeoutResponse(), 1.0, 1024):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, _TimeoutResponse()), 1.0, 1024):
             pass
 
 
@@ -720,7 +763,7 @@ async def test_iter_sse_events_cancels_pending_chunk_read():
     response = _BlockingResponse()
 
     async def consume() -> None:
-        async for _ in proxy_module._iter_sse_events(response, 10.0, 1024):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 10.0, 1024):
             pass
 
     task = asyncio.create_task(consume())
@@ -2014,7 +2057,7 @@ async def test_stream_responses_forced_websocket_preserves_rate_limit_code_on_ha
             )
         ]
 
-    assert exc_info.value.payload["error"]["code"] == "rate_limit_exceeded"
+    assert _proxy_error_code(exc_info.value) == "rate_limit_exceeded"
 
 
 @pytest.mark.asyncio
@@ -2271,8 +2314,8 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     assert timeout.sock_read == pytest.approx(123.0, abs=0.05)
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert exc.payload["error"]["message"] == "Timeout on reading data from socket"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "Timeout on reading data from socket"
 
 
 @pytest.mark.asyncio
@@ -4011,7 +4054,7 @@ async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
     assert request_logs.calls[0]["transport"] == "http"
 
@@ -4048,7 +4091,7 @@ async def test_compact_responses_records_transient_error_for_generic_upstream_fa
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
 
@@ -4074,7 +4117,7 @@ async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
@@ -4099,8 +4142,8 @@ async def test_select_account_with_budget_times_out_during_settings_fetch(monkey
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert exc.payload["error"]["message"] == "Proxy request budget exhausted"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "Proxy request budget exhausted"
     select_account.assert_not_awaited()
 
 
@@ -4159,7 +4202,7 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert transcribe_calls == 1
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
     assert request_logs.calls[0]["transport"] == "http"
@@ -4190,7 +4233,7 @@ async def test_transcribe_selection_budget_exhaustion_returns_upstream_unavailab
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
@@ -4241,7 +4284,7 @@ async def test_transcribe_records_transient_error_for_generic_upstream_failure(m
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
 
@@ -4279,7 +4322,7 @@ async def test_compact_responses_propagates_selection_error_code(monkeypatch):
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 503
-    assert exc.payload["error"]["code"] == "no_additional_quota_eligible_accounts"
+    assert _proxy_error_code(exc) == "no_additional_quota_eligible_accounts"
     assert request_logs.calls[0]["error_code"] == "no_additional_quota_eligible_accounts"
 
 
@@ -4341,8 +4384,8 @@ async def test_transcribe_audio_wraps_timeout_as_upstream_unavailable():
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert exc.payload["error"]["message"] == "Request to upstream timed out"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "Request to upstream timed out"
 
 
 @pytest.mark.asyncio
@@ -4439,5 +4482,5 @@ async def test_transcribe_audio_maps_body_read_transport_errors_to_upstream_unav
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert exc.payload["error"]["message"] == expected_message
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == expected_message

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.service import (
     _derive_prompt_cache_key,
@@ -221,7 +222,7 @@ class TestDerivePromptCacheKey:
     def test_different_model_classes_produce_different_keys(self):
         api_key = _make_api_key(id="ak_12345678ABCD")
         _instructions = "instructions here"
-        _input: list[dict[str, str]] = [{"role": "user", "content": "hello"}]
+        _input: list[JsonValue] = [{"role": "user", "content": "hello"}]
 
         # Test mini vs std
         payload_mini = ResponsesRequest(model="gpt-5.4-mini", instructions=_instructions, input=_input)
@@ -241,7 +242,7 @@ class TestDerivePromptCacheKey:
     def test_same_model_class_produces_same_key(self):
         api_key = _make_api_key(id="ak_12345678ABCD")
         _instructions = "instructions here"
-        _input: list[dict[str, str]] = [{"role": "user", "content": "hello"}]
+        _input: list[JsonValue] = [{"role": "user", "content": "hello"}]
 
         # Test that two gpt-5.4 requests produce the same key
         payload_a = ResponsesRequest(model="gpt-5.4", instructions=_instructions, input=_input)

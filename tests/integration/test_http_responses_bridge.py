@@ -1072,7 +1072,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_recreation_on_missing
     replay_turn_state = "http_turn_inflight_replay"
     replay_key = proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None)
     expected_session = _make_dummy_bridge_session(replay_key)
-    inflight_future: asyncio.Future = asyncio.get_running_loop().create_future()  # type: ignore[type-arg]
+    inflight_future: asyncio.Future = asyncio.get_running_loop().create_future()
     service._http_bridge_inflight_sessions[replay_key] = inflight_future
 
     request_key = proxy_module._HTTPBridgeSessionKey("request", "derived-key", None)

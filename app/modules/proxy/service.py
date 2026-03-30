@@ -24,6 +24,7 @@ from app.core.auth.refresh import (
     push_token_refresh_timeout_override,
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy
+from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -60,6 +61,7 @@ from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind, UsageHistory
+from app.db.session import SessionLocal
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -93,6 +95,7 @@ from app.modules.proxy.request_policy import (
     openai_validation_error,
     validate_model_access,
 )
+from app.modules.proxy.ring_membership import RingMembershipService
 from app.modules.proxy.types import (
     AdditionalRateLimitData,
     RateLimitStatusDetailsData,
@@ -143,6 +146,7 @@ class ProxyService:
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
+        self._ring_membership = RingMembershipService(SessionLocal)
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
@@ -1495,7 +1499,7 @@ class ProxyService:
 
                 await self._prune_http_bridge_sessions_locked()
 
-                owner_instance = _http_bridge_owner_instance(key, settings)
+                owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
                 current_instance, ring = _normalized_http_bridge_instance_ring(settings)
                 if (
                     key.affinity_kind != "request"
@@ -5159,19 +5163,42 @@ def _normalized_http_bridge_instance_ring(settings: object) -> tuple[str, tuple[
                 stripped = entry.strip()
                 if stripped:
                     ring_entries.append(stripped)
-    if instance_id not in ring_entries:
+    if not ring_entries:
         ring_entries.append(instance_id)
     return instance_id, tuple(sorted(set(ring_entries)))
 
 
-def _http_bridge_owner_instance(key: _HTTPBridgeSessionKey, settings: object) -> str | None:
-    instance_id, ring = _normalized_http_bridge_instance_ring(settings)
+async def _active_http_bridge_instance_ring(
+    settings: object,
+    ring_membership: RingMembershipService | None,
+) -> tuple[str, tuple[str, ...]]:
+    instance_id, static_ring = _normalized_http_bridge_instance_ring(settings)
+    if ring_membership is None:
+        return instance_id, static_ring
+    try:
+        active_members = await ring_membership.list_active()
+    except Exception:
+        return instance_id, static_ring
+    if not active_members:
+        return instance_id, static_ring
+    normalized_members = tuple(
+        sorted({member.strip() for member in active_members if isinstance(member, str) and member.strip()})
+    )
+    if not normalized_members:
+        return instance_id, static_ring
+    return instance_id, normalized_members
+
+
+async def _http_bridge_owner_instance(
+    key: _HTTPBridgeSessionKey,
+    settings: object,
+    ring_membership: RingMembershipService | None = None,
+) -> str | None:
+    instance_id, ring = await _active_http_bridge_instance_ring(settings, ring_membership)
     if len(ring) <= 1:
         return instance_id
     hash_input = f"{key.affinity_kind}:{key.affinity_key}:{key.api_key_id or ''}"
-    digest = sha256(hash_input.encode("utf-8")).digest()
-    owner_index = int.from_bytes(digest[:8], "big") % len(ring)
-    return ring[owner_index]
+    return select_node(hash_input, ring)
 
 
 def _http_responses_session_bridge_enabled(settings: object) -> bool:

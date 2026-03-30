@@ -110,6 +110,67 @@ def test_build_upstream_headers_accept_override():
     assert headers["Accept"] == "application/json"
 
 
+class _RingMembershipStub:
+    def __init__(self, members: list[str]) -> None:
+        self.members = members
+
+    async def list_active(self, stale_threshold_seconds: int = 120) -> list[str]:
+        del stale_threshold_seconds
+        return list(self.members)
+
+
+@pytest.mark.anyio
+async def test_owner_instance_uses_rendezvous_hash() -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_instance_ring=["pod-a", "pod-b", "pod-c", "pod-d", "pod-e"],
+    )
+    ring_membership = _RingMembershipStub(["pod-a", "pod-b", "pod-c", "pod-d", "pod-e"])
+
+    owners_before: dict[str, str | None] = {}
+    for index in range(1000):
+        key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", f"k-{index}", None)
+        owners_before[key.affinity_key] = await proxy_service._http_bridge_owner_instance(
+            key,
+            settings,
+            cast(proxy_service.RingMembershipService, ring_membership),
+        )
+
+    ring_membership.members = ["pod-a", "pod-b", "pod-c", "pod-d", "pod-e", "pod-f"]
+    moved = 0
+    for index in range(1000):
+        key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", f"k-{index}", None)
+        owner_after = await proxy_service._http_bridge_owner_instance(
+            key,
+            settings,
+            cast(proxy_service.RingMembershipService, ring_membership),
+        )
+        if owners_before[key.affinity_key] != owner_after:
+            moved += 1
+
+    assert moved / 1000 <= 0.2
+
+
+@pytest.mark.anyio
+async def test_ring_fallback_to_static_on_db_error() -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_instance_ring=["pod-b", "pod-c"],
+    )
+    ring_membership = AsyncMock()
+    ring_membership.list_active.side_effect = RuntimeError("db unavailable")
+
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", "k-fallback", None)
+    owner = await proxy_service._http_bridge_owner_instance(
+        key,
+        settings,
+        cast(proxy_service.RingMembershipService, ring_membership),
+    )
+    expected = proxy_service.select_node("prompt_cache_key:k-fallback:", ("pod-b", "pod-c"))
+
+    assert owner == expected
+
+
 def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_insensitively():
     headers = proxy_module._build_upstream_websocket_headers(
         {

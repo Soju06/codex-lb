@@ -1,32 +1,28 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.time import utcnow
 from app.db.models import Base, BridgeRingMember
 from app.modules.proxy.ring_membership import RingMembershipService
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
 pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-async def async_session_factory() -> Callable[[], AsyncSession]:
+async def async_session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
     """Create in-memory SQLite database for testing."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async_session_maker: sessionmaker[AsyncSession] = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
-    def get_session():
+    def get_session() -> AsyncSession:
         return async_session_maker()
 
     yield get_session
@@ -35,7 +31,7 @@ async def async_session_factory() -> Callable[[], AsyncSession]:
 
 
 @pytest.fixture
-async def ring_service(async_session_factory):
+async def ring_service(async_session_factory: Callable[[], AsyncSession]) -> RingMembershipService:
     """Create RingMembershipService with test session factory."""
     return RingMembershipService(async_session_factory)
 

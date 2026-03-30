@@ -392,10 +392,6 @@ async def test_deactivated_key_rejected_immediately() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="AccountSelectionCache is single-slot: model-a result poisons model-b queries",
-)
 async def test_different_models_get_different_cache_entries() -> None:
     """BUG: First model query caches its result; second model query gets wrong cached data."""
     from app.modules.proxy.account_cache import AccountSelectionCache
@@ -490,10 +486,6 @@ async def test_same_model_reuses_cache() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="AccountSelectionCache is single-slot: limit-a result poisons limit-b queries",
-)
 async def test_different_limit_names_get_different_cache_entries() -> None:
     """BUG: Queries with different additional_limit_name share the same cache slot."""
     from app.modules.proxy.account_cache import AccountSelectionCache

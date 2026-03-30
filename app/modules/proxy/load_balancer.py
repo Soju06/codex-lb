@@ -321,7 +321,8 @@ class LoadBalancer:
         model: str | None,
         additional_limit_name: str | None = None,
     ) -> _SelectionInputs:
-        cached = await self._selection_inputs_cache.get()
+        cache_key = (model, additional_limit_name)
+        cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
             return _clone_selection_inputs(cached)
 
@@ -338,7 +339,7 @@ class LoadBalancer:
                         latest_primary={},
                         latest_secondary={},
                     )
-                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
                     return selection_inputs
                 selection_inputs = _SelectionInputs(
                     accounts=[],
@@ -347,7 +348,7 @@ class LoadBalancer:
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
-                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
                 return selection_inputs
 
             if effective_limit_name:
@@ -365,7 +366,7 @@ class LoadBalancer:
                         error_message=error_message,
                         error_code=error_code,
                     )
-                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
                     return selection_inputs
             if not accounts:
                 selection_inputs = _SelectionInputs(
@@ -373,7 +374,7 @@ class LoadBalancer:
                     latest_primary={},
                     latest_secondary={},
                 )
-                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
                 return selection_inputs
 
             latest_primary, latest_secondary = await asyncio.gather(
@@ -389,7 +390,7 @@ class LoadBalancer:
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
             )
-            await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs))
+            await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
             return selection_inputs
 
     async def _filter_accounts_for_additional_limit(

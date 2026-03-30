@@ -9,6 +9,8 @@ import anyio
 if TYPE_CHECKING:
     from app.modules.proxy.load_balancer import SelectionInputs
 
+_CacheKey = tuple[str | None, str | None]
+
 
 @dataclass(slots=True)
 class _CachedSelectionInputs:
@@ -27,28 +29,28 @@ class AccountSelectionCache:
         if ttl_seconds < 0:
             raise ValueError("ttl_seconds must be non-negative")
         self._ttl_seconds = ttl_seconds
-        self._cached: _CachedSelectionInputs | None = None
+        self._cache: dict[_CacheKey, _CachedSelectionInputs] = {}
         self._lock = anyio.Lock()
 
-    async def get(self) -> SelectionInputs | None:
+    async def get(self, key: _CacheKey = (None, None)) -> SelectionInputs | None:
         if self._ttl_seconds == 0:
             return None  # Cache disabled (test mode)
-        cached = self._cached
-        if cached is None:
+        entry = self._cache.get(key)
+        if entry is None:
             return None
-        if time.monotonic() >= cached.expires_at:
+        if time.monotonic() >= entry.expires_at:
             return None
-        return cached.data
+        return entry.data
 
-    async def set(self, data: SelectionInputs) -> None:
+    async def set(self, data: SelectionInputs, key: _CacheKey = (None, None)) -> None:
         async with self._lock:
-            self._cached = _CachedSelectionInputs(
+            self._cache[key] = _CachedSelectionInputs(
                 data=data,
                 expires_at=time.monotonic() + self._ttl_seconds,
             )
 
     def invalidate(self) -> None:
-        self._cached = None
+        self._cache.clear()
 
 
 _account_selection_cache = AccountSelectionCache()

@@ -78,6 +78,24 @@ externalDatabase:
   url: "postgresql+asyncpg://user:pass@host:5432/codexlb"
 ```
 
+## Connection Pool Sizing
+
+When running multiple replicas, each pod maintains a pool of database connections. The total connections used is:
+
+```
+total_connections = (databasePoolSize + databaseMaxOverflow) × replicas
+```
+
+PostgreSQL defaults to `max_connections=100`. With 20 replicas:
+
+| Pool Size | Max Overflow | Replicas | Total | Notes |
+|-----------|-------------|----------|-------|-------|
+| 3 | 2 | 20 | 100 | **Recommended prod default** |
+| 5 | 5 | 10 | 100 | For ≤10 replicas |
+| 15 | 10 | 4 | 100 | For single-instance only |
+
+**If you need more concurrency**: Increase `max_connections` in PostgreSQL (requires restart), or deploy [PgBouncer](https://www.pgbouncer.org/) as a connection pooler.
+
 ## Security
 
 This chart enforces the Kubernetes **Restricted** Pod Security Standard:

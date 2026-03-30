@@ -2,7 +2,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "codex-lb.fullname" . }}-migrate
+  name: {{ printf "%s-migrate" (include "codex-lb.fullname" . | trunc 55 | trimSuffix "-") }}
   namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "codex-lb.labels" . | nindent 4 }}

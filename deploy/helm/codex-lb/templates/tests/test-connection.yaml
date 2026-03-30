@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: {{ include "codex-lb.fullname" . }}-test-connection
+  name: {{ printf "%s-test-connection" (include "codex-lb.fullname" . | trunc 47 | trimSuffix "-") }}
   namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "codex-lb.labels" . | nindent 4 }}

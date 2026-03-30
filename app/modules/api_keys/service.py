@@ -146,6 +146,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         self,
         key_id: str,
         since: datetime,
+        until: datetime,
     ) -> ApiKeyUsageTotals: ...
 
 
@@ -659,8 +660,9 @@ class ApiKeysService:
         row = await self._repository.get_by_id(key_id)
         if row is None:
             return None
-        since = utcnow() - timedelta(days=7)
-        data = await self._repository.usage_7d(key_id, since)
+        now = utcnow()
+        since = now - timedelta(days=7)
+        data = await self._repository.usage_7d(key_id, since, now)
         return ApiKeyUsage7DayData(
             key_id=key_id,
             total_tokens=data.total_tokens,

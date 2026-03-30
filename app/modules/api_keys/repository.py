@@ -549,7 +549,7 @@ class ApiKeysRepository:
             for row in result.all()
         ]
 
-    async def usage_7d(self, key_id: str, since: datetime) -> ApiKeyUsageTotals:
+    async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
         stmt = select(
             func.count(RequestLog.id).label("total_requests"),
             func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
@@ -562,6 +562,7 @@ class ApiKeysRepository:
         ).where(
             RequestLog.api_key_id == key_id,
             RequestLog.requested_at >= since,
+            RequestLog.requested_at < until,
         )
         result = await self._session.execute(stmt)
         row = result.one()

@@ -4,6 +4,13 @@ autoscaling:
   enabled: true
   minReplicas: 3
   maxReplicas: 20
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600  # 10 min cooldown for bridge session stability
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
 affinity:
   podAntiAffinity: hard
 topologySpreadConstraints:

@@ -185,7 +185,8 @@ autoscaling:
       policies:
         - type: Pods
           value: 1
-          periodSeconds: 60
+          periodSeconds: 120  # Slowed from 60s to 120s — bridge sessions need time to drain
+          # Bridge sessions have TTLs up to 3600s; slower scale-down reduces cache disruption
     scaleUp:
       stabilizationWindowSeconds: 0
       policies:

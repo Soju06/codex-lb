@@ -27,7 +27,7 @@ from app.core.resilience.backpressure import BackpressureMiddleware
 from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
-from app.db.session import close_db, init_db
+from app.db.session import SessionLocal, close_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.audit import api as audit_api
@@ -38,6 +38,7 @@ from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
+from app.modules.proxy.ring_membership import RingMembershipService
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
@@ -72,6 +73,9 @@ async def lifespan(_: FastAPI):
     shutdown_state = import_module("app.core.shutdown")
     metrics_server = None
     metrics_server_task: asyncio.Task[None] | None = None
+    ring_service = None
+    heartbeat_task: asyncio.Task[None] | None = None
+    instance_id = None
 
     startup_module._startup_complete = False
     shutdown_state.set_draining(False)
@@ -104,6 +108,28 @@ async def lifespan(_: FastAPI):
         metrics_server_task = asyncio.create_task(metrics_server.serve())
     elif settings.metrics_enabled:
         logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
+
+    # Ring membership — register this pod
+    try:
+        ring_service = RingMembershipService(SessionLocal)
+        instance_id = settings.http_responses_session_bridge_instance_id
+        await ring_service.register(instance_id)
+
+        async def _heartbeat_loop(svc: RingMembershipService, iid: str) -> None:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    await svc.register(iid)
+                except Exception:
+                    logger.warning("Ring heartbeat failed", exc_info=True)
+
+        heartbeat_task = asyncio.create_task(_heartbeat_loop(ring_service, instance_id))
+        logger.info("Registered in bridge ring", extra={"instance_id": instance_id})
+    except Exception:
+        logger.warning("Ring registration failed (non-fatal)", exc_info=True)
+        heartbeat_task = None
+        ring_service = None
+
     startup_module._startup_complete = True
 
     try:
@@ -113,6 +139,21 @@ async def lifespan(_: FastAPI):
         drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
         if not drained:
             logger.warning("Drain timeout reached, proceeding with shutdown")
+
+        # Cancel heartbeat and unregister from ring
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await asyncio.wait_for(heartbeat_task, timeout=2)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+        if ring_service is not None and instance_id is not None:
+            try:
+                await ring_service.unregister(instance_id)
+                logger.info("Unregistered from bridge ring", extra={"instance_id": instance_id})
+            except Exception:
+                logger.warning("Ring unregistration failed (non-fatal)", exc_info=True)
 
         if metrics_server is not None:
             metrics_server.should_exit = True

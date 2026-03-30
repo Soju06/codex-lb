@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -39,33 +38,8 @@ def _recreate_test_schema(sync_conn) -> None:
     Base.metadata.create_all(sync_conn)
 
 
-def _truncate_test_tables(sync_conn) -> None:
-    _drop_test_migration_tables(sync_conn)
-    if not Base.metadata.sorted_tables:
-        return
-    table_list = ", ".join(
-        sync_conn.dialect.identifier_preparer.format_table(table) for table in Base.metadata.sorted_tables
-    )
-    sync_conn.execute(text(f"TRUNCATE TABLE {table_list} RESTART IDENTITY CASCADE"))
-
-
 def _reset_test_database(sync_conn) -> None:
-    if sync_conn.dialect.name == "postgresql":
-        _truncate_test_tables(sync_conn)
-        return
     _recreate_test_schema(sync_conn)
-
-
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def _prepare_postgresql_test_schema() -> AsyncIterator[None]:
-    async with engine.begin() as conn:
-
-        def _prepare(sync_conn):
-            if sync_conn.dialect.name == "postgresql":
-                _recreate_test_schema(sync_conn)
-
-        await conn.run_sync(_prepare)
-    yield
 
 
 @pytest_asyncio.fixture

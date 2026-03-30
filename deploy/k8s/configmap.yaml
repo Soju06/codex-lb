@@ -3,6 +3,8 @@ kind: ConfigMap
 metadata:
   name: codex-lb-config
 data:
+  # Disable pod-level migration — use job-migrate.yaml instead.
+  CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"
   CODEX_LB_METRICS_ENABLED: "true"
   CODEX_LB_METRICS_PORT: "9090"
   CODEX_LB_LOG_FORMAT: "json"

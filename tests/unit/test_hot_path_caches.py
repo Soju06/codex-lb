@@ -222,3 +222,174 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
     assert accounts_repo.calls == 2
     assert usage_repo.primary_calls == 2
     assert usage_repo.secondary_calls == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 1 RED: API key cache invalidation (xfail — bug not yet fixed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="cache invalidation not yet implemented: delete_key() never calls invalidate()",
+)
+async def test_deleted_key_rejected_immediately() -> None:
+    """BUG: ApiKeyCache is never invalidated when a key is deleted."""
+    plain_key = "sk-clb-test-del-0001"
+    key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
+    now = datetime.now(UTC)
+    api_key_data = ApiKeyData(
+        id="key-del-1",
+        name="test-delete",
+        key_prefix=plain_key[:15],
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=True,
+        created_at=now,
+        last_used_at=None,
+    )
+
+    class _DeleteOnlyRepo:
+        async def delete(self, _key_id: str) -> bool:
+            return True
+
+    cache = get_api_key_cache()
+    await cache.set(key_hash, api_key_data)
+
+    from app.modules.api_keys.service import ApiKeysService
+
+    service = ApiKeysService(_DeleteOnlyRepo())  # type: ignore[arg-type]
+    await service.delete_key("key-del-1")
+
+    # BUG: after deletion the cache should be empty, but it still holds stale data
+    cached = await cache.get(key_hash)
+    assert cached is None  # xfail: cache still returns the deleted key's data
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="cache invalidation not yet implemented: regenerate_key() never calls invalidate()",
+)
+async def test_regenerated_key_old_token_rejected_immediately() -> None:
+    """BUG: Old key hash stays in cache after regeneration — old token remains valid."""
+    plain_key = "sk-clb-test-regen-001"
+    old_key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
+    now = datetime.now(UTC)
+    api_key_data = ApiKeyData(
+        id="key-regen-1",
+        name="test-regen",
+        key_prefix=plain_key[:15],
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=True,
+        created_at=now,
+        last_used_at=None,
+    )
+    old_row = SimpleNamespace(
+        id="key-regen-1",
+        name="test-regen",
+        key_hash=old_key_hash,
+        key_prefix=plain_key[:15],
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=True,
+        created_at=now,
+        last_used_at=None,
+        limits=[],
+    )
+    new_plain = "sk-clb-new-key-regen"
+    new_row = SimpleNamespace(
+        id="key-regen-1",
+        name="test-regen",
+        key_hash=hashlib.sha256(new_plain.encode()).hexdigest(),
+        key_prefix=new_plain[:15],
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=True,
+        created_at=now,
+        last_used_at=None,
+        limits=[],
+    )
+
+    class _RegenRepo:
+        async def get_by_id(self, _key_id: str) -> SimpleNamespace:
+            return old_row
+
+        async def update(self, _key_id: str, **_kwargs: object) -> SimpleNamespace:
+            return new_row
+
+    cache = get_api_key_cache()
+    await cache.set(old_key_hash, api_key_data)
+
+    from app.modules.api_keys.service import ApiKeysService
+
+    service = ApiKeysService(_RegenRepo())  # type: ignore[arg-type]
+    await service.regenerate_key("key-regen-1")
+
+    # BUG: old token should be evicted from cache but it still authorises requests
+    cached = await cache.get(old_key_hash)
+    assert cached is None  # xfail: old hash still in cache
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="cache invalidation not yet implemented: update_key() never calls invalidate()",
+)
+async def test_deactivated_key_rejected_immediately() -> None:
+    """BUG: Deactivated key (is_active=False) stays in cache — still grants access."""
+    plain_key = "sk-clb-test-deact-01"
+    key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
+    now = datetime.now(UTC)
+    api_key_data = ApiKeyData(
+        id="key-deact-1",
+        name="test-deactivate",
+        key_prefix=plain_key[:15],
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=True,
+        created_at=now,
+        last_used_at=None,
+    )
+    deactivated_row = SimpleNamespace(
+        id="key-deact-1",
+        name="test-deactivate",
+        key_hash=key_hash,
+        key_prefix=plain_key[:15],
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        expires_at=None,
+        is_active=False,
+        created_at=now,
+        last_used_at=None,
+        limits=[],
+    )
+
+    class _UpdateOnlyRepo:
+        async def update(self, _key_id: str, **_kwargs: object) -> SimpleNamespace:
+            return deactivated_row
+
+    cache = get_api_key_cache()
+    await cache.set(key_hash, api_key_data)
+
+    from app.modules.api_keys.service import ApiKeysService, ApiKeyUpdateData
+
+    service = ApiKeysService(_UpdateOnlyRepo())  # type: ignore[arg-type]
+    await service.update_key("key-deact-1", ApiKeyUpdateData(is_active=False, is_active_set=True))
+
+    # BUG: deactivated key should be evicted from cache but it still returns stale active data
+    cached = await cache.get(key_hash)
+    assert cached is None  # xfail: cache still returns the deactivated key's data

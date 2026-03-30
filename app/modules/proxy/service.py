@@ -1431,18 +1431,7 @@ class ProxyService:
     ) -> "_HTTPBridgeSession":
         settings = get_settings()
         api_key_id = api_key.id if api_key is not None else None
-        effective_idle_ttl_seconds = _effective_http_bridge_idle_ttl_seconds(
-            affinity=affinity,
-            idle_ttl_seconds=idle_ttl_seconds,
-            codex_idle_ttl_seconds=getattr(
-                settings,
-                "http_responses_session_bridge_codex_idle_ttl_seconds",
-                900.0,
-            ),
-            prompt_cache_idle_ttl_seconds=getattr(
-                settings, "http_responses_session_bridge_prompt_cache_idle_ttl_seconds", 3600.0
-            ),
-        )
+        effective_idle_ttl_seconds = idle_ttl_seconds
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         old_account_id: str | None = None
         while True:
@@ -4809,10 +4798,10 @@ def _extract_model_class(model: str) -> str:
     - "codex" for gpt-5.3-codex* (any variant)
     - "std" for all others
     """
-    if "mini" in model:
-        return "mini"
     if "codex" in model:
         return "codex"
+    if "mini" in model:
+        return "mini"
     return "std"
 
 

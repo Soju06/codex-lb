@@ -248,6 +248,15 @@ class TestDerivePromptCacheKey:
         assert key_codex != key_std
         assert key_codex.startswith("codex-")
 
+        payload_codex_mini = ResponsesRequest(
+            model="gpt-5.1-codex-mini",
+            instructions=_instructions,
+            input=_input,
+        )
+        key_codex_mini = _derive_prompt_cache_key(payload_codex_mini, api_key)
+        assert key_codex_mini.startswith("codex-")
+        assert key_codex_mini != key_mini
+
     def test_same_model_class_produces_same_key(self):
         api_key = _make_api_key(id="ak_12345678ABCD")
         _instructions = "instructions here"

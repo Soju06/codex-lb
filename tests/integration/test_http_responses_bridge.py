@@ -125,6 +125,7 @@ def _install_bridge_settings_with_limits(
     max_sessions: int = 128,
     queue_limit: int = 8,
     codex_idle_ttl_seconds: float = 900.0,
+    prompt_cache_idle_ttl_seconds: float = 3600.0,
     codex_prewarm_enabled: bool = False,
     prefer_earlier_reset_accounts: bool = False,
     instance_id: str = "instance-a",
@@ -154,7 +155,7 @@ def _install_bridge_settings_with_limits(
         http_responses_session_bridge_queue_limit=queue_limit,
         http_responses_session_bridge_instance_id=instance_id,
         http_responses_session_bridge_instance_ring=list(instance_ring or []),
-        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
         sticky_reallocation_budget_threshold_pct=95.0,
     )
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -487,7 +488,11 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
         affinity=affinity,
         api_key=None,
         request_model=payload.model,
-        idle_ttl_seconds=120.0,
+        idle_ttl_seconds=proxy_module._effective_http_bridge_idle_ttl_seconds(
+            affinity=affinity,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=600.0,
+        ),
         max_sessions=8,
     )
 
@@ -2034,6 +2039,122 @@ async def test_v1_responses_http_bridge_prefers_evicting_prompt_cache_session_be
         assert prompt_key not in service._http_bridge_sessions
         assert next_key in service._http_bridge_sessions
     assert created.key == next_key
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_honors_passed_prompt_cache_idle_ttl(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        prompt_cache_idle_ttl_seconds=1800.0,
+    )
+    account_id = await _import_account(async_client, "acc_prompt_ttl", "prompt-ttl@example.com")
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    payload = proxy_module.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+            "prompt_cache_key": "prompt-cache-ttl-test",
+        }
+    )
+    affinity = proxy_module._sticky_key_for_responses_request(
+        payload,
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=None,
+    )
+    key = proxy_module._make_http_bridge_session_key(
+        payload,
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_id="req_prompt_ttl",
+    )
+    cached_settings = await proxy_module.get_settings_cache().get()
+    overridden_settings = dict(cached_settings.__dict__)
+    overridden_settings["http_responses_session_bridge_prompt_cache_idle_ttl_seconds"] = 3600.0
+    monkeypatch.setattr(
+        proxy_module,
+        "get_settings",
+        lambda: SimpleNamespace(**overridden_settings),
+    )
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_open_upstream_websocket_with_budget(self, account, headers, *, timeout_seconds):
+        del self, account, headers, timeout_seconds
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_open_upstream_websocket_with_budget",
+        fake_open_upstream_websocket_with_budget,
+    )
+
+    session = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=proxy_module._effective_http_bridge_idle_ttl_seconds(
+            affinity=affinity,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            prompt_cache_idle_ttl_seconds=1800.0,
+        ),
+        max_sessions=32,
+    )
+
+    assert session.idle_ttl_seconds == 1800.0
+    await service._close_http_bridge_session(session)
 
 
 @pytest.mark.asyncio

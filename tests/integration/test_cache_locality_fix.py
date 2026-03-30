@@ -131,13 +131,12 @@ def test_model_class_extraction_for_all_model_types():
     """Verify model class extraction works correctly for mini, codex, and standard models."""
     from app.modules.proxy.service import _extract_model_class
 
-    # Mini models (checked first, so mini takes precedence)
     assert _extract_model_class("gpt-5.4-mini") == "mini"
     assert _extract_model_class("gpt-4-mini") == "mini"
 
-    # Codex models (checked second)
     assert _extract_model_class("gpt-5.3-codex") == "codex"
     assert _extract_model_class("gpt-5.3-codex-spark") == "codex"
+    assert _extract_model_class("gpt-5.1-codex-mini") == "codex"
 
     # Standard models (default)
     assert _extract_model_class("gpt-5.4") == "std"

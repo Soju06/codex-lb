@@ -393,3 +393,210 @@ async def test_deactivated_key_rejected_immediately() -> None:
     # BUG: deactivated key should be evicted from cache but it still returns stale active data
     cached = await cache.get(key_hash)
     assert cached is None  # xfail: cache still returns the deactivated key's data
+
+
+# ---------------------------------------------------------------------------
+# Task 3 RED: selection cache poisoning (xfail — bug not yet fixed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="AccountSelectionCache is single-slot: model-a result poisons model-b queries",
+)
+async def test_different_models_get_different_cache_entries() -> None:
+    """BUG: First model query caches its result; second model query gets wrong cached data."""
+    from app.modules.proxy.account_cache import AccountSelectionCache
+
+    cache = AccountSelectionCache(ttl_seconds=5)
+
+    class _AccountsRepo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_accounts(self) -> list[object]:
+            self.calls += 1
+            return []
+
+    class _UsageRepo:
+        async def latest_by_account(self, window: str | None = None) -> dict[object, object]:
+            return {}
+
+    class _Repos:
+        def __init__(self, accounts_repo: _AccountsRepo, usage_repo: _UsageRepo) -> None:
+            self.accounts = accounts_repo
+            self.usage = usage_repo
+
+        async def __aenter__(self) -> "_Repos":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    accounts_repo = _AccountsRepo()
+    usage_repo = _UsageRepo()
+
+    def _repo_factory() -> _Repos:
+        return _Repos(accounts_repo, usage_repo)
+
+    balancer = LoadBalancer(cast(ProxyRepoFactory, _repo_factory))
+    balancer._selection_inputs_cache = cache
+
+    # First call for model=None — loads from DB and caches
+    await balancer._load_selection_inputs(model=None)
+    assert accounts_repo.calls == 1
+
+    # Second call for a different model — should load from DB again (different cache key)
+    # BUG: it hits the single-slot cache and skips DB load
+    await balancer._load_selection_inputs(model="gpt-4-no-filter")
+    assert accounts_repo.calls == 2  # xfail: still 1 because cache poisoned this call
+
+
+@pytest.mark.asyncio
+async def test_same_model_reuses_cache() -> None:
+    """Same (model, limit_name) pair must reuse the cached result."""
+    from app.modules.proxy.account_cache import AccountSelectionCache
+
+    cache = AccountSelectionCache(ttl_seconds=5)
+
+    class _AccountsRepo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_accounts(self) -> list[object]:
+            self.calls += 1
+            return []
+
+    class _UsageRepo:
+        async def latest_by_account(self, window: str | None = None) -> dict[object, object]:
+            return {}
+
+    class _Repos:
+        def __init__(self, accounts_repo: _AccountsRepo, usage_repo: _UsageRepo) -> None:
+            self.accounts = accounts_repo
+            self.usage = usage_repo
+
+        async def __aenter__(self) -> "_Repos":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    accounts_repo = _AccountsRepo()
+    usage_repo = _UsageRepo()
+
+    def _repo_factory() -> _Repos:
+        return _Repos(accounts_repo, usage_repo)
+
+    balancer = LoadBalancer(cast(ProxyRepoFactory, _repo_factory))
+    balancer._selection_inputs_cache = cache
+
+    # Two calls with same model — second should be served from cache
+    await balancer._load_selection_inputs(model=None)
+    await balancer._load_selection_inputs(model=None)
+    assert accounts_repo.calls == 1  # second call must be a cache hit
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=False,
+    reason="AccountSelectionCache is single-slot: limit-a result poisons limit-b queries",
+)
+async def test_different_limit_names_get_different_cache_entries() -> None:
+    """BUG: Queries with different additional_limit_name share the same cache slot."""
+    from app.modules.proxy.account_cache import AccountSelectionCache
+
+    cache = AccountSelectionCache(ttl_seconds=5)
+
+    class _AccountsRepo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_accounts(self) -> list[object]:
+            self.calls += 1
+            return []
+
+    class _UsageRepo:
+        async def latest_by_account(self, window: str | None = None) -> dict[object, object]:
+            return {}
+
+    class _Repos:
+        def __init__(self, accounts_repo: _AccountsRepo, usage_repo: _UsageRepo) -> None:
+            self.accounts = accounts_repo
+            self.usage = usage_repo
+
+        async def __aenter__(self) -> "_Repos":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    accounts_repo = _AccountsRepo()
+    usage_repo = _UsageRepo()
+
+    def _repo_factory() -> _Repos:
+        return _Repos(accounts_repo, usage_repo)
+
+    balancer = LoadBalancer(cast(ProxyRepoFactory, _repo_factory))
+    balancer._selection_inputs_cache = cache
+
+    # First call with limit_name=None — loads and caches
+    await balancer._load_selection_inputs(model=None, additional_limit_name=None)
+    assert accounts_repo.calls == 1
+
+    # Second call with different additional_limit_name — should re-load from DB
+    # BUG: same single slot used → DB never re-queried
+    await balancer._load_selection_inputs(model=None, additional_limit_name="pro_tier")
+    assert accounts_repo.calls == 2  # xfail: still 1 because of cache poisoning
+
+
+@pytest.mark.asyncio
+async def test_invalidate_clears_all_keyed_entries() -> None:
+    """invalidate() must clear all cached entries (single-slot or multi-key)."""
+    from app.modules.proxy.account_cache import AccountSelectionCache
+
+    cache = AccountSelectionCache(ttl_seconds=5)
+
+    class _AccountsRepo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_accounts(self) -> list[object]:
+            self.calls += 1
+            return []
+
+    class _UsageRepo:
+        async def latest_by_account(self, window: str | None = None) -> dict[object, object]:
+            return {}
+
+    class _Repos:
+        def __init__(self, accounts_repo: _AccountsRepo, usage_repo: _UsageRepo) -> None:
+            self.accounts = accounts_repo
+            self.usage = usage_repo
+
+        async def __aenter__(self) -> "_Repos":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    accounts_repo = _AccountsRepo()
+    usage_repo = _UsageRepo()
+
+    def _repo_factory() -> _Repos:
+        return _Repos(accounts_repo, usage_repo)
+
+    balancer = LoadBalancer(cast(ProxyRepoFactory, _repo_factory))
+    balancer._selection_inputs_cache = cache
+
+    # Populate cache
+    await balancer._load_selection_inputs(model=None)
+    assert accounts_repo.calls == 1
+
+    # Invalidate should clear everything
+    cache.invalidate()
+
+    # Next call must re-load from DB
+    await balancer._load_selection_inputs(model=None)
+    assert accounts_repo.calls == 2  # must re-load after invalidation

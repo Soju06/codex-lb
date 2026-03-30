@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from enum import Enum
 
@@ -393,6 +394,16 @@ class RateLimitAttempt(Base):
     key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)
+
+
+class BridgeRingMember(Base):
+    __tablename__ = "bridge_ring_members"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    instance_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))

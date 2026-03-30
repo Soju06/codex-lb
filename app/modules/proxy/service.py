@@ -1439,7 +1439,9 @@ class ProxyService:
                 "http_responses_session_bridge_codex_idle_ttl_seconds",
                 900.0,
             ),
-            prompt_cache_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_prompt_cache_idle_ttl_seconds", 3600.0),
+            prompt_cache_idle_ttl_seconds=getattr(
+                settings, "http_responses_session_bridge_prompt_cache_idle_ttl_seconds", 3600.0
+            ),
         )
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         old_account_id: str | None = None
@@ -4665,7 +4667,8 @@ def _maybe_log_proxy_request_shape(
     logger.warning(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
         "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
-        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s session_header_present=%s tools_hash=%s model_class=%s",
+        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s"
+        " session_header_present=%s tools_hash=%s model_class=%s",
         request_id,
         kind,
         payload.model,
@@ -5195,7 +5198,8 @@ def _log_http_bridge_event(
         level = logging.WARNING
     logger.log(
         level,
-        "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s pending=%s detail=%s cache_key_family=%s model_class=%s",
+        "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s"
+        " model=%s pending=%s detail=%s cache_key_family=%s model_class=%s",
         event,
         key.affinity_kind,
         _hash_identifier(key.affinity_key),

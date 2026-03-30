@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.balancer import AccountState, select_account
+from app.core.balancer import AccountState
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy.load_balancer import LoadBalancer
 

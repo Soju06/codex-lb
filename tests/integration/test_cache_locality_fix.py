@@ -47,8 +47,8 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
 def test_mini_and_large_requests_use_different_cache_keys():
     """Verify that gpt-5.4-mini and gpt-5.3-codex requests produce different prompt_cache_keys
     due to model-class prefix separation."""
-    from app.modules.proxy.service import _derive_prompt_cache_key
     from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy.service import _derive_prompt_cache_key
 
     mini_payload = ResponsesRequest(
         model="gpt-5.4-mini",
@@ -72,8 +72,8 @@ def test_mini_and_large_requests_use_different_cache_keys():
 
 def test_same_model_class_produces_same_cache_key():
     """Verify that two requests with the same model class produce the same cache key."""
-    from app.modules.proxy.service import _derive_prompt_cache_key
     from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy.service import _derive_prompt_cache_key
 
     payload = ResponsesRequest(
         model="gpt-5.3-codex",
@@ -89,8 +89,8 @@ def test_same_model_class_produces_same_cache_key():
 
 def test_prompt_cache_bridge_idle_ttl_from_settings():
     """Verify that PROMPT_CACHE bridge idle TTL is read from dashboard settings."""
-    from app.modules.proxy.service import _effective_http_bridge_idle_ttl_seconds, _AffinityPolicy
     from app.db.models import StickySessionKind
+    from app.modules.proxy.service import _AffinityPolicy, _effective_http_bridge_idle_ttl_seconds
 
     affinity = _AffinityPolicy(
         key="cache-key-123",
@@ -109,8 +109,8 @@ def test_prompt_cache_bridge_idle_ttl_from_settings():
 
 def test_codex_session_idle_ttl_unchanged():
     """Verify that CODEX_SESSION idle TTL behavior is unchanged."""
-    from app.modules.proxy.service import _effective_http_bridge_idle_ttl_seconds, _AffinityPolicy
     from app.db.models import StickySessionKind
+    from app.modules.proxy.service import _AffinityPolicy, _effective_http_bridge_idle_ttl_seconds
 
     affinity = _AffinityPolicy(
         key="session-123",

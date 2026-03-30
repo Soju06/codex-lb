@@ -7,12 +7,9 @@ Create Date: 2026-03-30
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
-
 
 # revision identifiers, used by Alembic.
 revision = "20260330_000000_add_cache_locality_settings"

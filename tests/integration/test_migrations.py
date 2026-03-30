@@ -497,7 +497,8 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             http_responses_ttl = (
                 await session.execute(
                     text(
-                        "SELECT http_responses_session_bridge_prompt_cache_idle_ttl_seconds FROM dashboard_settings WHERE id=1"
+                        "SELECT http_responses_session_bridge_prompt_cache_idle_ttl_seconds"
+                        " FROM dashboard_settings WHERE id=1"
                     )
                 )
             ).scalar_one()

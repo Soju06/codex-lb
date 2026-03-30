@@ -1508,25 +1508,18 @@ class ProxyService:
                     and owner_instance != current_instance
                 ):
                     _log_http_bridge_event(
-                        "owner_mismatch",
+                        "owner_mismatch_graceful_fallback",
                         key,
                         account_id=None,
                         model=request_model,
-                        detail=f"expected_instance={owner_instance}, current_instance={current_instance}",
+                        detail=(
+                            f"expected_instance={owner_instance}, current_instance={current_instance}, outcome=fallback"
+                        ),
                         cache_key_family=key.affinity_kind,
                         model_class=_extract_model_class(request_model) if request_model else None,
                     )
-                    raise ProxyResponseError(
-                        409,
-                        openai_error(
-                            "bridge_instance_mismatch",
-                            (
-                                "HTTP responses session bridge request reached the wrong instance "
-                                f"(expected {owner_instance}, got {current_instance})"
-                            ),
-                            error_type="server_error",
-                        ),
-                    )
+                    # Graceful fallback: fall through to normal session creation on this pod.
+                    # The session creation below uses the same account from Layer 1 DB sticky lookup.
 
                 existing = self._http_bridge_sessions.get(key)
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:

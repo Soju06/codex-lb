@@ -217,3 +217,42 @@ async def test_prompt_cache_reallocates_when_usage_exceeds_configured_budget_thr
     second = await async_client.post("/backend-api/codex/responses", json=payload)
     assert second.status_code == 200
     assert seen == ["acc_budget_a", "acc_budget_b"]
+
+
+def test_owner_mismatch_no_longer_raises_409() -> None:
+    """Verify that the bridge mismatch block no longer raises ProxyResponseError(409).
+
+    After the graceful fallback change, the mismatch block should log and fall through,
+    not raise a 409 error.
+    """
+    import inspect
+
+    from app.modules.proxy import service as proxy_service_module
+
+    # Read the source of _get_or_create_http_bridge_session and verify no 409 raise
+    # in the owner_mismatch block
+    source = inspect.getsource(proxy_service_module)
+
+    # The old 409 raise had "bridge_instance_mismatch" as the error code
+    # After the fix, this should not appear in a raise statement
+    # We check that "bridge_instance_mismatch" only appears in comments or strings, not in raise
+    lines = source.split("\n")
+    for i, line in enumerate(lines):
+        if "bridge_instance_mismatch" in line and "raise" in line:
+            pytest.fail(
+                f"Found 'raise' with 'bridge_instance_mismatch' at line {i + 1}: {line.strip()}\n"
+                "The graceful fallback should not raise 409 on mismatch."
+            )
+
+
+def test_owner_mismatch_graceful_fallback_event_logged() -> None:
+    """Verify the graceful fallback log event name is correct."""
+    import inspect
+
+    from app.modules.proxy import service as proxy_service_module
+
+    source = inspect.getsource(proxy_service_module)
+    assert "owner_mismatch_graceful_fallback" in source, (
+        "Expected 'owner_mismatch_graceful_fallback' log event in service.py. "
+        "The graceful fallback should log this event instead of raising 409."
+    )

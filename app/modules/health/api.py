@@ -6,8 +6,9 @@ from sqlalchemy import text
 from app.core.config.settings import get_settings
 from app.core.resilience.circuit_breaker import CircuitState, get_circuit_breaker
 from app.core.resilience.degradation import get_status, is_degraded
-from app.db.session import get_session
-from app.modules.health.schemas import HealthCheckResponse, HealthResponse
+from app.db.session import SessionLocal, get_session
+from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, HealthResponse
+from app.modules.proxy.ring_membership import RingMembershipService
 
 router = APIRouter(tags=["health"])
 
@@ -53,7 +54,10 @@ async def health_ready() -> HealthCheckResponse:
                     if circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN:
                         raise HTTPException(status_code=503, detail="Circuit breaker open — upstream unavailable")
 
-                return HealthCheckResponse(status=status, checks=checks)
+                # Add bridge ring consistency info (best-effort, informational only)
+                bridge_ring = await _get_bridge_ring_info()
+
+                return HealthCheckResponse(status=status, checks=checks, bridge_ring=bridge_ring)
             except HTTPException:
                 raise
             except Exception:
@@ -70,6 +74,34 @@ async def health_ready() -> HealthCheckResponse:
         )
 
     raise HTTPException(status_code=503, detail="Service unavailable")
+
+
+async def _get_bridge_ring_info() -> BridgeRingInfo:
+    """Get bridge ring consistency info. Best-effort; returns error field if unavailable."""
+    settings = get_settings()
+    instance_id = settings.http_responses_session_bridge_instance_id
+
+    try:
+        ring_service = RingMembershipService(SessionLocal)
+        active_members = await ring_service.list_active()
+        fingerprint = await ring_service.ring_fingerprint()
+        is_member = instance_id in active_members
+
+        return BridgeRingInfo(
+            ring_fingerprint=fingerprint,
+            ring_size=len(active_members),
+            instance_id=instance_id,
+            is_member=is_member,
+        )
+    except Exception as e:
+        # DB unavailable or other error; return informational error
+        return BridgeRingInfo(
+            ring_fingerprint=None,
+            ring_size=0,
+            instance_id=instance_id,
+            is_member=False,
+            error=f"unavailable: {type(e).__name__}",
+        )
 
 
 @router.get("/health/startup", response_model=HealthCheckResponse)

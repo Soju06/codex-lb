@@ -5,7 +5,7 @@ import time
 from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import anyio
 
@@ -20,17 +20,18 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.balancer.types import UpstreamError
-from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
-from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+
+if TYPE_CHECKING:
+    from app.modules.accounts.repository import AccountsRepository
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -929,6 +930,8 @@ async def _latest_additional_by_key(
 
 
 def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
+    from app.core.config.settings import get_settings  # noqa: PLC0415
+
     current_time = now or utcnow()
     interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
     return current_time - timedelta(seconds=interval_seconds)

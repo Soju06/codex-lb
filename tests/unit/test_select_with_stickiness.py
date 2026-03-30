@@ -48,7 +48,7 @@ def _make_sticky_repo(existing_account_id: str | None = None) -> AsyncMock:
     return repo
 
 
-async def _select_with_stickiness(
+async def _invoke_stickiness(
     states: list[AccountState],
     sticky_key: str,
     sticky_repo: AsyncMock,
@@ -100,7 +100,7 @@ async def test_fallback_does_not_overwrite_sticky_when_pinned_rate_limited():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -121,7 +121,7 @@ async def test_all_accounts_unavailable_does_not_overwrite_sticky():
     acc_a = _rate_limited("a", cooldown_until=now + 60)
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a],
         "key1",
         repo,
@@ -142,7 +142,7 @@ async def test_fallback_overwrites_sticky_when_reallocate_sticky_true():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -167,7 +167,7 @@ async def test_sticky_preserved_then_returns_to_original_on_recovery():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    r1 = await _select_with_stickiness(
+    r1 = await _invoke_stickiness(
         [acc_a_down, acc_b],
         "key1",
         repo,
@@ -182,7 +182,7 @@ async def test_sticky_preserved_then_returns_to_original_on_recovery():
     acc_b2 = _active("b", used_percent=20.0)
     repo2 = _make_sticky_repo(existing_account_id="a")
 
-    r2 = await _select_with_stickiness(
+    r2 = await _invoke_stickiness(
         [acc_a_up, acc_b2],
         "key1",
         repo2,
@@ -199,7 +199,7 @@ async def test_sticky_deleted_when_pinned_account_removed_from_pool():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_b],
         "key1",
         repo,
@@ -219,7 +219,7 @@ async def test_first_request_creates_sticky_mapping():
     acc_b = _active("b", used_percent=50.0)
     repo = _make_sticky_repo(existing_account_id=None)
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -245,7 +245,7 @@ async def test_grace_period_returns_pinned_when_reset_imminent():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -266,7 +266,7 @@ async def test_grace_period_skipped_when_reset_far_away():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -296,7 +296,7 @@ async def test_grace_period_skipped_for_active_with_cooldown():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -315,7 +315,7 @@ async def test_grace_period_not_applied_for_reallocate_sticky():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -337,7 +337,7 @@ async def test_grace_period_skipped_when_no_reset_at():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -362,7 +362,7 @@ async def test_paused_pinned_account_persists_fallback():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -381,7 +381,7 @@ async def test_deactivated_pinned_account_persists_fallback():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -411,7 +411,7 @@ async def test_grace_period_does_not_mutate_original_state():
     original_status = acc_a.status
     original_reset_at = acc_a.reset_at
 
-    await _select_with_stickiness(
+    await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -432,7 +432,7 @@ async def test_codex_session_persists_fallback_during_outage():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "session_123",
         repo,
@@ -454,7 +454,7 @@ async def test_budget_exhaustion_triggers_reallocation():
     acc_b = _active("b", used_percent=50.0)
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -473,7 +473,7 @@ async def test_budget_threshold_80_triggers_at_85_percent():
     acc_b = _active("b", used_percent=50.0)
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -493,7 +493,7 @@ async def test_budget_threshold_95_no_reallocation_at_85_percent():
     acc_b = _active("b", used_percent=50.0)
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -516,7 +516,7 @@ async def test_rate_limit_far_away_triggers_reallocation():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,

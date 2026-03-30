@@ -1439,11 +1439,7 @@ class ProxyService:
                 "http_responses_session_bridge_codex_idle_ttl_seconds",
                 900.0,
             ),
-            prompt_cache_idle_ttl_seconds=getattr(
-                settings,
-                "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
-                3600.0,
-            ),
+            prompt_cache_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_prompt_cache_idle_ttl_seconds", 3600.0),
         )
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         old_account_id: str | None = None

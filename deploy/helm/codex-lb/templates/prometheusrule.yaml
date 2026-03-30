@@ -1,0 +1,62 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "codex-lb.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: codex-lb.rules
+      rules:
+        - alert: CodexLBHighErrorRate
+          expr: |
+            (
+              rate(codex_lb_requests_total{status=~"5.."}[5m])
+              / rate(codex_lb_requests_total[5m])
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb high error rate"
+            description: "5xx error rate is above 5% for 5 minutes"
+        - alert: CodexLBHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              rate(codex_lb_request_duration_seconds_bucket[5m])
+            ) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb high p99 latency"
+            description: "p99 request latency is above 10 seconds"
+        - alert: CodexLBPodDown
+          expr: |
+            kube_deployment_status_replicas_available{deployment="{{ include "codex-lb.fullname" . }}"}
+            < kube_deployment_spec_replicas{deployment="{{ include "codex-lb.fullname" . }}"}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "codex-lb pods unavailable"
+            description: "Available replicas is less than desired"
+        - alert: CodexLBHPAAtMax
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="{{ include "codex-lb.fullname" . }}"}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler="{{ include "codex-lb.fullname" . }}"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb HPA at maximum replicas"
+            description: "HPA has been at maximum replicas for 15 minutes"
+        {{- with .Values.metrics.prometheusRule.additionalRules }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

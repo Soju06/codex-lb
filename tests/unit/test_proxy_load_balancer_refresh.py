@@ -446,7 +446,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
 @pytest.mark.asyncio
 async def test_select_account_requires_fresh_additional_usage_data(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.modules.proxy.load_balancer.get_settings",
+        "app.core.config.settings.get_settings",
         lambda: SimpleNamespace(usage_refresh_interval_seconds=600),
     )
 

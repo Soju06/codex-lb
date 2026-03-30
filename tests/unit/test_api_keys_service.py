@@ -8,6 +8,7 @@ from app.core.utils.time import utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ReservationResult,
     UsageReservationData,
@@ -22,6 +23,7 @@ from app.modules.api_keys.service import (
     ApiKeysService,
     ApiKeyUpdateData,
     LimitRuleInput,
+    _build_api_key_trends,
 )
 
 pytestmark = pytest.mark.unit
@@ -1008,3 +1010,53 @@ async def test_finalize_after_release_is_noop() -> None:
 
     limits = await repo.get_limits_by_key(created.id)
     assert limits[0].current_value == 0  # unchanged
+
+
+def test_build_api_key_trends_includes_partial_boundary_hours() -> None:
+    since = datetime(2026, 3, 23, 10, 37, 0)
+    until = datetime(2026, 3, 30, 10, 37, 0)
+    oldest_bucket = datetime(2026, 3, 23, 10, 0, 0, tzinfo=timezone.utc)
+    newest_bucket = datetime(2026, 3, 30, 10, 0, 0, tzinfo=timezone.utc)
+
+    trends = _build_api_key_trends(
+        "key-123",
+        [
+            ApiKeyTrendBucket(bucket_epoch=int(oldest_bucket.timestamp()), total_tokens=5, total_cost_usd=0.1),
+            ApiKeyTrendBucket(bucket_epoch=int(newest_bucket.timestamp()), total_tokens=7, total_cost_usd=0.2),
+        ],
+        since,
+        until,
+        bucket_seconds=3600,
+    )
+
+    assert len(trends.cost) == 169
+    assert len(trends.tokens) == 169
+    assert trends.cost[0].t == oldest_bucket
+    assert trends.cost[-1].t == newest_bucket
+    assert sum(point.v for point in trends.tokens) == pytest.approx(12.0)
+    assert sum(point.v for point in trends.cost) == pytest.approx(0.3)
+
+
+def test_build_api_key_trends_keeps_aligned_windows_at_168_buckets() -> None:
+    since = datetime(2026, 3, 23, 11, 0, 0)
+    until = datetime(2026, 3, 30, 11, 0, 0)
+    oldest_bucket = datetime(2026, 3, 23, 11, 0, 0, tzinfo=timezone.utc)
+    newest_bucket = datetime(2026, 3, 30, 10, 0, 0, tzinfo=timezone.utc)
+
+    trends = _build_api_key_trends(
+        "key-123",
+        [
+            ApiKeyTrendBucket(bucket_epoch=int(oldest_bucket.timestamp()), total_tokens=5, total_cost_usd=0.1),
+            ApiKeyTrendBucket(bucket_epoch=int(newest_bucket.timestamp()), total_tokens=7, total_cost_usd=0.2),
+        ],
+        since,
+        until,
+        bucket_seconds=3600,
+    )
+
+    assert len(trends.cost) == 168
+    assert len(trends.tokens) == 168
+    assert trends.cost[0].t == oldest_bucket
+    assert trends.cost[-1].t == newest_bucket
+    assert sum(point.v for point in trends.tokens) == pytest.approx(12.0)
+    assert sum(point.v for point in trends.cost) == pytest.approx(0.3)

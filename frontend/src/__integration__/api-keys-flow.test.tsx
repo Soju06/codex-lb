@@ -67,36 +67,29 @@ describe("api keys flow integration", () => {
     });
   });
 
-  it("displays existing api keys with limit summaries and shows limit rules editor in create dialog", async () => {
-    const user = userEvent.setup({ delay: null });
-
+  it("displays the current api key list on settings", async () => {
     window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
-    // Default mock keys are loaded — first key has a total_tokens weekly limit
-    expect(await screen.findByText("Default key")).toBeInTheDocument();
-    expect(await screen.findByText("Read only key")).toBeInTheDocument();
-
-    // Verify limit summary is displayed for the first key (has limits)
-    const defaultKeyRow = getParentRow(screen.getByText("Default key"));
-    expect(within(defaultKeyRow).getByText("No Usage")).toBeInTheDocument();
-    expect(within(defaultKeyRow).getByText(/Tokens:/)).toBeInTheDocument();
-
-    const readOnlyKeyRow = getParentRow(screen.getByText("Read only key"));
-    expect(within(readOnlyKeyRow).getByText("No Usage")).toBeInTheDocument();
-    expect(within(readOnlyKeyRow).getByText("No Limit")).toBeInTheDocument();
-
+    expect(await screen.findByRole("columnheader", { name: "Name" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Prefix" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Models" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Usage" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Limit" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Expiry" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
 
-    // Open create dialog and verify limit rules editor in basic mode
-    await user.click(screen.getByRole("button", { name: "Create key" }));
+    const defaultKeyRow = getParentRow(screen.getByText("Default key"));
+    expect(within(defaultKeyRow).getByText("sk-test")).toBeInTheDocument();
+    expect(within(defaultKeyRow).getByText("gpt-5.1")).toBeInTheDocument();
+    expect(within(defaultKeyRow).getByText("Tokens: 125K/1M weekly")).toBeInTheDocument();
+    expect(within(defaultKeyRow).getByText("Active")).toBeInTheDocument();
 
-    const limitsElements = screen.getAllByText("Limits");
-    expect(limitsElements.length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("Weekly token limit")).toBeInTheDocument();
-    expect(screen.getByText("Weekly cost limit ($)")).toBeInTheDocument();
-    expect(screen.getByText("Allowed models")).toBeInTheDocument();
+    const readOnlyRow = getParentRow(screen.getByText("Read only key"));
+    expect(within(readOnlyRow).getByText("sk-second")).toBeInTheDocument();
+    expect(within(readOnlyRow).getByText("gpt-4o-mini")).toBeInTheDocument();
+    expect(within(readOnlyRow).getByText("No Usage")).toBeInTheDocument();
+    expect(within(readOnlyRow).getByText("Never")).toBeInTheDocument();
+    expect(within(readOnlyRow).getByText("Disabled")).toBeInTheDocument();
   });
 
   it("shows usage bars when editing a key with limits", async () => {

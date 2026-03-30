@@ -348,3 +348,139 @@ jobs:
           tags: codex-lb:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  helm-lint:
+    name: Helm lint + template + kubeconform
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Build Helm dependencies
+        run: helm dependency build deploy/helm/codex-lb/
+
+      - name: Helm lint (base values)
+        run: |
+          helm lint --strict deploy/helm/codex-lb/ \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ==
+
+      - name: Helm lint (dev overlay)
+        run: |
+          helm lint --strict deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-dev.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ==
+
+      - name: Helm lint (staging overlay)
+        run: |
+          helm lint --strict deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-staging.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ==
+
+      - name: Helm lint (prod overlay)
+        run: |
+          helm lint --strict deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-prod.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ==
+
+      - name: Helm template (base values)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ== \
+            > /dev/null
+
+      - name: Helm template (dev overlay)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-dev.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ== \
+            > /dev/null
+
+      - name: Helm template (staging overlay)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-staging.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ== \
+            > /dev/null
+
+      - name: Helm template (prod overlay)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-prod.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ== \
+            > /dev/null
+
+      - name: Install kubeconform
+        run: |
+          KUBECONFORM_VERSION="0.6.7"
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "x86_64" ]; then ARCH="amd64"; fi
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-${OS}-${ARCH}.tar.gz" \
+            | tar xz -C /tmp
+          sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: kubeconform (K8s 1.25.0)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-prod.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ== \
+            --set externalSecrets.secretStoreRef.name=test \
+            --set externalSecrets.secretStoreRef.kind=SecretStore \
+            --set gatewayApi.enabled=true \
+            --set "gatewayApi.parentRefs[0].name=test-gw" \
+            --set "gatewayApi.hostnames[0]=test.example.com" \
+            | kubeconform \
+              -strict \
+              -kubernetes-version 1.25.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary
+
+      - name: kubeconform (K8s 1.28.0)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-prod.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ== \
+            --set externalSecrets.secretStoreRef.name=test \
+            --set externalSecrets.secretStoreRef.kind=SecretStore \
+            --set gatewayApi.enabled=true \
+            --set "gatewayApi.parentRefs[0].name=test-gw" \
+            --set "gatewayApi.hostnames[0]=test.example.com" \
+            | kubeconform \
+              -strict \
+              -kubernetes-version 1.28.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary
+
+      - name: kubeconform (K8s 1.31.0)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-prod.yaml \
+            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
+            --set auth.encryptionKey=dGVzdGtleQ== \
+            --set externalSecrets.secretStoreRef.name=test \
+            --set externalSecrets.secretStoreRef.kind=SecretStore \
+            --set gatewayApi.enabled=true \
+            --set "gatewayApi.parentRefs[0].name=test-gw" \
+            --set "gatewayApi.hostnames[0]=test.example.com" \
+            | kubeconform \
+              -strict \
+              -kubernetes-version 1.31.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary

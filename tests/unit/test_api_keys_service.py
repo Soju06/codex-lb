@@ -16,7 +16,6 @@ from app.modules.api_keys.repository import (
     _Unset,
 )
 from app.modules.api_keys.service import (
-    _build_api_key_trends,
     ApiKeyCreateData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
@@ -24,6 +23,7 @@ from app.modules.api_keys.service import (
     ApiKeysService,
     ApiKeyUpdateData,
     LimitRuleInput,
+    _build_api_key_trends,
 )
 
 pytestmark = pytest.mark.unit

@@ -94,7 +94,7 @@ export function ApisPage() {
 		getErrorMessageOrNull(regenerateMutation.error);
 	const listError = getErrorMessageOrNull(apiKeysQuery.error);
 	const usage7DayError = getErrorMessageOrNull(usage7DayQuery.error);
-	const pageError = mutationError || (!!apiKeysQuery.data ? listError : null);
+	const pageError = mutationError || (apiKeysQuery.data ? listError : null);
 
 	const handleCreate = async (payload: ApiKeyCreateRequest) => {
 		const created = await createMutation.mutateAsync(payload);

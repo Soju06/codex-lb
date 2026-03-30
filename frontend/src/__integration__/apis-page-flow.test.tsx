@@ -154,7 +154,15 @@ describe("apis page integration", () => {
 				});
 			}),
 			http.get("/api/api-keys/:keyId/usage-7d", ({ params }) => {
-				return HttpResponse.json(createApiKeyUsage7Day({ keyId: String(params.keyId) }));
+				return HttpResponse.json(
+					createApiKeyUsage7Day({
+						keyId: String(params.keyId),
+						totalTokens: 12_000,
+						cachedInputTokens: 3_000,
+						totalRequests: 42,
+						totalCostUsd: 0.42,
+					}),
+				);
 			}),
 		);
 
@@ -162,9 +170,9 @@ describe("apis page integration", () => {
 
 		expect(await screen.findByRole("heading", { name: "Custom analytics key" })).toBeInTheDocument();
 		expect(screen.getByText("All models")).toBeInTheDocument();
-		expect(screen.getByText(/12K tok/)).toBeInTheDocument();
-		expect(screen.getByText(/3K cached/)).toBeInTheDocument();
-		expect(screen.getByText(/42 req/)).toBeInTheDocument();
-		expect(screen.getByText(/\$0.42/)).toBeInTheDocument();
+		expect(await screen.findByText(/12K tok/)).toBeInTheDocument();
+		expect(await screen.findByText(/3K cached/)).toBeInTheDocument();
+		expect(await screen.findByText(/42 req/)).toBeInTheDocument();
+		expect(await screen.findByText(/\$0.42/)).toBeInTheDocument();
 	});
 });

@@ -1823,7 +1823,13 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
         event = {"type": "response.completed", "response": {"id": "resp_retry", "usage": usage}}
         yield f"data: {json.dumps(event)}\n\n"
 
+    async def fake_ensure_fresh(self, account, force: bool = False):
+        if force:
+            account.chatgpt_account_id = "acc_401_retry_refreshed"
+        return account
+
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
 
     async with async_client.stream(
         "POST",

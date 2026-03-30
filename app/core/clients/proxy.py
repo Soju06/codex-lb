@@ -199,7 +199,7 @@ async def _service_circuit_breaker_context(
         if cb is not None:
             if hasattr(resp, "status") and resp.status >= 500:
                 await cb._record_failure(Exception(f"HTTP {resp.status}"))
-            else:
+            elif not hasattr(resp, "status") or resp.status < 400:
                 await cb._record_success()
     except CircuitBreakerOpenError:
         raise

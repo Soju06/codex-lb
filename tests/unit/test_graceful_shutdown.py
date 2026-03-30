@@ -103,7 +103,13 @@ async def test_in_flight_middleware_tracks_websocket() -> None:
 
     scope = {"type": "websocket", "path": "/v1/responses"}
 
-    await middleware(scope, lambda: {"type": "websocket.connect"}, lambda _: None)
+    async def ws_receive():  # noqa: ANN202
+        return {"type": "websocket.connect"}
+
+    async def ws_send(msg):  # noqa: ANN001, ANN202
+        pass
+
+    await middleware(scope, ws_receive, ws_send)
 
     assert in_flight_during_ws == 1
     assert shutdown_state.get_in_flight() == 0
@@ -119,7 +125,13 @@ async def test_in_flight_middleware_skips_lifespan() -> None:
 
     middleware = InFlightMiddleware(inner_app)
 
-    await middleware({"type": "lifespan"}, lambda: {}, lambda _: None)
+    async def ls_receive():  # noqa: ANN202
+        return {}
+
+    async def ls_send(msg):  # noqa: ANN001, ANN202
+        pass
+
+    await middleware({"type": "lifespan"}, ls_receive, ls_send)
 
     assert app_called is True
     assert shutdown_state.get_in_flight() == 0

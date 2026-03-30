@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.3](https://github.com/Soju06/codex-lb/compare/v1.8.2...v1.8.3) (2026-03-30)
+
+
+### Bug Fixes
+
+* **proxy:** complete cache-locality fix for prompt cache hit rate restoration ([#273](https://github.com/Soju06/codex-lb/issues/273)) ([aa971fa](https://github.com/Soju06/codex-lb/commit/aa971fa96c6789f079aa98c67205e1263f3c7598))
+
 ## [1.8.2](https://github.com/Soju06/codex-lb/compare/v1.8.1...v1.8.2) (2026-03-26)
 
 

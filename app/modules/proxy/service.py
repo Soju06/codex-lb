@@ -2270,23 +2270,23 @@ class ProxyService:
                 return False
             request_text = request_state.request_text
             request_state.replay_count += 1
-            _log_http_bridge_event(
-                "retry_precreated",
-                session.key,
-                account_id=session.account.id,
-                model=session.request_model,
-                pending_count=1,
-                cache_key_family=session.key.affinity_kind,
-                model_class=_extract_model_class(session.request_model) if session.request_model else None,
-            )
-            try:
-                await self._reconnect_http_bridge_session(session, request_state=request_state)
-                await session.upstream.send_text(request_text)
-                session.last_used_at = time.monotonic()
-                return True
-            except Exception:
-                logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
-                return False
+        _log_http_bridge_event(
+            "retry_precreated",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=1,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        try:
+            await self._reconnect_http_bridge_session(session, request_state=request_state)
+            await session.upstream.send_text(request_text)
+            session.last_used_at = time.monotonic()
+            return True
+        except Exception:
+            logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
+            return False
 
     async def _reconnect_http_bridge_session(
         self,

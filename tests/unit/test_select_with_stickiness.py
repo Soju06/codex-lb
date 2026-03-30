@@ -530,6 +530,28 @@ async def test_budget_threshold_95_no_reallocation_at_85_percent():
 
 
 @pytest.mark.asyncio
+async def test_budget_threshold_does_not_reallocate_codex_session_affinity():
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "codex-session-123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_far_away_triggers_reallocation():
     """When the pinned account's rate limit reset is more than 10 minutes away,
     it should be reallocated to avoid waiting."""

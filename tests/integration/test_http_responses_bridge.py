@@ -278,6 +278,10 @@ class _SilentUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         self.sent_text.append(text)
 
 
+class _RecordingUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    pass
+
+
 class _CreatedThenCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -5090,6 +5094,68 @@ async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client,
     assert response.status_code == 200
     assert response.json()["id"] == "resp_retry_send"
     assert connect_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_releases_pending_lock_before_reconnect(app_instance, monkeypatch):
+    service = get_proxy_service_for_app(app_instance)
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey("prompt_cache", "retry-lock-key", None),
+        headers={},
+        affinity=proxy_module._AffinityPolicy(
+            key="retry-lock-key",
+            kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=300,
+        ),
+        request_model="gpt-5.1",
+        account=cast(Account, SimpleNamespace(id="acct-retry", status=AccountStatus.ACTIVE)),
+        upstream=cast(proxy_module.UpstreamResponsesWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-precreated-retry",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": []}),
+    )
+    session.pending_requests.append(request_state)
+    reconnect_started = asyncio.Event()
+    allow_reconnect_finish = asyncio.Event()
+    lock_reacquired = asyncio.Event()
+    replacement_upstream = _RecordingUpstreamWebSocket()
+
+    async def fake_reconnect(self, target_session, *, request_state, restart_reader=False):
+        del self, request_state, restart_reader
+        reconnect_started.set()
+        await allow_reconnect_finish.wait()
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+
+    retry_task = asyncio.create_task(service._retry_http_bridge_precreated_request(session))
+    await reconnect_started.wait()
+
+    async def acquire_pending_lock() -> None:
+        async with session.pending_lock:
+            lock_reacquired.set()
+
+    lock_task = asyncio.create_task(acquire_pending_lock())
+    await asyncio.wait_for(lock_reacquired.wait(), timeout=1.0)
+    allow_reconnect_finish.set()
+
+    assert await retry_task is True
+    await lock_task
+    assert replacement_upstream.sent_text == [request_state.request_text]
 
 
 @pytest.mark.asyncio

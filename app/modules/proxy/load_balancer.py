@@ -538,7 +538,8 @@ class LoadBalancer:
                 # or rate limit is far away (reset_at more than 10 minutes away)
                 now = time.time()
                 budget_exhausted = (
-                    pinned.status != AccountStatus.RATE_LIMITED
+                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                    and pinned.status != AccountStatus.RATE_LIMITED
                     and pinned.used_percent is not None
                     and pinned.used_percent > budget_threshold_pct
                 )

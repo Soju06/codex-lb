@@ -146,6 +146,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
 
     steps:
       - name: Checkout repository
@@ -189,6 +190,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Scan Docker image with Trivy (SARIF)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        with:
+          sarif_file: trivy-results.sarif
+
   create-github-release:
     name: Create GitHub Release
     needs: [publish-to-pypi, docker-image]
@@ -225,9 +241,11 @@ jobs:
           else
             RANGE="${TAG_NAME}"
           fi
-          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
-          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
-          echo "range=${RANGE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag_name=${TAG_NAME}"
+            echo "prev_tag=${PREV_TAG}"
+            echo "range=${RANGE}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes (GitHub)
         id: notes

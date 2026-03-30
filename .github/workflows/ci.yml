@@ -345,9 +345,19 @@ jobs:
           context: .
           file: Dockerfile
           push: false
+          load: true
           tags: codex-lb:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: codex-lb:ci
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+          ignore-unfixed: true
 
   helm-lint:
     name: Helm lint + template + kubeconform

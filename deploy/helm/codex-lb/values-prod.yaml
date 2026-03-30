@@ -25,6 +25,8 @@ ingress:
   enabled: true
   certManager:
     enabled: true
+  nginx:
+    upstreamHashBy: "$http_authorization"
 config:
   # Connection pool budget: (databasePoolSize + databaseMaxOverflow) × maxReplicas ≤ PostgreSQL max_connections
   # For maxReplicas=20: (3+2)×20=100 = PG default max_connections

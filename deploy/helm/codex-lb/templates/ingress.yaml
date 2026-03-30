@@ -9,6 +9,13 @@
 {{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-send-timeout" "600" }}
 {{- $_ := set $annotations "nginx.ingress.kubernetes.io/limit-rps" "100" }}
 {{- end }}
+{{- if .Values.ingress.nginx.upstreamHashBy }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/upstream-hash-by" .Values.ingress.nginx.upstreamHashBy }}
+{{- end }}
+{{- if .Values.ingress.nginx.upstreamHashBySubset }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset" "true" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset-size" (.Values.ingress.nginx.upstreamHashBySubsetSize | toString) }}
+{{- end }}
 {{- range $key, $value := .Values.ingress.annotations }}
 {{- $_ := set $annotations $key $value }}
 {{- end }}

@@ -239,6 +239,13 @@ ingress:
   nginx:
     # @param ingress.nginx.enabled Add nginx-specific annotations
     enabled: false
+    # @param ingress.nginx.upstreamHashBy nginx upstream-hash-by annotation value. Empty = disabled.
+    #        Set to "$http_authorization" for consistent hash routing by API key.
+    upstreamHashBy: ""
+    # @param ingress.nginx.upstreamHashBySubset Enable subset mode for upstream-hash-by
+    upstreamHashBySubset: false
+    # @param ingress.nginx.upstreamHashBySubsetSize Subset size when subset mode is enabled
+    upstreamHashBySubsetSize: 3
 
 # @section Gateway API parameters
 gatewayApi:

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.service import (
     _derive_prompt_cache_key,
@@ -188,6 +189,15 @@ class TestDerivePromptCacheKey:
         assert isinstance(key, str)
         assert len(key) > 0
 
+    def test_empty_requests_without_api_key_remain_unique(self):
+        payload = ResponsesRequest(model="gpt-5.4", instructions="", input=[])
+        key1 = _derive_prompt_cache_key(payload, None)
+        key2 = _derive_prompt_cache_key(payload, None)
+
+        assert key1 != key2
+        assert key1.startswith("std-")
+        assert key2.startswith("std-")
+
     def test_key_is_deterministic(self):
         payload = ResponsesRequest(
             model="gpt-5.4",
@@ -212,7 +222,49 @@ class TestDerivePromptCacheKey:
         )
         key = _derive_prompt_cache_key(payload, _make_api_key(id="ak_12345678ABCD"))
         parts = key.split("-")
-        assert len(parts) == 3
-        assert parts[0] == "ak_12345678ABCD"[:12]
-        assert len(parts[1]) == 12
-        assert len(parts[2]) == 12
+        assert len(parts) == 4
+        assert parts[0] == "std"  # model class prefix
+        assert parts[1] == "ak_12345678ABCD"[:12]
+        assert len(parts[2]) == 12  # instructions hash
+        assert len(parts[3]) == 12  # input hash
+
+    def test_different_model_classes_produce_different_keys(self):
+        api_key = _make_api_key(id="ak_12345678ABCD")
+        _instructions = "instructions here"
+        _input: list[JsonValue] = [{"role": "user", "content": "hello"}]
+
+        # Test mini vs std
+        payload_mini = ResponsesRequest(model="gpt-5.4-mini", instructions=_instructions, input=_input)
+        payload_std = ResponsesRequest(model="gpt-5.4", instructions=_instructions, input=_input)
+        key_mini = _derive_prompt_cache_key(payload_mini, api_key)
+        key_std = _derive_prompt_cache_key(payload_std, api_key)
+        assert key_mini != key_std
+        assert key_mini.startswith("mini-")
+        assert key_std.startswith("std-")
+
+        # Test codex vs std
+        payload_codex = ResponsesRequest(model="gpt-5.3-codex", instructions=_instructions, input=_input)
+        key_codex = _derive_prompt_cache_key(payload_codex, api_key)
+        assert key_codex != key_std
+        assert key_codex.startswith("codex-")
+
+        payload_codex_mini = ResponsesRequest(
+            model="gpt-5.1-codex-mini",
+            instructions=_instructions,
+            input=_input,
+        )
+        key_codex_mini = _derive_prompt_cache_key(payload_codex_mini, api_key)
+        assert key_codex_mini.startswith("codex-")
+        assert key_codex_mini != key_mini
+
+    def test_same_model_class_produces_same_key(self):
+        api_key = _make_api_key(id="ak_12345678ABCD")
+        _instructions = "instructions here"
+        _input: list[JsonValue] = [{"role": "user", "content": "hello"}]
+
+        # Test that two gpt-5.4 requests produce the same key
+        payload_a = ResponsesRequest(model="gpt-5.4", instructions=_instructions, input=_input)
+        payload_b = ResponsesRequest(model="gpt-5.4", instructions=_instructions, input=_input)
+        key_a = _derive_prompt_cache_key(payload_a, api_key)
+        key_b = _derive_prompt_cache_key(payload_b, api_key)
+        assert key_a == key_b

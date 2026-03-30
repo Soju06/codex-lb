@@ -8,14 +8,15 @@ Covers:
 from __future__ import annotations
 
 import time
-from dataclasses import replace
+from contextlib import asynccontextmanager
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.balancer import AccountState, select_account
-from app.db.models import AccountStatus, StickySessionKind
-from app.modules.proxy.load_balancer import _RECOVERABLE_STATUSES, _STICKY_GRACE_PERIOD_SECONDS
+from app.core.balancer import AccountState
+from app.db.models import Account, AccountStatus, StickySessionKind
+from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = pytest.mark.unit
 
@@ -28,10 +29,12 @@ def _rate_limited(
     account_id: str,
     reset_at: float | None = None,
     cooldown_until: float | None = None,
+    used_percent: float | None = None,
 ) -> AccountState:
     return AccountState(
         account_id,
         AccountStatus.RATE_LIMITED,
+        used_percent=used_percent,
         reset_at=reset_at,
         cooldown_until=cooldown_until,
         error_count=1,
@@ -47,7 +50,7 @@ def _make_sticky_repo(existing_account_id: str | None = None) -> AsyncMock:
     return repo
 
 
-async def _select_with_stickiness(
+async def _invoke_stickiness(
     states: list[AccountState],
     sticky_key: str,
     sticky_repo: AsyncMock,
@@ -55,64 +58,33 @@ async def _select_with_stickiness(
     sticky_kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
+    budget_threshold_pct: float = 95.0,
 ):
-    """Inline replica of LoadBalancer._select_with_stickiness for unit testing.
+    """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
-    WARNING: This is a copy of the logic in LoadBalancer._select_with_stickiness.
-    If the original method changes, this replica must be updated to match.
-    Integration tests in test_proxy_sticky_sessions.py cover the real code path.
+    This delegates to the real implementation in LoadBalancer to avoid
+    maintaining a replica that can drift from production.
     """
 
-    if not sticky_key or not sticky_repo:
-        return select_account(states)
+    @asynccontextmanager
+    async def mock_repo_factory():
+        yield AsyncMock()
 
-    account_map = {s.account_id: True for s in states}
+    lb = LoadBalancer(mock_repo_factory)
+    account_map = {s.account_id: cast(Account, AsyncMock()) for s in states}
 
-    existing = await sticky_repo.get_account_id(
-        sticky_key,
-        kind=sticky_kind,
-        max_age_seconds=sticky_max_age_seconds,
+    return await lb._select_with_stickiness(
+        states=states,
+        account_map=account_map,
+        sticky_key=sticky_key,
+        sticky_kind=sticky_kind,
+        reallocate_sticky=reallocate_sticky,
+        sticky_max_age_seconds=sticky_max_age_seconds,
+        budget_threshold_pct=budget_threshold_pct,
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        sticky_repo=sticky_repo,
     )
-
-    persist_fallback = True
-
-    if existing:
-        pinned = next((s for s in states if s.account_id == existing), None)
-        if pinned is not None:
-            pinned_result = select_account(
-                [pinned],
-                routing_strategy="usage_weighted",
-                allow_backoff_fallback=False,
-            )
-            if pinned_result.account is not None:
-                if not reallocate_sticky and sticky_max_age_seconds is not None:
-                    await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                return pinned_result
-            if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
-                grace_copy = replace(pinned)
-                grace_result = select_account(
-                    [grace_copy],
-                    now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
-                    routing_strategy="usage_weighted",
-                    allow_backoff_fallback=False,
-                )
-                if grace_result.account is not None:
-                    if sticky_max_age_seconds is not None:
-                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                    return grace_result
-            if reallocate_sticky:
-                await sticky_repo.delete(sticky_key, kind=sticky_kind)
-            elif pinned.status not in _RECOVERABLE_STATUSES:
-                pass
-            elif sticky_max_age_seconds is not None:
-                persist_fallback = False
-        else:
-            await sticky_repo.delete(sticky_key, kind=sticky_kind)
-
-    chosen = select_account(states, routing_strategy="usage_weighted")
-    if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
-        await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
-    return chosen
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +102,7 @@ async def test_fallback_does_not_overwrite_sticky_when_pinned_rate_limited():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -151,7 +123,7 @@ async def test_all_accounts_unavailable_does_not_overwrite_sticky():
     acc_a = _rate_limited("a", cooldown_until=now + 60)
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a],
         "key1",
         repo,
@@ -172,7 +144,7 @@ async def test_fallback_overwrites_sticky_when_reallocate_sticky_true():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -197,7 +169,7 @@ async def test_sticky_preserved_then_returns_to_original_on_recovery():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    r1 = await _select_with_stickiness(
+    r1 = await _invoke_stickiness(
         [acc_a_down, acc_b],
         "key1",
         repo,
@@ -212,7 +184,7 @@ async def test_sticky_preserved_then_returns_to_original_on_recovery():
     acc_b2 = _active("b", used_percent=20.0)
     repo2 = _make_sticky_repo(existing_account_id="a")
 
-    r2 = await _select_with_stickiness(
+    r2 = await _invoke_stickiness(
         [acc_a_up, acc_b2],
         "key1",
         repo2,
@@ -229,7 +201,7 @@ async def test_sticky_deleted_when_pinned_account_removed_from_pool():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_b],
         "key1",
         repo,
@@ -249,7 +221,7 @@ async def test_first_request_creates_sticky_mapping():
     acc_b = _active("b", used_percent=50.0)
     repo = _make_sticky_repo(existing_account_id=None)
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -275,7 +247,7 @@ async def test_grace_period_returns_pinned_when_reset_imminent():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -288,6 +260,26 @@ async def test_grace_period_returns_pinned_when_reset_imminent():
 
 
 @pytest.mark.asyncio
+async def test_grace_period_keeps_rate_limited_pinned_account_even_when_usage_is_100_pct():
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 5, used_percent=100.0)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
 async def test_grace_period_skipped_when_reset_far_away():
     """When the reset_at is well beyond the grace window, the grace period
     should NOT trigger — a fallback should be used instead."""
@@ -296,7 +288,7 @@ async def test_grace_period_skipped_when_reset_far_away():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -326,7 +318,7 @@ async def test_grace_period_skipped_for_active_with_cooldown():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -345,7 +337,7 @@ async def test_grace_period_not_applied_for_reallocate_sticky():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -367,7 +359,7 @@ async def test_grace_period_skipped_when_no_reset_at():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -392,7 +384,7 @@ async def test_paused_pinned_account_persists_fallback():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -411,7 +403,7 @@ async def test_deactivated_pinned_account_persists_fallback():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -441,7 +433,7 @@ async def test_grace_period_does_not_mutate_original_state():
     original_status = acc_a.status
     original_reset_at = acc_a.reset_at
 
-    await _select_with_stickiness(
+    await _invoke_stickiness(
         [acc_a, acc_b],
         "key1",
         repo,
@@ -462,7 +454,7 @@ async def test_codex_session_persists_fallback_during_outage():
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
-    result = await _select_with_stickiness(
+    result = await _invoke_stickiness(
         [acc_a, acc_b],
         "session_123",
         repo,
@@ -474,3 +466,150 @@ async def test_codex_session_persists_fallback_during_outage():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION)
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_far_away_does_not_reallocate_codex_session_affinity():
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 1200)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "session_123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION)
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_far_away_without_fallback_preserves_codex_session_affinity():
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 1200)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a],
+        "session_123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+    )
+
+    assert result.account is None
+    repo.delete.assert_not_called()
+    repo.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_triggers_reallocation():
+    """When the pinned account has < 5% budget remaining (used_percent >= 95%),
+    it should be reallocated to a different account."""
+    acc_a = _active("a", used_percent=96.0)  # 96% used = < 4% remaining
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_80_triggers_at_85_percent():
+    acc_a = _active("a", used_percent=85.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+        budget_threshold_pct=80.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_95_no_reallocation_at_85_percent():
+    acc_a = _active("a", used_percent=85.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_does_not_reallocate_codex_session_affinity():
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "codex-session-123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_far_away_triggers_reallocation():
+    """When the pinned account's rate limit reset is more than 10 minutes away,
+    it should be reallocated to avoid waiting."""
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 900)  # resets in 15 minutes > 10 min threshold
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)

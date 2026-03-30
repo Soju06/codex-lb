@@ -13,6 +13,18 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import connect_responses_websocket
 
 
+def _proxy_error_code(exc: ProxyResponseError) -> str | None:
+    return exc.payload["error"].get("code")
+
+
+def _proxy_error_message(exc: ProxyResponseError) -> str | None:
+    return exc.payload["error"].get("message")
+
+
+def _proxy_error_type(exc: ProxyResponseError) -> str | None:
+    return exc.payload["error"].get("type")
+
+
 class _UnexpectedAiohttpSession:
     async def ws_connect(self, *args, **kwargs):  # pragma: no cover - red-path guard
         raise AssertionError("aiohttp ws_connect should not be used for upstream websocket transport")
@@ -159,8 +171,8 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
         )
 
     assert exc_info.value.status_code == 403
-    assert exc_info.value.payload["error"]["code"] == "forbidden"
-    assert exc_info.value.payload["error"]["type"] == "permission_error"
+    assert _proxy_error_code(exc_info.value) == "forbidden"
+    assert _proxy_error_type(exc_info.value) == "permission_error"
 
 
 @pytest.mark.asyncio
@@ -219,8 +231,8 @@ async def test_connect_responses_websocket_maps_generic_invalid_handshake(monkey
         )
 
     assert exc_info.value.status_code == 502
-    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
-    assert exc_info.value.payload["error"]["message"] == "proxy CONNECT failed"
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert _proxy_error_message(exc_info.value) == "proxy CONNECT failed"
 
 
 @pytest.mark.asyncio
@@ -250,4 +262,4 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
         )
 
     assert exc_info.value.status_code == 502
-    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"

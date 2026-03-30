@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.types import Message
 
 from app.core.middleware.request_id import add_request_id_middleware
 from app.core.utils.request_id import get_request_id
@@ -35,7 +36,7 @@ async def test_request_id_middleware_resets_context_on_success():
             "client": ("testclient", 50000),
             "server": ("testserver", 80),
         },
-        receive=lambda: None,
+        receive=_empty_receive,
     )
 
     async def call_next(_: Request) -> JSONResponse:
@@ -46,3 +47,7 @@ async def test_request_id_middleware_resets_context_on_success():
 
     assert response.headers["x-request-id"] == "req-test-123"
     assert get_request_id() is None
+
+
+async def _empty_receive() -> Message:
+    return {"type": "http.request", "body": b"", "more_body": False}

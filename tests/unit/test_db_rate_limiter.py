@@ -91,7 +91,7 @@ def test_migration_upgrade_downgrade_upgrade_is_reversible(tmp_path: Path) -> No
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
 
     command.upgrade(cfg, "head")
-    command.downgrade(cfg, "-1")
+    command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
     engine = sa.create_engine(f"sqlite:///{db_path}", future=True)

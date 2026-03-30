@@ -52,6 +52,8 @@ class SettingsRepository:
         prefer_earlier_reset_accounts: bool | None = None,
         routing_strategy: str | None = None,
         openai_cache_affinity_max_age_seconds: int | None = None,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
+        sticky_reallocation_budget_threshold_pct: float | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
@@ -67,6 +69,12 @@ class SettingsRepository:
             settings.routing_strategy = routing_strategy
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
+        if http_responses_session_bridge_prompt_cache_idle_ttl_seconds is not None:
+            settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds = (
+                http_responses_session_bridge_prompt_cache_idle_ttl_seconds
+            )
+        if sticky_reallocation_budget_threshold_pct is not None:
+            settings.sticky_reallocation_budget_threshold_pct = sticky_reallocation_budget_threshold_pct
         if import_without_overwrite is not None:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:

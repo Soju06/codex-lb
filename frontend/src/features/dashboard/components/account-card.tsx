@@ -11,7 +11,7 @@ import {
   quotaBarColor,
   quotaBarTrack,
 } from "@/utils/account-status";
-import { formatPercentNullable, formatQuotaResetLabel } from "@/utils/formatters";
+import { formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
 
 type AccountAction = "details" | "resume" | "reauth";
 
@@ -77,11 +77,12 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
 
   const title = account.displayName || account.email;
   const compactId = formatCompactAccountId(account.accountId);
+  const planLabel = formatSlug(account.planType);
   const emailSubtitle =
     account.displayName && account.displayName !== account.email
       ? account.email
       : null;
-  const idSuffix = showAccountId ? ` (${compactId})` : "";
+  const idSuffix = showAccountId ? ` | ID ${compactId}` : "";
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
@@ -90,8 +91,12 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold leading-tight">
             {blurred
-              ? <><span className="privacy-blur">{title}</span>{!emailSubtitle ? idSuffix : ""}</>
-              : <>{title}{!emailSubtitle ? idSuffix : ""}</>}
+              ? <span className="privacy-blur">{title}</span>
+              : title}
+          </p>
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+            {planLabel}
+            {!emailSubtitle ? idSuffix : ""}
           </p>
           {emailSubtitle ? (
             <p className="mt-0.5 truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>

@@ -71,6 +71,7 @@ def _make_proxy_settings() -> object:
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
         log_proxy_service_tier_trace=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
     )
 
 

@@ -1,17 +1,35 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory
+from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
+from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
+
+
+def _proxy_repositories(additional_usage: object) -> ProxyRepositories:
+    return ProxyRepositories(
+        accounts=cast(AccountsRepository, AsyncMock()),
+        usage=cast(UsageRepository, AsyncMock()),
+        request_logs=cast(RequestLogsRepository, AsyncMock()),
+        sticky_sessions=cast(StickySessionsRepository, AsyncMock()),
+        api_keys=cast(ApiKeysRepository, AsyncMock()),
+        additional_usage=cast(AdditionalUsageRepository, additional_usage),
+    )
 
 
 def _make_account(account_id: str, email: str = "a@example.com") -> Account:
@@ -150,27 +168,13 @@ async def test_build_additional_rate_limits_aggregates_reset_metadata_determinis
     )
 
     @asynccontextmanager
-    async def repo_factory() -> Any:
-        yield ProxyRepositories(
-            accounts=object(),  # type: ignore[arg-type]
-            usage=object(),  # type: ignore[arg-type]
-            request_logs=object(),  # type: ignore[arg-type]
-            sticky_sessions=object(),  # type: ignore[arg-type]
-            api_keys=object(),  # type: ignore[arg-type]
-            additional_usage=additional_usage,  # type: ignore[arg-type]
-        )
+    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        yield _proxy_repositories(additional_usage)
 
     service = ProxyService(repo_factory)
 
     results = await service._build_additional_rate_limits(
-        ProxyRepositories(
-            accounts=object(),  # type: ignore[arg-type]
-            usage=object(),  # type: ignore[arg-type]
-            request_logs=object(),  # type: ignore[arg-type]
-            sticky_sessions=object(),  # type: ignore[arg-type]
-            api_keys=object(),  # type: ignore[arg-type]
-            additional_usage=additional_usage,  # type: ignore[arg-type]
-        ),
+        _proxy_repositories(additional_usage),
         accounts,
         now_epoch=1000,
     )

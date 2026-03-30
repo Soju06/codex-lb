@@ -13,19 +13,37 @@ import socket
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncContextManager, AsyncIterator, Awaitable, Mapping, Protocol, TypeAlias, TypeVar, cast
+from typing import (
+    Any,
+    AsyncContextManager,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import hdrs
 from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT
+from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
 from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
-from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
+from app.core.errors import (
+    OpenAIErrorDetail,
+    OpenAIErrorEnvelope,
+    ResponseFailedEvent,
+    openai_error,
+    response_failed_event,
+)
 from app.core.openai.model_registry import get_model_registry
-from app.core.openai.models import CompactResponsePayload
+from app.core.openai.models import CompactResponsePayload, OpenAIError
 from app.core.openai.parsing import (
     parse_compact_response_payload,
     parse_error_payload,
@@ -442,7 +460,7 @@ def _error_payload_from_websocket_handshake_error(exc: aiohttp.WSServerHandshake
     if extracted is not None:
         error = parse_error_payload(extracted)
         if error is not None:
-            return cast(OpenAIErrorEnvelope, {"error": error.model_dump(exclude_none=True)})
+            return {"error": _openai_error_detail(error)}
 
     code = _infer_websocket_handshake_error_code(exc.status, message)
     if code == "invalid_api_key":
@@ -728,11 +746,30 @@ async def _error_payload_from_response(resp: ErrorResponse) -> OpenAIErrorEnvelo
     if isinstance(data, dict):
         error = parse_error_payload(data)
         if error:
-            return cast(OpenAIErrorEnvelope, {"error": error.model_dump(exclude_none=True)})
+            return {"error": _openai_error_detail(error)}
         message = _extract_upstream_message(data)
         if message:
             return openai_error("upstream_error", message)
     return openai_error("upstream_error", fallback_message)
+
+
+def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
+    detail: OpenAIErrorDetail = {}
+    if error.message is not None:
+        detail["message"] = error.message
+    if error.type is not None:
+        detail["type"] = error.type
+    if error.code is not None:
+        detail["code"] = error.code
+    if error.param is not None:
+        detail["param"] = error.param
+    if error.plan_type is not None:
+        detail["plan_type"] = error.plan_type
+    if error.resets_at is not None:
+        detail["resets_at"] = error.resets_at
+    if error.resets_in_seconds is not None:
+        detail["resets_in_seconds"] = error.resets_in_seconds
+    return detail
 
 
 def _extract_upstream_message(data: Mapping[str, object]) -> str | None:
@@ -893,8 +930,8 @@ async def _open_upstream_websocket(
     connect_timeout_seconds: float,
     max_msg_size: int,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
-    request = getattr(session, "request", None)
-    if not callable(request):
+    request_obj = getattr(session, "request", None)
+    if not callable(request_obj):
         websocket_cm = session.ws_connect(
             url,
             headers=headers,
@@ -905,6 +942,7 @@ async def _open_upstream_websocket(
         )
         websocket = await asyncio.wait_for(websocket_cm.__aenter__(), timeout=connect_timeout_seconds)
         return websocket_cm, websocket
+    request = cast(Callable[..., Awaitable[aiohttp.ClientResponse]], request_obj)
 
     request_headers = CIMultiDict(headers)
     request_headers.setdefault(hdrs.UPGRADE, "websocket")
@@ -950,8 +988,7 @@ async def _open_upstream_websocket(
             await _raise_handshake_error("Invalid connection header")
 
         response_key = resp.headers.get(hdrs.SEC_WEBSOCKET_ACCEPT, "")
-        client_module = cast(Any, aiohttp.client)
-        expected_key = base64.b64encode(hashlib.sha1(sec_key.encode() + client_module.WS_KEY).digest()).decode()
+        expected_key = base64.b64encode(hashlib.sha1(sec_key.encode() + WS_KEY).digest()).decode()
         if response_key != expected_key:
             await _raise_handshake_error("Invalid challenge response")
 
@@ -963,9 +1000,10 @@ async def _open_upstream_websocket(
 
         transport = conn.transport
         assert transport is not None
-        reader = client_module.WebSocketDataQueue(conn_proto, 2**16, loop=session._loop)
-        conn_proto.set_parser(client_module.WebSocketReader(reader, max_msg_size), reader)
-        writer = client_module.WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
+        web_socket_data_queue = cast(Callable[..., Any], getattr(aiohttp.client_ws, "WebSocketDataQueue"))
+        reader = web_socket_data_queue(conn_proto, 2**16, loop=session._loop)
+        conn_proto.set_parser(WebSocketReader(reader, max_msg_size), reader)
+        writer = WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
     except BaseException:
         resp.close()
         raise

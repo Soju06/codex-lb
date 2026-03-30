@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
 from app.modules.firewall.repository import FirewallRepositoryConflictError
 from app.modules.firewall.service import (
     FirewallIpAlreadyExistsError,
+    FirewallRepositoryPort,
     FirewallService,
     FirewallValidationError,
     normalize_ip_address,
@@ -26,7 +29,7 @@ class _Repo:
     def __init__(self) -> None:
         self._entries: dict[str, _Entry] = {}
 
-    async def list_entries(self) -> list[_Entry]:
+    async def list_entries(self) -> Sequence[_Entry]:
         return sorted(self._entries.values(), key=lambda entry: (entry.created_at, entry.ip_address))
 
     async def list_ip_addresses(self) -> set[str]:
@@ -55,7 +58,7 @@ def test_normalize_ip_address_normalizes_ipv6():
 
 @pytest.mark.asyncio
 async def test_add_ip_rejects_duplicates():
-    service = FirewallService(_Repo())
+    service = FirewallService(cast(FirewallRepositoryPort, _Repo()))
     await service.add_ip("127.0.0.1")
     with pytest.raises(FirewallIpAlreadyExistsError):
         await service.add_ip("127.0.0.1")
@@ -70,14 +73,14 @@ async def test_add_ip_maps_repository_conflict_to_exists_error():
         async def add(self, ip_address: str) -> _Entry:
             raise FirewallRepositoryConflictError("duplicate")
 
-    service = FirewallService(_ConflictRepo())
+    service = FirewallService(cast(FirewallRepositoryPort, _ConflictRepo()))
     with pytest.raises(FirewallIpAlreadyExistsError):
         await service.add_ip("127.0.0.1")
 
 
 @pytest.mark.asyncio
 async def test_is_ip_allowed_follows_allowlist_mode():
-    service = FirewallService(_Repo())
+    service = FirewallService(cast(FirewallRepositoryPort, _Repo()))
 
     assert await service.is_ip_allowed("192.168.0.1") is True
 

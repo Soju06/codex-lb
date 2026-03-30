@@ -48,13 +48,23 @@ def _list_raw(data: dict[str, JsonValue], key: str) -> list[JsonValue]:
     return []
 
 
+def _parse_reasoning_level(value: JsonValue) -> ReasoningLevel | None:
+    if not isinstance(value, dict):
+        return None
+    effort = value.get("effort")
+    description = value.get("description")
+    if not isinstance(effort, str) or not isinstance(description, str):
+        return None
+    return ReasoningLevel(effort=effort, description=description)
+
+
 def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
     raw = {k: v for k, v in data.items() if k not in _FILTERED_FIELDS}
 
     reasoning_levels = tuple(
-        ReasoningLevel(effort=rl.get("effort", ""), description=rl.get("description", ""))
+        parsed_level
         for rl in _list_raw(data, "supported_reasoning_levels")
-        if isinstance(rl, dict)
+        if (parsed_level := _parse_reasoning_level(rl)) is not None
     )
 
     available_in_plans = frozenset(p for p in _list_raw(data, "available_in_plans") if isinstance(p, str))

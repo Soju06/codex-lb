@@ -27,18 +27,32 @@ from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 
+def _drop_test_migration_tables(sync_conn) -> None:
+    sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+    sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+
+
+def _recreate_test_schema(sync_conn) -> None:
+    _drop_test_migration_tables(sync_conn)
+    Base.metadata.drop_all(sync_conn)
+    Base.metadata.create_all(sync_conn)
+
+
+def _reset_test_database(sync_conn) -> None:
+    _recreate_test_schema(sync_conn)
+
+
 @pytest_asyncio.fixture
-async def app_instance():
-    app = create_app()
+async def _reset_db_state():
     async with engine.begin() as conn:
+        await conn.run_sync(_reset_test_database)
+    return True
 
-        def _reset(sync_conn):
-            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
-            Base.metadata.drop_all(sync_conn)
-            Base.metadata.create_all(sync_conn)
 
-        await conn.run_sync(_reset)
+@pytest_asyncio.fixture
+async def app_instance(_reset_db_state):
+    del _reset_db_state
+    app = create_app()
     return app
 
 
@@ -49,16 +63,8 @@ async def dispose_engine():
 
 
 @pytest_asyncio.fixture
-async def db_setup():
-    async with engine.begin() as conn:
-
-        def _reset(sync_conn):
-            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
-            Base.metadata.drop_all(sync_conn)
-            Base.metadata.create_all(sync_conn)
-
-        await conn.run_sync(_reset)
+async def db_setup(_reset_db_state):
+    del _reset_db_state
     return True
 
 

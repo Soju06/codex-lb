@@ -493,6 +493,23 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 )
             ).scalar_one()
             assert affinity_ttl == 1800
+            assert "http_responses_session_bridge_prompt_cache_idle_ttl_seconds" in dashboard_columns
+            http_responses_ttl = (
+                await session.execute(
+                    text(
+                        "SELECT http_responses_session_bridge_prompt_cache_idle_ttl_seconds"
+                        " FROM dashboard_settings WHERE id=1"
+                    )
+                )
+            ).scalar_one()
+            assert http_responses_ttl == 3600
+            assert "sticky_reallocation_budget_threshold_pct" in dashboard_columns
+            sticky_budget_threshold = (
+                await session.execute(
+                    text("SELECT sticky_reallocation_budget_threshold_pct FROM dashboard_settings WHERE id=1")
+                )
+            ).scalar_one()
+            assert sticky_budget_threshold == 95.0
             sticky_columns_rows = (await session.execute(text("PRAGMA table_info(sticky_sessions)"))).fetchall()
             sticky_columns = {str(row[1]) for row in sticky_columns_rows if len(row) > 1}
             assert "kind" in sticky_columns

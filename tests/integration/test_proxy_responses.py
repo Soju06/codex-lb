@@ -50,6 +50,7 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = SimpleNamespace(
         http_responses_session_bridge_enabled=False,
         prefer_earlier_reset_accounts=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
         sticky_threads_enabled=False,
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,

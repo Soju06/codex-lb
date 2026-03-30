@@ -20,7 +20,8 @@ from websockets.typing import Origin
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
+from app.core.openai.models import OpenAIError
 from app.core.openai.parsing import parse_error_payload
 from app.core.utils.request_id import get_request_id
 
@@ -262,4 +263,23 @@ def _try_parse_handshake_error_payload(
     error = parse_error_payload(payload)
     if error is None:
         return None
-    return {"error": error.model_dump(exclude_none=True)}
+    return {"error": _openai_error_detail(error)}
+
+
+def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
+    detail: OpenAIErrorDetail = {}
+    if error.message is not None:
+        detail["message"] = error.message
+    if error.type is not None:
+        detail["type"] = error.type
+    if error.code is not None:
+        detail["code"] = error.code
+    if error.param is not None:
+        detail["param"] = error.param
+    if error.plan_type is not None:
+        detail["plan_type"] = error.plan_type
+    if error.resets_at is not None:
+        detail["resets_at"] = error.resets_at
+    if error.resets_in_seconds is not None:
+        detail["resets_in_seconds"] = error.resets_in_seconds
+    return detail

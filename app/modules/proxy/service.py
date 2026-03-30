@@ -244,6 +244,7 @@ class ProxyService:
             codex_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0),
             max_sessions=getattr(settings, "http_responses_session_bridge_max_sessions", 256),
             queue_limit=getattr(settings, "http_responses_session_bridge_queue_limit", 8),
+            prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
             downstream_turn_state=downstream_turn_state,
         ):
             yield line
@@ -263,6 +264,7 @@ class ProxyService:
         codex_idle_ttl_seconds: float,
         max_sessions: int,
         queue_limit: int,
+        prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
     ) -> AsyncIterator[str]:
         del propagate_http_errors, suppress_text_done_events
@@ -319,6 +321,7 @@ class ProxyService:
                 affinity=affinity,
                 idle_ttl_seconds=idle_ttl_seconds,
                 codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
             ),
             max_sessions=max_sessions,
             previous_response_id=request_state.previous_response_id,
@@ -1430,16 +1433,9 @@ class ProxyService:
     ) -> "_HTTPBridgeSession":
         settings = get_settings()
         api_key_id = api_key.id if api_key is not None else None
-        effective_idle_ttl_seconds = _effective_http_bridge_idle_ttl_seconds(
-            affinity=affinity,
-            idle_ttl_seconds=idle_ttl_seconds,
-            codex_idle_ttl_seconds=getattr(
-                settings,
-                "http_responses_session_bridge_codex_idle_ttl_seconds",
-                900.0,
-            ),
-        )
+        effective_idle_ttl_seconds = idle_ttl_seconds
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
+        old_account_id: str | None = None
         while True:
             sessions_to_close: list[_HTTPBridgeSession] = []
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
@@ -1513,6 +1509,8 @@ class ProxyService:
                         account_id=None,
                         model=request_model,
                         detail=f"expected_instance={owner_instance}, current_instance={current_instance}",
+                        cache_key_family=key.affinity_kind,
+                        model_class=_extract_model_class(request_model) if request_model else None,
                     )
                     raise ProxyResponseError(
                         409,
@@ -1536,15 +1534,20 @@ class ProxyService:
                         account_id=existing.account.id,
                         model=existing.request_model,
                         pending_count=await self._http_bridge_pending_count(existing),
+                        cache_key_family=key.affinity_kind,
+                        model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
                     )
                     return existing
 
                 if existing is not None:
+                    old_account_id = existing.account.id
                     _log_http_bridge_event(
                         "discard_stale",
                         key,
                         account_id=existing.account.id,
                         model=existing.request_model,
+                        cache_key_family=key.affinity_kind,
+                        model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
                     )
                     self._http_bridge_sessions.pop(key, None)
                     sessions_to_close.append(existing)
@@ -1584,6 +1587,10 @@ class ProxyService:
                                 lru_key,
                                 account_id=lru_session.account.id,
                                 model=lru_session.request_model,
+                                cache_key_family=lru_key.affinity_kind,
+                                model_class=_extract_model_class(lru_session.request_model)
+                                if lru_session.request_model
+                                else None,
                             )
                             self._http_bridge_sessions.pop(lru_key, None)
                             sessions_to_close.append(lru_session)
@@ -1599,6 +1606,8 @@ class ProxyService:
                                     pending_count=(
                                         len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
                                     ),
+                                    cache_key_family=key.affinity_kind,
+                                    model_class=_extract_model_class(request_model) if request_model else None,
                                 )
                                 raise ProxyResponseError(
                                     429,
@@ -1639,17 +1648,18 @@ class ProxyService:
                     raise
                 except Exception:
                     continue
-                assert session is not None
+                if session is None:
+                    continue
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     session.request_model = request_model
                     session.last_used_at = time.monotonic()
                     return session
                 continue
 
-            session: _HTTPBridgeSession | None = None
+            created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
-                session = await self._create_http_bridge_session(
+                created_session = await self._create_http_bridge_session(
                     key,
                     headers=headers,
                     affinity=affinity,
@@ -1660,10 +1670,10 @@ class ProxyService:
                     current_future = self._http_bridge_inflight_sessions.get(key)
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(key, None)
-                        self._http_bridge_sessions[key] = session
+                        self._http_bridge_sessions[key] = created_session
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():
-                            inflight_future.set_result(session)
+                            inflight_future.set_result(created_session)
             except BaseException as exc:
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -1675,16 +1685,33 @@ class ProxyService:
                             else:
                                 inflight_future.set_exception(exc)
                                 inflight_future.exception()
-                if session is not None and not session_registered:
-                    await self._close_http_bridge_session(session)
+                if created_session is not None and not session_registered:
+                    await self._close_http_bridge_session(created_session)
                 raise
+            assert created_session is not None
             _log_http_bridge_event(
                 "create",
                 key,
-                account_id=session.account.id,
-                model=session.request_model,
+                account_id=created_session.account.id,
+                model=created_session.request_model,
+                cache_key_family=key.affinity_kind,
+                model_class=_extract_model_class(created_session.request_model)
+                if created_session.request_model
+                else None,
             )
-            return session
+            if old_account_id is not None and old_account_id != created_session.account.id:
+                _log_http_bridge_event(
+                    "reallocation_orphan",
+                    key,
+                    account_id=created_session.account.id,
+                    model=created_session.request_model,
+                    detail=f"old_account={old_account_id}",
+                    cache_key_family=key.affinity_kind,
+                    model_class=_extract_model_class(created_session.request_model)
+                    if created_session.request_model
+                    else None,
+                )
+            return created_session
 
     async def _prune_http_bridge_sessions_locked(self) -> None:
         now = time.monotonic()
@@ -1707,6 +1734,8 @@ class ProxyService:
                     key,
                     account_id=session.account.id,
                     model=session.request_model,
+                    cache_key_family=key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
                 await self._close_http_bridge_session(session, turn_state_lock_held=True)
 
@@ -1736,6 +1765,8 @@ class ProxyService:
             session.key,
             account_id=session.account.id,
             model=session.request_model,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
 
     async def _register_http_bridge_turn_state(self, session: "_HTTPBridgeSession", turn_state: str) -> None:
@@ -1880,6 +1911,8 @@ class ProxyService:
                 session.key,
                 account_id=session.account.id,
                 model=session.request_model,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             raise ProxyResponseError(
                 502,
@@ -1900,6 +1933,8 @@ class ProxyService:
                     account_id=session.account.id,
                     model=session.request_model,
                     pending_count=session.queued_request_count,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
                 raise ProxyResponseError(
                     429,
@@ -1933,6 +1968,8 @@ class ProxyService:
                 account_id=session.account.id,
                 model=session.request_model,
                 detail=str(exc) or None,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             retried = await self._retry_http_bridge_request_on_fresh_upstream(
                 session,
@@ -2183,6 +2220,8 @@ class ProxyService:
             account_id=session.account.id,
             model=session.request_model,
             pending_count=1,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
             await self._reconnect_http_bridge_session(
@@ -2228,6 +2267,8 @@ class ProxyService:
             account_id=session.account.id,
             model=session.request_model,
             pending_count=1,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
@@ -2308,6 +2349,8 @@ class ProxyService:
             account_id=account.id,
             model=session.request_model,
             detail=f"previous_account={old_account_id}",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
 
     async def _process_http_bridge_upstream_text(
@@ -2385,6 +2428,8 @@ class ProxyService:
                 model=session.request_model,
                 detail=error_code,
                 pending_count=await self._http_bridge_pending_count(session),
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
 
         await self._finalize_websocket_request_state(
@@ -4158,6 +4203,7 @@ class ProxyService:
             _raise_proxy_budget_exhausted()
         try:
             with anyio.fail_after(remaining_budget):
+                settings = await get_settings_cache().get()
                 return await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
@@ -4167,6 +4213,7 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,
+                    budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                 )
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
@@ -4624,11 +4671,13 @@ def _maybe_log_proxy_request_shape(
     header_keys = _interesting_header_keys(headers)
     session_header_present = _sticky_key_from_session_header(headers) is not None
     tools_hash = _tools_hash(payload)
+    model_class = _extract_model_class(payload.model)
 
     logger.warning(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
         "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
-        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s session_header_present=%s tools_hash=%s",
+        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s"
+        " session_header_present=%s tools_hash=%s model_class=%s",
         request_id,
         kind,
         payload.model,
@@ -4644,6 +4693,7 @@ def _maybe_log_proxy_request_shape(
         prompt_cache_key_set,
         session_header_present,
         tools_hash,
+        model_class,
     )
 
 
@@ -4760,18 +4810,36 @@ def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCo
     return None
 
 
+def _extract_model_class(model: str) -> str:
+    """Extract model class from model name for cache key prefix.
+
+    Classification:
+    - "mini" for gpt-5.4-mini
+    - "codex" for gpt-5.3-codex* (any variant)
+    - "std" for all others
+    """
+    if "codex" in model:
+        return "codex"
+    if "mini" in model:
+        return "mini"
+    return "std"
+
+
 def _derive_prompt_cache_key(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
 ) -> str:
     """Derive a stable, session-scoped prompt_cache_key when the client does not provide one.
 
-    The generated key is scoped to (api-key, instructions-prefix, first-user-input) so that:
+    The generated key is scoped to (model-class, api-key, instructions-prefix, first-user-input) so that:
+    - Different model classes get *different* keys (prevents cache pollution).
     - Parallel sessions from the same API key get *different* keys (different first input).
     - Successive turns within one session get the *same* key (first input stays constant).
     - Different API keys never collide.
     """
     parts: list[str] = []
+    model = getattr(payload, "model", None)
+    model_class = _extract_model_class(model) if isinstance(model, str) and model else None
 
     if api_key is not None:
         parts.append(api_key.id[:12])
@@ -4784,7 +4852,11 @@ def _derive_prompt_cache_key(
     if first_user_text:
         parts.append(sha256(first_user_text[:512].encode()).hexdigest()[:12])
 
-    return "-".join(parts) if parts else uuid4().hex[:24]
+    if not parts:
+        random_suffix = uuid4().hex[:24]
+        return f"{model_class}-{random_suffix}" if model_class is not None else random_suffix
+
+    return "-".join([model_class, *parts]) if model_class is not None else "-".join(parts)
 
 
 def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
@@ -5016,9 +5088,12 @@ def _effective_http_bridge_idle_ttl_seconds(
     affinity: _AffinityPolicy,
     idle_ttl_seconds: float,
     codex_idle_ttl_seconds: float,
+    prompt_cache_idle_ttl_seconds: float | None = None,
 ) -> float:
     if affinity.kind == StickySessionKind.CODEX_SESSION:
         return max(idle_ttl_seconds, codex_idle_ttl_seconds)
+    if affinity.kind == StickySessionKind.PROMPT_CACHE and prompt_cache_idle_ttl_seconds is not None:
+        return prompt_cache_idle_ttl_seconds
     return idle_ttl_seconds
 
 
@@ -5114,6 +5189,8 @@ def _log_http_bridge_event(
     model: str | None,
     pending_count: int | None = None,
     detail: str | None = None,
+    cache_key_family: str | None = None,
+    model_class: str | None = None,
 ) -> None:
     level = logging.INFO
     if event in {
@@ -5126,11 +5203,13 @@ def _log_http_bridge_event(
         "terminal_error",
         "capacity_exhausted_active_sessions",
         "owner_mismatch",
+        "reallocation_orphan",
     }:
         level = logging.WARNING
     logger.log(
         level,
-        "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s pending=%s detail=%s",
+        "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s"
+        " model=%s pending=%s detail=%s cache_key_family=%s model_class=%s",
         event,
         key.affinity_kind,
         _hash_identifier(key.affinity_key),
@@ -5138,6 +5217,8 @@ def _log_http_bridge_event(
         model,
         pending_count,
         detail,
+        cache_key_family,
+        model_class,
     )
 
 

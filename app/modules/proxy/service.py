@@ -4187,7 +4187,6 @@ class ProxyService:
         model: str | None = None,
         additional_limit_name: str | None = None,
     ) -> AccountSelection:
-        settings = await get_settings_cache().get()
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
             logger.warning(
@@ -4196,6 +4195,7 @@ class ProxyService:
             _raise_proxy_budget_exhausted()
         try:
             with anyio.fail_after(remaining_budget):
+                settings = await get_settings_cache().get()
                 return await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,

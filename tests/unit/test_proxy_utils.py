@@ -4079,6 +4079,32 @@ async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(
 
 
 @pytest.mark.asyncio
+async def test_select_account_with_budget_times_out_during_settings_fetch(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(return_value=AccountSelection(account=_make_account("acc_budget"), error_message=None))
+
+    class _SlowSettingsCache:
+        async def get(self) -> object:
+            await anyio.sleep(0.05)
+            return settings
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SlowSettingsCache())
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 0.01)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._select_account_with_budget(deadline=123.0, request_id="req-budget", kind="compact")
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert exc.payload["error"]["message"] == "Proxy request budget exhausted"
+    select_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

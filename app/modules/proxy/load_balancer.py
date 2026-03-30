@@ -537,7 +537,11 @@ class LoadBalancer:
                 # Check if pinned account has insufficient budget (< 5% remaining)
                 # or rate limit is far away (reset_at more than 10 minutes away)
                 now = time.time()
-                budget_exhausted = pinned.used_percent is not None and pinned.used_percent > budget_threshold_pct
+                budget_exhausted = (
+                    pinned.status != AccountStatus.RATE_LIMITED
+                    and pinned.used_percent is not None
+                    and pinned.used_percent > budget_threshold_pct
+                )
                 rate_limit_far_away = (
                     pinned.reset_at is not None and pinned.reset_at - now >= 600  # 10 minutes
                 )

@@ -29,10 +29,12 @@ def _rate_limited(
     account_id: str,
     reset_at: float | None = None,
     cooldown_until: float | None = None,
+    used_percent: float | None = None,
 ) -> AccountState:
     return AccountState(
         account_id,
         AccountStatus.RATE_LIMITED,
+        used_percent=used_percent,
         reset_at=reset_at,
         cooldown_until=cooldown_until,
         error_count=1,
@@ -254,6 +256,26 @@ async def test_grace_period_returns_pinned_when_reset_imminent():
 
     assert result.account is not None
     assert result.account.account_id == "a"
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_grace_period_keeps_rate_limited_pinned_account_even_when_usage_is_100_pct():
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 5, used_percent=100.0)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
 
 

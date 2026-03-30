@@ -10,6 +10,7 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
+from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -55,7 +56,10 @@ async def validate_proxy_api_key_authorization(authorization: str | None) -> Api
     cache = get_api_key_cache()
     cached = await cache.get(token_hash)
     if cached is not None:
-        return cached
+        if cached.expires_at is not None and cached.expires_at <= utcnow():
+            await cache.invalidate(token_hash)
+        else:
+            return cached
 
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))

@@ -27,6 +27,7 @@ from app.modules.accounts.schemas import (
     AccountSummary,
     AccountTrendsResponse,
 )
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
@@ -169,6 +170,7 @@ class AccountsService:
         if self._usage_repo and self._usage_updater:
             latest_usage = await self._usage_repo.latest_by_account(window="primary")
             await self._usage_updater.refresh_accounts([saved], latest_usage)
+        get_account_selection_cache().invalidate()
         return AccountImportResponse(
             account_id=saved.id,
             email=saved.email,
@@ -177,10 +179,19 @@ class AccountsService:
         )
 
     async def reactivate_account(self, account_id: str) -> bool:
-        return await self._repo.update_status(account_id, AccountStatus.ACTIVE, None)
+        result = await self._repo.update_status(account_id, AccountStatus.ACTIVE, None)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
 
     async def pause_account(self, account_id: str) -> bool:
-        return await self._repo.update_status(account_id, AccountStatus.PAUSED, None)
+        result = await self._repo.update_status(account_id, AccountStatus.PAUSED, None)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
 
     async def delete_account(self, account_id: str) -> bool:
-        return await self._repo.delete(account_id)
+        result = await self._repo.delete(account_id)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result

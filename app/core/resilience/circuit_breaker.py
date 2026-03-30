@@ -68,6 +68,9 @@ class CircuitBreaker:
                     self._state = CircuitState.CLOSED
                     self._failure_count = 0
                     self._success_count = 0
+            elif self.state == CircuitState.CLOSED:
+                if self._failure_count > 0:
+                    self._failure_count = 0
 
     async def _record_failure(self, exc: Exception) -> None:
         if not _is_server_error(exc):
@@ -85,6 +88,10 @@ def _is_server_error(exc: Exception) -> bool:
         return exc.status >= 500
     if isinstance(exc, (asyncio.TimeoutError, aiohttp.ServerTimeoutError)):
         return True
+    # ProxyResponseError wraps upstream HTTP responses — only 5xx is a server error.
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return status_code >= 500
     return True
 
 

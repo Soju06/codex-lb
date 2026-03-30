@@ -14,7 +14,7 @@ def test_settings_multi_replica_defaults():
     assert settings.metrics_port == 9090
     assert settings.log_format == "text"
     assert settings.leader_election_enabled is False
-    assert settings.leader_election_ttl_seconds == 30
+    assert settings.leader_election_ttl_seconds == 600
     assert settings.circuit_breaker_enabled is False
     assert settings.circuit_breaker_failure_threshold == 5
     assert settings.circuit_breaker_recovery_timeout_seconds == 60

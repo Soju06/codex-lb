@@ -16,9 +16,7 @@ class BulkheadSemaphore:
     def get_semaphore(self, path: str) -> Semaphore | None:
         if path.startswith("/v1/") or path.startswith("/backend-api/"):
             return self._proxy
-        if path.startswith("/api/") or path.startswith("/health/"):
-            return self._dashboard
-        return self._proxy
+        return self._dashboard
 
 
 class BulkheadMiddleware:

@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import get_settings
@@ -49,17 +48,19 @@ from app.modules.usage.additional_quota_keys import reload_additional_quota_regi
 logger = logging.getLogger(__name__)
 
 
-def add_in_flight_middleware(app: FastAPI) -> None:
-    @app.middleware("http")
-    async def in_flight_middleware(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        shutdown_state = import_module("app.core.shutdown")
+class InFlightMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        shutdown_state = import_module("app.core.shutdown")
         shutdown_state.increment_in_flight()
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
             shutdown_state.decrement_in_flight()
 
@@ -146,7 +147,7 @@ def create_app() -> FastAPI:
         swagger_ui_parameters={"persistAuthorization": True},
     )
 
-    add_in_flight_middleware(app)
+    app.add_middleware(cast(Any, InFlightMiddleware))
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)

@@ -21,6 +21,13 @@ def get_rss_bytes() -> int:
         psutil = __import__("psutil")
         return int(psutil.Process().memory_info().rss)
     except ImportError:
+        if sys.platform == "linux":
+            try:
+                with open("/proc/self/statm", "rb") as f:
+                    pages = int(f.read().split()[1])
+                return pages * resource.getpagesize()
+            except (OSError, ValueError, IndexError):
+                pass
         usage = resource.getrusage(resource.RUSAGE_SELF)
         if sys.platform == "darwin":
             return int(usage.ru_maxrss)

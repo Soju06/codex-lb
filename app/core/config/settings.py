@@ -123,7 +123,7 @@ class Settings(BaseSettings):
 
     # Leader election
     leader_election_enabled: bool = False
-    leader_election_ttl_seconds: int = 30
+    leader_election_ttl_seconds: int = 600
 
     # Circuit breaker
     circuit_breaker_enabled: bool = False

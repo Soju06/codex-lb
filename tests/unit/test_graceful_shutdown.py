@@ -1,22 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from importlib import import_module
-from typing import cast
 
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
-from starlette.types import Message
 
-from app.main import add_in_flight_middleware
+from app.main import InFlightMiddleware
 
 shutdown_state = import_module("app.core.shutdown")
 
 pytestmark = pytest.mark.unit
-
-_Dispatch = Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]
 
 
 @pytest.fixture(autouse=True)
@@ -60,34 +53,73 @@ async def test_wait_for_in_flight_drain_respects_timeout() -> None:
 
 @pytest.mark.asyncio
 async def test_in_flight_middleware_increments_and_decrements() -> None:
-    app = FastAPI()
-    add_in_flight_middleware(app)
-    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
+    in_flight_during_app: int | None = None
 
-    async def receive() -> Message:
+    async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
+        nonlocal in_flight_during_app
+        in_flight_during_app = shutdown_state.get_in_flight()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+    middleware = InFlightMiddleware(inner_app)
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/health",
+        "raw_path": b"/health",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    request = Request(
-        {
-            "type": "http",
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/health",
-            "raw_path": b"/health",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [],
-            "client": ("testclient", 50000),
-            "server": ("testserver", 80),
-        },
-        receive=receive,
-    )
+    sent_messages: list[dict] = []
 
-    async def call_next(_: Request) -> JSONResponse:
-        assert shutdown_state.get_in_flight() == 1
-        return JSONResponse({"ok": True})
+    async def send(msg):  # noqa: ANN001, ANN202
+        sent_messages.append(msg)
 
-    await dispatch(request, call_next)
+    await middleware(scope, receive, send)
 
+    assert in_flight_during_app == 1
+    assert shutdown_state.get_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_in_flight_middleware_tracks_websocket() -> None:
+    in_flight_during_ws: int | None = None
+
+    async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
+        nonlocal in_flight_during_ws
+        in_flight_during_ws = shutdown_state.get_in_flight()
+
+    middleware = InFlightMiddleware(inner_app)
+
+    scope = {"type": "websocket", "path": "/v1/responses"}
+
+    await middleware(scope, lambda: {"type": "websocket.connect"}, lambda _: None)
+
+    assert in_flight_during_ws == 1
+    assert shutdown_state.get_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_in_flight_middleware_skips_lifespan() -> None:
+    app_called = False
+
+    async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
+        nonlocal app_called
+        app_called = True
+
+    middleware = InFlightMiddleware(inner_app)
+
+    await middleware({"type": "lifespan"}, lambda: {}, lambda _: None)
+
+    assert app_called is True
     assert shutdown_state.get_in_flight() == 0

@@ -205,9 +205,44 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
+  helm-chart:
+    name: Publish Helm chart to GHCR
+    needs: [build]
+    runs-on: ubuntu-24.04
+
+    permissions:
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Build Helm dependencies
+        run: helm dependency build deploy/helm/codex-lb/
+
+      - name: Log in to GHCR (Helm)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io \
+              --username ${{ github.actor }} \
+              --password-stdin
+
+      - name: Package Helm chart
+        run: |
+          mkdir -p .helm-pkg
+          helm package deploy/helm/codex-lb/ -d .helm-pkg/
+
+      - name: Push Helm chart to GHCR
+        run: helm push .helm-pkg/codex-lb-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+
   create-github-release:
     name: Create GitHub Release
-    needs: [publish-to-pypi, docker-image]
+    needs: [publish-to-pypi, docker-image, helm-chart]
     runs-on: ubuntu-24.04
 
     permissions:

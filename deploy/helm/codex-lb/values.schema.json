@@ -101,6 +101,31 @@
       "properties": {
         "enabled": { "type": "boolean" }
       }
+    },
+    "global": {
+      "type": "object"
+    },
+    "config": {
+      "type": "object"
+    },
+    "podSecurityContext": {
+      "type": "object"
+    },
+    "containerSecurityContext": {
+      "type": "object"
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {"type": "boolean"},
+        "automount": {"type": "boolean"}
+      }
+    },
+    "resources": {
+      "type": "object"
+    },
+    "externalDatabase": {
+      "type": "object"
     }
   }
 }

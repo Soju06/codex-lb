@@ -96,6 +96,8 @@ serviceAccount:
   name: ""
   # @param serviceAccount.annotations Annotations to add to the ServiceAccount
   annotations: {}
+  # @param serviceAccount.automount Disable service account token automounting
+  automount: false
 
 # @section Application parameters
 # Maps to CODEX_LB_* environment variables. Only ~17 K8s-relevant vars are templated here.

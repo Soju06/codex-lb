@@ -38,27 +38,33 @@ spec:
       {{- end }}
       {{- if .Values.postgresql.enabled }}
       initContainers:
-        - name: wait-for-db
-          image: postgres:16-alpine
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 999
-            capabilities:
-              drop:
-                - ALL
-          command:
-            - sh
-            - -c
-            - |
-              echo "Waiting for PostgreSQL to be ready..."
-              until pg_isready -h {{ printf "%s-postgresql" .Release.Name | quote }} -p 5432 -U {{ .Values.postgresql.auth.username | quote }} -d {{ .Values.postgresql.auth.database | quote }}; do
-                echo "PostgreSQL not ready, sleeping 2s..."
-                sleep 2
-              done
-              echo "PostgreSQL is ready!"
+         - name: wait-for-db
+           image: postgres:16-alpine
+           imagePullPolicy: IfNotPresent
+           securityContext:
+             allowPrivilegeEscalation: false
+             readOnlyRootFilesystem: true
+             runAsNonRoot: true
+             runAsUser: 999
+             capabilities:
+               drop:
+                 - ALL
+           command:
+             - sh
+             - -c
+             - |
+               echo "Waiting for PostgreSQL to be ready (timeout: 60s)..."
+               i=0
+               until pg_isready -h {{ printf "%s-postgresql" .Release.Name | quote }} -p 5432 -U {{ .Values.postgresql.auth.username | quote }} -d {{ .Values.postgresql.auth.database | quote }}; do
+                 i=$((i + 1))
+                 if [ $i -ge 30 ]; then
+                   echo "ERROR: PostgreSQL not ready after 60s"
+                   exit 1
+                 fi
+                 echo "PostgreSQL not ready, sleeping 2s... ($i/30)"
+                 sleep 2
+               done
+               echo "PostgreSQL is ready!"
       {{- end }}
       containers:
         - name: migrate

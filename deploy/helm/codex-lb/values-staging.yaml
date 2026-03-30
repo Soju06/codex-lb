@@ -1,0 +1,23 @@
+# Staging environment — moderate scale, external DB, monitoring on
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+
+postgresql:
+  enabled: false
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+ingress:
+  enabled: true
+  hosts:
+    - host: codex-lb.staging.example.com
+      paths:
+        - path: /
+          pathType: Prefix

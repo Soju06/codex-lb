@@ -1,0 +1,48 @@
+{{- if .Values.ingress.enabled }}
+{{- $annotations := dict }}
+{{- if .Values.ingress.certManager.enabled }}
+{{- $_ := set $annotations "cert-manager.io/cluster-issuer" .Values.ingress.certManager.clusterIssuer }}
+{{- end }}
+{{- if .Values.ingress.nginx.enabled }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-body-size" "0" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-read-timeout" "600" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-send-timeout" "600" }}
+{{- end }}
+{{- range $key, $value := .Values.ingress.annotations }}
+{{- $_ := set $annotations $key $value }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "codex-lb.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  {{- if $annotations }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.ingressClassName }}
+  ingressClassName: {{ .Values.ingress.ingressClassName | quote }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "codex-lb.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

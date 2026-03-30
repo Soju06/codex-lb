@@ -1,0 +1,79 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codex-lb.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "codex-lb.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow HTTP traffic from ingress controller
+    - ports:
+        - port: 2455
+          protocol: TCP
+      {{- if .Values.networkPolicy.ingressNSMatchLabels }}
+      from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressNSMatchLabels | nindent 14 }}
+      {{- else }}
+      from:
+        - namespaceSelector: {}
+      {{- end }}
+    # Allow metrics scraping from Prometheus
+    - ports:
+        - port: {{ .Values.metrics.port }}
+          protocol: TCP
+      from:
+        - namespaceSelector: {}
+    # Helm test pod
+    - from:
+        - podSelector:
+            matchLabels:
+              helm.sh/chart: {{ include "codex-lb.chart" . }}
+    {{- with .Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    # DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL
+    {{- if .Values.postgresql.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    {{- else }}
+    - ports:
+        - port: 5432
+          protocol: TCP
+    {{- end }}
+    # HTTPS for OpenAI API
+    - ports:
+        - port: 443
+          protocol: TCP
+    # OTLP gRPC tracing (port 4317)
+    {{- if .Values.tracing.enabled }}
+    - ports:
+        - port: 4317
+          protocol: TCP
+    {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

@@ -544,7 +544,10 @@ class LoadBalancer:
                     and pinned.used_percent > budget_threshold_pct
                 )
                 rate_limit_far_away = (
-                    pinned.reset_at is not None and pinned.reset_at - now >= 600  # 10 minutes
+                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                    and pinned.status == AccountStatus.RATE_LIMITED
+                    and pinned.reset_at is not None
+                    and pinned.reset_at - now >= 600  # 10 minutes
                 )
                 if not (budget_exhausted or rate_limit_far_away):
                     pinned_result = select_account(

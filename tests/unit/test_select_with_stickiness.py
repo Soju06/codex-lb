@@ -469,6 +469,48 @@ async def test_codex_session_persists_fallback_during_outage():
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_far_away_does_not_reallocate_codex_session_affinity():
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 1200)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "session_123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION)
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_far_away_without_fallback_preserves_codex_session_affinity():
+    now = time.time()
+    acc_a = _rate_limited("a", reset_at=now + 1200)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a],
+        "session_123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+    )
+
+    assert result.account is None
+    repo.delete.assert_not_called()
+    repo.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion_triggers_reallocation():
     """When the pinned account has < 5% budget remaining (used_percent >= 95%),
     it should be reallocated to a different account."""

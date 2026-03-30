@@ -148,6 +148,7 @@ def test_has_native_codex_transport_headers_requires_allowlisted_originator():
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_chatgpt_desktop"}) is True
     assert proxy_module._has_native_codex_transport_headers({"originator": "Codex Chat"}) is False
     assert proxy_module._has_native_codex_transport_headers({"originator": "Codex QA"}) is False
+    assert proxy_module._has_native_codex_transport_headers({"originator": "Codex Foo"}) is False
     assert proxy_module._has_native_codex_transport_headers({"originator": "other-client"}) is False
 
 

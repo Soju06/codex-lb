@@ -254,12 +254,33 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **THEN** the service sends one internal `response.create` prewarm with `generate=false` before the client-visible request
 - **AND** the client-visible response contract remains unchanged
 
-#### Scenario: bridge enforces deterministic owner instance only for stable bridge keys
+#### Scenario: bridge enforces deterministic owner instance only for stable non-turn-state keys
 - **WHEN** operators configure multiple eligible bridge instance ids
-- **AND** a request uses a stable bridge key derived from turn-state, session header, or prompt-cache key
+- **AND** a request uses a stable bridge key derived from a session header or prompt-cache key
 - **AND** that request lands on a non-owner instance
-- **THEN** the service fails the request fast with `bridge_instance_mismatch`
+- **THEN** the service fails the request fast with `bridge_wrong_instance`
 - **AND** it MUST NOT create a fresh local bridge session for that key on the wrong instance
+
+#### Scenario: replayed signed turn-state fails only for a true live-owner mismatch
+- **WHEN** a client replays a signed HTTP bridge `x-codex-turn-state`
+- **AND** the durable bridge lease shows another live owner instance
+- **THEN** the service fails the request fast with `bridge_wrong_instance`
+
+#### Scenario: replayed signed turn-state without a live lease recovers when continuity is optional
+- **WHEN** a client replays a signed HTTP bridge `x-codex-turn-state`
+- **AND** no live bridge lease exists for that turn-state
+- **AND** the request does not include `previous_response_id`
+- **THEN** the service creates a fresh bridge session and returns a fresh signed `x-codex-turn-state`
+
+#### Scenario: replayed turn-state without a live lease fails clearly when continuity is required
+- **WHEN** a client replays an HTTP bridge `x-codex-turn-state`
+- **AND** no live bridge lease exists for that turn-state
+- **AND** the request includes `previous_response_id`
+- **THEN** the service fails the request with `bridge_session_expired`
+
+#### Scenario: malformed or cross-scope signed turn-state is rejected
+- **WHEN** a client sends a signed HTTP bridge `x-codex-turn-state` that cannot be validated or belongs to another API key scope
+- **THEN** the service fails the request with `bridge_token_invalid`
 
 ### Requirement: Websocket responses advertise and honor Codex turn-state affinity
 When serving websocket Responses endpoints, the service MUST advertise an `x-codex-turn-state` header during websocket accept. If the client reconnects and presents that same `x-codex-turn-state`, the service MUST treat it as the highest-priority Codex-affinity key for upstream routing on that websocket turn. On `/v1/responses`, a proxy-generated turn-state MUST NOT override the first request's prompt-cache routing unless the client explicitly sends the turn-state back.

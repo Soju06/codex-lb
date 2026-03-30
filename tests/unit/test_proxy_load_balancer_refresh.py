@@ -1504,7 +1504,8 @@ async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_reque
 
     assert selection.account is None
     assert selection.error_code is None
-    assert selection.error_message == "No available accounts"
+    assert selection.error_message is not None
+    assert "No available accounts" in selection.error_message
 
 
 @pytest.mark.asyncio

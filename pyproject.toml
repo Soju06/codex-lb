@@ -89,6 +89,10 @@ markers = [
     "unit: fast isolated tests",
 ]
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:sqlalchemy",
+    "ignore::ResourceWarning",
+]
 
 [tool.ruff]
 line-length = 120

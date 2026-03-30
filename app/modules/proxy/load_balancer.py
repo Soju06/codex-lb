@@ -185,6 +185,7 @@ class LoadBalancer:
                 else:
                     error_message = result.error_message
 
+                pre_persist_versions = {aid: runtime.version for aid, runtime in self._runtime.items()}
                 async with self._repo_factory() as repos:
                     stale_account_ids = await self._persist_selection_state(
                         repos.accounts,
@@ -205,6 +206,18 @@ class LoadBalancer:
                     selected_states = []
                     selected_account_map = {}
                     continue
+
+                if selected_snapshot is None and error_message == "No available accounts":
+                    runtime_recovered = any(
+                        self._runtime.get(aid, RuntimeState()).version != pre_persist_versions.get(aid, 0)
+                        for aid in account_map
+                    )
+                    if runtime_recovered:
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        pre_persist_versions = {aid: runtime.version for aid, runtime in self._runtime.items()}
+                        continue
                 break
         else:
             while True:

@@ -230,10 +230,6 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="cache invalidation not yet implemented: delete_key() never calls invalidate()",
-)
 async def test_deleted_key_rejected_immediately() -> None:
     """BUG: ApiKeyCache is never invalidated when a key is deleted."""
     plain_key = "sk-clb-test-del-0001"
@@ -253,6 +249,9 @@ async def test_deleted_key_rejected_immediately() -> None:
     )
 
     class _DeleteOnlyRepo:
+        async def get_by_id(self, _key_id: str) -> SimpleNamespace:
+            return SimpleNamespace(key_hash=key_hash)
+
         async def delete(self, _key_id: str) -> bool:
             return True
 
@@ -270,10 +269,6 @@ async def test_deleted_key_rejected_immediately() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="cache invalidation not yet implemented: regenerate_key() never calls invalidate()",
-)
 async def test_regenerated_key_old_token_rejected_immediately() -> None:
     """BUG: Old key hash stays in cache after regeneration — old token remains valid."""
     plain_key = "sk-clb-test-regen-001"
@@ -342,10 +337,6 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=False,
-    reason="cache invalidation not yet implemented: update_key() never calls invalidate()",
-)
 async def test_deactivated_key_rejected_immediately() -> None:
     """BUG: Deactivated key (is_active=False) stays in cache — still grants access."""
     plain_key = "sk-clb-test-deact-01"

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Protocol
 
+from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
@@ -340,17 +341,23 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
+        await get_api_key_cache().invalidate(row.key_hash)
         return _to_api_key_data(row)
 
     async def delete_key(self, key_id: str) -> None:
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            raise ApiKeyNotFoundError(f"API key not found: {key_id}")
         deleted = await self._repository.delete(key_id)
         if not deleted:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        await get_api_key_cache().invalidate(row.key_hash)
 
     async def regenerate_key(self, key_id: str) -> ApiKeyCreatedData:
         row = await self._repository.get_by_id(key_id)
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        old_key_hash = row.key_hash
         plain_key = _generate_plain_key()
         updated = await self._repository.update(
             key_id,
@@ -359,6 +366,7 @@ class ApiKeysService:
         )
         if updated is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        await get_api_key_cache().invalidate(old_key_hash)
         return _to_created_data(_to_api_key_data(updated), plain_key)
 
     async def validate_key(self, plain_key: str) -> ApiKeyData:

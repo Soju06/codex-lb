@@ -78,14 +78,13 @@ async def health_ready() -> HealthCheckResponse:
 
 async def _get_bridge_ring_info() -> BridgeRingInfo:
     """Get bridge ring consistency info. Best-effort; returns error field if unavailable."""
-    settings = get_settings()
-    instance_id = settings.http_responses_session_bridge_instance_id
-
     try:
+        settings = get_settings()
+        instance_id = getattr(settings, "http_responses_session_bridge_instance_id", None)
         ring_service = RingMembershipService(SessionLocal)
         active_members = await ring_service.list_active()
         fingerprint = await ring_service.ring_fingerprint()
-        is_member = instance_id in active_members
+        is_member = instance_id in active_members if instance_id else False
 
         return BridgeRingInfo(
             ring_fingerprint=fingerprint,
@@ -98,7 +97,7 @@ async def _get_bridge_ring_info() -> BridgeRingInfo:
         return BridgeRingInfo(
             ring_fingerprint=None,
             ring_size=0,
-            instance_id=instance_id,
+            instance_id=None,
             is_member=False,
             error=f"unavailable: {type(e).__name__}",
         )

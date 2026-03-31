@@ -12,6 +12,7 @@ from app.core.resilience.circuit_breaker import CircuitState
 from app.core.resilience.degradation import get_status, is_degraded, set_degraded, set_normal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy import load_balancer as load_balancer_module
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -204,3 +205,34 @@ async def test_load_balancer_returns_degraded_message_when_no_accounts_available
         "No available accounts. Service is operating in degraded mode: all upstream accounts are unavailable"
     )
     assert is_degraded() is True
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_clears_stale_degraded_state_for_typed_selection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=False)
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory([]))
+    monkeypatch.setattr(
+        balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=load_balancer_module._SelectionInputs(
+                accounts=[],
+                latest_primary={},
+                latest_secondary={},
+                error_message="No accounts with a plan supporting model 'gpt-5.3-codex-spark'",
+                error_code=load_balancer_module.NO_PLAN_SUPPORT_FOR_MODEL,
+            )
+        ),
+    )
+
+    set_degraded("all upstream accounts are unavailable")
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.NO_PLAN_SUPPORT_FOR_MODEL
+    assert is_degraded() is False

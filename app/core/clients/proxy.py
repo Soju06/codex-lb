@@ -956,15 +956,22 @@ async def _open_upstream_websocket(
 
     timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
     request_fn = cast(Any, request)
-    resp = await _call_with_service_circuit_breaker(
-        request_fn(
+    settings = get_settings()
+    circuit_breaker = get_circuit_breaker(settings)
+    if circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN:
+        raise CircuitBreakerOpenError("Circuit breaker is OPEN")
+    try:
+        resp = await request_fn(
             hdrs.METH_GET,
             url,
             headers=request_headers,
             timeout=timeout,
             read_until_eof=False,
         )
-    )
+    except Exception as exc:
+        if circuit_breaker is not None:
+            await circuit_breaker._record_failure(exc)
+        raise
 
     async def _raise_handshake_error(message: str) -> None:
         body_text = ""
@@ -982,6 +989,8 @@ async def _open_upstream_websocket(
 
     try:
         if resp.status != 101:
+            if circuit_breaker is not None and resp.status >= 500:
+                await circuit_breaker._record_failure(Exception(f"WebSocket handshake failed: HTTP {resp.status}"))
             await _raise_handshake_error("Invalid response status")
 
         if resp.headers.get(hdrs.UPGRADE, "").lower() != "websocket":
@@ -1024,6 +1033,8 @@ async def _open_upstream_websocket(
         compress=0,
         client_notakeover=False,
     )
+    if circuit_breaker is not None and resp.status == 101:
+        await circuit_breaker._record_success()
     return websocket, websocket
 
 

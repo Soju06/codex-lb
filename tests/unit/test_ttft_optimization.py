@@ -182,3 +182,41 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch) -> No
 
     assert len(chunks) == 2
     assert latency_first_token_ms > 0
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(monkeypatch) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ttft_control_frame")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield 'data: {"type":"response.created","response":{"id":"resp_ttft"}}\n\n'
+        await asyncio.sleep(0.03)
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ttft","usage":'
+            '{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-control"})]
+    latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
+
+    assert len(chunks) == 3
+    assert latency_first_token_ms >= 20

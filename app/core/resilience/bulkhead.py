@@ -7,6 +7,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.core.resilience.memory_monitor import is_memory_pressure
 
 
+async def _reject_websocket(receive: Receive, send: Send, *, reason: str) -> None:
+    try:
+        event = await receive()
+        if event.get("type") != "websocket.connect":
+            return
+    except Exception:
+        return
+    await send({"type": "websocket.close", "code": 1013, "reason": reason})
+
+
 class BulkheadSemaphore:
     def __init__(self, proxy_limit: int = 200, dashboard_limit: int = 50, background_limit: int = 10) -> None:
         self._proxy = Semaphore(proxy_limit) if proxy_limit > 0 else None
@@ -25,7 +35,7 @@ class BulkheadMiddleware:
         self._bulkhead = bulkhead
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
 
@@ -36,6 +46,9 @@ class BulkheadMiddleware:
             return
 
         if is_memory_pressure():
+            if scope["type"] == "websocket":
+                await _reject_websocket(receive, send, reason="Service temporarily unavailable (memory pressure)")
+                return
             body = b'{"detail":"Service temporarily unavailable (memory pressure)"}'
             await send(
                 {
@@ -53,6 +66,9 @@ class BulkheadMiddleware:
             return
 
         if sem._value <= 0:
+            if scope["type"] == "websocket":
+                await _reject_websocket(receive, send, reason="Service temporarily unavailable (bulkhead full)")
+                return
             body = b'{"detail":"Service temporarily unavailable (bulkhead full)"}'
             await send(
                 {

@@ -764,7 +764,11 @@ async def test_v1_responses_http_bridge_codex_session_does_not_prewarm_by_defaul
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(async_client, app_instance, monkeypatch):
+async def test_v1_responses_http_bridge_non_owner_instance_falls_back_to_local_session(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
     _install_bridge_settings_with_limits(
         monkeypatch,
         enabled=True,
@@ -815,6 +819,19 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
 
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return _FakeBridgeUpstreamWebSocket()
+
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
     candidate_suffix = 0
     while True:
         payload = proxy_module.ResponsesRequest.model_validate(
@@ -841,25 +858,22 @@ async def test_v1_responses_http_bridge_rejects_request_for_non_owner_instance(a
             api_key=None,
             request_id="req_owner",
         )
-        owner = proxy_module._http_bridge_owner_instance(key, proxy_module.get_settings())
+        owner = await proxy_module._http_bridge_owner_instance(key, proxy_module.get_settings())
         if owner != "instance-b":
             break
         candidate_suffix += 1
 
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await service._get_or_create_http_bridge_session(
-            key,
-            headers={},
-            affinity=affinity,
-            api_key=None,
-            request_model=payload.model,
-            idle_ttl_seconds=120.0,
-            max_sessions=8,
-        )
+    session = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
 
-    exc = exc_info.value
-    assert exc.status_code == 409
-    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
+    assert session is not None
 
 
 @pytest.mark.asyncio
@@ -1001,7 +1015,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
             api_key=None,
             request_id="req_owner_alias",
         )
-        if proxy_module._http_bridge_owner_instance(key, proxy_module.get_settings()) == "instance-a":
+        if await proxy_module._http_bridge_owner_instance(key, proxy_module.get_settings()) == "instance-a":
             break
         candidate_suffix += 1
 
@@ -1015,15 +1029,18 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
         max_sessions=128,
     )
 
-    replay_turn_state = next(
-        candidate
-        for candidate in ("turn_owner_alias_b", "turn_owner_alias_c", "turn_owner_alias_d", "turn_owner_alias_e")
-        if proxy_module._http_bridge_owner_instance(
-            proxy_module._HTTPBridgeSessionKey("turn_state_header", candidate, None),
-            proxy_module.get_settings(),
-        )
-        == "instance-b"
-    )
+    replay_turn_state = None
+    for candidate in ("turn_owner_alias_b", "turn_owner_alias_c", "turn_owner_alias_d", "turn_owner_alias_e"):
+        if (
+            await proxy_module._http_bridge_owner_instance(
+                proxy_module._HTTPBridgeSessionKey("turn_state_header", candidate, None),
+                proxy_module.get_settings(),
+            )
+            == "instance-b"
+        ):
+            replay_turn_state = candidate
+            break
+    assert replay_turn_state is not None
     await service._register_http_bridge_turn_state(session, replay_turn_state)
     replay_key = proxy_module._HTTPBridgeSessionKey("turn_state_header", replay_turn_state, None)
     assert (

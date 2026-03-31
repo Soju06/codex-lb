@@ -27,7 +27,7 @@ from app.core.resilience.backpressure import BackpressureMiddleware
 from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
-from app.db.session import SessionLocal, close_db, init_db
+from app.db.session import SessionLocal, close_db, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.audit import api as audit_api
@@ -89,6 +89,7 @@ async def lifespan(app: FastAPI):
 
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint)
     await init_db()
+    init_background_db()
     await init_http_client()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()

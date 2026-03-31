@@ -349,7 +349,10 @@ class ProxyService:
                 if event_block is None:
                     break
                 if request_state.latency_first_token_ms is None:
-                    request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
+                    block_payload = parse_sse_data_json(event_block)
+                    block_event_type = _event_type_from_payload(None, block_payload)
+                    if block_event_type in _TEXT_DELTA_EVENT_TYPES:
+                        request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
                 yield event_block
         finally:
             with anyio.CancelScope(shield=True):
@@ -3831,7 +3834,8 @@ class ProxyService:
                 suppress_text_done_events=suppress_text_done_events,
                 saw_text_delta=saw_text_delta,
             ):
-                latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
+                if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
+                    latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
@@ -3873,7 +3877,7 @@ class ProxyService:
                         usage = event.response.usage if event.response else None
                         if event_type == "response.incomplete":
                             status = "error"
-                if latency_first_token_ms is None:
+                if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
                     latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 yield line
         except ProxyResponseError as exc:

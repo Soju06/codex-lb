@@ -1678,6 +1678,190 @@ async def test_open_upstream_websocket_preserves_error_body_on_handshake_failure
 
 
 @pytest.mark.asyncio
+async def test_open_upstream_websocket_records_circuit_breaker_failure_on_5xx_handshake(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = proxy_module.CircuitState.CLOSED
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    class _HandshakeFailureResponse:
+        def __init__(self) -> None:
+            self.status = 503
+            self.headers = {}
+            self.request_info = SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses")
+            self.history = ()
+            self.connection = None
+
+        async def text(self) -> str:
+            return "upstream unavailable"
+
+        def close(self) -> None:
+            return None
+
+    class _HandshakeFailureSession:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+            self._ws_response_class = proxy_module.aiohttp.ClientWebSocketResponse
+
+        async def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            return _HandshakeFailureResponse()
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker", lambda _settings: cb)
+
+    with pytest.raises(proxy_module.aiohttp.WSServerHandshakeError):
+        await proxy_module._open_upstream_websocket(
+            session=cast(proxy_module.aiohttp.ClientSession, _HandshakeFailureSession()),
+            url="wss://chatgpt.com/backend-api/codex/responses",
+            headers={"Authorization": "Bearer token"},
+            connect_timeout_seconds=8.0,
+            max_msg_size=1024,
+        )
+
+    assert cb.successes == 0
+    assert len(cb.failures) == 1
+    assert str(cb.failures[0]) == "WebSocket handshake failed: HTTP 503"
+
+
+@pytest.mark.asyncio
+async def test_open_upstream_websocket_records_circuit_breaker_success_after_valid_handshake(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = proxy_module.CircuitState.CLOSED
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    class _ProtocolStub:
+        def __init__(self) -> None:
+            self.read_timeout: float | None = 10.0
+
+        def set_parser(self, parser, reader) -> None:
+            del parser, reader
+
+    class _ConnectionStub:
+        def __init__(self) -> None:
+            self.protocol = _ProtocolStub()
+            self.transport = object()
+
+    class _HandshakeSuccessResponse:
+        def __init__(self, headers: dict[str, str]) -> None:
+            self.status = 101
+            self.headers = headers
+            self.request_info = SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses")
+            self.history = ()
+            self.connection = _ConnectionStub()
+
+        async def text(self) -> str:
+            return ""
+
+        def close(self) -> None:
+            return None
+
+    class _HandshakeSuccessSession:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+
+            def _build_ws(*args, **kwargs):
+                del args, kwargs
+                return SimpleNamespace(tag="ws")
+
+            self._ws_response_class = _build_ws
+
+        async def request(self, method, url, **kwargs):
+            del method, url
+            sec_key = kwargs["headers"][proxy_module.hdrs.SEC_WEBSOCKET_KEY]
+            response_key = proxy_module.base64.b64encode(
+                proxy_module.hashlib.sha1(sec_key.encode() + proxy_module.WS_KEY).digest()
+            ).decode()
+            return _HandshakeSuccessResponse(
+                {
+                    proxy_module.hdrs.UPGRADE: "websocket",
+                    proxy_module.hdrs.CONNECTION: "upgrade",
+                    proxy_module.hdrs.SEC_WEBSOCKET_ACCEPT: response_key,
+                }
+            )
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker", lambda _settings: cb)
+    monkeypatch.setattr(proxy_module.aiohttp.client_ws, "WebSocketDataQueue", lambda *args, **kwargs: object())
+    monkeypatch.setattr(proxy_module, "WebSocketReader", lambda *args, **kwargs: object())
+    monkeypatch.setattr(proxy_module, "WebSocketWriter", lambda *args, **kwargs: object())
+
+    websocket_cm, websocket = await proxy_module._open_upstream_websocket(
+        session=cast(proxy_module.aiohttp.ClientSession, _HandshakeSuccessSession()),
+        url="wss://chatgpt.com/backend-api/codex/responses",
+        headers={"Authorization": "Bearer token"},
+        connect_timeout_seconds=8.0,
+        max_msg_size=1024,
+    )
+
+    assert websocket_cm == websocket
+    assert cb.failures == []
+    assert cb.successes == 1
+
+
+@pytest.mark.asyncio
+async def test_open_upstream_websocket_raises_when_circuit_breaker_is_open(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = proxy_module.CircuitState.OPEN
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    called = False
+
+    class _Session:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+            self._ws_response_class = proxy_module.aiohttp.ClientWebSocketResponse
+
+        async def request(self, method, url, **kwargs):
+            nonlocal called
+            called = True
+            del method, url, kwargs
+            raise AssertionError("request should not be called when circuit is open")
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker", lambda _settings: cb)
+
+    with pytest.raises(proxy_module.CircuitBreakerOpenError):
+        await proxy_module._open_upstream_websocket(
+            session=cast(proxy_module.aiohttp.ClientSession, _Session()),
+            url="wss://chatgpt.com/backend-api/codex/responses",
+            headers={"Authorization": "Bearer token"},
+            connect_timeout_seconds=8.0,
+            max_msg_size=1024,
+        )
+
+    assert called is False
+    assert cb.failures == []
+    assert cb.successes == 0
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_auto_transport_uses_model_preference(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

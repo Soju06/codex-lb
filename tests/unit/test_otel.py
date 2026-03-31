@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -229,7 +229,17 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     usage_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
+    call_order: list[str] = []
+
+    async def _init_db() -> None:
+        call_order.append("init_db")
+
+    def _init_background_db() -> None:
+        call_order.append("init_background_db")
+
     init_db = AsyncMock()
+    init_db.side_effect = _init_db
+    init_background_db = Mock(side_effect=_init_background_db)
     init_http_client = AsyncMock()
     close_http_client = AsyncMock()
     close_db = AsyncMock()
@@ -239,6 +249,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
     monkeypatch.setattr(main, "init_db", init_db)
+    monkeypatch.setattr(main, "init_background_db", init_background_db)
     monkeypatch.setattr(main, "init_http_client", init_http_client)
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
@@ -253,11 +264,13 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
         assert sticky_scheduler.started is True
 
     init_db.assert_awaited_once()
+    init_background_db.assert_called_once()
     init_http_client.assert_awaited_once()
     close_http_client.assert_awaited_once()
     close_db.assert_awaited_once()
     settings_cache.invalidate.assert_awaited_once()
     rate_limit_cache.invalidate.assert_awaited_once()
+    assert call_order[:2] == ["init_db", "init_background_db"]
     assert usage_scheduler.stopped is True
     assert model_scheduler.stopped is True
     assert sticky_scheduler.stopped is True

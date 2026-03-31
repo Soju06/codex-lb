@@ -85,3 +85,46 @@ async def test_backpressure_exempts_health_live_even_at_capacity():
 
     assert health_response.status_code == 200
     assert health_response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_backpressure_websocket_rejects_with_close_when_at_capacity():
+    app_called = False
+
+    async def inner_app(scope, receive, send):
+        nonlocal app_called
+        app_called = True
+        del scope, receive, send
+
+    middleware = BackpressureMiddleware(cast(Any, inner_app), max_concurrent=1)
+    await middleware._semaphore.acquire()
+    sent_events: list[dict[str, object]] = []
+    connect_delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal connect_delivered
+        if not connect_delivered:
+            connect_delivered = True
+            return {"type": "websocket.connect"}
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message: dict[str, object]) -> None:
+        sent_events.append(message)
+
+    try:
+        await middleware(
+            {"type": "websocket", "path": "/v1/responses"},
+            cast(Any, receive),
+            cast(Any, send),
+        )
+    finally:
+        middleware._semaphore.release()
+
+    assert app_called is False
+    assert sent_events == [
+        {
+            "type": "websocket.close",
+            "code": 1013,
+            "reason": "Too Many Requests",
+        }
+    ]

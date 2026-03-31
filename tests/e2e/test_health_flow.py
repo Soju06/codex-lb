@@ -12,7 +12,10 @@ async def test_all_health_endpoints_respond(client):
 
     response = await client.get("/health/live")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "checks": None}
+    live_payload = response.json()
+    assert live_payload["status"] == "ok"
+    assert live_payload["checks"] is None
+    assert live_payload.get("bridge_ring") is None
 
     response = await client.get("/health/ready")
     assert response.status_code == 200

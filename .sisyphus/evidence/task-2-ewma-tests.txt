@@ -1,4 +1,0 @@
-lsp_diagnostics: clean for app/core/usage/depletion.py
-ruff check app/core/usage/depletion.py: PASS
-pytest tests/unit/test_depletion.py -v: PASS (29 passed)
-pytest tests/ -v --tb=short -q: FAIL in pre-existing migration state; sqlite3.OperationalError: table additional_usage_history already exists

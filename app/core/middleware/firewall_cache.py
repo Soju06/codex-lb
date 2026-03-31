@@ -13,7 +13,7 @@ class _CachedFirewallDecision:
 
 
 class FirewallIPCache:
-    def __init__(self, ttl_seconds: int = 300) -> None:
+    def __init__(self, ttl_seconds: int = 15) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         self._ttl_seconds = ttl_seconds

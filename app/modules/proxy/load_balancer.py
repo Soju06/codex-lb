@@ -139,6 +139,7 @@ class LoadBalancer:
             )
 
         selected_snapshot: Account | None = None
+        selected_version_at_pick: int = 0
         error_message: str | None = None
         selected_states: list[AccountState] = []
         selected_account_map: dict[str, Account] = {}
@@ -187,6 +188,7 @@ class LoadBalancer:
                         selected_snapshot.status = result.account.status
                         selected_snapshot.deactivation_reason = result.account.deactivation_reason
                         selected_snapshot.reset_at = selected_reset_at
+                        selected_version_at_pick = self._runtime.get(selected.id, RuntimeState()).version
                 else:
                     error_message = result.error_message
 
@@ -211,6 +213,42 @@ class LoadBalancer:
                     selected_states = []
                     selected_account_map = {}
                     continue
+
+                # Revalidate: if the selected account entered balancer-level
+                # error backoff during _persist_selection_state (concurrent
+                # record_errors), discard the selection and retry.  The threshold
+                # mirrors the suppression rule in core/balancer/logic.py (>=3
+                # errors + active exponential backoff window).
+                if selected_snapshot is not None:
+                    _sel_runtime = self._runtime.get(selected_snapshot.id)
+                    _sel_pre_ver = selected_version_at_pick
+                    _now = time.time()
+                    _in_error_backoff = (
+                        _sel_runtime is not None
+                        and _sel_runtime.version != _sel_pre_ver
+                        and (
+                            (
+                                _sel_runtime.error_count >= 3
+                                and _sel_runtime.last_error_at is not None
+                                and _now - _sel_runtime.last_error_at
+                                < min(300, 30 * (2 ** (_sel_runtime.error_count - 3)))
+                            )
+                            or (_sel_runtime.cooldown_until is not None and _sel_runtime.cooldown_until > _now)
+                        )
+                    )
+                    if _in_error_backoff:
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        selected_snapshot = None
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        continue
 
                 if selected_snapshot is None and error_message == "No available accounts":
                     runtime_recovered = any(

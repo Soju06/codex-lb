@@ -134,26 +134,46 @@ async def lifespan(app: FastAPI):
     elif settings.metrics_enabled:
         logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
 
-    # Ring membership — register this pod
+    async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await svc.register(iid)
+                logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
+                break
+            except Exception:
+                delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
+                logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
+                await asyncio.sleep(delay)
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await svc.heartbeat(iid)
+            except Exception:
+                logger.warning("Ring heartbeat failed", exc_info=True)
+
+    async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await svc.heartbeat(iid)
+            except Exception:
+                logger.warning("Ring heartbeat failed", exc_info=True)
+
+    ring_service: RingMembershipService | None = None
+    instance_id: str | None = None
+    heartbeat_task: asyncio.Task[None] | None = None
     try:
         ring_service = RingMembershipService(SessionLocal)
         instance_id = settings.http_responses_session_bridge_instance_id
-        await ring_service.register(instance_id)
-
-        async def _heartbeat_loop(svc: RingMembershipService, iid: str) -> None:
-            while True:
-                await asyncio.sleep(30)
-                try:
-                    await svc.heartbeat(iid)
-                except Exception:
-                    logger.warning("Ring heartbeat failed", exc_info=True)
-
-        heartbeat_task = asyncio.create_task(_heartbeat_loop(ring_service, instance_id))
+        await asyncio.wait_for(ring_service.register(instance_id), timeout=5.0)
         logger.info("Registered in bridge ring", extra={"instance_id": instance_id})
+        heartbeat_task = asyncio.create_task(_heartbeat_only(ring_service, instance_id))
     except Exception:
-        logger.warning("Ring registration failed (non-fatal)", exc_info=True)
-        heartbeat_task = None
-        ring_service = None
+        logger.warning("Ring registration failed, retrying in background", exc_info=True)
+        if ring_service is not None and instance_id is not None:
+            heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
 
     startup_module._startup_complete = True
 

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from datetime import timedelta
+from hashlib import sha256
+
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import select as sa_select
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.resilience.circuit_breaker import CircuitState, get_circuit_breaker
 from app.core.resilience.degradation import get_status, is_degraded
-from app.db.session import SessionLocal, get_session
+from app.core.utils.time import utcnow
+from app.db.models import BridgeRingMember
+from app.db.session import get_session
 from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, HealthResponse
-from app.modules.proxy.ring_membership import RingMembershipService
 
 router = APIRouter(tags=["health"])
 
@@ -54,8 +60,7 @@ async def health_ready() -> HealthCheckResponse:
                     if circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN:
                         raise HTTPException(status_code=503, detail="Circuit breaker open — upstream unavailable")
 
-                # Add bridge ring consistency info (best-effort, informational only)
-                bridge_ring = await _get_bridge_ring_info()
+                bridge_ring = await _get_bridge_ring_info(session)
 
                 return HealthCheckResponse(status=status, checks=checks, bridge_ring=bridge_ring)
             except HTTPException:
@@ -76,14 +81,20 @@ async def health_ready() -> HealthCheckResponse:
     raise HTTPException(status_code=503, detail="Service unavailable")
 
 
-async def _get_bridge_ring_info() -> BridgeRingInfo:
-    """Get bridge ring consistency info. Best-effort; returns error field if unavailable."""
+async def _get_bridge_ring_info(session: AsyncSession) -> BridgeRingInfo:
     try:
         settings = get_settings()
         instance_id = getattr(settings, "http_responses_session_bridge_instance_id", None)
-        ring_service = RingMembershipService(SessionLocal)
-        active_members = await ring_service.list_active()
-        fingerprint = await ring_service.ring_fingerprint()
+
+        cutoff = utcnow() - timedelta(seconds=120)
+        result = await session.execute(
+            sa_select(BridgeRingMember.instance_id)
+            .where(BridgeRingMember.last_heartbeat_at >= cutoff)
+            .order_by(BridgeRingMember.instance_id)
+        )
+        active_members = list(result.scalars().all())
+        data = ",".join(sorted(active_members))
+        fingerprint = sha256(data.encode()).hexdigest()
         is_member = instance_id in active_members if instance_id else False
 
         return BridgeRingInfo(
@@ -93,7 +104,6 @@ async def _get_bridge_ring_info() -> BridgeRingInfo:
             is_member=is_member,
         )
     except Exception as e:
-        # DB unavailable or other error; return informational error
         return BridgeRingInfo(
             ring_fingerprint=None,
             ring_size=0,

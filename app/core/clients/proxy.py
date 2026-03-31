@@ -191,8 +191,9 @@ async def _service_circuit_breaker_context(
     """Wrap an async context manager with circuit breaker protection."""
     effective_settings = settings or get_settings()
     cb = get_circuit_breaker(effective_settings)
-    if cb is not None and cb.state == CircuitState.OPEN:
-        raise CircuitBreakerOpenError("Circuit breaker is OPEN")
+    is_probe = False
+    if cb is not None:
+        is_probe = await cb.pre_call_check()
     try:
         async with cm as resp:
             yield resp
@@ -207,6 +208,9 @@ async def _service_circuit_breaker_context(
         if cb is not None:
             await cb._record_failure(e)
         raise
+    finally:
+        if is_probe and cb is not None:
+            await cb.release_half_open_probe()
 
 
 class StreamIdleTimeoutError(Exception):

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import random
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
@@ -62,8 +63,12 @@ class ModelRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        if not await _get_leader_election().try_acquire():
-            return
+        is_leader = await _get_leader_election().try_acquire()
+        if not is_leader:
+            registry = get_model_registry()
+            if not registry.needs_refresh():
+                return
+            await asyncio.sleep(random.uniform(1.0, min(10.0, self.interval_seconds * 0.1)))
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)

@@ -14,7 +14,7 @@ class CachedApiKey:
 
 
 class ApiKeyCache:
-    def __init__(self, ttl_seconds: int = 60, max_entries: int = 10_000) -> None:
+    def __init__(self, ttl_seconds: int = 5, max_entries: int = 10_000) -> None:
         self._cache: dict[str, CachedApiKey] = {}
         self._lock = anyio.Lock()
         self._ttl = ttl_seconds

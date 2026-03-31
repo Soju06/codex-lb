@@ -1514,6 +1514,21 @@ class ProxyService:
 
                 await self._prune_http_bridge_sessions_locked()
 
+                existing = self._http_bridge_sessions.get(key)
+                if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
+                    existing.request_model = request_model
+                    existing.last_used_at = time.monotonic()
+                    _log_http_bridge_event(
+                        "reuse",
+                        key,
+                        account_id=existing.account.id,
+                        model=existing.request_model,
+                        pending_count=await self._http_bridge_pending_count(existing),
+                        cache_key_family=key.affinity_kind,
+                        model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
+                    )
+                    return existing
+
                 owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
                 current_instance, ring = await _active_http_bridge_instance_ring(settings, self._ring_membership)
                 if (
@@ -1543,21 +1558,6 @@ class ProxyService:
                             error_type="server_error",
                         ),
                     )
-
-                existing = self._http_bridge_sessions.get(key)
-                if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
-                    existing.request_model = request_model
-                    existing.last_used_at = time.monotonic()
-                    _log_http_bridge_event(
-                        "reuse",
-                        key,
-                        account_id=existing.account.id,
-                        model=existing.request_model,
-                        pending_count=await self._http_bridge_pending_count(existing),
-                        cache_key_family=key.affinity_kind,
-                        model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
-                    )
-                    return existing
 
                 if existing is not None:
                     old_account_id = existing.account.id

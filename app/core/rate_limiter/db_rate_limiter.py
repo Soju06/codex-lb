@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DashboardRateLimitError
@@ -57,10 +57,53 @@ class DatabaseRateLimiter:
             raise DashboardRateLimitError("Too many attempts", retry_after=retry_after)
 
     async def record_failure(self, key: str, session: AsyncSession) -> None:
-        """Record a single failed attempt without performing a rate-limit check."""
-        session.add(RateLimitAttempt(key=key, type=self.type, attempted_at=datetime.now(UTC)))
+        """Record a failed attempt atomically.
+
+        On PostgreSQL uses an advisory lock to serialize concurrent
+        record_failure calls for the same rate key.  After inserting,
+        re-counts attempts; if the post-insert total exceeds
+        ``max_attempts`` raises ``DashboardRateLimitError``.
+        """
+        now = datetime.now(UTC)
+        lock_key = f"{self.type}:{key}"
+
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
+
+        session.add(RateLimitAttempt(key=key, type=self.type, attempted_at=now))
         await session.flush()
+
+        window_start = now - timedelta(seconds=self.window_seconds)
+        count = await session.scalar(
+            select(func.count())
+            .select_from(RateLimitAttempt)
+            .where(
+                RateLimitAttempt.key == key,
+                RateLimitAttempt.type == self.type,
+                RateLimitAttempt.attempted_at >= window_start,
+            )
+        )
         await session.commit()
+
+        if (count or 0) > self.max_attempts:
+            oldest_attempt = await session.scalar(
+                select(RateLimitAttempt.attempted_at)
+                .where(
+                    RateLimitAttempt.key == key,
+                    RateLimitAttempt.type == self.type,
+                    RateLimitAttempt.attempted_at >= window_start,
+                )
+                .order_by(RateLimitAttempt.attempted_at.asc())
+                .limit(1)
+            )
+            retry_after = self.window_seconds
+            if oldest_attempt is not None:
+                if oldest_attempt.tzinfo is None:
+                    oldest_attempt = oldest_attempt.replace(tzinfo=UTC)
+                reset_at = oldest_attempt + timedelta(seconds=self.window_seconds)
+                retry_after = max(1, int((reset_at - now).total_seconds()))
+            raise DashboardRateLimitError("Too many attempts", retry_after=retry_after)
 
     async def clear_for_key(self, key: str, session: AsyncSession) -> None:
         """Delete all attempts for (key, type) — used to reset counter on successful auth."""

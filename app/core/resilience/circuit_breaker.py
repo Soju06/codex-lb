@@ -31,6 +31,7 @@ class CircuitBreaker:
         self._failure_count = 0
         self._success_count = 0
         self._last_failure_time: float | None = None
+        self._half_open_probe_in_flight = False
         self._lock = asyncio.Lock()
         self.failure_threshold = failure_threshold
         self.recovery_timeout_seconds = recovery_timeout_seconds
@@ -46,12 +47,29 @@ class CircuitBreaker:
             return CircuitState.HALF_OPEN
         return self._state
 
-    async def call(self, coro: Awaitable[T]) -> T:
+    async def pre_call_check(self) -> bool:
         async with self._lock:
             current_state = self.state
             if current_state == CircuitState.OPEN:
                 raise CircuitBreakerOpenError("Circuit breaker is OPEN")
+            if current_state == CircuitState.HALF_OPEN:
+                if self._half_open_probe_in_flight:
+                    raise CircuitBreakerOpenError("Circuit breaker is HALF_OPEN — probe in flight")
+                self._half_open_probe_in_flight = True
+                return True
+            return False
 
+    async def release_half_open_probe(self) -> None:
+        async with self._lock:
+            self._half_open_probe_in_flight = False
+
+    async def call(self, coro: Awaitable[T]) -> T:
+        try:
+            is_probe = await self.pre_call_check()
+        except CircuitBreakerOpenError:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            raise
         try:
             result = await coro
             await self._record_success()
@@ -59,6 +77,9 @@ class CircuitBreaker:
         except Exception as exc:
             await self._record_failure(exc)
             raise
+        finally:
+            if is_probe:
+                await self.release_half_open_probe()
 
     async def _record_success(self) -> None:
         async with self._lock:

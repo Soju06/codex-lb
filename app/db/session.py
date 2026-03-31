@@ -163,11 +163,12 @@ def init_background_db(url: str | None = None) -> None:
     if _is_sqlite_url(db_url):
         is_sqlite_memory = _is_sqlite_memory_url(db_url)
         if is_sqlite_memory:
-            _background_engine = create_async_engine(
-                db_url,
-                echo=False,
-                connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
-            )
+            # Reuse the main engine for in-memory SQLite — creating a second
+            # engine would open a separate, empty in-memory database with no
+            # schema, causing "no such table" errors in background tasks.
+            _background_engine = engine
+            _background_session_factory = SessionLocal
+            return
         else:
             _background_engine = create_async_engine(
                 db_url,

@@ -332,6 +332,8 @@ class LoadBalancer:
         if cached is not None:
             return _clone_selection_inputs(cached)
 
+        load_generation = self._selection_inputs_cache.generation
+
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
@@ -345,7 +347,9 @@ class LoadBalancer:
                         latest_primary={},
                         latest_secondary={},
                     )
-                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
                     return selection_inputs
                 selection_inputs = _SelectionInputs(
                     accounts=[],
@@ -354,7 +358,9 @@ class LoadBalancer:
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
-                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
+                await self._selection_inputs_cache.set(
+                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                )
                 return selection_inputs
 
             if effective_limit_name:
@@ -372,7 +378,9 @@ class LoadBalancer:
                         error_message=error_message,
                         error_code=error_code,
                     )
-                    await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
                     return selection_inputs
             if not accounts:
                 selection_inputs = _SelectionInputs(
@@ -380,7 +388,9 @@ class LoadBalancer:
                     latest_primary={},
                     latest_secondary={},
                 )
-                await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
+                await self._selection_inputs_cache.set(
+                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                )
                 return selection_inputs
 
             latest_primary, latest_secondary = await asyncio.gather(
@@ -396,7 +406,9 @@ class LoadBalancer:
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
             )
-            await self._selection_inputs_cache.set(_clone_selection_inputs(selection_inputs), key=cache_key)
+            await self._selection_inputs_cache.set(
+                _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+            )
             return selection_inputs
 
     async def _filter_accounts_for_additional_limit(
@@ -647,6 +659,7 @@ class LoadBalancer:
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            self._selection_inputs_cache.invalidate()
 
     async def mark_quota_exceeded(self, account: Account, error: UpstreamError) -> None:
         lock = await self._get_account_lock(account.id)
@@ -656,6 +669,7 @@ class LoadBalancer:
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
         lock = await self._get_account_lock(account.id)
@@ -665,6 +679,7 @@ class LoadBalancer:
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            self._selection_inputs_cache.invalidate()
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)

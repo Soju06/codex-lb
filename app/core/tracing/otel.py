@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 _otel_initialized = False
 
 
-def init_tracing(service_name: str = "codex-lb", endpoint: str = "") -> bool:
+def init_tracing(service_name: str = "codex-lb", endpoint: str = "", app: object | None = None) -> bool:
     global _otel_initialized
 
     if _otel_initialized:
@@ -39,7 +39,10 @@ def init_tracing(service_name: str = "codex-lb", endpoint: str = "") -> bool:
             instrumentation_module = import_module("opentelemetry.instrumentation.fastapi")
             FastAPIInstrumentor = getattr(instrumentation_module, "FastAPIInstrumentor")
 
-            FastAPIInstrumentor().instrument()
+            if app is not None:
+                FastAPIInstrumentor.instrument_app(app)
+            else:
+                FastAPIInstrumentor().instrument()
         except ImportError:
             pass
         except Exception:

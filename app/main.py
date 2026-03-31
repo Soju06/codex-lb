@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
     if settings.otel_enabled:
         from app.core.tracing.otel import init_tracing
 
-        init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint)
+        init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
     await init_db()
     init_background_db()
     await init_http_client()
@@ -107,7 +107,30 @@ async def lifespan(app: FastAPI):
         metrics_app = make_asgi_app(registry=REGISTRY)
         config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
         metrics_server = uvicorn.Server(config)
-        metrics_server_task = asyncio.create_task(metrics_server.serve())
+
+        async def _serve_metrics(srv: Any) -> None:
+            try:
+                await srv.serve()
+            except SystemExit as exc:
+                if exc.code == 1:
+                    logger.info(
+                        "Metrics port %d unavailable (another worker likely serves metrics)",
+                        settings.metrics_port,
+                    )
+                else:
+                    raise
+            except OSError as exc:
+                import errno as _errno
+
+                if exc.errno in (_errno.EADDRINUSE, _errno.EADDRNOTAVAIL):
+                    logger.info(
+                        "Metrics port %d already bound (another worker serves metrics)",
+                        settings.metrics_port,
+                    )
+                else:
+                    raise
+
+        metrics_server_task = asyncio.create_task(_serve_metrics(metrics_server))
     elif settings.metrics_enabled:
         logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
 

@@ -18,7 +18,7 @@ data:
   {{- if .Values.config.upstreamBaseUrl }}
   CODEX_LB_UPSTREAM_BASE_URL: {{ .Values.config.upstreamBaseUrl | quote }}
   {{- end }}
-  CODEX_LB_UPSTREAM_CONNECT_TIMEOUT: {{ .Values.config.upstreamConnectTimeout | toString | quote }}
+  CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS: {{ .Values.config.upstreamConnectTimeout | toString | quote }}
   CODEX_LB_UPSTREAM_STREAM_TRANSPORT: {{ .Values.config.upstreamStreamTransport | quote }}
   # Logging
   CODEX_LB_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
@@ -43,5 +43,5 @@ data:
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: {{ .Values.config.sessionBridgeInstanceRing | quote }}
   {{- if .Values.tracing.enabled }}
   CODEX_LB_OTEL_ENABLED: "true"
-  CODEX_LB_OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.tracing.endpoint | quote }}
+  CODEX_LB_OTEL_EXPORTER_ENDPOINT: {{ .Values.tracing.endpoint | quote }}
   {{- end }}

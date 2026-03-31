@@ -78,23 +78,14 @@ def test_scale_up_minimal_key_remapping() -> None:
     )
 
 
-def test_graceful_fallback_under_mismatch() -> None:
+def test_retry_under_mismatch() -> None:
     import inspect
 
     from app.modules.proxy import service as proxy_module
 
     source = inspect.getsource(proxy_module)
 
-    assert "owner_mismatch_graceful_fallback" in source, (
-        "Expected 'owner_mismatch_graceful_fallback' event — graceful fallback not implemented"
-    )
-
-    lines = source.split("\n")
-    for i, line in enumerate(lines):
-        if "bridge_instance_mismatch" in line and "raise" in line:
-            pytest.fail(
-                f"Found 409 raise at line {i + 1}: {line.strip()}\nGraceful fallback should not raise 409 on mismatch."
-            )
+    assert "owner_mismatch_retry" in source, "Expected 'owner_mismatch_retry' event — retry on mismatch not implemented"
 
 
 @pytest.mark.asyncio

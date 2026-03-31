@@ -20,8 +20,6 @@ class _CachedSelectionInputs:
 
 class AccountSelectionCache:
     def __init__(self, ttl_seconds: int | None = None) -> None:
-        # Default TTL: 0 (disabled) in test mode, 5s in production
-        # Passing an explicit ttl_seconds bypasses test mode detection
         if ttl_seconds is None:
             import sys
 
@@ -31,10 +29,15 @@ class AccountSelectionCache:
         self._ttl_seconds = ttl_seconds
         self._cache: dict[_CacheKey, _CachedSelectionInputs] = {}
         self._lock = anyio.Lock()
+        self._generation: int = 0
+
+    @property
+    def generation(self) -> int:
+        return self._generation
 
     async def get(self, key: _CacheKey = (None, None)) -> SelectionInputs | None:
         if self._ttl_seconds == 0:
-            return None  # Cache disabled (test mode)
+            return None
         entry = self._cache.get(key)
         if entry is None:
             return None
@@ -42,14 +45,17 @@ class AccountSelectionCache:
             return None
         return entry.data
 
-    async def set(self, data: SelectionInputs, key: _CacheKey = (None, None)) -> None:
+    async def set(self, data: SelectionInputs, key: _CacheKey = (None, None), *, generation: int | None = None) -> None:
         async with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             self._cache[key] = _CachedSelectionInputs(
                 data=data,
                 expires_at=time.monotonic() + self._ttl_seconds,
             )
 
     def invalidate(self) -> None:
+        self._generation += 1
         self._cache.clear()
 
 

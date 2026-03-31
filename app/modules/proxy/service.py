@@ -1523,21 +1523,26 @@ class ProxyService:
                     and owner_instance != current_instance
                 ):
                     _log_http_bridge_event(
-                        "owner_mismatch_graceful_fallback",
+                        "owner_mismatch_retry",
                         key,
                         account_id=None,
                         model=request_model,
                         detail=(
-                            f"expected_instance={owner_instance}, current_instance={current_instance}, outcome=fallback"
+                            f"expected_instance={owner_instance}, current_instance={current_instance}, outcome=retry"
                         ),
                         cache_key_family=key.affinity_kind,
                         model_class=_extract_model_class(request_model) if request_model else None,
                     )
-                    # Increment mismatch counter
                     if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
-                        bridge_instance_mismatch_total.labels(outcome="fallback").inc()
-                    # Graceful fallback: fall through to normal session creation on this pod.
-                    # The session creation below uses the same account from Layer 1 DB sticky lookup.
+                        bridge_instance_mismatch_total.labels(outcome="retry").inc()
+                    raise ProxyResponseError(
+                        409,
+                        openai_error(
+                            "bridge_instance_mismatch",
+                            "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+                            error_type="server_error",
+                        ),
+                    )
 
                 existing = self._http_bridge_sessions.get(key)
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:

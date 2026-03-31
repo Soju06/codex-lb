@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import Integer, cast, delete, func, literal_column, or_, select
+from sqlalchemy import Integer, cast, delete, func, literal_column, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
-from app.db.models import AdditionalUsageHistory, UsageHistory
+from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
     canonicalize_additional_quota_key,
@@ -163,12 +163,22 @@ class UsageRepository:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
-            stmt = (
-                select(UsageHistory)
-                .distinct(UsageHistory.account_id)
-                .where(conditions)
-                .order_by(UsageHistory.account_id.asc(), UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            acct_subq = select(Account.id).subquery("accts")
+            lateral = (
+                select(UsageHistory.id)
+                .where(
+                    conditions,
+                    UsageHistory.account_id == acct_subq.c.id,
+                )
+                .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+                .limit(1)
+                .correlate(acct_subq)
+                .lateral("latest")
             )
+            id_query = (
+                select(lateral.c.id).select_from(acct_subq.outerjoin(lateral, true())).where(lateral.c.id.is_not(None))
+            )
+            stmt = select(UsageHistory).where(UsageHistory.id.in_(id_query))
             result = await self._session.execute(stmt)
             return {entry.account_id: entry for entry in result.scalars().all()}
         subq = (

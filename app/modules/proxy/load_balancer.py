@@ -561,6 +561,39 @@ class LoadBalancer:
                             await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                         return pinned_result
                 else:
+                    # Before reallocating, check whether the pool has a
+                    # meaningfully better candidate.  When every account
+                    # is above the budget threshold, reallocating just
+                    # wastes DB writes and destroys prompt-cache locality
+                    # (thrashing).
+                    if budget_exhausted:
+                        pool_best = select_account(
+                            states,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            routing_strategy=routing_strategy,
+                        )
+                        pool_also_exhausted = pool_best.account is not None and (
+                            pool_best.account.account_id == pinned.account_id
+                            or (
+                                pool_best.account.used_percent is not None
+                                and pool_best.account.used_percent > budget_threshold_pct
+                            )
+                        )
+                        if pool_also_exhausted:
+                            pinned_result = select_account(
+                                [pinned],
+                                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                                routing_strategy=routing_strategy,
+                                allow_backoff_fallback=False,
+                            )
+                            if pinned_result.account is not None:
+                                if sticky_max_age_seconds is not None:
+                                    await sticky_repo.upsert(
+                                        sticky_key,
+                                        pinned.account_id,
+                                        kind=sticky_kind,
+                                    )
+                                return pinned_result
                     reallocate_sticky = True
                 # Grace period: if the pinned account is rate-limited with a
                 # known reset time within a short window, retry selection

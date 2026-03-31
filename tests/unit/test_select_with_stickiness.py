@@ -210,7 +210,109 @@ async def test_sticky_deleted_when_pinned_account_removed_from_pool():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once()
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+# ---------------------------------------------------------------------------
+# Pool exhaustion guard — prevent thrashing when all accounts are depleted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_all_accounts_exhausted_keeps_pinned_no_thrashing():
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = _active("b", used_percent=97.0)
+    acc_c = _active("c", used_percent=98.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b, acc_c],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_pool_exhausted_but_better_candidate_exists_reallocates():
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = _active("b", used_percent=50.0)
+    acc_c = _active("c", used_percent=97.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b, acc_c],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_pool_exhausted_single_account_keeps_pinned():
+    acc_a = _active("a", used_percent=96.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_pool_exhausted_with_custom_threshold():
+    acc_a = _active("a", used_percent=85.0)
+    acc_b = _active("b", used_percent=88.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+        budget_threshold_pct=80.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_pool_exhausted_candidate_with_none_usage_triggers_reallocation():
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = AccountState("b", AccountStatus.ACTIVE, used_percent=None)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 

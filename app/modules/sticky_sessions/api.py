@@ -9,6 +9,8 @@ from app.dependencies import StickySessionsContext, get_sticky_sessions_context
 from app.modules.sticky_sessions.schemas import (
     StickySessionDeleteResponse,
     StickySessionEntryResponse,
+    StickySessionsDeleteRequest,
+    StickySessionsDeleteResponse,
     StickySessionsListResponse,
     StickySessionsPurgeRequest,
     StickySessionsPurgeResponse,
@@ -56,6 +58,15 @@ async def purge_sticky_sessions(
 ) -> StickySessionsPurgeResponse:
     deleted_count = await context.service.purge_entries()
     return StickySessionsPurgeResponse(deleted_count=deleted_count)
+
+
+@router.post("/delete", response_model=StickySessionsDeleteResponse)
+async def delete_sticky_sessions(
+    payload: StickySessionsDeleteRequest,
+    context: StickySessionsContext = Depends(get_sticky_sessions_context),
+) -> StickySessionsDeleteResponse:
+    deleted_count = await context.service.delete_entries([(entry.key, entry.kind) for entry in payload.sessions])
+    return StickySessionsDeleteResponse(deleted_count=deleted_count)
 
 
 @router.delete("/{kind}/{key:path}", response_model=StickySessionDeleteResponse)

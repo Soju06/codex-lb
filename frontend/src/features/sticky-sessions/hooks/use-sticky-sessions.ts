@@ -3,7 +3,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import {
-  deleteStickySession,
+  deleteStickySessions,
   listStickySessions,
   purgeStickySessions,
 } from "@/features/sticky-sessions/api";
@@ -40,9 +40,13 @@ export function useStickySessions() {
   };
 
   const deleteMutation = useMutation({
-    mutationFn: (target: StickySessionIdentifier) => deleteStickySession(target),
-    onSuccess: () => {
-      toast.success("Sticky session removed");
+    mutationFn: (targets: StickySessionIdentifier[]) => deleteStickySessions({ sessions: targets }),
+    onSuccess: (response) => {
+      toast.success(
+        response.deletedCount === 1
+          ? "Sticky session removed"
+          : `Removed ${response.deletedCount} sticky sessions`,
+      );
       invalidate();
     },
     onError: (error: Error) => {

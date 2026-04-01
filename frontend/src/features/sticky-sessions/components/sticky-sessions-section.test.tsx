@@ -16,7 +16,7 @@ describe("StickySessionsSection", () => {
     vi.clearAllMocks();
   });
 
-  it("renders rows and supports purge and remove actions", async () => {
+  it("renders rows and supports selection, purge, and remove actions", async () => {
     const user = userEvent.setup();
     const deleteMutation = {
       mutateAsync: vi.fn().mockResolvedValue(undefined),
@@ -83,6 +83,26 @@ describe("StickySessionsSection", () => {
     expect(screen.getByText("1")).toBeInTheDocument();
     expect(screen.getByText("1–2 of 2")).toBeInTheDocument();
 
+    await user.click(screen.getByRole("checkbox", { name: "Select all visible sticky sessions" }));
+    expect(screen.getByText("Selected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove selected" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Remove selected" }));
+    await user.click(screen.getByRole("button", { name: "Remove selected" }));
+
+    await waitFor(() => {
+      expect(deleteMutation.mutateAsync).toHaveBeenNthCalledWith(1, [
+        {
+          key: "session-1",
+          kind: "prompt_cache",
+        },
+        {
+          key: "session-2",
+          kind: "codex_session",
+        },
+      ]);
+    });
+
     await user.click(screen.getByRole("button", { name: "Purge stale" }));
     await user.click(screen.getByRole("button", { name: "Purge" }));
 
@@ -94,10 +114,12 @@ describe("StickySessionsSection", () => {
     await user.click(screen.getByRole("button", { name: "Remove" }));
 
     await waitFor(() => {
-      expect(deleteMutation.mutateAsync).toHaveBeenCalledWith({
-        key: "session-1",
-        kind: "prompt_cache",
-      });
+      expect(deleteMutation.mutateAsync).toHaveBeenNthCalledWith(2, [
+        {
+          key: "session-1",
+          kind: "prompt_cache",
+        },
+      ]);
     });
   });
 

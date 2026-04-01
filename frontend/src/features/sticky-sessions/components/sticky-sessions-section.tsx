@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Pin } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -6,6 +6,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { SpinnerBlock } from "@/components/ui/spinner";
 import {
   Table,
@@ -17,7 +18,7 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { useStickySessions } from "@/features/sticky-sessions/hooks/use-sticky-sessions";
-import type { StickySessionIdentifier, StickySessionKind } from "@/features/sticky-sessions/schemas";
+import type { StickySessionEntry, StickySessionIdentifier, StickySessionKind } from "@/features/sticky-sessions/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
@@ -33,10 +34,18 @@ function kindLabel(kind: StickySessionKind): string {
   }
 }
 
+function stickySessionRowId(entry: StickySessionIdentifier): string {
+  return `${entry.kind}:${entry.key}`;
+}
+
+const EMPTY_STICKY_SESSION_ENTRIES: StickySessionEntry[] = [];
+
 export function StickySessionsSection() {
   const { params, setLimit, setOffset, stickySessionsQuery, deleteMutation, purgeMutation } = useStickySessions();
   const deleteDialog = useDialogState<StickySessionIdentifier>();
+  const deleteSelectedDialog = useDialogState<StickySessionIdentifier[]>();
   const purgeDialog = useDialogState();
+  const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
 
   const mutationError = useMemo(
     () =>
@@ -46,13 +55,40 @@ export function StickySessionsSection() {
     [stickySessionsQuery.error, deleteMutation.error, purgeMutation.error],
   );
 
-  const entries = stickySessionsQuery.data?.entries ?? [];
+  const entries = stickySessionsQuery.data?.entries ?? EMPTY_STICKY_SESSION_ENTRIES;
   const staleCount = stickySessionsQuery.data?.stalePromptCacheCount ?? 0;
   const total = stickySessionsQuery.data?.total ?? 0;
   const hasMore = stickySessionsQuery.data?.hasMore ?? false;
   const busy = deleteMutation.isPending || purgeMutation.isPending;
   const hasEntries = entries.length > 0;
   const hasAnyRows = total > 0;
+  const selectedRowIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
+  const selectedEntries = useMemo(
+    () =>
+      entries
+        .filter((entry) => selectedRowIdSet.has(stickySessionRowId(entry)))
+        .map(({ key, kind }) => ({ key, kind })),
+    [entries, selectedRowIdSet],
+  );
+  const selectedCount = selectedEntries.length;
+  const allVisibleSelected = hasEntries && selectedCount === entries.length;
+  const someVisibleSelected = selectedCount > 0 && !allVisibleSelected;
+  const selectedDeleteTargets = deleteSelectedDialog.data ?? [];
+  const selectedDeleteCount = selectedDeleteTargets.length;
+
+  const setSelected = (target: StickySessionIdentifier, checked: boolean) => {
+    const rowId = stickySessionRowId(target);
+    setSelectedRowIds((current) => {
+      if (checked) {
+        return current.includes(rowId) ? current : [...current, rowId];
+      }
+      return current.filter((value) => value !== rowId);
+    });
+  };
+
+  const setAllVisibleSelected = (checked: boolean) => {
+    setSelectedRowIds(checked ? entries.map((entry) => stickySessionRowId(entry)) : []);
+  };
 
   return (
     <section className="space-y-3 rounded-xl border bg-card p-5">
@@ -80,17 +116,35 @@ export function StickySessionsSection() {
             <span className="text-xs text-muted-foreground">Stale prompt-cache</span>
             <span className="text-sm font-medium tabular-nums">{staleCount}</span>
           </div>
+          {selectedCount > 0 ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Selected</span>
+              <span className="text-sm font-medium tabular-nums">{selectedCount}</span>
+            </div>
+          ) : null}
         </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 text-xs"
-          disabled={busy || staleCount === 0}
-          onClick={() => purgeDialog.show()}
-        >
-          Purge stale
-        </Button>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Button
+            type="button"
+            size="sm"
+            variant="destructive"
+            className="h-8 text-xs"
+            disabled={busy || selectedCount === 0}
+            onClick={() => deleteSelectedDialog.show(selectedEntries)}
+          >
+            Remove selected
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs"
+            disabled={busy || staleCount === 0}
+            onClick={() => purgeDialog.show()}
+          >
+            Purge stale
+          </Button>
+        </div>
       </div>
 
       {stickySessionsQuery.isLoading && !stickySessionsQuery.data ? (
@@ -110,7 +164,15 @@ export function StickySessionsSection() {
               <Table className="table-fixed">
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-[30%] min-w-[14rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                    <TableHead className="w-[5%] min-w-[3rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                      <Checkbox
+                        aria-label="Select all visible sticky sessions"
+                        checked={allVisibleSelected ? true : someVisibleSelected ? "indeterminate" : false}
+                        disabled={busy || !hasEntries}
+                        onCheckedChange={(checked) => setAllVisibleSelected(checked === true)}
+                      />
+                    </TableHead>
+                    <TableHead className="w-[25%] min-w-[14rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       Key
                     </TableHead>
                     <TableHead className="w-[14%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
@@ -134,9 +196,18 @@ export function StickySessionsSection() {
                   {entries.map((entry) => {
                     const updated = formatTimeLong(entry.updatedAt);
                     const expires = entry.expiresAt ? formatTimeLong(entry.expiresAt) : null;
+                    const selected = selectedRowIdSet.has(stickySessionRowId(entry));
                     return (
-                      <TableRow key={`${entry.kind}:${entry.key}`}>
-                        <TableCell className="max-w-[18rem] truncate pl-4 font-mono text-xs" title={entry.key}>
+                      <TableRow key={`${entry.kind}:${entry.key}`} data-state={selected ? "selected" : undefined}>
+                        <TableCell className="pl-4">
+                          <Checkbox
+                            aria-label={`Select sticky session ${entry.key}`}
+                            checked={selected}
+                            disabled={busy}
+                            onCheckedChange={(checked) => setSelected(entry, checked === true)}
+                          />
+                        </TableCell>
+                        <TableCell className="max-w-[18rem] truncate font-mono text-xs" title={entry.key}>
                           {entry.key}
                         </TableCell>
                         <TableCell>
@@ -207,8 +278,29 @@ export function StickySessionsSection() {
           if (!deleteDialog.data) {
             return;
           }
-          void deleteMutation.mutateAsync(deleteDialog.data).finally(() => {
+          void deleteMutation.mutateAsync([deleteDialog.data]).finally(() => {
             deleteDialog.hide();
+          });
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleteSelectedDialog.open}
+        title="Remove selected sticky sessions"
+        description={
+          selectedDeleteCount === 1
+            ? "The selected sticky session will stop pinning future requests."
+            : `${selectedDeleteCount} selected sticky sessions will stop pinning future requests.`
+        }
+        confirmLabel="Remove selected"
+        onOpenChange={deleteSelectedDialog.onOpenChange}
+        onConfirm={() => {
+          if (selectedDeleteTargets.length === 0) {
+            return;
+          }
+          void deleteMutation.mutateAsync(selectedDeleteTargets).finally(() => {
+            setSelectedRowIds([]);
+            deleteSelectedDialog.hide();
           });
         }}
       />

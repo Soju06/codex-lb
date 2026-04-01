@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -77,6 +78,9 @@ class StickySessionsService:
 
     async def delete_entry(self, key: str, *, kind: StickySessionKind) -> bool:
         return await self._repository.delete(key, kind=kind)
+
+    async def delete_entries(self, entries: Sequence[tuple[str, StickySessionKind]]) -> int:
+        return await self._repository.delete_entries(entries)
 
     async def purge_entries(self) -> int:
         settings = await self._settings_repository.get_or_create()

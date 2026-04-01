@@ -175,9 +175,13 @@ def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
     state.cooldown_until = time.time() + delay
 
 
+QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
+
+
 def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:
     state.status = AccountStatus.QUOTA_EXCEEDED
     state.used_percent = 100.0
+    state.cooldown_until = time.time() + QUOTA_EXCEEDED_COOLDOWN_SECONDS
 
     reset_at = _extract_reset_at(error)
     if reset_at is not None:

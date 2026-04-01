@@ -255,11 +255,12 @@ def test_apply_usage_quota_sets_fallback_reset_for_primary_window(monkeypatch):
     assert reset_at == pytest.approx(now + 60.0)
 
 
-def test_handle_quota_exceeded_sets_used_percent():
+def test_handle_quota_exceeded_sets_used_percent_and_cooldown():
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_quota_exceeded(state, {})
     assert state.status == AccountStatus.QUOTA_EXCEEDED
     assert state.used_percent == 100.0
+    assert state.cooldown_until is not None
 
 
 def test_handle_permanent_failure_sets_reason():
@@ -363,6 +364,31 @@ def test_apply_usage_quota_resets_rate_limited_on_early_upstream_reset(monkeypat
     assert status == AccountStatus.ACTIVE
     assert used_percent == 10.0
     assert reset_at is None
+
+
+def test_quota_exceeded_cooldown_blocks_selection_despite_low_usage():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        cooldown_until=now + 120.0,
+    )
+    result = select_account([state], now=now)
+    assert result.account is None
+
+
+def test_quota_exceeded_cooldown_allows_selection_after_expiry():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        cooldown_until=now - 1.0,
+    )
+    result = select_account([state], now=now)
+    assert result.account is not None
+    assert result.account.account_id == "a"
 
 
 def test_error_backoff_resets_error_count_when_expired():

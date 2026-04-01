@@ -939,6 +939,14 @@ def _state_from_account(
     db_reset_at = float(account.reset_at) if account.reset_at else None
     effective_runtime_reset = db_reset_at or runtime.reset_at
 
+    # When the quota-exceeded cooldown has expired, the usage refresher has
+    # had enough cycles to fetch current data.  Clear the runtime reset
+    # guard so apply_usage_quota trusts the now-fresh usage percentages.
+    # On process restart (cooldown_until is None) the guard is preserved,
+    # keeping the account blocked until the persisted reset_at expires.
+    if runtime.cooldown_until is not None and runtime.cooldown_until <= time.time():
+        effective_runtime_reset = None
+
     status, used_percent, reset_at = apply_usage_quota(
         status=account.status,
         primary_used=primary_used,

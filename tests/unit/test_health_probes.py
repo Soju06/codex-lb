@@ -229,3 +229,38 @@ async def test_health_ready_allows_empty_bridge_ring_while_instance_registers():
         response = await health_ready()
 
     assert response.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_health_ready_fails_when_bridge_ring_lookup_errors():
+    from app.modules.health.api import health_ready
+    from app.modules.health.schemas import BridgeRingInfo
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock()
+
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api.get_settings") as mock_get_settings,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock()) as mock_bridge_ring,
+    ):
+        mock_get_settings.return_value = MagicMock(http_responses_session_bridge_enabled=True)
+        mock_bridge_ring.return_value = BridgeRingInfo(
+            ring_fingerprint=None,
+            ring_size=0,
+            instance_id="pod-a",
+            is_member=False,
+            error="unavailable: ProgrammingError",
+        )
+
+        async def mock_get_session_context():
+            yield mock_session
+
+        mock_get_session.return_value = mock_get_session_context()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await health_ready()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Service bridge ring metadata is unavailable"

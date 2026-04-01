@@ -92,7 +92,7 @@ async def test_in_flight_middleware_increments_and_decrements() -> None:
 
 
 @pytest.mark.asyncio
-async def test_in_flight_middleware_tracks_websocket() -> None:
+async def test_in_flight_middleware_skips_websocket_connections() -> None:
     in_flight_during_ws: int | None = None
 
     async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
@@ -111,7 +111,7 @@ async def test_in_flight_middleware_tracks_websocket() -> None:
 
     await middleware(scope, ws_receive, ws_send)
 
-    assert in_flight_during_ws == 1
+    assert in_flight_during_ws == 0
     assert shutdown_state.get_in_flight() == 0
 
 

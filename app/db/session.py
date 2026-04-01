@@ -254,10 +254,6 @@ async def init_db() -> None:
                     )
                 raise RuntimeError(message)
 
-    if not _settings.database_migrate_on_startup:
-        logger.info("Startup database migration is disabled")
-        return
-
     try:
         inspect_migration_state, run_startup_migrations, check_schema_drift = _load_migration_entrypoints()
     except ModuleNotFoundError as exc:
@@ -268,6 +264,23 @@ async def init_db() -> None:
     except ImportError as exc:
         logger.exception("Failed to import database migration entrypoints from app.db.migrate")
         raise RuntimeError("Database migration entrypoint app.db.migrate is invalid") from exc
+
+    if not _settings.database_migrate_on_startup:
+        migration_state = await to_thread.run_sync(
+            lambda: inspect_migration_state(_settings.database_url),
+        )
+        if migration_state.needs_upgrade:
+            current_revision = migration_state.current_revision or "none"
+            message = (
+                "Startup database migration is disabled but database schema is behind Alembic head "
+                f"(current={current_revision}, head={migration_state.head_revision}). "
+                "Run the dedicated migration job or `python -m app.db.migrate upgrade` before starting the app."
+            )
+            logger.error(message)
+            raise RuntimeError(message)
+
+        logger.info("Startup database migration is disabled and database schema is current")
+        return
 
     if sqlite_path is not None and _settings.database_sqlite_pre_migrate_backup_enabled and sqlite_path.exists():
         migration_state = await to_thread.run_sync(

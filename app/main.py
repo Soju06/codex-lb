@@ -71,7 +71,9 @@ class InFlightMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] not in ("http", "websocket"):
+        # Graceful drain waits for finite HTTP request lifetimes only. Long-lived
+        # websocket sessions are handled independently and must not pin drain.
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 

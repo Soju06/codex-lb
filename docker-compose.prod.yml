@@ -18,7 +18,7 @@ services:
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:2455/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:2455/health/ready')"]
       interval: 30s
       timeout: 5s
       retries: 3

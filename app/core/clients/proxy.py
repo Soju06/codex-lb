@@ -1074,8 +1074,6 @@ async def _open_upstream_websocket(
             compress=0,
             client_notakeover=False,
         )
-        if circuit_breaker is not None and not _cb_recorded:
-            await circuit_breaker._record_success()
         return websocket, websocket
     finally:
         if is_probe and circuit_breaker is not None:
@@ -1159,6 +1157,27 @@ async def _stream_responses_via_websocket(
     request_payload = _build_websocket_response_create_payload(payload_dict)
     websocket_cm: AsyncContextManager[aiohttp.ClientWebSocketResponse] | None = None
     websocket: aiohttp.ClientWebSocketResponse | None = None
+    circuit_breaker = None
+    lifecycle_recorded = False
+    seen_terminal = False
+    settings = get_settings()
+    if account_id is not None:
+        circuit_breaker = get_circuit_breaker_for_account(account_id, settings)
+
+    async def _record_lifecycle_success() -> None:
+        nonlocal lifecycle_recorded
+        if circuit_breaker is None or lifecycle_recorded:
+            return
+        await circuit_breaker._record_success()
+        lifecycle_recorded = True
+
+    async def _record_lifecycle_failure(exc: Exception) -> None:
+        nonlocal lifecycle_recorded
+        if circuit_breaker is None or lifecycle_recorded:
+            return
+        await circuit_breaker._record_failure(exc)
+        lifecycle_recorded = True
+
     connect_timeout_seconds = min(
         effective_connect_timeout,
         _remaining_total_timeout(effective_total_timeout, request_started_at, time.monotonic())
@@ -1201,7 +1220,16 @@ async def _stream_responses_via_websocket(
             total_timeout_seconds=remaining_total_timeout,
             max_event_bytes=max_event_bytes,
         ):
+            parsed_event = parse_sse_event(event)
+            if parsed_event and parsed_event.type in ("response.completed", "response.failed", "response.incomplete"):
+                seen_terminal = True
+                await _record_lifecycle_success()
             yield event
+        if not seen_terminal:
+            await _record_lifecycle_failure(aiohttp.ClientError("Upstream websocket closed without terminal event"))
+    except Exception as exc:
+        await _record_lifecycle_failure(exc)
+        raise
     finally:
         if websocket_cm is not None:
             await websocket_cm.__aexit__(None, None, None)

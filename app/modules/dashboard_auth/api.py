@@ -108,6 +108,10 @@ async def login_password(
     payload: PasswordLoginRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> DashboardAuthSessionResponse | JSONResponse:
+    settings = await get_settings_cache().get()
+    if settings.password_hash is None:
+        raise DashboardBadRequestError("Password is not configured", code="password_not_configured")
+
     limiter = get_password_rate_limiter()
     rate_key = _session_client_key(request, prefix="password_login")
     try:
@@ -126,6 +130,7 @@ async def login_password(
     except InvalidCredentialsError as exc:
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
     except PasswordNotConfiguredError as exc:
+        await limiter.clear_for_key(rate_key, context.session)
         raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
 
     await limiter.clear_for_key(rate_key, context.session)

@@ -1828,7 +1828,129 @@ async def test_open_upstream_websocket_records_circuit_breaker_success_after_val
 
     assert websocket_cm == websocket
     assert cb.failures == []
-    assert cb.successes == 1
+    assert cb.successes == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_records_circuit_breaker_success_after_terminal_event(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+        circuit_breaker_enabled = True
+
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    websocket = _WsResponse(
+        [
+            _WsMessage(
+                proxy_module.aiohttp.WSMsgType.TEXT,
+                json.dumps({"type": "response.completed", "response": {"id": "resp_ws"}}),
+            )
+        ]
+    )
+    breaker = _CircuitBreakerStub()
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    async def fake_open_upstream_websocket(**kwargs):
+        del kwargs
+        return websocket, websocket
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: breaker)
+    monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    _ = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _WsSession(websocket)),
+        )
+    ]
+
+    assert breaker.successes == 1
+    assert breaker.failures == []
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_records_circuit_breaker_failure_when_stream_closes_without_terminal(
+    monkeypatch,
+):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+        circuit_breaker_enabled = True
+
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    websocket = _WsResponse([])
+    breaker = _CircuitBreakerStub()
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    async def fake_open_upstream_websocket(**kwargs):
+        del kwargs
+        return websocket, websocket
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: breaker)
+    monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _WsSession(websocket)),
+        )
+    ]
+
+    assert breaker.successes == 0
+    assert len(breaker.failures) == 1
+    assert any("stream_incomplete" in event for event in events)
 
 
 @pytest.mark.asyncio

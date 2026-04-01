@@ -133,3 +133,31 @@ async def test_password_login_rate_limit(async_client):
         json={"password": "password123"},
     )
     assert success.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_password_not_configured_requests_do_not_spend_login_budget(async_client):
+    await _clear_password_rate_limit_attempts()
+
+    for _ in range(8):
+        response = await async_client.post(
+            "/api/dashboard-auth/password/login",
+            json={"password": "wrong-password"},
+        )
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "password_not_configured"
+
+    setup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup.status_code == 200
+
+    logout = await async_client.post("/api/dashboard-auth/logout", json={})
+    assert logout.status_code == 200
+
+    login = await async_client.post(
+        "/api/dashboard-auth/password/login",
+        json={"password": "password123"},
+    )
+    assert login.status_code == 200

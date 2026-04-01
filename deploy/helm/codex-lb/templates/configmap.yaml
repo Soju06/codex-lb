@@ -1,4 +1,3 @@
-{{- $startupMigrateOnInstall := and .Release.IsInstall .Values.externalSecrets.enabled .Values.migration.enabled -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,7 +11,7 @@ metadata:
   {{- end }}
 data:
   # Database
-  CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: {{ or .Values.config.databaseMigrateOnStartup $startupMigrateOnInstall | toString | quote }}
+  CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: {{ .Values.config.databaseMigrateOnStartup | toString | quote }}
   CODEX_LB_DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | toString | quote }}
   CODEX_LB_DATABASE_MAX_OVERFLOW: {{ .Values.config.databaseMaxOverflow | toString | quote }}
   # Upstream

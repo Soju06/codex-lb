@@ -1,8 +1,4 @@
 {{- if .Values.migration.enabled }}
-{{- $migrationHook := "pre-install,pre-upgrade" -}}
-{{- if .Values.externalSecrets.enabled -}}
-{{- $migrationHook = "pre-upgrade" -}}
-{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -11,7 +7,7 @@ metadata:
   labels:
     {{- include "codex-lb.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": {{ $migrationHook | quote }}
+    "helm.sh/hook": "post-install,pre-upgrade"
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-failed
     {{- with .Values.commonAnnotations }}

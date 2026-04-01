@@ -159,6 +159,12 @@ externalSecrets:
     kind: SecretStore
   # @param externalSecrets.refreshInterval How often to refresh the secret
   refreshInterval: 1h
+rollout:
+  reloader:
+    # @param rollout.reloader.enabled Add Stakater Reloader annotations so pod restarts follow Secret/ConfigMap updates
+    enabled: false
+  # @param rollout.manualToken Optional operator-managed token to force a rollout when externally managed Secret contents change
+  manualToken: ""
 
 # @section Availability parameters
 pdb:

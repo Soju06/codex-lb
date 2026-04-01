@@ -102,6 +102,18 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "rollout": {
+      "type": "object",
+      "properties": {
+        "manualToken": { "type": "string" },
+        "reloader": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
     "global": {
       "type": "object"
     },

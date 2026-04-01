@@ -54,8 +54,9 @@ async def health_ready() -> HealthCheckResponse:
                 # pod eviction after transient upstream failures.
 
                 bridge_ring = await _get_bridge_ring_info(session)
-                if _bridge_readiness_requires_active_membership(bridge_ring):
-                    raise HTTPException(status_code=503, detail="Service is not an active bridge ring member")
+                failure_detail = _bridge_readiness_failure_detail(bridge_ring)
+                if failure_detail is not None:
+                    raise HTTPException(status_code=503, detail=failure_detail)
 
                 return HealthCheckResponse(status=status, checks=checks, bridge_ring=bridge_ring)
             except HTTPException:
@@ -76,15 +77,17 @@ async def health_ready() -> HealthCheckResponse:
     raise HTTPException(status_code=503, detail="Service unavailable")
 
 
-def _bridge_readiness_requires_active_membership(bridge_ring: BridgeRingInfo) -> bool:
+def _bridge_readiness_failure_detail(bridge_ring: BridgeRingInfo) -> str | None:
     settings = get_settings()
     if not getattr(settings, "http_responses_session_bridge_enabled", True):
-        return False
+        return None
     if bridge_ring.error is not None:
-        return False
+        return "Service bridge ring metadata is unavailable"
     if bridge_ring.ring_size == 0:
-        return False
-    return not bridge_ring.is_member
+        return None
+    if bridge_ring.is_member:
+        return None
+    return "Service is not an active bridge ring member"
 
 
 async def _get_bridge_ring_info(session: AsyncSession) -> BridgeRingInfo:

@@ -31,10 +31,26 @@ spec:
         {{- with .Values.commonLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.commonAnnotations }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.externalSecrets.enabled }}
+        checksum/external-secret: {{ include (print $.Template.BasePath "/externalsecret.yaml") . | sha256sum }}
+        {{- else if not .Values.auth.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- else }}
+        checksum/secret-ref: {{ printf "%s:%s:%s" (include "codex-lb.secretName" .) .Values.auth.secretKeys.databaseUrl .Values.auth.secretKeys.encryptionKey | sha256sum }}
+        {{- end }}
+        {{- if .Values.rollout.reloader.enabled }}
+        reloader.stakater.com/auto: "true"
+        configmap.reloader.stakater.com/reload: {{ include "codex-lb.fullname" . | quote }}
+        secret.reloader.stakater.com/reload: {{ include "codex-lb.secretName" . | quote }}
+        {{- end }}
+        {{- if .Values.rollout.manualToken }}
+        rollout-token: {{ .Values.rollout.manualToken | quote }}
+        {{- end }}
+        {{- with .Values.commonAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "codex-lb.serviceAccountName" . }}
       automountServiceAccountToken: false

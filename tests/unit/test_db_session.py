@@ -245,6 +245,21 @@ async def test_init_db_uses_quick_check_by_default(monkeypatch, tmp_path) -> Non
         ),
     )
     monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            lambda _: _FakeMigrationState(
+                current_revision="head",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=False,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations should stay disabled")),
+            lambda _: (),
+        ),
+    )
 
     await session_module.init_db()
 
@@ -272,6 +287,21 @@ async def test_init_db_uses_full_check_when_configured(monkeypatch, tmp_path) ->
         ),
     )
     monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            lambda _: _FakeMigrationState(
+                current_revision="head",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=False,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations should stay disabled")),
+            lambda _: (),
+        ),
+    )
 
     await session_module.init_db()
 
@@ -296,8 +326,56 @@ async def test_init_db_skips_sqlite_check_when_disabled(monkeypatch, tmp_path) -
         ),
     )
     monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            lambda _: _FakeMigrationState(
+                current_revision="head",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=False,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations should stay disabled")),
+            lambda _: (),
+        ),
+    )
 
     await session_module.init_db()
+
+
+@pytest.mark.asyncio
+async def test_init_db_fails_when_startup_migrations_are_disabled_but_schema_is_behind(monkeypatch) -> None:
+    def _inspect_migration_state(_: str) -> _FakeMigrationState:
+        return _FakeMigrationState(
+            current_revision="20260330_020000_add_bridge_ring_members",
+            head_revision="20260401_000000_add_cache_invalidation",
+            has_alembic_version_table=True,
+            has_legacy_migrations_table=False,
+            needs_upgrade=True,
+        )
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            _inspect_migration_state,
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations should stay disabled")),
+            lambda _: (),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="database schema is behind Alembic head"):
+        await session_module.init_db()
 
 
 @pytest.mark.asyncio

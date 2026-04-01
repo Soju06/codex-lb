@@ -113,6 +113,21 @@ This chart enforces the Kubernetes **Restricted** Pod Security Standard:
 - ExternalSecrets Operator: set `externalSecrets.enabled: true` with `secretStoreRef`
 - Bring-your-own: set `auth.existingSecret: my-secret`
 
+**Rollout on external secret changes:**
+
+- Chart-managed ConfigMap/Secret changes already trigger rollout checksums on `helm upgrade`
+- If Secret data changes outside Helm, enable `rollout.reloader.enabled: true` when you run [Stakater Reloader](https://github.com/stakater/Reloader)
+- If you do not use a reloader controller, bump `rollout.manualToken` to force a Deployment rollout after rotating an external Secret
+
+Example:
+
+```yaml
+rollout:
+  reloader:
+    enabled: true
+  manualToken: ""
+```
+
 Generate an encryption key:
 
 ```bash
@@ -179,6 +194,8 @@ helm upgrade codex-lb deploy/helm/codex-lb/ -f values-prod.yaml
 The migration Job runs `python -m app.db.migrate upgrade` before the new pods start. If the migration fails (up to 3 retries), the upgrade is halted and the failed Job is preserved for debugging.
 
 Rolling updates use `maxSurge: 1, maxUnavailable: 0`, so new pods must pass health checks before old pods are terminated.
+
+For externally managed Secret rotations, either rely on `rollout.reloader.enabled` or change `rollout.manualToken` during `helm upgrade` so the Deployment template changes and Kubernetes creates a new ReplicaSet.
 
 ## Uninstalling
 

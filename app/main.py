@@ -97,8 +97,7 @@ async def lifespan(app: FastAPI):
     instance_id = None
 
     startup_module._startup_complete = False
-    shutdown_state.set_draining(False)
-    shutdown_state.set_bridge_drain_active(False)
+    shutdown_state.reset()
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
@@ -267,6 +266,7 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Metrics server stopped with an error")
             finally:
+                shutdown_state.reset()
                 mark_process_dead()
                 await close_db()
 

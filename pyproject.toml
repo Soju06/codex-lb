@@ -76,6 +76,7 @@ dev = [
     "ruff>=0.14.13",
     "ty>=0.0.12",
     "openai>=2.16.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.pytest.ini_options]

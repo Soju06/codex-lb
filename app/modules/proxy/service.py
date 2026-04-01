@@ -109,6 +109,24 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
+_TASK_CANCEL_TIMEOUT_SECONDS = 1.0
+
+
+async def _await_cancelled_task(
+    task: asyncio.Task[object] | asyncio.Task[None],
+    *,
+    timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
+    label: str,
+) -> None:
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        pass
+    except TimeoutError:
+        logger.warning("Timed out waiting for %s cancellation", label)
+
+
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -1007,11 +1025,7 @@ class ProxyService:
                         response_create_gate=response_create_gate,
                     )
                     if upstream_reader is not None:
-                        upstream_reader.cancel()
-                        try:
-                            await upstream_reader
-                        except asyncio.CancelledError:
-                            pass
+                        await _await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
                         upstream_reader = None
                     upstream_control = None
                     if upstream is not None:
@@ -1024,11 +1038,7 @@ class ProxyService:
                     continue
         finally:
             if upstream_reader is not None:
-                upstream_reader.cancel()
-                try:
-                    await upstream_reader
-                except asyncio.CancelledError:
-                    pass
+                await _await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
             if upstream is not None:
                 try:
                     await upstream.close()
@@ -1780,11 +1790,7 @@ class ProxyService:
         else:
             await self._unregister_http_bridge_turn_states(session)
         if session.upstream_reader is not None:
-            session.upstream_reader.cancel()
-            try:
-                await session.upstream_reader
-            except asyncio.CancelledError:
-                pass
+            await _await_cancelled_task(session.upstream_reader, label="http bridge upstream reader")
         try:
             await session.upstream.close()
         except Exception:
@@ -2319,12 +2325,8 @@ class ProxyService:
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         if old_reader is not None:
-            old_reader.cancel()
             if old_reader is not asyncio.current_task():
-                try:
-                    await old_reader
-                except asyncio.CancelledError:
-                    pass
+                await _await_cancelled_task(old_reader, label="http bridge upstream reader")
         try:
             await old_upstream.close()
         except Exception:

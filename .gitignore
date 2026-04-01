@@ -47,6 +47,9 @@ certs/
 .specstory/
 
 .agents/hooks/state/
+.agents/.personality_migration
+.agents/version.json
+.agents/log/
 .venv
 
 .omx/

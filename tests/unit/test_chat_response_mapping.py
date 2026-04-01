@@ -88,6 +88,16 @@ def test_tool_call_delta_is_emitted():
     assert delta["id"] == "call_1"
     assert delta["type"] == "function"
     assert delta["function"]["name"] == "do_thing"
+    collected_arguments = "".join(
+        (
+            (
+                (((chunk["choices"][0]["delta"].get("tool_calls") or [{}])[0]).get("function") or {}).get("arguments")
+                or ""
+            )
+            for chunk in tool_chunks
+        )
+    )
+    assert collected_arguments == '{"a":1}'
     done_chunks = [
         json.loads(chunk[5:].strip()) for chunk in chunks if chunk.startswith("data: ") and '"finish_reason"' in chunk
     ]
@@ -136,9 +146,111 @@ async def test_stream_chat_chunks_preserves_tool_call_state():
         tool_calls = delta.get("tool_calls")
         if tool_calls:
             indices.extend([tool_call["index"] for tool_call in tool_calls])
-    assert indices == [0, 1]
+    assert indices[:2] == [0, 1]
+    assert set(indices) == {0, 1}
     done_chunks = [chunk for chunk in parsed_chunks if chunk["choices"][0].get("finish_reason") is not None]
     assert done_chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_chunks_does_not_duplicate_tool_call_snapshots():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    chunks = [
+        json.loads(chunk[5:].strip())
+        for chunk in [c async for c in stream_chat_chunks(_stream(), model="gpt-5.2")]
+        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+    ]
+
+    collected_arguments = ""
+    for chunk in chunks:
+        tool_calls = chunk["choices"][0]["delta"].get("tool_calls")
+        if not tool_calls:
+            continue
+        function = tool_calls[0].get("function") or {}
+        arguments = function.get("arguments")
+        if arguments:
+            collected_arguments += arguments
+
+    assert collected_arguments == '{"city":"Zurich","unit":"C"}'
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_chunks_skips_incompatible_snapshot_rewrites():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\": \\"Zurich\\", \\"unit\\": \\"C\\"}"}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    chunks = [
+        json.loads(chunk[5:].strip())
+        for chunk in [c async for c in stream_chat_chunks(_stream(), model="gpt-5.2")]
+        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+    ]
+
+    collected_arguments = ""
+    for chunk in chunks:
+        tool_calls = chunk["choices"][0]["delta"].get("tool_calls")
+        if not tool_calls:
+            continue
+        function = tool_calls[0].get("function") or {}
+        arguments = function.get("arguments")
+        if arguments:
+            collected_arguments += arguments
+
+    assert collected_arguments == '{"city":"Zur'
+
+
+def test_tool_call_delta_is_preserved_before_response_failed():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"do_thing","arguments":"{\\"a\\":1"}\n\n'
+        ),
+        (
+            'data: {"type":"response.failed","response":{"id":"r1","status":"failed","error":'
+            '{"message":"bad","type":"server_error","code":"no_accounts"}}}\n\n'
+        ),
+    ]
+
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+    tool_chunks = [
+        json.loads(chunk[5:].strip()) for chunk in chunks if chunk.startswith("data: ") and "tool_calls" in chunk
+    ]
+    assert tool_chunks
+    arguments = (tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0].get("function") or {}).get("arguments")
+    assert arguments == '{"a":1'
+    assert any('"error"' in chunk for chunk in chunks)
+    assert chunks[-1].strip() == "data: [DONE]"
 
 
 @pytest.mark.asyncio
@@ -219,6 +331,60 @@ async def test_collect_completion_merges_tool_call_arguments():
     function = tool_call.function
     assert function is not None
     assert function.arguments == '{"a":1}'
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_prefers_final_tool_call_snapshot_without_duplication():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    function = tool_calls[0].function
+    assert function is not None
+    assert function.arguments == '{"city":"Zurich","unit":"C"}'
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_uses_snapshot_only_tool_call_arguments():
+    lines = [
+        (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    function = tool_calls[0].function
+    assert function is not None
+    assert function.arguments == '{"city":"Zurich","unit":"C"}'
 
 
 @pytest.mark.asyncio

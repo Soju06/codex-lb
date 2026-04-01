@@ -1,0 +1,3 @@
+- [x] Add regression tests covering mixed tool-call delta and snapshot events for chat-completions adapters.
+- [x] Update the chat response adapter to avoid duplicating finalized tool-call arguments.
+- [x] Document the `/v1/chat/completions` tool-call argument contract in the Responses compatibility spec.

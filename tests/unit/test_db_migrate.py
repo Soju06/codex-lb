@@ -26,6 +26,7 @@ from app.db.migrate import (
     check_schema_drift,
     inspect_migration_state,
     run_upgrade,
+    wait_for_connection,
     wait_for_head,
 )
 from app.db.migration_url import to_sync_database_url
@@ -146,6 +147,44 @@ def test_wait_for_head_times_out_when_schema_never_reaches_head(monkeypatch) -> 
 
     with pytest.raises(TimeoutError, match="Timed out waiting for database schema to reach Alembic head"):
         wait_for_head("sqlite+aiosqlite:///tmp/test.db", timeout_seconds=2.0, interval_seconds=1.0)
+
+
+def test_wait_for_connection_returns_once_database_is_reachable(monkeypatch) -> None:
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+
+    class _FakeContext:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def _sync_connection(_: str):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("db not ready")
+        return _FakeContext()
+
+    monkeypatch.setattr(migrate_module, "_sync_connection", _sync_connection)
+    monkeypatch.setattr(migrate_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monotonic_values = iter([0.0, 0.5])
+    monkeypatch.setattr(migrate_module.time, "monotonic", lambda: next(monotonic_values, 0.5))
+
+    wait_for_connection("sqlite+aiosqlite:///tmp/test.db", timeout_seconds=5.0, interval_seconds=1.0)
+
+    assert attempts["count"] == 2
+    assert sleep_calls == [1.0]
+
+
+def test_wait_for_connection_times_out_when_database_stays_unreachable(monkeypatch) -> None:
+    monkeypatch.setattr(migrate_module, "_sync_connection", lambda _: (_ for _ in ()).throw(RuntimeError("db down")))
+    monkeypatch.setattr(migrate_module.time, "sleep", lambda _seconds: None)
+    monotonic_values = iter([0.0, 1.0, 2.1])
+    monkeypatch.setattr(migrate_module.time, "monotonic", lambda: next(monotonic_values, 2.1))
+
+    with pytest.raises(TimeoutError, match="Timed out waiting for database connectivity"):
+        wait_for_connection("sqlite+aiosqlite:///tmp/test.db", timeout_seconds=2.0, interval_seconds=1.0)
 
 
 def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None:

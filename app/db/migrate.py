@@ -603,6 +603,37 @@ def stamp_revision(database_url: str, revision: str) -> None:
     command.stamp(config, revision)
 
 
+def wait_for_connection(
+    database_url: str,
+    *,
+    timeout_seconds: float,
+    interval_seconds: float = 2.0,
+) -> None:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than 0")
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be greater than 0")
+
+    started_at = time.monotonic()
+    last_error: Exception | None = None
+    sync_database_url = to_sync_database_url(database_url)
+
+    while True:
+        try:
+            with _sync_connection(sync_database_url):
+                return
+        except Exception as exc:
+            last_error = exc
+        elapsed = time.monotonic() - started_at
+        if elapsed >= timeout_seconds:
+            if last_error is not None:
+                raise TimeoutError(
+                    f"Timed out waiting for database connectivity after {timeout_seconds:.1f}s: {last_error}"
+                ) from last_error
+            raise TimeoutError(f"Timed out waiting for database connectivity after {timeout_seconds:.1f}s")
+        time.sleep(min(interval_seconds, timeout_seconds - elapsed))
+
+
 def wait_for_head(
     database_url: str,
     *,
@@ -681,6 +712,23 @@ def _parse_args() -> argparse.Namespace:
         help="Polling interval in seconds while waiting for the schema to reach Alembic head.",
     )
 
+    connect_parser = subparsers.add_parser(
+        "wait-for-connection",
+        help="Wait until the database accepts connections without applying migrations locally.",
+    )
+    connect_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=300.0,
+        help="Maximum seconds to wait for database connectivity.",
+    )
+    connect_parser.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=2.0,
+        help="Polling interval in seconds while waiting for database connectivity.",
+    )
+
     stamp_parser = subparsers.add_parser("stamp", help="Set current revision without running migrations.")
     stamp_parser.add_argument("revision")
 
@@ -738,6 +786,15 @@ def main() -> None:
         )
         print(f"current_revision={state.current_revision or 'none'}")
         print(f"head_revision={state.head_revision}")
+        return
+
+    if args.command == "wait-for-connection":
+        wait_for_connection(
+            database_url,
+            timeout_seconds=args.timeout_seconds,
+            interval_seconds=args.interval_seconds,
+        )
+        print("database_connection=ready")
         return
 
     raise RuntimeError(f"unsupported command: {args.command}")

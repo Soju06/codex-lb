@@ -27,8 +27,9 @@ Use the bundled Bitnami PostgreSQL sub-chart. This is the easiest self-contained
 Key properties:
 
 - `postgresql.enabled=true`
-- migration Job runs as a hook
-- application pods include a schema gate initContainer and do not start the main container until Alembic head is visible
+- `values-bundled.yaml` enables `databaseMigrateOnStartup=true`
+- the migration Job is reserved for upgrades (`pre-upgrade`)
+- fresh installs stay self-contained and single-replica friendly
 
 Example:
 
@@ -134,15 +135,16 @@ The mode overlays define the installation contract. The environment overlays tun
 
 ## Schema and Migration Behavior
 
-This chart intentionally uses a **single migration writer**.
+This chart intentionally keeps migration behavior explicit by install mode.
 
-- When startup migrations are disabled in the app pods, the chart relies on the dedicated migration Job to advance schema.
+- In external DB and external secrets modes, the chart relies on the dedicated migration Job to advance schema.
 - Application pods use a schema gate initContainer when `migration.enabled=true`, `config.databaseMigrateOnStartup=false`, and `migration.schemaGate.enabled=true`.
 - That initContainer runs `python -m app.db.migrate wait-for-head` and blocks the app container until the database is at Alembic head.
+- In bundled mode, `values-bundled.yaml` enables startup migration instead of the schema gate so fresh self-contained installs do not deadlock on `helm install --wait`.
 
 This means:
 
-- bundled PostgreSQL installs do not need app pods to race migrations
+- bundled PostgreSQL installs bootstrap themselves without requiring a separate install-time migration writer
 - external DB installs with direct credentials can migrate before Deployment creation
 - external secrets installs fail closed instead of serving on a stale schema
 
@@ -240,8 +242,9 @@ gatewayApi:
 helm upgrade codex-lb deploy/helm/codex-lb/ <your values...>
 ```
 
-- The migration Job stays the only automatic schema writer.
-- App pods wait for Alembic head before the main container starts when the schema gate is enabled.
+- External DB installs can migrate before Deployment creation.
+- External secrets installs keep the dedicated migration Job and fail closed behind the schema gate.
+- Bundled installs stay easy to bootstrap and keep the migration hook for upgrades.
 - Deployment checksums force rollouts when chart-managed ConfigMaps or Secrets change.
 
 ## Validation

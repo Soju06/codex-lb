@@ -72,7 +72,7 @@ def test_chart_managed_secret_keeps_pre_install_hook_path() -> None:
     )
 
     assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
-    assert '"helm.sh/hook": "post-install,pre-upgrade"' in rendered
+    assert '"helm.sh/hook": "pre-upgrade"' in rendered
     assert "serviceAccountName: default" in rendered
 
 
@@ -85,7 +85,7 @@ def test_existing_secret_install_keeps_pre_install_hook_path() -> None:
     )
 
     assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
-    assert '"helm.sh/hook": "post-install,pre-upgrade"' in rendered
+    assert '"helm.sh/hook": "pre-upgrade"' in rendered
     assert "serviceAccountName: default" in rendered
 
 
@@ -103,18 +103,19 @@ def test_direct_external_database_install_uses_pre_install_hook_path() -> None:
     assert "serviceAccountName: default" in rendered
 
 
-def test_bundled_mode_overlay_renders_schema_gate_init_container() -> None:
+def test_bundled_mode_overlay_enables_startup_migration_and_skips_schema_gate() -> None:
     rendered = _helm_template(
         "-f",
         str(_CHART_DIR / "values-bundled.yaml"),
-        "--show-only",
-        "templates/deployment.yaml",
         "--set",
         "postgresql.auth.password=local-password",
     )
 
-    assert "name: wait-for-schema-head" in rendered
-    assert "wait-for-head" in rendered
+    assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"' in rendered
+    assert "name: wait-for-schema-head" not in rendered
+    assert "name: wait-for-database" in rendered
+    assert "wait-for-connection" in rendered
+    assert '"helm.sh/hook": "pre-upgrade"' in rendered
 
 
 def test_external_db_mode_overlay_renders_schema_gate_init_container() -> None:

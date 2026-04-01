@@ -1207,8 +1207,10 @@ async def test_select_account_retries_after_post_persist_quota_exceeded(monkeypa
 
     selection = await balancer.select_account()
 
-    assert account.status == AccountStatus.QUOTA_EXCEEDED
-    assert selection.account is None
+    # Usage data shows 10% — apply_usage_quota trusts actual usage over the
+    # stale runtime_reset timer and reverts the account to ACTIVE on retry.
+    assert account.status == AccountStatus.ACTIVE
+    assert selection.account is not None
 
 
 @pytest.mark.asyncio

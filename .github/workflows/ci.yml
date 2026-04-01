@@ -376,15 +376,13 @@ jobs:
       - name: Helm lint (base values)
         run: |
           helm lint --strict deploy/helm/codex-lb/ \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ==
+            --set postgresql.auth.password=test-password
 
       - name: Helm lint (dev overlay)
         run: |
           helm lint --strict deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-dev.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ==
+            --set postgresql.auth.password=test-password
 
       - name: Helm lint (bundled mode)
         run: |
@@ -408,29 +406,25 @@ jobs:
         run: |
           helm lint --strict deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-staging.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ==
+            --set externalDatabase.url=postgresql+asyncpg://test:test@localhost/test
 
       - name: Helm lint (prod overlay)
         run: |
           helm lint --strict deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-prod.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ==
+            --set externalSecrets.secretStoreRef.name=test-store
 
       - name: Helm template (base values)
         run: |
           helm template codex-lb deploy/helm/codex-lb/ \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ== \
+            --set postgresql.auth.password=test-password \
             > /dev/null
 
       - name: Helm template (dev overlay)
         run: |
           helm template codex-lb deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-dev.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ== \
+            --set postgresql.auth.password=test-password \
             > /dev/null
 
       - name: Helm template (bundled mode)
@@ -458,16 +452,14 @@ jobs:
         run: |
           helm template codex-lb deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-staging.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ== \
+            --set externalDatabase.url=postgresql+asyncpg://test:test@localhost/test \
             > /dev/null
 
       - name: Helm template (prod overlay)
         run: |
           helm template codex-lb deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-prod.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ== \
+            --set externalSecrets.secretStoreRef.name=test-store \
             > /dev/null
 
       - name: Install kubeconform

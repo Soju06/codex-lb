@@ -3,9 +3,21 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError
 
 pytestmark = pytest.mark.unit
+
+
+def _bridge_ring_ok():
+    from app.modules.health.schemas import BridgeRingInfo
+
+    return BridgeRingInfo(
+        ring_fingerprint="abc",
+        ring_size=0,
+        instance_id="pod-a",
+        is_member=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -44,7 +56,11 @@ async def test_health_ready_db_ok():
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock()
 
-    with patch("app.modules.health.api.get_session") as mock_get_session:
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock(return_value=_bridge_ring_ok())),
+    ):
 
         async def mock_get_session_context():
             yield mock_session
@@ -58,8 +74,6 @@ async def test_health_ready_db_ok():
 
 @pytest.mark.asyncio
 async def test_health_ready_db_error():
-    from fastapi import HTTPException
-
     from app.modules.health.api import health_ready
 
     mock_session = AsyncMock()
@@ -79,8 +93,6 @@ async def test_health_ready_db_error():
 
 @pytest.mark.asyncio
 async def test_health_ready_draining():
-    from fastapi import HTTPException
-
     from app.modules.health.api import health_ready
 
     with patch("builtins.__import__") as mock_import:
@@ -109,7 +121,11 @@ async def test_health_ready_ignores_upstream_state():
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock()
 
-    with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock(return_value=_bridge_ring_ok())),
+    ):
 
         async def mock_get_session_context():
             yield mock_session
@@ -131,7 +147,11 @@ async def test_health_ready_circuit_breaker_disabled_returns_200():
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock()
 
-    with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock(return_value=_bridge_ring_ok())),
+    ):
         with patch("app.modules.health.api.get_settings", return_value=SimpleNamespace(circuit_breaker_enabled=False)):
 
             async def mock_get_session_context():
@@ -143,3 +163,69 @@ async def test_health_ready_circuit_breaker_disabled_returns_200():
 
     assert response.status == "ok"
     assert response.checks == {"database": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_health_ready_fails_when_active_ring_exists_but_instance_is_missing():
+    from app.modules.health.api import health_ready
+    from app.modules.health.schemas import BridgeRingInfo
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock()
+
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api.get_settings") as mock_get_settings,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock()) as mock_bridge_ring,
+    ):
+        mock_get_settings.return_value = MagicMock(http_responses_session_bridge_enabled=True)
+        mock_bridge_ring.return_value = BridgeRingInfo(
+            ring_fingerprint="abc",
+            ring_size=2,
+            instance_id="pod-a",
+            is_member=False,
+        )
+
+        async def mock_get_session_context():
+            yield mock_session
+
+        mock_get_session.return_value = mock_get_session_context()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await health_ready()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Service is not an active bridge ring member"
+
+
+@pytest.mark.asyncio
+async def test_health_ready_allows_empty_bridge_ring_while_instance_registers():
+    from app.modules.health.api import health_ready
+    from app.modules.health.schemas import BridgeRingInfo
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock()
+
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api.get_settings") as mock_get_settings,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock()) as mock_bridge_ring,
+    ):
+        mock_get_settings.return_value = MagicMock(http_responses_session_bridge_enabled=True)
+        mock_bridge_ring.return_value = BridgeRingInfo(
+            ring_fingerprint="abc",
+            ring_size=0,
+            instance_id="pod-a",
+            is_member=False,
+        )
+
+        async def mock_get_session_context():
+            yield mock_session
+
+        mock_get_session.return_value = mock_get_session_context()
+
+        response = await health_ready()
+
+    assert response.status == "ok"

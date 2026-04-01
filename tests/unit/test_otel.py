@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import errno
 import json
 import logging
 import sys
@@ -11,6 +12,7 @@ import pytest
 
 import app.core.tracing.otel as otel
 from app.core.runtime_logging import JsonFormatter
+from app.modules.proxy.ring_membership import RING_STALE_GRACE_SECONDS, RING_STALE_THRESHOLD_SECONDS
 
 pytestmark = pytest.mark.unit
 
@@ -32,6 +34,7 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         fastapi_instrumented=0,
         aiohttp_instrumented=0,
         sqlalchemy_instrumented=0,
+        resource_attributes=None,
     )
 
     class FakeSpanContext:
@@ -48,8 +51,10 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             return self._context
 
     class FakeTracerProvider:
-        def __init__(self) -> None:
+        def __init__(self, *, resource: object | None = None) -> None:
             self.processors: list[FakeBatchSpanProcessor] = []
+            self.resource = resource
+            state.resource_attributes = getattr(resource, "attributes", None)
 
         def add_span_processor(self, processor: FakeBatchSpanProcessor) -> None:
             self.processors.append(processor)
@@ -93,6 +98,18 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     sdk_module = ModuleType("opentelemetry.sdk")
     sdk_module.__path__ = []
+    sdk_resources_module = ModuleType("opentelemetry.sdk.resources")
+
+    class FakeResource:
+        def __init__(self, attributes: dict[str, str]) -> None:
+            self.attributes = attributes
+
+        @classmethod
+        def create(cls, attributes: dict[str, str]) -> "FakeResource":
+            return cls(attributes)
+
+    setattr(sdk_resources_module, "Resource", FakeResource)
+    setattr(sdk_resources_module, "SERVICE_NAME", "service.name")
     sdk_trace_module = ModuleType("opentelemetry.sdk.trace")
     setattr(sdk_trace_module, "TracerProvider", FakeTracerProvider)
     sdk_trace_export_module = ModuleType("opentelemetry.sdk.trace.export")
@@ -122,6 +139,7 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         "opentelemetry": opentelemetry_module,
         "opentelemetry.trace": trace_module,
         "opentelemetry.sdk": sdk_module,
+        "opentelemetry.sdk.resources": sdk_resources_module,
         "opentelemetry.sdk.trace": sdk_trace_module,
         "opentelemetry.sdk.trace.export": sdk_trace_export_module,
         "opentelemetry.exporter": exporter_module,
@@ -163,6 +181,7 @@ def test_init_tracing_returns_true_when_opentelemetry_modules_are_available(monk
     assert state.provider is not None
     assert len(state.provider.processors) == 1
     assert state.exporter_endpoint == "http://collector:4317"
+    assert state.resource_attributes == {"service.name": "codex-lb"}
     assert state.fastapi_instrumented == 1
     assert state.aiohttp_instrumented == 1
     assert state.sqlalchemy_instrumented == 1
@@ -274,3 +293,76 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     assert usage_scheduler.stopped is True
     assert model_scheduler.stopped is True
     assert sticky_scheduler.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: pytest.MonkeyPatch):
+    import app.main as main
+
+    settings = SimpleNamespace(
+        otel_enabled=False,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        shutdown_drain_timeout_seconds=0,
+        http_responses_session_bridge_instance_id="pod-a",
+    )
+    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
+    usage_scheduler = _DummyScheduler()
+    model_scheduler = _DummyScheduler()
+    sticky_scheduler = _DummyScheduler()
+    close_http_client = AsyncMock()
+    close_db = AsyncMock()
+    ring_service = SimpleNamespace(
+        register=AsyncMock(),
+        mark_stale=AsyncMock(),
+        unregister=AsyncMock(),
+        heartbeat=AsyncMock(),
+    )
+    cache_poller = SimpleNamespace(
+        on_invalidation=Mock(),
+        start=AsyncMock(),
+        stop=AsyncMock(),
+    )
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
+    monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "init_background_db", Mock())
+    monkeypatch.setattr(main, "init_http_client", AsyncMock())
+    monkeypatch.setattr(main, "close_http_client", close_http_client)
+    monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
+    monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
+    monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(main, "mark_process_dead", Mock())
+    monkeypatch.setattr(
+        "app.core.cache.invalidation.CacheInvalidationPoller",
+        lambda session_factory: cache_poller,
+    )
+
+    async with main.lifespan(main.app):
+        pass
+
+    ring_service.register.assert_awaited_once_with("pod-a")
+    ring_service.mark_stale.assert_awaited_once_with(
+        "pod-a",
+        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+        grace_seconds=RING_STALE_GRACE_SECONDS,
+    )
+    ring_service.unregister.assert_not_called()
+
+
+def test_metrics_bind_failure_is_only_benign_in_multiprocess_mode(monkeypatch: pytest.MonkeyPatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "MULTIPROCESS_MODE", False)
+    assert main._is_benign_metrics_bind_failure(SystemExit(1)) is False
+    assert main._is_benign_metrics_bind_failure(OSError(errno.EADDRINUSE, "in use")) is False
+
+    monkeypatch.setattr(main, "MULTIPROCESS_MODE", True)
+    assert main._is_benign_metrics_bind_failure(SystemExit(1)) is True
+    assert main._is_benign_metrics_bind_failure(OSError(errno.EADDRINUSE, "in use")) is True

@@ -18,6 +18,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+RING_HEARTBEAT_INTERVAL_SECONDS = 30
+RING_STALE_THRESHOLD_SECONDS = 120
+RING_STALE_GRACE_SECONDS = RING_HEARTBEAT_INTERVAL_SECONDS + 5
+
+
 class RingMembershipService:
     """Manages pod registration in the bridge ring.
 
@@ -115,18 +120,24 @@ class RingMembershipService:
             await session.execute(stmt)
             await session.commit()
 
-    async def mark_stale(self, instance_id: str) -> None:
-        """Set heartbeat far enough in the past to expire the member immediately.
+    async def mark_stale(
+        self,
+        instance_id: str,
+        *,
+        stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS,
+        grace_seconds: int = RING_STALE_GRACE_SECONDS,
+    ) -> None:
+        """Age the heartbeat close to expiry without deleting the shared row.
 
-        Safer than ``unregister`` in multi-worker deployments: sibling workers
-        sharing the same *instance_id* will refresh the timestamp on their next
-        heartbeat, keeping the entry alive.  If all workers are shutting down
-        (pod termination), no heartbeat follows and the row is immediately
-        treated as stale by ``list_active``.
+        A short grace window lets sibling workers refresh the shared row on
+        their next heartbeat, while a fully terminating pod still ages out far
+        faster than the normal stale threshold.
         """
         from datetime import timedelta
 
-        stale_time = utcnow() - timedelta(seconds=300)
+        active_for_seconds = max(grace_seconds, 0)
+        age_seconds = max(stale_threshold_seconds - active_for_seconds, 0)
+        stale_time = utcnow() - timedelta(seconds=age_seconds)
         async with self._session() as session:
             stmt = (
                 update(BridgeRingMember)
@@ -136,7 +147,7 @@ class RingMembershipService:
             await session.execute(stmt)
             await session.commit()
 
-    async def list_active(self, stale_threshold_seconds: int = 120) -> list[str]:
+    async def list_active(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> list[str]:
         """Return sorted list of pods whose heartbeat is within threshold."""
         from datetime import timedelta
 
@@ -149,7 +160,7 @@ class RingMembershipService:
             )
             return list(result.scalars().all())
 
-    async def ring_fingerprint(self, stale_threshold_seconds: int = 120) -> str:
+    async def ring_fingerprint(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> str:
         """sha256 of sorted active member list. Same for all pods with same membership."""
         members = await self.list_active(stale_threshold_seconds)
         data = ",".join(sorted(members))

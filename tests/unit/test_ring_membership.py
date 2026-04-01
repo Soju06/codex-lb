@@ -8,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.utils.time import utcnow
 from app.db.models import Base, BridgeRingMember
-from app.modules.proxy.ring_membership import RingMembershipService
+from app.modules.proxy.ring_membership import (
+    RING_HEARTBEAT_INTERVAL_SECONDS,
+    RING_STALE_GRACE_SECONDS,
+    RING_STALE_THRESHOLD_SECONDS,
+    RingMembershipService,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -82,6 +87,22 @@ async def test_stale_heartbeat_excluded(ring_service: RingMembershipService) -> 
     # With 300s threshold, stale pod should be included
     active = await ring_service.list_active(stale_threshold_seconds=300)
     assert active == ["pod-stale"]
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_keeps_member_visible_until_grace_window_elapses(
+    ring_service: RingMembershipService,
+) -> None:
+    await ring_service.register("pod-grace")
+
+    await ring_service.mark_stale(
+        "pod-grace",
+        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+        grace_seconds=RING_STALE_GRACE_SECONDS,
+    )
+
+    assert await ring_service.list_active(stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS) == ["pod-grace"]
+    assert await ring_service.list_active(stale_threshold_seconds=RING_HEARTBEAT_INTERVAL_SECONDS) == []
 
 
 @pytest.mark.asyncio

@@ -210,6 +210,12 @@ class DashboardAuthService:
             raise PasswordSessionRequiredError("TOTP-verified session is required")
         return settings
 
+    async def ensure_active_password_session(self, session_id: str | None) -> None:
+        await self._require_active_password_session(session_id)
+
+    async def ensure_totp_verified_session(self, session_id: str | None) -> None:
+        await self._require_totp_verified_session(session_id)
+
     async def start_totp_setup(self, *, session_id: str | None) -> TotpSetupStartResponse:
         settings = await self._require_active_password_session(session_id)
         if settings.totp_secret_encrypted is not None:

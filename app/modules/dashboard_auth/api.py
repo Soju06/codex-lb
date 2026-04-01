@@ -247,6 +247,11 @@ async def verify_totp(
 ) -> DashboardAuthSessionResponse | JSONResponse:
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_verify")
+    current_session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
+    try:
+        await context.service.ensure_active_password_session(current_session_id)
+    except PasswordSessionRequiredError as exc:
+        raise DashboardAuthError(str(exc)) from exc
     try:
         await limiter.check_and_increment(rate_key, context.session)
     except DashboardRateLimitError as exc:
@@ -256,7 +261,6 @@ async def verify_totp(
             code="totp_rate_limited",
         ) from exc
     try:
-        current_session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
         session_id = await context.service.verify_totp(
             session_id=current_session_id,
             code=payload.code,
@@ -284,6 +288,11 @@ async def disable_totp(
 ) -> JSONResponse:
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_disable")
+    session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
+    try:
+        await context.service.ensure_totp_verified_session(session_id)
+    except PasswordSessionRequiredError as exc:
+        raise DashboardAuthError(str(exc)) from exc
     try:
         await limiter.check_and_increment(rate_key, context.session)
     except DashboardRateLimitError as exc:
@@ -293,7 +302,6 @@ async def disable_totp(
             code="totp_rate_limited",
         ) from exc
     try:
-        session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
         await context.service.disable_totp(
             session_id=session_id,
             code=payload.code,

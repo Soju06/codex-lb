@@ -16,7 +16,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
 from app.core.metrics.middleware import MetricsMiddleware
-from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
+from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
     add_api_firewall_middleware,
     add_request_decompression_middleware,
@@ -38,7 +38,12 @@ from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
-from app.modules.proxy.ring_membership import RingMembershipService
+from app.modules.proxy.ring_membership import (
+    RING_HEARTBEAT_INTERVAL_SECONDS,
+    RING_STALE_GRACE_SECONDS,
+    RING_STALE_THRESHOLD_SECONDS,
+    RingMembershipService,
+)
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
@@ -47,6 +52,18 @@ from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
 logger = logging.getLogger(__name__)
+
+
+def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
+    if not MULTIPROCESS_MODE:
+        return False
+    if isinstance(exc, SystemExit):
+        return exc.code == 1
+    if isinstance(exc, OSError):
+        import errno as _errno
+
+        return exc.errno in (_errno.EADDRINUSE, _errno.EADDRNOTAVAIL)
+    return False
 
 
 class InFlightMiddleware:
@@ -111,7 +128,7 @@ async def lifespan(app: FastAPI):
             try:
                 await srv.serve()
             except SystemExit as exc:
-                if exc.code == 1:
+                if _is_benign_metrics_bind_failure(exc):
                     logger.info(
                         "Metrics port %d unavailable (another worker likely serves metrics)",
                         settings.metrics_port,
@@ -119,9 +136,7 @@ async def lifespan(app: FastAPI):
                 else:
                     raise
             except OSError as exc:
-                import errno as _errno
-
-                if exc.errno in (_errno.EADDRINUSE, _errno.EADDRNOTAVAIL):
+                if _is_benign_metrics_bind_failure(exc):
                     logger.info(
                         "Metrics port %d already bound (another worker serves metrics)",
                         settings.metrics_port,
@@ -146,7 +161,7 @@ async def lifespan(app: FastAPI):
                 logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
                 await asyncio.sleep(delay)
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
             try:
                 await svc.heartbeat(iid)
             except Exception:
@@ -154,7 +169,7 @@ async def lifespan(app: FastAPI):
 
     async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
             try:
                 await svc.heartbeat(iid)
             except Exception:
@@ -207,7 +222,7 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.warning("Failed to close HTTP bridge sessions during shutdown", exc_info=True)
 
-        # Cancel heartbeat and unregister from ring
+        # Cancel heartbeat and age the shared ring row near expiry.
         if heartbeat_task is not None:
             heartbeat_task.cancel()
             try:
@@ -217,13 +232,20 @@ async def lifespan(app: FastAPI):
 
         if ring_service is not None and instance_id is not None:
             try:
-                await asyncio.wait_for(ring_service.unregister(instance_id), timeout=3)
+                await asyncio.wait_for(
+                    ring_service.mark_stale(
+                        instance_id,
+                        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+                        grace_seconds=RING_STALE_GRACE_SECONDS,
+                    ),
+                    timeout=3,
+                )
                 logger.info(
-                    "Unregistered from bridge ring",
+                    "Marked bridge ring membership stale for shutdown",
                     extra={"instance_id": instance_id},
                 )
             except Exception:
-                logger.warning("Failed to unregister from bridge ring", exc_info=True)
+                logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
 
         if metrics_server is not None:
             metrics_server.should_exit = True

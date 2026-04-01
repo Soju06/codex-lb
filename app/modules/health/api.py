@@ -13,6 +13,7 @@ from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
 from app.db.session import get_session
 from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, HealthResponse
+from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 
 router = APIRouter(tags=["health"])
 
@@ -53,6 +54,8 @@ async def health_ready() -> HealthCheckResponse:
                 # pod eviction after transient upstream failures.
 
                 bridge_ring = await _get_bridge_ring_info(session)
+                if _bridge_readiness_requires_active_membership(bridge_ring):
+                    raise HTTPException(status_code=503, detail="Service is not an active bridge ring member")
 
                 return HealthCheckResponse(status=status, checks=checks, bridge_ring=bridge_ring)
             except HTTPException:
@@ -73,12 +76,23 @@ async def health_ready() -> HealthCheckResponse:
     raise HTTPException(status_code=503, detail="Service unavailable")
 
 
+def _bridge_readiness_requires_active_membership(bridge_ring: BridgeRingInfo) -> bool:
+    settings = get_settings()
+    if not getattr(settings, "http_responses_session_bridge_enabled", True):
+        return False
+    if bridge_ring.error is not None:
+        return False
+    if bridge_ring.ring_size == 0:
+        return False
+    return not bridge_ring.is_member
+
+
 async def _get_bridge_ring_info(session: AsyncSession) -> BridgeRingInfo:
     try:
         settings = get_settings()
         instance_id = getattr(settings, "http_responses_session_bridge_instance_id", None)
 
-        cutoff = utcnow() - timedelta(seconds=120)
+        cutoff = utcnow() - timedelta(seconds=RING_STALE_THRESHOLD_SECONDS)
         result = await session.execute(
             sa_select(BridgeRingMember.instance_id)
             .where(BridgeRingMember.last_heartbeat_at >= cutoff)

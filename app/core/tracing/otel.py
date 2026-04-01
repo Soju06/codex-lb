@@ -17,11 +17,14 @@ def init_tracing(service_name: str = "codex-lb", endpoint: str = "", app: object
     try:
         trace = import_module("opentelemetry.trace")
         sdk_trace = import_module("opentelemetry.sdk.trace")
+        sdk_resources = import_module("opentelemetry.sdk.resources")
         sdk_trace_export = import_module("opentelemetry.sdk.trace.export")
+        Resource = getattr(sdk_resources, "Resource")
+        SERVICE_NAME = getattr(sdk_resources, "SERVICE_NAME")
         TracerProvider = getattr(sdk_trace, "TracerProvider")
         BatchSpanProcessor = getattr(sdk_trace_export, "BatchSpanProcessor")
 
-        provider = TracerProvider()
+        provider = TracerProvider(resource=Resource.create({SERVICE_NAME: service_name}))
 
         if endpoint:
             try:

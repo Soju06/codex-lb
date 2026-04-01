@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,6 +73,18 @@ class StickySessionsRepository:
         result = await self._session.execute(statement.returning(StickySession.key))
         await self._session.commit()
         return result.scalar_one_or_none() is not None
+
+    async def delete_entries(self, entries: Sequence[tuple[str, StickySessionKind]]) -> int:
+        targets = {(key, kind) for key, kind in entries if key}
+        if not targets:
+            return 0
+        statement = delete(StickySession).where(
+            or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in targets))
+        )
+        result = await self._session.execute(statement.returning(StickySession.key))
+        deleted = len(result.scalars().all())
+        await self._session.commit()
+        return deleted
 
     async def list_entries(
         self,

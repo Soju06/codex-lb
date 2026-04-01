@@ -496,27 +496,27 @@ export const handlers = [
 		});
 	}),
 
-	http.delete("/api/sticky-sessions/:kind/:key", ({ params }) => {
-		const key = decodeURIComponent(String(params.key));
-		const kind = String(params.kind);
-		const exists = state.stickySessions.some(
-			(entry) => entry.key === key && entry.kind === kind,
-		);
-		if (!exists) {
-			return HttpResponse.json(
-				{
-					error: {
-						code: "sticky_session_not_found",
-						message: "Sticky session not found",
-					},
-				},
-				{ status: 404 },
-			);
-		}
+	http.post("/api/sticky-sessions/delete", async ({ request }) => {
+		const payload = (await parseJsonBody(
+			request,
+			z.object({
+				sessions: z
+					.array(
+						z.object({
+							key: z.string().min(1),
+							kind: z.enum(["codex_session", "sticky_thread", "prompt_cache"]),
+						}),
+					)
+					.min(1)
+					.max(500),
+			}),
+		)) ?? { sessions: [] };
+		const targets = new Set(payload.sessions.map((session) => `${session.kind}:${session.key}`));
+		const before = state.stickySessions.length;
 		state.stickySessions = state.stickySessions.filter(
-			(entry) => !(entry.key === key && entry.kind === kind),
+			(entry) => !targets.has(`${entry.kind}:${entry.key}`),
 		);
-		return HttpResponse.json({ status: "deleted" });
+		return HttpResponse.json({ deletedCount: before - state.stickySessions.length });
 	}),
 
 	http.post("/api/sticky-sessions/purge", async ({ request }) => {

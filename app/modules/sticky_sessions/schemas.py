@@ -26,8 +26,21 @@ class StickySessionsListResponse(DashboardModel):
     has_more: bool = False
 
 
+class StickySessionIdentifier(DashboardModel):
+    key: str = Field(min_length=1)
+    kind: StickySessionKind
+
+
 class StickySessionDeleteResponse(DashboardModel):
     status: str
+
+
+class StickySessionsDeleteRequest(DashboardModel):
+    sessions: list[StickySessionIdentifier] = Field(min_length=1, max_length=500)
+
+
+class StickySessionsDeleteResponse(DashboardModel):
+    deleted_count: int
 
 
 class StickySessionsPurgeRequest(DashboardModel):

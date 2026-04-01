@@ -1,8 +1,9 @@
 import { del, get, post } from "@/lib/api-client";
 
 import {
-  StickySessionDeleteResponseSchema,
   StickySessionIdentifierSchema,
+  StickySessionsDeleteRequestSchema,
+  StickySessionsDeleteResponseSchema,
   StickySessionsListParamsSchema,
   StickySessionsListResponseSchema,
   StickySessionsPurgeRequestSchema,
@@ -23,10 +24,14 @@ export function listStickySessions(params: unknown) {
 
 export function deleteStickySession(payload: unknown) {
   const validated = StickySessionIdentifierSchema.parse(payload);
-  return del(
-    `${STICKY_SESSIONS_PATH}/${validated.kind}/${encodeURIComponent(validated.key)}`,
-    StickySessionDeleteResponseSchema,
-  );
+  return del(`${STICKY_SESSIONS_PATH}/${validated.kind}/${encodeURIComponent(validated.key)}`);
+}
+
+export function deleteStickySessions(payload: unknown) {
+  const validated = StickySessionsDeleteRequestSchema.parse(payload);
+  return post(`${STICKY_SESSIONS_PATH}/delete`, StickySessionsDeleteResponseSchema, {
+    body: validated,
+  });
 }
 
 export function purgeStickySessions(payload: unknown) {

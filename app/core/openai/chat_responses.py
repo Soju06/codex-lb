@@ -185,10 +185,14 @@ class ToolCallState:
         if delta.tool_type:
             self.tool_type = delta.tool_type
 
-    def build_stream_delta(self) -> ToolCallDelta | None:
+    def build_stream_delta(self, *, emit_arguments: bool = False) -> ToolCallDelta | None:
         call_id = _pending_stream_value(self.emitted_call_id, self.call_id)
         name = _pending_stream_value(self.emitted_name, self.name)
-        arguments = _stream_arguments_delta(self.emitted_arguments, self.arguments)
+        arguments = _pending_stream_arguments(
+            self.emitted_arguments,
+            self.arguments,
+            emit_arguments=emit_arguments,
+        )
         tool_type = self.tool_type or "function"
         if call_id is None and name is None and arguments is None and self.emitted_tool_type == tool_type:
             return None
@@ -319,6 +323,32 @@ def iter_chat_chunks(
                 yield "data: [DONE]\n\n"
                 return
         if event_type in ("response.completed", "response.incomplete"):
+            for tool_state in state.tool_calls:
+                stream_delta = tool_state.build_stream_delta(emit_arguments=True)
+                if stream_delta is None:
+                    continue
+                state.saw_tool_call = True
+                role = None
+                if not state.sent_role:
+                    role = "assistant"
+                chunk = ChatCompletionChunk(
+                    id="chatcmpl_temp",
+                    created=created,
+                    model=model,
+                    choices=[
+                        ChatChunkChoice(
+                            index=0,
+                            delta=ChatChunkDelta(
+                                role=role,
+                                tool_calls=[stream_delta.to_chunk_call()],
+                            ),
+                            finish_reason=None,
+                        )
+                    ],
+                )
+                yield _dump_chunk(chunk, include_usage=include_usage)
+                if role is not None:
+                    state.sent_role = True
             usage = None
             if include_usage:
                 response = payload.get("response")
@@ -727,12 +757,7 @@ def _pending_stream_value(emitted: str | None, current: str | None) -> str | Non
     return None
 
 
-def _stream_arguments_delta(emitted: str, current: str) -> str | None:
-    if not current or current == emitted:
+def _pending_stream_arguments(emitted: str, current: str, *, emit_arguments: bool) -> str | None:
+    if not emit_arguments or not current or emitted:
         return None
-    if not emitted:
-        return current
-    if current.startswith(emitted):
-        suffix = current[len(emitted) :]
-        return suffix or None
-    return None
+    return current

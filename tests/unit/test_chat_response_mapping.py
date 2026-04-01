@@ -136,7 +136,8 @@ async def test_stream_chat_chunks_preserves_tool_call_state():
         tool_calls = delta.get("tool_calls")
         if tool_calls:
             indices.extend([tool_call["index"] for tool_call in tool_calls])
-    assert indices == [0, 1]
+    assert indices[:2] == [0, 1]
+    assert set(indices) == {0, 1}
     done_chunks = [chunk for chunk in parsed_chunks if chunk["choices"][0].get("finish_reason") is not None]
     assert done_chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
 
@@ -180,6 +181,43 @@ async def test_stream_chat_chunks_does_not_duplicate_tool_call_snapshots():
             collected_arguments += arguments
 
     assert collected_arguments == '{"city":"Zurich","unit":"C"}'
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_chunks_prefers_final_snapshot_when_snapshot_rewrites_prefix():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\": \\"Zurich\\", \\"unit\\": \\"C\\"}"}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    chunks = [
+        json.loads(chunk[5:].strip())
+        for chunk in [c async for c in stream_chat_chunks(_stream(), model="gpt-5.2")]
+        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+    ]
+
+    collected_arguments = ""
+    for chunk in chunks:
+        tool_calls = chunk["choices"][0]["delta"].get("tool_calls")
+        if not tool_calls:
+            continue
+        function = tool_calls[0].get("function") or {}
+        arguments = function.get("arguments")
+        if arguments:
+            collected_arguments += arguments
+
+    assert collected_arguments == '{"city": "Zurich", "unit": "C"}'
 
 
 @pytest.mark.asyncio

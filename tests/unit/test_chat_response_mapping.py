@@ -247,7 +247,7 @@ def test_tool_call_delta_is_preserved_before_response_failed():
         json.loads(chunk[5:].strip()) for chunk in chunks if chunk.startswith("data: ") and "tool_calls" in chunk
     ]
     assert tool_chunks
-    arguments = ((tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0].get("function") or {}).get("arguments"))
+    arguments = (tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0].get("function") or {}).get("arguments")
     assert arguments == '{"a":1'
     assert any('"error"' in chunk for chunk in chunks)
     assert chunks[-1].strip() == "data: [DONE]"

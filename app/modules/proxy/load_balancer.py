@@ -942,15 +942,23 @@ def _state_from_account(
     db_reset_at = float(account.reset_at) if account.reset_at else None
     effective_runtime_reset = db_reset_at or runtime.reset_at
 
-    # Clear the runtime reset guard only when BOTH conditions hold:
+    # Clear the runtime reset guard only when ALL conditions hold:
     #   1. The quota/rate-limit cooldown has expired (debounce period over).
-    #   2. Usage data was recorded AFTER the block event (data is fresh).
+    #   2. The block event was tracked in this process (blocked_at set).
+    #   3. The governing usage row was refreshed AFTER the block event.
+    # The freshness check must use the row that governs each status:
+    #   QUOTA_EXCEEDED → secondary window, RATE_LIMITED → primary window.
     # On restart both blocked_at and cooldown_until are None, so the
     # guard stays — accounts remain blocked until persisted reset_at expires.
     if runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None:
-        usage_entry = effective_secondary_entry or primary_entry
-        if usage_entry and usage_entry.recorded_at is not None:
-            recorded_epoch = usage_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
+        if account.status == AccountStatus.QUOTA_EXCEEDED:
+            freshness_entry = effective_secondary_entry
+        elif account.status == AccountStatus.RATE_LIMITED:
+            freshness_entry = primary_entry
+        else:
+            freshness_entry = None
+        if freshness_entry and freshness_entry.recorded_at is not None:
+            recorded_epoch = freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
             if recorded_epoch > runtime.blocked_at:
                 effective_runtime_reset = None
 

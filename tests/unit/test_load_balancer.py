@@ -560,6 +560,68 @@ def test_state_from_account_keeps_quota_exceeded_when_no_usage_data(monkeypatch)
     assert state.status == AccountStatus.QUOTA_EXCEEDED
 
 
+def test_state_from_account_rate_limited_checks_primary_freshness(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+    fresh_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    runtime = RuntimeState()
+    runtime.cooldown_until = now - 1.0
+    runtime.blocked_at = blocked
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=fresh_secondary,
+        runtime=runtime,
+    )
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    fresh_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    runtime = RuntimeState()
+    runtime.cooldown_until = now - 1.0
+    runtime.blocked_at = blocked
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=fresh_primary,
+        secondary_entry=None,
+        runtime=runtime,
+    )
+    assert state.status == AccountStatus.ACTIVE
+
+
 def test_error_backoff_resets_error_count_when_expired():
     now = 1_700_000_000.0
     state = AccountState(

@@ -476,8 +476,6 @@ jobs:
         run: |
           helm template codex-lb deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-prod.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ== \
             --set externalSecrets.secretStoreRef.name=test \
             --set externalSecrets.secretStoreRef.kind=SecretStore \
             --set gatewayApi.enabled=true \
@@ -486,6 +484,38 @@ jobs:
             | kubeconform \
               -strict \
               -kubernetes-version 1.25.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary
+
+      - name: kubeconform (K8s 1.28.0)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-prod.yaml \
+            --set externalSecrets.secretStoreRef.name=test \
+            --set externalSecrets.secretStoreRef.kind=SecretStore \
+            --set gatewayApi.enabled=true \
+            --set "gatewayApi.parentRefs[0].name=test-gw" \
+            --set "gatewayApi.hostnames[0]=test.example.com" \
+            | kubeconform \
+              -strict \
+              -kubernetes-version 1.28.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary
+
+      - name: kubeconform (K8s 1.31.0)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-prod.yaml \
+            --set externalSecrets.secretStoreRef.name=test \
+            --set externalSecrets.secretStoreRef.kind=SecretStore \
+            --set gatewayApi.enabled=true \
+            --set "gatewayApi.parentRefs[0].name=test-gw" \
+            --set "gatewayApi.hostnames[0]=test.example.com" \
+            | kubeconform \
+              -strict \
+              -kubernetes-version 1.31.0 \
               -schema-location default \
               -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
               -summary
@@ -531,39 +561,3 @@ jobs:
           IMAGE_REPOSITORY: soju06/codex-lb
           IMAGE_TAG: ci
         run: ./scripts/helm-kind-smoke.sh external-db
-
-      - name: kubeconform (K8s 1.28.0)
-        run: |
-          helm template codex-lb deploy/helm/codex-lb/ \
-            -f deploy/helm/codex-lb/values-prod.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ== \
-            --set externalSecrets.secretStoreRef.name=test \
-            --set externalSecrets.secretStoreRef.kind=SecretStore \
-            --set gatewayApi.enabled=true \
-            --set "gatewayApi.parentRefs[0].name=test-gw" \
-            --set "gatewayApi.hostnames[0]=test.example.com" \
-            | kubeconform \
-              -strict \
-              -kubernetes-version 1.28.0 \
-              -schema-location default \
-              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-              -summary
-
-      - name: kubeconform (K8s 1.31.0)
-        run: |
-          helm template codex-lb deploy/helm/codex-lb/ \
-            -f deploy/helm/codex-lb/values-prod.yaml \
-            --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
-            --set auth.encryptionKey=dGVzdGtleQ== \
-            --set externalSecrets.secretStoreRef.name=test \
-            --set externalSecrets.secretStoreRef.kind=SecretStore \
-            --set gatewayApi.enabled=true \
-            --set "gatewayApi.parentRefs[0].name=test-gw" \
-            --set "gatewayApi.hostnames[0]=test.example.com" \
-            | kubeconform \
-              -strict \
-              -kubernetes-version 1.31.0 \
-              -schema-location default \
-              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-              -summary

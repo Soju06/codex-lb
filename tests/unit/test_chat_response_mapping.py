@@ -142,6 +142,47 @@ async def test_stream_chat_chunks_preserves_tool_call_state():
 
 
 @pytest.mark.asyncio
+async def test_stream_chat_chunks_does_not_duplicate_tool_call_snapshots():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    chunks = [
+        json.loads(chunk[5:].strip())
+        for chunk in [c async for c in stream_chat_chunks(_stream(), model="gpt-5.2")]
+        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+    ]
+
+    collected_arguments = ""
+    for chunk in chunks:
+        tool_calls = chunk["choices"][0]["delta"].get("tool_calls")
+        if not tool_calls:
+            continue
+        function = tool_calls[0].get("function") or {}
+        arguments = function.get("arguments")
+        if arguments:
+            collected_arguments += arguments
+
+    assert collected_arguments == '{"city":"Zurich","unit":"C"}'
+
+
+@pytest.mark.asyncio
 async def test_stream_chat_chunks_include_usage_chunk():
     lines = [
         'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
@@ -219,6 +260,60 @@ async def test_collect_completion_merges_tool_call_arguments():
     function = tool_call.function
     assert function is not None
     assert function.arguments == '{"a":1}'
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_prefers_final_tool_call_snapshot_without_duplication():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    function = tool_calls[0].function
+    assert function is not None
+    assert function.arguments == '{"city":"Zurich","unit":"C"}'
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_uses_snapshot_only_tool_call_arguments():
+    lines = [
+        (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    function = tool_calls[0].function
+    assert function is not None
+    assert function.arguments == '{"city":"Zurich","unit":"C"}'
 
 
 @pytest.mark.asyncio

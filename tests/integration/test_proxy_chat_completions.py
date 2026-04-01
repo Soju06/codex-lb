@@ -83,6 +83,117 @@ async def test_v1_chat_completions_non_stream_forces_stream(async_client, monkey
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_non_stream_deduplicates_tool_call_snapshots(async_client, monkeypatch):
+    email = "chat-tool-snapshot@example.com"
+    raw_account_id = "acc_chat_tool_snapshot"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Zurich?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                },
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+
+    tool_call = body["choices"][0]["message"]["tool_calls"][0]
+    assert tool_call["function"]["arguments"] == '{"city":"Zurich","unit":"C"}'
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_stream_deduplicates_tool_call_snapshots(async_client, monkeypatch):
+    email = "chat-tool-stream@example.com"
+    raw_account_id = "acc_chat_tool_stream"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.function_call_arguments.done","call_id":"call_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call_1",'
+            '"type":"function_call","name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\",\\"unit\\":\\"C\\"}"}}\n\n'
+        )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Zurich?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                },
+            }
+        ],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    collected_arguments = ""
+    for line in lines:
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        payload = json.loads(line[6:])
+        choices = payload.get("choices") or []
+        if not choices:
+            continue
+        tool_calls = (choices[0].get("delta") or {}).get("tool_calls") or []
+        if not tool_calls:
+            continue
+        arguments = (tool_calls[0].get("function") or {}).get("arguments")
+        if arguments:
+            collected_arguments += arguments
+
+    assert collected_arguments == '{"city":"Zurich","unit":"C"}'
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_stream_include_usage(async_client, monkeypatch):
     email = "chatusage@example.com"
     raw_account_id = "acc_chatusage"

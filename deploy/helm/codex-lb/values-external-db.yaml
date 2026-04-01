@@ -1,0 +1,14 @@
+# External DB install mode — chart-managed app resources plus an already reachable PostgreSQL database.
+postgresql:
+  enabled: false
+
+migration:
+  enabled: true
+  schemaGate:
+    enabled: true
+
+# Provide one of:
+# - externalDatabase.url
+# - externalDatabase.host/user/database (+ optional port)
+# - externalDatabase.existingSecret
+# - auth.existingSecret

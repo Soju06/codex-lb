@@ -386,6 +386,24 @@ jobs:
             --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
             --set auth.encryptionKey=dGVzdGtleQ==
 
+      - name: Helm lint (bundled mode)
+        run: |
+          helm lint --strict deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-bundled.yaml \
+            --set postgresql.auth.password=test-password
+
+      - name: Helm lint (external DB mode)
+        run: |
+          helm lint --strict deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-external-db.yaml \
+            --set externalDatabase.url=postgresql+asyncpg://test:test@localhost/test
+
+      - name: Helm lint (external secrets mode)
+        run: |
+          helm lint --strict deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-external-secrets.yaml \
+            --set externalSecrets.secretStoreRef.name=test-store
+
       - name: Helm lint (staging overlay)
         run: |
           helm lint --strict deploy/helm/codex-lb/ \
@@ -413,6 +431,27 @@ jobs:
             -f deploy/helm/codex-lb/values-dev.yaml \
             --set auth.databaseUrl=postgresql+asyncpg://test:test@localhost/test \
             --set auth.encryptionKey=dGVzdGtleQ== \
+            > /dev/null
+
+      - name: Helm template (bundled mode)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-bundled.yaml \
+            --set postgresql.auth.password=test-password \
+            > /dev/null
+
+      - name: Helm template (external DB mode)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-external-db.yaml \
+            --set externalDatabase.url=postgresql+asyncpg://test:test@localhost/test \
+            > /dev/null
+
+      - name: Helm template (external secrets mode)
+        run: |
+          helm template codex-lb deploy/helm/codex-lb/ \
+            -f deploy/helm/codex-lb/values-external-secrets.yaml \
+            --set externalSecrets.secretStoreRef.name=test-store \
             > /dev/null
 
       - name: Helm template (staging overlay)
@@ -458,6 +497,48 @@ jobs:
               -schema-location default \
               -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
               -summary
+
+  helm-smoke-kind:
+    name: Helm smoke install (kind)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Create kind cluster
+        run: kind create cluster --name codex-lb-smoke --wait 120s
+
+      - name: Build Docker image
+        run: docker build -t ghcr.io/soju06/codex-lb:ci .
+
+      - name: Load image into kind
+        run: kind load docker-image ghcr.io/soju06/codex-lb:ci --name codex-lb-smoke
+
+      - name: Smoke install (bundled mode)
+        env:
+          KUBE_CONTEXT: kind-codex-lb-smoke
+          IMAGE_REGISTRY: ghcr.io
+          IMAGE_REPOSITORY: soju06/codex-lb
+          IMAGE_TAG: ci
+        run: ./scripts/helm-kind-smoke.sh bundled
+
+      - name: Smoke install (external DB mode)
+        env:
+          KUBE_CONTEXT: kind-codex-lb-smoke
+          IMAGE_REGISTRY: ghcr.io
+          IMAGE_REPOSITORY: soju06/codex-lb
+          IMAGE_TAG: ci
+        run: ./scripts/helm-kind-smoke.sh external-db
 
       - name: kubeconform (K8s 1.28.0)
         run: |

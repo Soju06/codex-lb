@@ -1,177 +1,228 @@
 # codex-lb Helm Chart
 
-Production-grade Helm chart for [codex-lb](https://github.com/soju06/codex-lb), an OpenAI API load balancer with account pooling, usage tracking, and dashboard.
+Production-ready Helm chart for [codex-lb](https://github.com/soju06/codex-lb), an OpenAI API load balancer with account pooling, usage tracking, and dashboard.
+
+## Design Goal
+
+This chart is organized around **install modes**, not cloud vendors.
+
+The same chart should work on Docker Desktop, kind, EKS, GKE, OKE, and other Kubernetes distributions. Cluster-specific concerns such as storage classes, ingress classes, load balancer annotations, and secret backends are expressed through values, while the application install contract stays the same.
 
 ## Prerequisites
 
 - Helm 3.7+
 - Kubernetes 1.25+
-- (Optional) Prometheus Operator, for `ServiceMonitor` and `PrometheusRule`
-- (Optional) cert-manager, for automatic TLS certificate management
-- (Optional) Gateway API CRDs, for `HTTPRoute` support
-- (Optional) External Secrets Operator, for `ExternalSecret` integration
+- Optional:
+  - Prometheus Operator for `ServiceMonitor` and `PrometheusRule`
+  - cert-manager for automated ingress TLS
+  - Gateway API CRDs for `HTTPRoute`
+  - External Secrets Operator for `externalSecrets.enabled=true`
+
+## Install Modes
+
+### 1. Bundled
+
+Use the bundled Bitnami PostgreSQL sub-chart. This is the easiest self-contained install mode for demos, development clusters, and disposable environments.
+
+Key properties:
+
+- `postgresql.enabled=true`
+- migration Job runs as a hook
+- application pods include a schema gate initContainer and do not start the main container until Alembic head is visible
+
+Example:
+
+```bash
+helm dependency build deploy/helm/codex-lb/
+
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-bundled.yaml \
+  --set postgresql.auth.password=change-me
+```
+
+### 2. External DB
+
+Use an already reachable PostgreSQL database. This is the preferred production contract when the database is managed separately.
+
+Key properties:
+
+- `postgresql.enabled=false`
+- direct DB URL or DB secret is available at install time
+- migration Job runs `pre-install,pre-upgrade`
+- application pods still keep the schema gate initContainer enabled
+
+Supported DB wiring:
+
+- `externalDatabase.url`
+- `externalDatabase.host`, `externalDatabase.port`, `externalDatabase.database`, `externalDatabase.user`
+- `externalDatabase.existingSecret`
+- `auth.existingSecret` if one secret contains both `database-url` and `encryption-key`
+
+Example using a direct URL:
+
+```bash
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-external-db.yaml \
+  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+```
+
+Example using separate secrets:
+
+```bash
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-external-db.yaml \
+  --set externalDatabase.existingSecret=codex-lb-db \
+  --set auth.existingSecret=codex-lb-app
+```
+
+### 3. External Secrets
+
+Use External Secrets Operator to materialize credentials.
+
+Key properties:
+
+- `externalSecrets.enabled=true`
+- DB credentials are not assumed to exist at render time
+- migration Job remains `post-install,pre-upgrade`
+- application pods keep the schema gate initContainer enabled and wait for schema head before starting the app container
+
+Example:
+
+```bash
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-external-secrets.yaml \
+  --set externalSecrets.secretStoreRef.name=my-store
+```
 
 ## Quick Start
 
+### Docker Desktop / kind style cluster
+
+Bundled PostgreSQL:
+
 ```bash
-# Add Bitnami repository (for PostgreSQL sub-chart)
 helm dependency build deploy/helm/codex-lb/
-
-# Install with bundled PostgreSQL (development)
-helm install codex-lb deploy/helm/codex-lb/ \
-  --set postgresql.auth.password=mypassword
-
-# Install with external PostgreSQL (production)
-helm install codex-lb deploy/helm/codex-lb/ \
-  --set postgresql.enabled=false \
-  --set auth.existingSecret=codex-lb-secrets
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-bundled.yaml \
+  --set postgresql.auth.password=local-dev-password
 ```
 
-## Configuration
-
-All configurable values are documented in [values.yaml](values.yaml) with `@param` annotations.
-
-| Section | Key | Default | Description |
-|---------|-----|---------|-------------|
-| Deployment | `replicaCount` | `2` | Number of replicas |
-| Deployment | `resources.requests.cpu` | `200m` | CPU request |
-| Application | `config.logFormat` | `json` | Log format (`json` or `text`) |
-| Metrics | `metrics.enabled` | `true` | Enable Prometheus metrics |
-| HPA | `autoscaling.enabled` | `false` | Enable HorizontalPodAutoscaler |
-| PDB | `pdb.create` | `true` | Enable PodDisruptionBudget |
-| NetworkPolicy | `networkPolicy.enabled` | `false` | Enable NetworkPolicy |
-
-Use environment overlays for multi-env deployments:
+### Managed PostgreSQL
 
 ```bash
-helm install codex-lb deploy/helm/codex-lb/ -f values-prod.yaml
+helm dependency build deploy/helm/codex-lb/
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-external-db.yaml \
+  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
 ```
 
-## Database Setup
+## Included Value Overlays
 
-### Bundled PostgreSQL (development/staging)
+Mode-centric overlays:
+
+- `values-bundled.yaml`
+- `values-external-db.yaml`
+- `values-external-secrets.yaml`
+
+Environment-oriented overlays kept for convenience:
+
+- `values-dev.yaml`
+- `values-staging.yaml`
+- `values-prod.yaml`
+
+The mode overlays define the installation contract. The environment overlays tune scale, observability, and routing posture.
+
+## Schema and Migration Behavior
+
+This chart intentionally uses a **single migration writer**.
+
+- When startup migrations are disabled in the app pods, the chart relies on the dedicated migration Job to advance schema.
+- Application pods use a schema gate initContainer when `migration.enabled=true`, `config.databaseMigrateOnStartup=false`, and `migration.schemaGate.enabled=true`.
+- That initContainer runs `python -m app.db.migrate wait-for-head` and blocks the app container until the database is at Alembic head.
+
+This means:
+
+- bundled PostgreSQL installs do not need app pods to race migrations
+- external DB installs with direct credentials can migrate before Deployment creation
+- external secrets installs fail closed instead of serving on a stale schema
+
+## Secret Model
+
+The chart supports two secret patterns.
+
+### Single secret
+
+Use `auth.existingSecret` when one secret contains both:
+
+- `database-url`
+- `encryption-key`
+
+### Split secrets
+
+Use `externalDatabase.existingSecret` for the database URL and let the chart manage or reference a separate app secret for `encryption-key`.
+
+When `externalDatabase.existingSecret` is set and `auth.existingSecret` is not, the chart-managed app secret contains only the encryption key; the Deployment reads `CODEX_LB_DATABASE_URL` from the external DB secret.
+
+## Network Policy
+
+When `networkPolicy.enabled=true`, the chart now fails closed for the main HTTP ingress port.
+
+- The chart does **not** open port `2455` to every namespace by default.
+- To allow ingress-controller traffic, set `networkPolicy.ingressNSMatchLabels`.
+- For custom cases, use `networkPolicy.extraIngress`.
+
+Example:
 
 ```yaml
-postgresql:
+networkPolicy:
   enabled: true
-  auth:
-    username: codexlb
-    password: changeme  # CHANGE THIS
-    database: codexlb
-```
-
-### External PostgreSQL (production)
-
-```yaml
-postgresql:
-  enabled: false
-auth:
-  existingSecret: my-db-secret  # must contain keys: database-url, encryption-key
-```
-
-Or provide via `externalDatabase.url`:
-
-```yaml
-postgresql:
-  enabled: false
-externalDatabase:
-  url: "postgresql+asyncpg://user:pass@host:5432/codexlb"
+  ingressNSMatchLabels:
+    kubernetes.io/metadata.name: ingress-nginx
 ```
 
 ## Connection Pool Sizing
 
-When running multiple replicas, each pod maintains a pool of database connections. The total connections used is:
+Each pod keeps its own SQLAlchemy pool.
 
 ```
 total_connections = (databasePoolSize + databaseMaxOverflow) × replicas
 ```
 
-PostgreSQL defaults to `max_connections=100`. With 20 replicas:
-
-| Pool Size | Max Overflow | Replicas | Total | Notes |
-|-----------|-------------|----------|-------|-------|
-| 3 | 2 | 20 | 100 | **Recommended prod default** |
-| 5 | 5 | 10 | 100 | For ≤10 replicas |
-| 15 | 10 | 4 | 100 | For single-instance only |
-
-**If you need more concurrency**: Increase `max_connections` in PostgreSQL (requires restart), or deploy [PgBouncer](https://www.pgbouncer.org/) as a connection pooler.
+Keep this within your PostgreSQL `max_connections` budget or place PgBouncer in front of the database.
 
 ## Security
 
-This chart enforces the Kubernetes **Restricted** Pod Security Standard:
+The chart targets the Kubernetes Restricted Pod Security Standard.
 
-- `runAsNonRoot: true`, `runAsUser: 1000`
-- `readOnlyRootFilesystem: true` (with emptyDir for `/tmp` and `/app/.cache`)
+- `runAsNonRoot: true`
+- `readOnlyRootFilesystem: true`
 - `allowPrivilegeEscalation: false`
-- All Linux capabilities dropped
+- all Linux capabilities dropped
 - `automountServiceAccountToken: false`
-- `seccompProfile: RuntimeDefault`
 
-**Secret Management:**
+Rollout controls for externally managed config:
 
-- Chart-managed Secret: `stringData` with `database-url` and `encryption-key` keys
-- ExternalSecrets Operator: set `externalSecrets.enabled: true` with `secretStoreRef`
-- Bring-your-own: set `auth.existingSecret: my-secret`
+- `rollout.reloader.enabled=true` adds Stakater Reloader annotations
+- `rollout.manualToken` forces a Deployment rollout when external Secret contents change outside Helm
 
-**Rollout on external secret changes:**
+## Ingress and Gateway API
 
-- Chart-managed ConfigMap/Secret changes already trigger rollout checksums on `helm upgrade`
-- If Secret data changes outside Helm, enable `rollout.reloader.enabled: true` when you run [Stakater Reloader](https://github.com/stakater/Reloader)
-- If you do not use a reloader controller, bump `rollout.manualToken` to force a Deployment rollout after rotating an external Secret
+The chart supports either classic Ingress or Gateway API.
 
-Example:
-
-```yaml
-rollout:
-  reloader:
-    enabled: true
-  manualToken: ""
-```
-
-Generate an encryption key:
-
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-## Observability
-
-Enable full observability stack:
-
-```yaml
-metrics:
-  enabled: true
-  serviceMonitor:
-    enabled: true  # requires Prometheus Operator
-  prometheusRule:
-    enabled: true  # 4 alert rules: HighErrorRate, HighLatency, PodDown, HPAAtMax
-  grafanaDashboard:
-    enabled: true  # auto-provisioned via ConfigMap sidecar
-```
-
-## Ingress & Gateway API
-
-### Standard Ingress (nginx)
+Ingress example:
 
 ```yaml
 ingress:
   enabled: true
   ingressClassName: nginx
-  certManager:
-    enabled: true
-    clusterIssuer: letsencrypt-prod
   hosts:
     - host: codex-lb.example.com
       paths:
         - path: /
           pathType: Prefix
-  tls:
-    - secretName: codex-lb-tls
-      hosts:
-        - codex-lb.example.com
 ```
 
-### Gateway API
+Gateway API example:
 
 ```yaml
 gatewayApi:
@@ -183,53 +234,53 @@ gatewayApi:
     - codex-lb.example.com
 ```
 
-## Upgrading
-
-Upgrades trigger the pre-upgrade migration Job automatically:
+## Upgrade Contract
 
 ```bash
-helm upgrade codex-lb deploy/helm/codex-lb/ -f values-prod.yaml
+helm upgrade codex-lb deploy/helm/codex-lb/ <your values...>
 ```
 
-The migration Job runs `python -m app.db.migrate upgrade` before the new pods start. If the migration fails (up to 3 retries), the upgrade is halted and the failed Job is preserved for debugging.
+- The migration Job stays the only automatic schema writer.
+- App pods wait for Alembic head before the main container starts when the schema gate is enabled.
+- Deployment checksums force rollouts when chart-managed ConfigMaps or Secrets change.
 
-Rolling updates use `maxSurge: 1, maxUnavailable: 0`, so new pods must pass health checks before old pods are terminated.
+## Validation
 
-For externally managed Secret rotations, either rely on `rollout.reloader.enabled` or change `rollout.manualToken` during `helm upgrade` so the Deployment template changes and Kubernetes creates a new ReplicaSet.
-
-## Uninstalling
+Recommended after install:
 
 ```bash
-helm uninstall codex-lb
-# Manually delete the PersistentVolumeClaim if postgresql.primary.persistence.enabled=true:
-kubectl delete pvc -l app.kubernetes.io/name=postgresql
+helm test codex-lb -n <namespace>
+kubectl get pods -n <namespace>
+kubectl logs job/<release>-migrate -n <namespace>
+```
+
+If you are using a port-forwarded install:
+
+```bash
+kubectl port-forward svc/codex-lb 2455:2455 -n <namespace>
+curl -i http://127.0.0.1:2455/health/live
+curl -i http://127.0.0.1:2455/health/ready
 ```
 
 ## Troubleshooting
 
-**Migration Job fails:**
+Migration Job:
 
 ```bash
-kubectl describe job codex-lb-migrate
-kubectl logs -l app.kubernetes.io/component=migration
+kubectl describe job <release>-migrate -n <namespace>
+kubectl logs job/<release>-migrate -n <namespace>
 ```
 
-**Health check failures:**
+App pod stuck in init:
 
 ```bash
-kubectl describe pod -l app.kubernetes.io/name=codex-lb
-# Check probe: /health/startup (init), /health/ready (traffic), /health/live (alive)
+kubectl describe pod -l app.kubernetes.io/name=codex-lb -n <namespace>
+kubectl logs deploy/<release> -c wait-for-schema-head -n <namespace>
 ```
 
-**Secret errors (encryption key):**
+Health failures:
 
 ```bash
-kubectl get secret codex-lb -o jsonpath='{.data.encryption-key}' | base64 -d | wc -c
-# Must be 44 bytes (Fernet key)
-```
-
-**Run Helm tests:**
-
-```bash
-helm test codex-lb -n your-namespace
+kubectl describe deploy <release> -n <namespace>
+kubectl logs deploy/<release> -n <namespace>
 ```

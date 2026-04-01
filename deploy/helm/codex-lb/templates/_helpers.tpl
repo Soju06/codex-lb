@@ -98,7 +98,7 @@ This is used in secret.yaml to populate the database-url secret key.
 {{- else if and .Values.externalDatabase.host .Values.externalDatabase.user .Values.externalDatabase.database }}
 {{- printf "postgresql+asyncpg://%s@%s:%v/%s" .Values.externalDatabase.user .Values.externalDatabase.host (.Values.externalDatabase.port | default 5432) .Values.externalDatabase.database }}
 {{- else }}
-{{- "" }}
+{{- fail "No database URL source configured. Enable postgresql, set externalDatabase.url, provide externalDatabase.host/user/database, configure externalDatabase.existingSecret, auth.existingSecret, or externalSecrets.enabled." }}
 {{- end }}
 {{- end }}
 
@@ -112,6 +112,19 @@ Migration job service account — pre-install hooks cannot rely on chart-created
 Use an operator-provided existing SA when explicitly configured; otherwise fall back to default.
 */}}
 {{- define "codex-lb.migrationServiceAccountName" -}}{{- if and .Values.externalSecrets.enabled .Values.serviceAccount.create -}}{{- include "codex-lb.serviceAccountName" . -}}{{- else if .Values.serviceAccount.name -}}{{- .Values.serviceAccount.name -}}{{- else -}}default{{- end -}}{{- end }}
+
+{{/*
+Human-readable install mode label used in NOTES and docs.
+*/}}
+{{- define "codex-lb.installMode" -}}
+{{- if .Values.postgresql.enabled -}}
+bundled
+{{- else if .Values.externalSecrets.enabled -}}
+external-secrets
+{{- else -}}
+external-db
+{{- end -}}
+{{- end }}
 
 {{/*
 Image string — resolves registry/repository:tag with optional digest override

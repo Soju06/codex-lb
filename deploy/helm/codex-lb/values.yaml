@@ -343,6 +343,13 @@ migration:
   backoffLimit: 3
   # @param migration.activeDeadlineSeconds Maximum Job duration in seconds
   activeDeadlineSeconds: 300
+  schemaGate:
+    # @param migration.schemaGate.enabled Add an initContainer that blocks the app until Alembic head is visible
+    enabled: true
+    # @param migration.schemaGate.timeoutSeconds Maximum seconds the app initContainer waits for schema head
+    timeoutSeconds: 300
+    # @param migration.schemaGate.intervalSeconds Poll interval in seconds while waiting for schema head
+    intervalSeconds: 2
   resources:
     requests:
       # @param migration.resources.requests.cpu Migration Job CPU request

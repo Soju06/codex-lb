@@ -103,6 +103,61 @@ def test_direct_external_database_install_uses_pre_install_hook_path() -> None:
     assert "serviceAccountName: default" in rendered
 
 
+def test_bundled_mode_overlay_renders_schema_gate_init_container() -> None:
+    rendered = _helm_template(
+        "-f",
+        str(_CHART_DIR / "values-bundled.yaml"),
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "postgresql.auth.password=local-password",
+    )
+
+    assert "name: wait-for-schema-head" in rendered
+    assert "wait-for-head" in rendered
+
+
+def test_external_db_mode_overlay_renders_schema_gate_init_container() -> None:
+    rendered = _helm_template(
+        "-f",
+        str(_CHART_DIR / "values-external-db.yaml"),
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "externalDatabase.url=postgresql+asyncpg://user:pass@db.example.com:5432/codexlb",
+    )
+
+    assert "name: wait-for-schema-head" in rendered
+    assert "wait-for-head" in rendered
+
+
+def test_external_secrets_mode_overlay_renders_schema_gate_init_container() -> None:
+    rendered = _helm_template(
+        "-f",
+        str(_CHART_DIR / "values-external-secrets.yaml"),
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "externalSecrets.secretStoreRef.name=test-store",
+    )
+
+    assert "name: wait-for-schema-head" in rendered
+    assert "wait-for-head" in rendered
+
+
+def test_schema_gate_can_be_disabled() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "postgresql.auth.password=local-password",
+        "--set",
+        "migration.schemaGate.enabled=false",
+    )
+
+    assert "name: wait-for-schema-head" not in rendered
+
+
 def test_deployment_rolls_when_configmap_backed_env_changes() -> None:
     baseline = _helm_template()
     updated = _helm_template("--set", "config.logFormat=text")
@@ -156,6 +211,20 @@ def test_external_database_existing_secret_is_used_for_database_url_env() -> Non
         rendered,
         re.S,
     )
+
+
+def test_chart_managed_secret_omits_database_url_when_external_database_secret_is_used() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/secret.yaml",
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "externalDatabase.existingSecret=external-db-secret",
+    )
+
+    assert "database-url:" not in rendered
+    assert "encryption-key:" in rendered
 
 
 def test_external_database_url_is_rendered_into_chart_managed_secret_when_postgresql_is_disabled() -> None:

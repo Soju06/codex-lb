@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -602,6 +603,40 @@ def stamp_revision(database_url: str, revision: str) -> None:
     command.stamp(config, revision)
 
 
+def wait_for_head(
+    database_url: str,
+    *,
+    timeout_seconds: float,
+    interval_seconds: float = 2.0,
+) -> MigrationState:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than 0")
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be greater than 0")
+
+    started_at = time.monotonic()
+    last_error: Exception | None = None
+
+    while True:
+        try:
+            state = inspect_migration_state(database_url)
+            if not state.needs_upgrade:
+                return state
+        except Exception as exc:
+            last_error = exc
+        elapsed = time.monotonic() - started_at
+        if elapsed >= timeout_seconds:
+            if last_error is not None:
+                raise TimeoutError(
+                    f"Timed out waiting for database schema to reach Alembic head after {timeout_seconds:.1f}s: "
+                    f"{last_error}"
+                ) from last_error
+            raise TimeoutError(
+                f"Timed out waiting for database schema to reach Alembic head after {timeout_seconds:.1f}s"
+            )
+        time.sleep(min(interval_seconds, timeout_seconds - elapsed))
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Database migration utility for codex-lb.")
     parser.add_argument(
@@ -628,6 +663,23 @@ def _parse_args() -> argparse.Namespace:
     subparsers.add_parser("current", help="Print current alembic revision.")
 
     subparsers.add_parser("check", help="Check Alembic policy and model/schema drift.")
+
+    wait_parser = subparsers.add_parser(
+        "wait-for-head",
+        help="Wait until the database schema reaches Alembic head without applying migrations locally.",
+    )
+    wait_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=300.0,
+        help="Maximum seconds to wait for the schema to reach Alembic head.",
+    )
+    wait_parser.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=2.0,
+        help="Polling interval in seconds while waiting for the schema to reach Alembic head.",
+    )
 
     stamp_parser = subparsers.add_parser("stamp", help="Set current revision without running migrations.")
     stamp_parser.add_argument("revision")
@@ -676,6 +728,16 @@ def main() -> None:
     if args.command == "stamp":
         stamp_revision(database_url, args.revision)
         print(f"stamped={args.revision}")
+        return
+
+    if args.command == "wait-for-head":
+        state = wait_for_head(
+            database_url,
+            timeout_seconds=args.timeout_seconds,
+            interval_seconds=args.interval_seconds,
+        )
+        print(f"current_revision={state.current_revision or 'none'}")
+        print(f"head_revision={state.head_revision}")
         return
 
     raise RuntimeError(f"unsupported command: {args.command}")

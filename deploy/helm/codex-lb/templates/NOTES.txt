@@ -2,6 +2,7 @@ codex-lb has been installed successfully.
 
   Release: {{ .Release.Name }}
   Namespace: {{ .Release.Namespace }}
+  Install mode: {{ include "codex-lb.installMode" . }}
 
 {{- if .Values.ingress.enabled }}
   Access URL:
@@ -20,6 +21,10 @@ codex-lb has been installed successfully.
   Database: Bitnami PostgreSQL sub-chart ({{ .Release.Name }}-postgresql)
 {{- else }}
   Database: External (configure via externalDatabase.url or auth.existingSecret)
+{{- end }}
+
+{{- if and .Values.migration.enabled (not .Values.config.databaseMigrateOnStartup) .Values.migration.schemaGate.enabled }}
+  App startup gate: enabled (pods wait for Alembic head before starting the main container)
 {{- end }}
 
 {{- if .Values.metrics.enabled }}

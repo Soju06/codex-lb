@@ -1,4 +1,4 @@
-# Production environment — high availability, full observability, hardened
+# Production environment — based on the external secrets install mode with HA, observability, and hardened defaults.
 replicaCount: 3
 autoscaling:
   enabled: true

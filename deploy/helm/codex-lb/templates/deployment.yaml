@@ -115,6 +115,36 @@ spec:
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- if and .Values.migration.enabled (not .Values.config.databaseMigrateOnStartup) .Values.migration.schemaGate.enabled }}
+      initContainers:
+        - name: wait-for-schema-head
+          image: {{ include "codex-lb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - python
+            - -m
+            - app.db.migrate
+            - wait-for-head
+            - --timeout-seconds
+            - {{ .Values.migration.schemaGate.timeoutSeconds | quote }}
+            - --interval-seconds
+            - {{ .Values.migration.schemaGate.intervalSeconds | quote }}
+          env:
+            - name: CODEX_LB_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codex-lb.databaseUrlSecretName" . }}
+                  key: {{ .Values.auth.secretKeys.databaseUrl }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+      {{- end }}
       containers:
         - name: codex-lb
           image: {{ include "codex-lb.image" . }}

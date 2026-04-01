@@ -185,14 +185,10 @@ class ToolCallState:
         if delta.tool_type:
             self.tool_type = delta.tool_type
 
-    def build_stream_delta(self, *, emit_arguments: bool = False) -> ToolCallDelta | None:
+    def build_stream_delta(self) -> ToolCallDelta | None:
         call_id = _pending_stream_value(self.emitted_call_id, self.call_id)
         name = _pending_stream_value(self.emitted_name, self.name)
-        arguments = _pending_stream_arguments(
-            self.emitted_arguments,
-            self.arguments,
-            emit_arguments=emit_arguments,
-        )
+        arguments = _pending_stream_arguments(self.emitted_arguments, self.arguments)
         tool_type = self.tool_type or "function"
         if call_id is None and name is None and arguments is None and self.emitted_tool_type == tool_type:
             return None
@@ -324,7 +320,7 @@ def iter_chat_chunks(
                 return
         if event_type in ("response.completed", "response.incomplete"):
             for tool_state in state.tool_calls:
-                stream_delta = tool_state.build_stream_delta(emit_arguments=True)
+                stream_delta = tool_state.build_stream_delta()
                 if stream_delta is None:
                     continue
                 state.saw_tool_call = True
@@ -757,7 +753,14 @@ def _pending_stream_value(emitted: str | None, current: str | None) -> str | Non
     return None
 
 
-def _pending_stream_arguments(emitted: str, current: str, *, emit_arguments: bool) -> str | None:
-    if not emit_arguments or not current or emitted:
+def _pending_stream_arguments(emitted: str, current: str) -> str | None:
+    if not current or current == emitted:
         return None
-    return current
+    if not emitted:
+        return current
+    if current.startswith(emitted):
+        suffix = current[len(emitted) :]
+        return suffix or None
+    # Chat Completions tool-call arguments are append-only, so snapshot rewrites
+    # that change previously emitted bytes cannot be represented safely.
+    return None

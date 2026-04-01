@@ -88,6 +88,16 @@ def test_tool_call_delta_is_emitted():
     assert delta["id"] == "call_1"
     assert delta["type"] == "function"
     assert delta["function"]["name"] == "do_thing"
+    collected_arguments = "".join(
+        (
+            (
+                (((chunk["choices"][0]["delta"].get("tool_calls") or [{}])[0]).get("function") or {}).get("arguments")
+                or ""
+            )
+            for chunk in tool_chunks
+        )
+    )
+    assert collected_arguments == '{"a":1}'
     done_chunks = [
         json.loads(chunk[5:].strip()) for chunk in chunks if chunk.startswith("data: ") and '"finish_reason"' in chunk
     ]
@@ -184,7 +194,7 @@ async def test_stream_chat_chunks_does_not_duplicate_tool_call_snapshots():
 
 
 @pytest.mark.asyncio
-async def test_stream_chat_chunks_prefers_final_snapshot_when_snapshot_rewrites_prefix():
+async def test_stream_chat_chunks_skips_incompatible_snapshot_rewrites():
     lines = [
         (
             'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
@@ -217,7 +227,30 @@ async def test_stream_chat_chunks_prefers_final_snapshot_when_snapshot_rewrites_
         if arguments:
             collected_arguments += arguments
 
-    assert collected_arguments == '{"city": "Zurich", "unit": "C"}'
+    assert collected_arguments == '{"city":"Zur'
+
+
+def test_tool_call_delta_is_preserved_before_response_failed():
+    lines = [
+        (
+            'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
+            '"name":"do_thing","arguments":"{\\"a\\":1"}\n\n'
+        ),
+        (
+            'data: {"type":"response.failed","response":{"id":"r1","status":"failed","error":'
+            '{"message":"bad","type":"server_error","code":"no_accounts"}}}\n\n'
+        ),
+    ]
+
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+    tool_chunks = [
+        json.loads(chunk[5:].strip()) for chunk in chunks if chunk.startswith("data: ") and "tool_calls" in chunk
+    ]
+    assert tool_chunks
+    arguments = ((tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0].get("function") or {}).get("arguments"))
+    assert arguments == '{"a":1'
+    assert any('"error"' in chunk for chunk in chunks)
+    assert chunks[-1].strip() == "data: [DONE]"
 
 
 @pytest.mark.asyncio

@@ -5322,9 +5322,7 @@ def _sticky_key_for_compact_request(
 
 
 def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
-    if not payload.model_extra:
-        return None
-    return _normalize_service_tier_value(payload.model_extra.get("service_tier"))
+    return _normalize_service_tier_value(payload.service_tier)
 
 
 def _service_tier_from_response(

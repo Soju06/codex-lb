@@ -25,7 +25,7 @@ import {
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType } from "@/features/api-keys/schemas";
+import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType, ServiceTierType } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
 
 import { hasLimitRuleChanges, normalizeLimitRules } from "./limit-rules-utils";
@@ -78,6 +78,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState<string>(
     apiKey.enforcedReasoningEffort || "none",
   );
+  const [enforcedServiceTier, setEnforcedServiceTier] = useState<string>(
+    apiKey.enforcedServiceTier || "none",
+  );
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(limitRules);
@@ -86,6 +89,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+      enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
@@ -150,6 +154,22 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   <SelectItem value="medium">Medium</SelectItem>
                   <SelectItem value="high">High</SelectItem>
                   <SelectItem value="xhigh">XHigh</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Enforced service tier</div>
+              <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
+                <SelectTrigger>
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="auto">Auto</SelectItem>
+                  <SelectItem value="default">Default</SelectItem>
+                  <SelectItem value="priority">Priority</SelectItem>
+                  <SelectItem value="flex">Flex</SelectItem>
                 </SelectContent>
               </Select>
             </div>

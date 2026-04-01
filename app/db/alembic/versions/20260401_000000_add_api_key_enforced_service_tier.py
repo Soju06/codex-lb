@@ -1,7 +1,7 @@
 """add api key enforced service tier
 
-Revision ID: 20260401_010000_add_api_key_enforced_service_tier
-Revises: 20260401_000000_add_cache_invalidation
+Revision ID: 20260401_000000_add_api_key_enforced_service_tier
+Revises: 20260330_000000_add_cache_locality_settings
 Create Date: 2026-04-01
 """
 
@@ -11,8 +11,9 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260401_010000_add_api_key_enforced_service_tier"
-down_revision = "20260401_000000_add_cache_invalidation"
+# revision identifiers, used by Alembic.
+revision = "20260401_000000_add_api_key_enforced_service_tier"
+down_revision = "20260330_000000_add_cache_locality_settings"
 branch_labels = None
 depends_on = None
 

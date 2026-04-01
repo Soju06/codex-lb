@@ -138,7 +138,7 @@ def test_compact_normalizes_fast_service_tier_to_priority_for_upstream():
     }
     request = ResponsesCompactRequest.model_validate(payload)
 
-    assert request.model_extra == {"service_tier": "priority"}
+    assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
 

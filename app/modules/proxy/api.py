@@ -849,9 +849,7 @@ def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: st
 
 
 def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | None:
-    if not payload.model_extra:
-        return None
-    value = payload.model_extra.get("service_tier")
+    value = payload.service_tier
     if not isinstance(value, str):
         return None
     stripped = value.strip()

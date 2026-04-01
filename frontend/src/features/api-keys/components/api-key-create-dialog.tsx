@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKeyCreateRequest, LimitRuleCreate } from "@/features/api-keys/schemas";
+import type { ApiKeyCreateRequest, LimitRuleCreate, ServiceTierType } from "@/features/api-keys/schemas";
 import {
   Select,
   SelectContent,
@@ -50,6 +50,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   const [expiresAt, setExpiresAt] = useState<Date | null>(null);
   const [enforcedModel, setEnforcedModel] = useState("");
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState("none");
+  const [enforcedServiceTier, setEnforcedServiceTier] = useState("none");
 
   const handleSubmit = async (values: FormValues) => {
     const validLimits = limitRules.filter((r) => r.maxValue > 0);
@@ -58,6 +59,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
       allowedModels: selectedModels.length > 0 ? selectedModels : undefined,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+      enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
       expiresAt: expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
@@ -72,6 +74,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
     setExpiresAt(null);
     setEnforcedModel("");
     setEnforcedReasoningEffort("none");
+    setEnforcedServiceTier("none");
     onOpenChange(false);
   };
 
@@ -132,6 +135,22 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                       <SelectItem value="medium">Medium</SelectItem>
                       <SelectItem value="high">High</SelectItem>
                       <SelectItem value="xhigh">XHigh</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Enforced service tier</label>
+                  <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="auto">Auto</SelectItem>
+                      <SelectItem value="default">Default</SelectItem>
+                      <SelectItem value="priority">Priority</SelectItem>
+                      <SelectItem value="flex">Flex</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

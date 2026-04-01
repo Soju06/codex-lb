@@ -30,6 +30,9 @@ export const ApiKeyUsageSummarySchema = z.object({
   totalCostUsd: z.number().nonnegative().default(0),
 });
 
+export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
+export type ServiceTierType = (typeof SERVICE_TIERS)[number];
+
 export const ApiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -38,6 +41,10 @@ export const ApiKeySchema = z.object({
   enforcedModel: z.string().nullable().default(null),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .nullable()
+    .default(null),
+  enforcedServiceTier: z
+    .enum(SERVICE_TIERS)
     .nullable()
     .default(null),
   expiresAt: z.string().datetime({ offset: true }).nullable(),
@@ -56,6 +63,10 @@ export const ApiKeyCreateRequestSchema = z.object({
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
     .nullable()
     .optional(),
+  enforcedServiceTier: z
+    .enum(SERVICE_TIERS)
+    .nullable()
+    .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
@@ -71,6 +82,10 @@ export const ApiKeyUpdateRequestSchema = z.object({
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .nullable()
+    .optional(),
+  enforcedServiceTier: z
+    .enum(SERVICE_TIERS)
     .nullable()
     .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),

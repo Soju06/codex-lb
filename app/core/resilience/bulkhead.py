@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import logging
+import time
 from asyncio import Semaphore
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.core.resilience.memory_monitor import is_memory_pressure
+from app.core.resilience.memory_monitor import is_memory_pressure, is_memory_warning
+
+logger = logging.getLogger(__name__)
+
+_MEMORY_WARNING_LOG_INTERVAL = 30.0
+_last_memory_warning_log: float = 0.0
 
 
 async def _reject_websocket(receive: Receive, send: Send, *, reason: str) -> None:
@@ -44,6 +51,13 @@ class BulkheadMiddleware:
         if path.startswith("/health"):
             await self.app(scope, receive, send)
             return
+
+        if is_memory_warning():
+            global _last_memory_warning_log
+            now = time.monotonic()
+            if now - _last_memory_warning_log >= _MEMORY_WARNING_LOG_INTERVAL:
+                _last_memory_warning_log = now
+                logger.warning("Memory warning threshold exceeded")
 
         if is_memory_pressure():
             if scope["type"] == "websocket":

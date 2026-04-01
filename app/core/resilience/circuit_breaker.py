@@ -117,6 +117,7 @@ def _is_server_error(exc: Exception) -> bool:
 
 
 _circuit_breaker: CircuitBreaker | None = None
+_account_circuit_breakers: dict[str, CircuitBreaker] = {}
 
 
 def get_circuit_breaker(settings: object | None = None) -> CircuitBreaker | None:
@@ -133,3 +134,27 @@ def get_circuit_breaker(settings: object | None = None) -> CircuitBreaker | None
         )
 
     return _circuit_breaker if enabled else None
+
+
+def get_circuit_breaker_for_account(
+    account_id: str,
+    settings: object,
+) -> CircuitBreaker | None:
+    enabled = getattr(settings, "circuit_breaker_enabled", False)
+    if not enabled:
+        return None
+
+    breaker = _account_circuit_breakers.get(account_id)
+    if breaker is None:
+        breaker = CircuitBreaker(
+            failure_threshold=getattr(settings, "circuit_breaker_failure_threshold", 5),
+            recovery_timeout_seconds=getattr(settings, "circuit_breaker_recovery_timeout_seconds", 60),
+        )
+        _account_circuit_breakers[account_id] = breaker
+    return breaker
+
+
+def are_all_account_circuit_breakers_open() -> bool:
+    if not _account_circuit_breakers:
+        return False
+    return all(cb.state == CircuitState.OPEN for cb in _account_circuit_breakers.values())

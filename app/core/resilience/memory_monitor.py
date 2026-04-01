@@ -35,11 +35,15 @@ def get_rss_bytes() -> int:
 
 
 def is_memory_pressure() -> bool:
-    if _memory_reject_threshold_bytes > 0:
-        return get_rss_bytes() >= _memory_reject_threshold_bytes
+    if _memory_reject_threshold_bytes <= 0:
+        return False
+    return get_rss_bytes() >= _memory_reject_threshold_bytes
+
+
+def is_memory_warning() -> bool:
     if _memory_warning_threshold_bytes <= 0:
         return False
     return get_rss_bytes() >= _memory_warning_threshold_bytes
 
 
-__all__ = ["configure", "get_rss_bytes", "is_memory_pressure"]
+__all__ = ["configure", "get_rss_bytes", "is_memory_pressure", "is_memory_warning"]

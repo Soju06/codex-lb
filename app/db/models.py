@@ -396,6 +396,13 @@ class RateLimitAttempt(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
 
 
+class CacheInvalidation(Base):
+    __tablename__ = "cache_invalidation"
+
+    namespace: Mapped[str] = mapped_column(String(50), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class BridgeRingMember(Base):
     __tablename__ = "bridge_ring_members"
 

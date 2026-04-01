@@ -56,6 +56,60 @@ class DatabaseRateLimiter:
                 retry_after = max(1, int((reset_at - now).total_seconds()))
             raise DashboardRateLimitError("Too many attempts", retry_after=retry_after)
 
+    async def check_and_increment(self, key: str, session: AsyncSession) -> None:
+        """Atomically check the rate limit and record an attempt.
+
+        PostgreSQL: advisory lock serialises the count-then-insert.
+        SQLite: a single INSERT … SELECT statement with a WHERE-count
+        guard is processed atomically by SQLite's single-writer lock,
+        safe across processes sharing the same database file.
+        """
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            lock_key = f"{self.type}:{key}"
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
+
+        now = datetime.now(UTC)
+        window_start = now - timedelta(seconds=self.window_seconds)
+
+        raw_result = await session.execute(
+            text(
+                "INSERT INTO rate_limit_attempts (key, type, attempted_at) "
+                "SELECT :key, :type, :now "
+                "WHERE (SELECT COUNT(*) FROM rate_limit_attempts "
+                "       WHERE key = :key AND type = :type AND attempted_at >= :window_start"
+                "      ) < :max_attempts"
+            ),
+            {
+                "key": key,
+                "type": self.type,
+                "now": now,
+                "window_start": window_start,
+                "max_attempts": self.max_attempts,
+            },
+        )
+        inserted = raw_result.rowcount > 0  # type: ignore[union-attr]
+        await session.commit()
+
+        if not inserted:
+            oldest_attempt = await session.scalar(
+                select(RateLimitAttempt.attempted_at)
+                .where(
+                    RateLimitAttempt.key == key,
+                    RateLimitAttempt.type == self.type,
+                    RateLimitAttempt.attempted_at >= window_start,
+                )
+                .order_by(RateLimitAttempt.attempted_at.asc())
+                .limit(1)
+            )
+            retry_after = self.window_seconds
+            if oldest_attempt is not None:
+                if oldest_attempt.tzinfo is None:
+                    oldest_attempt = oldest_attempt.replace(tzinfo=UTC)
+                reset_at = oldest_attempt + timedelta(seconds=self.window_seconds)
+                retry_after = max(1, int((reset_at - now).total_seconds()))
+            raise DashboardRateLimitError("Too many attempts", retry_after=retry_after)
+
     async def record_failure(self, key: str, session: AsyncSession) -> None:
         """Record a failed attempt atomically.
 

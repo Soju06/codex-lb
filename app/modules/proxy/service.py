@@ -1516,6 +1516,35 @@ class ProxyService:
 
                 existing = self._http_bridge_sessions.get(key)
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
+                    if key.affinity_kind != "request":
+                        owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
+                        current_instance, ring = await _active_http_bridge_instance_ring(
+                            settings, self._ring_membership
+                        )
+                        if owner_instance is not None and len(ring) > 1 and owner_instance != current_instance:
+                            _log_http_bridge_event(
+                                "owner_mismatch_retry",
+                                key,
+                                account_id=existing.account.id,
+                                model=request_model,
+                                detail=(
+                                    f"expected_instance={owner_instance}, "
+                                    f"current_instance={current_instance}, outcome=retry"
+                                ),
+                                cache_key_family=key.affinity_kind,
+                                model_class=(_extract_model_class(request_model) if request_model else None),
+                            )
+                            if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
+                                bridge_instance_mismatch_total.labels(outcome="retry").inc()
+                            raise ProxyResponseError(
+                                409,
+                                openai_error(
+                                    "bridge_instance_mismatch",
+                                    "HTTP bridge session is owned by a different instance; "
+                                    "retry to reach the correct replica",
+                                    error_type="server_error",
+                                ),
+                            )
                     existing.request_model = request_model
                     existing.last_used_at = time.monotonic()
                     _log_http_bridge_event(
@@ -5204,7 +5233,8 @@ async def _active_http_bridge_instance_ring(
     try:
         active_members = await ring_membership.list_active()
     except Exception:
-        return instance_id, static_ring
+        logger.warning("Bridge ring lookup failed — refusing to fall back to static ring", exc_info=True)
+        raise
     if not active_members:
         return instance_id, static_ring
     normalized_members = tuple(

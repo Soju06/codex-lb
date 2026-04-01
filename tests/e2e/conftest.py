@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import pytest
 import pytest_asyncio
@@ -16,7 +16,7 @@ DEFAULT_DASHBOARD_PASSWORD = "password123"
 DEFAULT_MODEL = "gpt-5.2"
 
 
-def _encode_jwt(payload: dict[str, object]) -> str:
+def _encode_jwt(payload: Mapping[str, object]) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
     return f"header.{body}.sig"

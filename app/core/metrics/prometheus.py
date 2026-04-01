@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from importlib import import_module
 from typing import Any
 
@@ -10,6 +11,7 @@ except ImportError:
 
 
 PROMETHEUS_AVAILABLE = prometheus_client is not None
+MULTIPROCESS_MODE = bool(os.environ.get("PROMETHEUS_MULTIPROC_DIR"))
 
 
 if PROMETHEUS_AVAILABLE:
@@ -43,10 +45,16 @@ if PROMETHEUS_AVAILABLE:
         "Upstream request duration",
         registry=REGISTRY,
     )
+
+    _gauge_kwargs: dict[str, Any] = {}
+    if MULTIPROCESS_MODE:
+        _gauge_kwargs["multiprocess_mode"] = "livesum"
+
     active_connections = Gauge(
         "codex_lb_active_connections",
         "Active HTTP connections",
         registry=REGISTRY,
+        **_gauge_kwargs,
     )
     rate_limit_hits_total = Counter(
         "codex_lb_rate_limit_hits_total",
@@ -59,12 +67,14 @@ if PROMETHEUS_AVAILABLE:
         "Circuit breaker state (0=closed, 1=open, 2=half-open)",
         ["service"],
         registry=REGISTRY,
+        **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
     )
     accounts_total = Gauge(
         "codex_lb_accounts_total",
         "Total accounts by status",
         ["status"],
         registry=REGISTRY,
+        **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
     )
     bridge_instance_mismatch_total = Counter(
         "codex_lb_bridge_instance_mismatch_total",
@@ -72,6 +82,23 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+
+    def make_scrape_registry() -> Any:
+        if MULTIPROCESS_MODE:
+            _multiprocess = import_module("prometheus_client.multiprocess")
+            registry = CollectorRegistry()
+            _multiprocess.MultiProcessCollector(registry)
+            return registry
+        return REGISTRY
+
+    def mark_process_dead() -> None:
+        if MULTIPROCESS_MODE:
+            try:
+                _multiprocess = import_module("prometheus_client.multiprocess")
+                _multiprocess.mark_process_dead(os.getpid())
+            except (ImportError, AttributeError):
+                pass
+
 else:
     REGISTRY: Any = None
     requests_total: Any = None
@@ -84,14 +111,23 @@ else:
     accounts_total: Any = None
     bridge_instance_mismatch_total: Any = None
 
+    def make_scrape_registry() -> Any:
+        return None
+
+    def mark_process_dead() -> None:
+        pass
+
 
 __all__ = [
+    "MULTIPROCESS_MODE",
     "PROMETHEUS_AVAILABLE",
     "REGISTRY",
     "active_connections",
     "accounts_total",
     "bridge_instance_mismatch_total",
     "circuit_breaker_state",
+    "make_scrape_registry",
+    "mark_process_dead",
     "prometheus_client",
     "rate_limit_hits_total",
     "request_duration_seconds",

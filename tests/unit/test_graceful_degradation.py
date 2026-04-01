@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.core.openai.model_registry import ModelRegistry, ReasoningLevel, UpstreamModel
-from app.core.resilience.circuit_breaker import CircuitState
 from app.core.resilience.degradation import get_status, is_degraded, set_degraded, set_normal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -121,7 +120,7 @@ def test_set_normal_clears_degraded_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_ready_reports_degraded_status() -> None:
+async def test_health_ready_succeeds_when_degraded() -> None:
     from app.modules.health.api import health_ready
 
     set_degraded("all upstream accounts are unavailable")
@@ -135,42 +134,9 @@ async def test_health_ready_reports_degraded_status() -> None:
 
         mock_get_session.return_value = mock_get_session_context()
 
-        response = await health_ready()
+        result = await health_ready()
 
-    assert response.status == "degraded"
-    assert response.checks == {
-        "database": "ok",
-        "upstream": "degraded",
-        "upstream_reason": "all upstream accounts are unavailable",
-    }
-
-
-@pytest.mark.asyncio
-async def test_health_ready_reports_degraded_when_circuit_breaker_open() -> None:
-    from fastapi import HTTPException
-
-    from app.modules.health.api import health_ready
-
-    mock_session = AsyncMock()
-    mock_session.execute = AsyncMock()
-
-    with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
-        with patch("app.modules.health.api.get_settings", return_value=SimpleNamespace(circuit_breaker_enabled=True)):
-            with patch(
-                "app.modules.health.api.get_circuit_breaker",
-                return_value=SimpleNamespace(state=CircuitState.OPEN),
-            ):
-
-                async def mock_get_session_context():
-                    yield mock_session
-
-                mock_get_session.return_value = mock_get_session_context()
-
-                with pytest.raises(HTTPException) as exc_info:
-                    await health_ready()
-
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Circuit breaker open — upstream unavailable"
+    assert result.status == "ok"
 
 
 @pytest.mark.asyncio

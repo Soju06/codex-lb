@@ -100,59 +100,23 @@ async def test_health_ready_draining():
 
 
 @pytest.mark.asyncio
-async def test_health_ready_circuit_breaker_open_returns_503():
-    from types import SimpleNamespace
-
-    from fastapi import HTTPException
-
-    from app.core.resilience.circuit_breaker import CircuitState
+async def test_health_ready_ignores_upstream_state():
+    from app.core.resilience.degradation import set_degraded
     from app.modules.health.api import health_ready
+
+    set_degraded("upstream circuit breaker is open")
 
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock()
 
     with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
-        with patch("app.modules.health.api.get_settings", return_value=SimpleNamespace(circuit_breaker_enabled=True)):
-            with patch(
-                "app.modules.health.api.get_circuit_breaker",
-                return_value=SimpleNamespace(state=CircuitState.OPEN),
-            ):
 
-                async def mock_get_session_context():
-                    yield mock_session
+        async def mock_get_session_context():
+            yield mock_session
 
-                mock_get_session.return_value = mock_get_session_context()
+        mock_get_session.return_value = mock_get_session_context()
 
-                with pytest.raises(HTTPException) as exc_info:
-                    await health_ready()
-
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Circuit breaker open \u2014 upstream unavailable"
-
-
-@pytest.mark.asyncio
-async def test_health_ready_circuit_breaker_closed_returns_200():
-    from types import SimpleNamespace
-
-    from app.core.resilience.circuit_breaker import CircuitState
-    from app.modules.health.api import health_ready
-
-    mock_session = AsyncMock()
-    mock_session.execute = AsyncMock()
-
-    with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
-        with patch("app.modules.health.api.get_settings", return_value=SimpleNamespace(circuit_breaker_enabled=True)):
-            with patch(
-                "app.modules.health.api.get_circuit_breaker",
-                return_value=SimpleNamespace(state=CircuitState.CLOSED),
-            ):
-
-                async def mock_get_session_context():
-                    yield mock_session
-
-                mock_get_session.return_value = mock_get_session_context()
-
-                response = await health_ready()
+        response = await health_ready()
 
     assert response.status == "ok"
     assert response.checks == {"database": "ok"}

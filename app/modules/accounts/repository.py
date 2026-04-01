@@ -200,7 +200,7 @@ class AccountsRepository:
         email: str | None = None,
         chatgpt_account_id: str | None = None,
     ) -> bool:
-        values = {
+        values: dict[str, bytes | datetime | str] = {
             "access_token_encrypted": access_token_encrypted,
             "refresh_token_encrypted": refresh_token_encrypted,
             "id_token_encrypted": id_token_encrypted,

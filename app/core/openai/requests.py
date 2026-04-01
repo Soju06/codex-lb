@@ -244,7 +244,7 @@ def _normalize_assistant_input_item(value: Mapping[str, JsonValue]) -> JsonValue
 
 def _normalize_assistant_content(content: JsonValue) -> JsonValue:
     if content is None:
-        return content
+        return None
     if isinstance(content, str):
         return [{"type": "output_text", "text": content}]
     if is_json_list(content):

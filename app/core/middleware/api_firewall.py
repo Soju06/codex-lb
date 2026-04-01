@@ -39,12 +39,13 @@ def add_api_firewall_middleware(app: FastAPI) -> None:
         if cached_decision is not None:
             is_allowed = cached_decision
         else:
+            version_before_read = firewall_cache.version
             async with get_background_session() as session:
                 repository = cast(FirewallRepositoryPort, FirewallRepository(session))
                 service = FirewallService(repository)
                 is_allowed = await service.is_ip_allowed(client_ip)
             if client_ip is not None:
-                await firewall_cache.set(client_ip, is_allowed)
+                await firewall_cache.set(client_ip, is_allowed, if_version=version_before_read)
 
         if is_allowed:
             return await call_next(request)

@@ -257,7 +257,7 @@ def _text_type_for_role(role: str) -> str:
 
 def _normalize_content_parts(content: JsonValue, role: str = "user") -> JsonValue:
     if content is None:
-        return content
+        return None
     text_type = _text_type_for_role(role)
     if isinstance(content, str):
         return [{"type": text_type, "text": content}]

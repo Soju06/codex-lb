@@ -21,7 +21,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
-from app.core.resilience.circuit_breaker import CircuitState, get_circuit_breaker
+from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
@@ -1087,8 +1087,7 @@ def _is_upstream_circuit_breaker_open() -> bool:
     settings = get_settings()
     if not getattr(settings, "circuit_breaker_enabled", False):
         return False
-    circuit_breaker = get_circuit_breaker(settings)
-    return circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN
+    return are_all_account_circuit_breakers_open()
 
 
 def _format_degraded_error_message(message: str | None) -> str:

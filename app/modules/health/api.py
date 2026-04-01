@@ -9,8 +9,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
-from app.core.resilience.circuit_breaker import CircuitState, get_circuit_breaker
-from app.core.resilience.degradation import get_status, is_degraded
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
 from app.db.session import get_session
@@ -49,16 +47,10 @@ async def health_ready() -> HealthCheckResponse:
                 checks = {"database": "ok"}
                 status = "ok"
 
-                degradation_status = get_status() if is_degraded() else None
-                if degradation_status is not None:
-                    checks["upstream"] = "degraded"
-                    checks["upstream_reason"] = degradation_status["reason"] or "unknown"
-                    status = "degraded"
-                else:
-                    settings = get_settings()
-                    circuit_breaker = get_circuit_breaker(settings) if settings.circuit_breaker_enabled else None
-                    if circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN:
-                        raise HTTPException(status_code=503, detail="Circuit breaker open — upstream unavailable")
+                # Upstream health (degradation flag, circuit breaker) is NOT
+                # checked here — only infrastructure readiness matters.
+                # Mixing upstream state into readiness causes permanent
+                # pod eviction after transient upstream failures.
 
                 bridge_ring = await _get_bridge_ring_info(session)
 

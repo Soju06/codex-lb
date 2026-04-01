@@ -19,6 +19,11 @@ class ApiKeyCache:
         self._lock = anyio.Lock()
         self._ttl = ttl_seconds
         self._max_entries = max_entries
+        self._version = 0
+
+    @property
+    def version(self) -> int:
+        return self._version
 
     async def get(self, key_hash: str) -> Any | None:
         entry = self._cache.get(key_hash)
@@ -26,8 +31,10 @@ class ApiKeyCache:
             return entry.data
         return None
 
-    async def set(self, key_hash: str, data: Any) -> None:
+    async def set(self, key_hash: str, data: Any, *, if_version: int | None = None) -> None:
         async with self._lock:
+            if if_version is not None and if_version != self._version:
+                return
             if len(self._cache) >= self._max_entries:
                 oldest = min(self._cache.keys(), key=lambda key: self._cache[key].expires_at)
                 del self._cache[oldest]
@@ -36,12 +43,14 @@ class ApiKeyCache:
     async def invalidate(self, key_hash: str) -> None:
         async with self._lock:
             self._cache.pop(key_hash, None)
+            self._version += 1
 
     def clear(self) -> None:
         self._cache.clear()
+        self._version += 1
 
 
-_api_key_cache = ApiKeyCache()
+_api_key_cache = ApiKeyCache(ttl_seconds=2)
 
 
 def get_api_key_cache() -> ApiKeyCache:

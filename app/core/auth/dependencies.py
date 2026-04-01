@@ -61,11 +61,12 @@ async def validate_proxy_api_key_authorization(authorization: str | None) -> Api
         else:
             return cached
 
+    version_before_read = cache.version
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         try:
             validated = await service.validate_key(token)
-            await cache.set(token_hash, validated)
+            await cache.set(token_hash, validated, if_version=version_before_read)
             return validated
         except ApiKeyInvalidError as exc:
             raise ProxyAuthError(str(exc)) from exc

@@ -67,13 +67,44 @@ class RingMembershipService:
             await session.commit()
 
     async def heartbeat(self, instance_id: str) -> None:
-        """Update last_heartbeat_at for a registered pod."""
+        """Upsert heartbeat — recovers from mark_stale or unregister by sibling workers."""
         async with self._session() as session:
-            stmt = (
-                update(BridgeRingMember)
-                .where(BridgeRingMember.instance_id == instance_id)
-                .values(last_heartbeat_at=utcnow())
-            )
+            dialect = session.get_bind().dialect.name
+            now = utcnow()
+            if dialect == "postgresql":
+                stmt = (
+                    pg_insert(BridgeRingMember)
+                    .values(
+                        id=str(uuid.uuid4()),
+                        instance_id=instance_id,
+                        registered_at=now,
+                        last_heartbeat_at=now,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=["instance_id"],
+                        set_={"last_heartbeat_at": now},
+                    )
+                )
+            elif dialect == "sqlite":
+                stmt = (
+                    sqlite_insert(BridgeRingMember)
+                    .values(
+                        id=str(uuid.uuid4()),
+                        instance_id=instance_id,
+                        registered_at=now,
+                        last_heartbeat_at=now,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=["instance_id"],
+                        set_={"last_heartbeat_at": now},
+                    )
+                )
+            else:
+                stmt = (
+                    update(BridgeRingMember)
+                    .where(BridgeRingMember.instance_id == instance_id)
+                    .values(last_heartbeat_at=now)
+                )
             await session.execute(stmt)
             await session.commit()
 
@@ -81,6 +112,27 @@ class RingMembershipService:
         """Remove pod from ring."""
         async with self._session() as session:
             stmt = delete(BridgeRingMember).where(BridgeRingMember.instance_id == instance_id)
+            await session.execute(stmt)
+            await session.commit()
+
+    async def mark_stale(self, instance_id: str) -> None:
+        """Set heartbeat far enough in the past to expire the member immediately.
+
+        Safer than ``unregister`` in multi-worker deployments: sibling workers
+        sharing the same *instance_id* will refresh the timestamp on their next
+        heartbeat, keeping the entry alive.  If all workers are shutting down
+        (pod termination), no heartbeat follows and the row is immediately
+        treated as stale by ``list_active``.
+        """
+        from datetime import timedelta
+
+        stale_time = utcnow() - timedelta(seconds=300)
+        async with self._session() as session:
+            stmt = (
+                update(BridgeRingMember)
+                .where(BridgeRingMember.instance_id == instance_id)
+                .values(last_heartbeat_at=stale_time)
+            )
             await session.execute(stmt)
             await session.commit()
 

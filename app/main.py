@@ -16,7 +16,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
 from app.core.metrics.middleware import MetricsMiddleware
-from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
     add_api_firewall_middleware,
     add_request_decompression_middleware,
@@ -100,11 +100,10 @@ async def lifespan(app: FastAPI):
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
-        from app.core.metrics.prometheus import REGISTRY
-
+        scrape_registry = make_scrape_registry()
         prometheus_module = import_module("prometheus_client")
         make_asgi_app = getattr(prometheus_module, "make_asgi_app")
-        metrics_app = make_asgi_app(registry=REGISTRY)
+        metrics_app = make_asgi_app(registry=scrape_registry)
         config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
         metrics_server = uvicorn.Server(config)
 
@@ -175,6 +174,21 @@ async def lifespan(app: FastAPI):
         if ring_service is not None and instance_id is not None:
             heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
 
+    from app.core.auth.api_key_cache import get_api_key_cache
+    from app.core.cache.invalidation import (
+        NAMESPACE_API_KEY,
+        NAMESPACE_FIREWALL,
+        CacheInvalidationPoller,
+        set_cache_invalidation_poller,
+    )
+    from app.core.middleware.firewall_cache import get_firewall_ip_cache
+
+    cache_poller = CacheInvalidationPoller(SessionLocal)
+    cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
+    cache_poller.on_invalidation(NAMESPACE_FIREWALL, get_firewall_ip_cache().invalidate_all)
+    set_cache_invalidation_poller(cache_poller)
+    await cache_poller.start()
+
     startup_module._startup_complete = True
 
     try:
@@ -203,14 +217,18 @@ async def lifespan(app: FastAPI):
 
         if ring_service is not None and instance_id is not None:
             try:
-                await ring_service.unregister(instance_id)
-                logger.info("Unregistered from bridge ring", extra={"instance_id": instance_id})
+                await asyncio.wait_for(ring_service.unregister(instance_id), timeout=3)
+                logger.info(
+                    "Unregistered from bridge ring",
+                    extra={"instance_id": instance_id},
+                )
             except Exception:
-                logger.warning("Ring unregistration failed (non-fatal)", exc_info=True)
+                logger.warning("Failed to unregister from bridge ring", exc_info=True)
 
         if metrics_server is not None:
             metrics_server.should_exit = True
 
+        await cache_poller.stop()
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await usage_scheduler.stop()
@@ -225,6 +243,7 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Metrics server stopped with an error")
             finally:
+                mark_process_dead()
                 await close_db()
 
 

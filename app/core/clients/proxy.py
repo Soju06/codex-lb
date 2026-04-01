@@ -50,7 +50,11 @@ from app.core.openai.parsing import (
     parse_sse_event,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
-from app.core.resilience.circuit_breaker import CircuitBreakerOpenError, CircuitState, get_circuit_breaker
+from app.core.resilience.circuit_breaker import (
+    CircuitBreakerOpenError,
+    _is_server_error,
+    get_circuit_breaker_for_account,
+)
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
@@ -176,9 +180,16 @@ _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = conte
 R = TypeVar("R")
 
 
-async def _call_with_service_circuit_breaker(request: Awaitable[R], *, settings: object | None = None) -> R:
+async def _call_with_service_circuit_breaker(
+    request: Awaitable[R],
+    *,
+    settings: object | None = None,
+    account_id: str | None = None,
+) -> R:
+    if not account_id:
+        return await request
     effective_settings = settings or get_settings()
-    circuit_breaker = get_circuit_breaker(effective_settings)
+    circuit_breaker = get_circuit_breaker_for_account(account_id, effective_settings)
     if circuit_breaker is None:
         return await request
     return await circuit_breaker.call(request)
@@ -186,27 +197,40 @@ async def _call_with_service_circuit_breaker(request: Awaitable[R], *, settings:
 
 @asynccontextmanager
 async def _service_circuit_breaker_context(
-    cm: AsyncContextManager[aiohttp.ClientResponse], *, settings: object | None = None
+    cm: AsyncContextManager[aiohttp.ClientResponse],
+    *,
+    settings: object | None = None,
+    account_id: str | None = None,
 ) -> AsyncIterator[aiohttp.ClientResponse]:
     """Wrap an async context manager with circuit breaker protection."""
     effective_settings = settings or get_settings()
-    cb = get_circuit_breaker(effective_settings)
+    cb = get_circuit_breaker_for_account(account_id, effective_settings) if account_id else None
     is_probe = False
     if cb is not None:
         is_probe = await cb.pre_call_check()
+    resp_ref: aiohttp.ClientResponse | None = None
     try:
         async with cm as resp:
+            resp_ref = resp
             yield resp
         if cb is not None:
             if hasattr(resp, "status") and resp.status >= 500:
                 await cb._record_failure(Exception(f"HTTP {resp.status}"))
-            elif not hasattr(resp, "status") or resp.status < 400:
+            else:
                 await cb._record_success()
     except CircuitBreakerOpenError:
         raise
     except Exception as e:
         if cb is not None:
-            await cb._record_failure(e)
+            if (
+                resp_ref is not None
+                and hasattr(resp_ref, "status")
+                and resp_ref.status < 500
+                and not _is_server_error(e)
+            ):
+                await cb._record_success()
+            else:
+                await cb._record_failure(e)
         raise
     finally:
         if is_probe and cb is not None:
@@ -936,6 +960,7 @@ async def _open_upstream_websocket(
     headers: Mapping[str, str],
     connect_timeout_seconds: float,
     max_msg_size: int,
+    account_id: str | None = None,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
     request_obj = getattr(session, "request", None)
     if not callable(request_obj):
@@ -961,85 +986,100 @@ async def _open_upstream_websocket(
     timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
     request_fn = cast(Any, request)
     settings = get_settings()
-    circuit_breaker = get_circuit_breaker(settings)
-    if circuit_breaker is not None and circuit_breaker.state == CircuitState.OPEN:
-        raise CircuitBreakerOpenError("Circuit breaker is OPEN")
+    circuit_breaker = get_circuit_breaker_for_account(account_id, settings) if account_id else None
+    is_probe = False
+    if circuit_breaker is not None:
+        is_probe = await circuit_breaker.pre_call_check()
     try:
-        resp = await request_fn(
-            hdrs.METH_GET,
-            url,
-            headers=request_headers,
-            timeout=timeout,
-            read_until_eof=False,
-        )
-    except Exception as exc:
-        if circuit_breaker is not None:
-            await circuit_breaker._record_failure(exc)
-        raise
-
-    async def _raise_handshake_error(message: str) -> None:
-        body_text = ""
         try:
-            body_text = (await resp.text()).strip()
-        except Exception:
+            resp = await request_fn(
+                hdrs.METH_GET,
+                url,
+                headers=request_headers,
+                timeout=timeout,
+                read_until_eof=False,
+            )
+        except Exception as exc:
+            if circuit_breaker is not None:
+                await circuit_breaker._record_failure(exc)
+            raise
+
+        async def _raise_handshake_error(message: str) -> None:
             body_text = ""
-        raise aiohttp.WSServerHandshakeError(
-            resp.request_info,
-            resp.history,
-            message=body_text or message,
-            status=resp.status,
-            headers=resp.headers,
+            try:
+                body_text = (await resp.text()).strip()
+            except Exception:
+                body_text = ""
+            raise aiohttp.WSServerHandshakeError(
+                resp.request_info,
+                resp.history,
+                message=body_text or message,
+                status=resp.status,
+                headers=resp.headers,
+            )
+
+        _cb_recorded = False
+        try:
+            if circuit_breaker is not None:
+                if resp.status >= 500:
+                    await circuit_breaker._record_failure(Exception(f"WebSocket handshake failed: HTTP {resp.status}"))
+                    _cb_recorded = True
+                elif resp.status != 101:
+                    await circuit_breaker._record_success()
+                    _cb_recorded = True
+
+            if resp.status != 101:
+                await _raise_handshake_error("Invalid response status")
+
+            if resp.headers.get(hdrs.UPGRADE, "").lower() != "websocket":
+                await _raise_handshake_error("Invalid upgrade header")
+
+            if resp.headers.get(hdrs.CONNECTION, "").lower() != "upgrade":
+                await _raise_handshake_error("Invalid connection header")
+
+            response_key = resp.headers.get(hdrs.SEC_WEBSOCKET_ACCEPT, "")
+            expected_key = base64.b64encode(hashlib.sha1(sec_key.encode() + WS_KEY).digest()).decode()
+            if response_key != expected_key:
+                await _raise_handshake_error("Invalid challenge response")
+
+            conn = resp.connection
+            assert conn is not None
+            conn_proto = conn.protocol
+            assert conn_proto is not None
+            conn_proto.read_timeout = None
+
+            transport = conn.transport
+            assert transport is not None
+            web_socket_data_queue = cast(Callable[..., Any], getattr(aiohttp.client_ws, "WebSocketDataQueue"))
+            reader = web_socket_data_queue(conn_proto, 2**16, loop=session._loop)
+            conn_proto.set_parser(WebSocketReader(reader, max_msg_size), reader)
+            writer = WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
+        except BaseException as exc:
+            if circuit_breaker is not None and not _cb_recorded and isinstance(exc, Exception):
+                await circuit_breaker._record_failure(exc)
+                _cb_recorded = True
+            resp.close()
+            raise
+
+        websocket = session._ws_response_class(
+            reader,
+            writer,
+            None,
+            resp,
+            DEFAULT_WS_CLIENT_TIMEOUT,
+            True,
+            True,
+            session._loop,
+            heartbeat=None,
+            compress=0,
+            client_notakeover=False,
         )
-
-    try:
-        if resp.status != 101:
-            if circuit_breaker is not None and resp.status >= 500:
-                await circuit_breaker._record_failure(Exception(f"WebSocket handshake failed: HTTP {resp.status}"))
-            await _raise_handshake_error("Invalid response status")
-
-        if resp.headers.get(hdrs.UPGRADE, "").lower() != "websocket":
-            await _raise_handshake_error("Invalid upgrade header")
-
-        if resp.headers.get(hdrs.CONNECTION, "").lower() != "upgrade":
-            await _raise_handshake_error("Invalid connection header")
-
-        response_key = resp.headers.get(hdrs.SEC_WEBSOCKET_ACCEPT, "")
-        expected_key = base64.b64encode(hashlib.sha1(sec_key.encode() + WS_KEY).digest()).decode()
-        if response_key != expected_key:
-            await _raise_handshake_error("Invalid challenge response")
-
-        conn = resp.connection
-        assert conn is not None
-        conn_proto = conn.protocol
-        assert conn_proto is not None
-        conn_proto.read_timeout = None
-
-        transport = conn.transport
-        assert transport is not None
-        web_socket_data_queue = cast(Callable[..., Any], getattr(aiohttp.client_ws, "WebSocketDataQueue"))
-        reader = web_socket_data_queue(conn_proto, 2**16, loop=session._loop)
-        conn_proto.set_parser(WebSocketReader(reader, max_msg_size), reader)
-        writer = WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
-    except BaseException:
-        resp.close()
-        raise
-
-    websocket = session._ws_response_class(
-        reader,
-        writer,
-        None,
-        resp,
-        DEFAULT_WS_CLIENT_TIMEOUT,
-        True,
-        True,
-        session._loop,
-        heartbeat=None,
-        compress=0,
-        client_notakeover=False,
-    )
-    if circuit_breaker is not None and resp.status == 101:
-        await circuit_breaker._record_success()
-    return websocket, websocket
+        if circuit_breaker is not None and not _cb_recorded:
+            await circuit_breaker._record_success()
+        return websocket, websocket
+    finally:
+        if is_probe and circuit_breaker is not None:
+            await circuit_breaker.release_half_open_probe()
 
 
 async def _stream_websocket_events(
@@ -1112,6 +1152,7 @@ async def _stream_responses_via_websocket(
     effective_idle_timeout: float,
     max_event_bytes: int,
     raise_for_status: bool,
+    account_id: str | None = None,
 ) -> AsyncIterator[str]:
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
@@ -1129,6 +1170,7 @@ async def _stream_responses_via_websocket(
         headers=headers,
         connect_timeout_seconds=connect_timeout_seconds,
         max_msg_size=max_event_bytes,
+        account_id=account_id,
     )
 
     try:
@@ -1516,6 +1558,7 @@ async def stream_responses(
                 timeout=current_timeout,
             ),
             settings=settings,
+            account_id=account_id,
         ) as resp:
             status_code = resp.status
             if resp.status >= 400:
@@ -1566,6 +1609,7 @@ async def stream_responses(
                     effective_idle_timeout=effective_idle_timeout,
                     max_event_bytes=settings.max_sse_event_bytes,
                     raise_for_status=raise_for_status,
+                    account_id=account_id,
                 ):
                     if status_code is None:
                         status_code = 101
@@ -1914,6 +1958,7 @@ class _CompactCommandTransport:
                     timeout=timeout,
                 ),
                 settings=settings,
+                account_id=self.account_id,
             ) as resp:
                 status_code = resp.status
                 if resp.status >= 400:
@@ -2114,6 +2159,7 @@ async def transcribe_audio(
                 timeout=timeout,
             ),
             settings=settings,
+            account_id=account_id,
         ) as resp:
             status_code = resp.status
             if resp.status >= 400:

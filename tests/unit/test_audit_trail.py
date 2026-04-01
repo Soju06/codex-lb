@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections.abc import Mapping
 from time import perf_counter
 
 import pytest
@@ -17,7 +18,7 @@ from app.db.session import SessionLocal
 pytestmark = pytest.mark.unit
 
 
-def _encode_jwt(payload: dict[str, object]) -> str:
+def _encode_jwt(payload: Mapping[str, object]) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
     return f"header.{body}.sig"

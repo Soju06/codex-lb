@@ -377,3 +377,64 @@ def test_error_backoff_expired_account_does_not_immediately_relock():
     result2 = select_account([state], now=now + 2)
     assert result2.account is not None
     assert result2.account.account_id == "a"
+
+
+def test_select_account_resets_used_percent_when_rate_limit_expires():
+    """When a rate-limited account's reset_at expires, used_percent must be
+    cleared so the account is not deprioritised in the usage-weighted sort."""
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.RATE_LIMITED,
+        used_percent=100.0,
+        reset_at=now - 10,
+    )
+    result = select_account([state], now=now)
+    assert result.account is not None
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 0.0
+    assert state.reset_at is None
+
+
+def test_select_account_resets_secondary_used_percent_when_quota_exceeded_expires():
+    """When a quota-exceeded account's reset_at expires, secondary_used_percent
+    must be cleared so the account is not deprioritised in the sort key."""
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        secondary_used_percent=100.0,
+        reset_at=now - 10,
+    )
+    result = select_account([state], now=now)
+    assert result.account is not None
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 0.0
+    assert state.secondary_used_percent == 0.0
+    assert state.reset_at is None
+
+
+def test_select_account_prefers_reset_account_over_high_usage():
+    """An account whose quota just reset (via the selection-time clear) should
+    be preferred over an active account with moderate usage."""
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            secondary_used_percent=100.0,
+            reset_at=now - 10,
+        ),
+        AccountState(
+            "b",
+            AccountStatus.ACTIVE,
+            used_percent=60.0,
+            secondary_used_percent=60.0,
+        ),
+    ]
+    result = select_account(states, now=now)
+    assert result.account is not None
+    # Account "a" should be preferred because after reset its usage is 0%
+    assert result.account.account_id == "a"

@@ -4,7 +4,7 @@ description: Production-grade Helm chart for codex-lb — OpenAI API load balanc
 type: application
 version: 0.1.0
 appVersion: "1.8.2"
-kubeVersion: ">=1.25.0-0"
+kubeVersion: ">=1.32.0-0"
 home: https://github.com/soju06/codex-lb
 sources:
   - https://github.com/soju06/codex-lb

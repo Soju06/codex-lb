@@ -31,3 +31,18 @@ The project MUST run automated Helm smoke installs for the easy-setup install mo
 - **THEN** it installs the chart on a disposable Kubernetes cluster in bundled mode
 - **AND** it installs the chart on a disposable Kubernetes cluster in external DB mode
 - **AND** both installs reach a healthy testable state
+
+### Requirement: Helm support policy is pinned to modern Kubernetes minors
+
+The chart MUST declare a minimum supported Kubernetes version of `1.32`, and CI MUST validate chart rendering against a `1.35` baseline instead of older legacy minors.
+
+#### Scenario: Chart metadata declares the minimum supported version
+
+- **WHEN** a user inspects the chart metadata and README
+- **THEN** the documented minimum supported Kubernetes version is `1.32`
+
+#### Scenario: CI validates the modern baseline
+
+- **WHEN** CI runs Kubernetes schema validation and kind-based smoke installs
+- **THEN** the validation set includes Kubernetes `1.35`
+- **AND** pre-`1.32` validation targets are not treated as the support baseline

@@ -472,7 +472,7 @@ jobs:
             | tar xz -C /tmp
           sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
 
-      - name: kubeconform (K8s 1.25.0)
+      - name: kubeconform (K8s 1.32.0)
         run: |
           helm template codex-lb deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-prod.yaml \
@@ -483,12 +483,12 @@ jobs:
             --set "gatewayApi.hostnames[0]=test.example.com" \
             | kubeconform \
               -strict \
-              -kubernetes-version 1.25.0 \
+              -kubernetes-version 1.32.0 \
               -schema-location default \
               -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
               -summary
 
-      - name: kubeconform (K8s 1.28.0)
+      - name: kubeconform (K8s 1.35.0)
         run: |
           helm template codex-lb deploy/helm/codex-lb/ \
             -f deploy/helm/codex-lb/values-prod.yaml \
@@ -499,23 +499,7 @@ jobs:
             --set "gatewayApi.hostnames[0]=test.example.com" \
             | kubeconform \
               -strict \
-              -kubernetes-version 1.28.0 \
-              -schema-location default \
-              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-              -summary
-
-      - name: kubeconform (K8s 1.31.0)
-        run: |
-          helm template codex-lb deploy/helm/codex-lb/ \
-            -f deploy/helm/codex-lb/values-prod.yaml \
-            --set externalSecrets.secretStoreRef.name=test \
-            --set externalSecrets.secretStoreRef.kind=SecretStore \
-            --set gatewayApi.enabled=true \
-            --set "gatewayApi.parentRefs[0].name=test-gw" \
-            --set "gatewayApi.hostnames[0]=test.example.com" \
-            | kubeconform \
-              -strict \
-              -kubernetes-version 1.31.0 \
+              -kubernetes-version 1.35.0 \
               -schema-location default \
               -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
               -summary
@@ -538,7 +522,7 @@ jobs:
           sudo mv ./kind /usr/local/bin/kind
 
       - name: Create kind cluster
-        run: kind create cluster --name codex-lb-smoke --wait 120s
+        run: kind create cluster --name codex-lb-smoke --image kindest/node:v1.35.0 --wait 120s
 
       - name: Build Docker image
         run: docker build -t ghcr.io/soju06/codex-lb:ci .

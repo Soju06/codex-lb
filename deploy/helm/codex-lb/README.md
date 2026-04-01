@@ -11,12 +11,19 @@ The same chart should work on Docker Desktop, kind, EKS, GKE, OKE, and other Kub
 ## Prerequisites
 
 - Helm 3.7+
-- Kubernetes 1.25+
+- Kubernetes 1.32+
 - Optional:
   - Prometheus Operator for `ServiceMonitor` and `PrometheusRule`
   - cert-manager for automated ingress TLS
   - Gateway API CRDs for `HTTPRoute`
   - External Secrets Operator for `externalSecrets.enabled=true`
+
+## Version Policy
+
+- Minimum supported Kubernetes version: `1.32`
+- Validation baseline in CI and smoke installs: `1.35`
+
+This is a project support policy. Cloud providers may keep older versions available for some time, but the chart and CI no longer optimize for pre-`1.32` clusters.
 
 ## Install Modes
 

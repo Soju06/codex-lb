@@ -8,6 +8,7 @@ The Helm chart should be easy to install across Docker Desktop, kind, EKS, GKE, 
 - Keep install behavior mode-centric across bundled PostgreSQL, direct external database, and External Secrets modes.
 - Publish mode-specific values overlays and rewrite Helm chart documentation around those contracts.
 - Add a kind-based Helm smoke install workflow for bundled and external DB modes.
+- Raise the chart support contract to Kubernetes `1.32+` and validate against a `1.35` baseline in CI.
 
 ## Capabilities
 

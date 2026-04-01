@@ -149,6 +149,7 @@ class ApiKeysRepository:
         allowed_models: str | None | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
+        enforced_service_tier: str | None | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
@@ -169,6 +170,9 @@ class ApiKeysRepository:
         if enforced_reasoning_effort is not _UNSET:
             assert enforced_reasoning_effort is None or isinstance(enforced_reasoning_effort, str)
             row.enforced_reasoning_effort = enforced_reasoning_effort
+        if enforced_service_tier is not _UNSET:
+            assert enforced_service_tier is None or isinstance(enforced_service_tier, str)
+            row.enforced_service_tier = enforced_service_tier
         if expires_at is not _UNSET:
             assert expires_at is None or isinstance(expires_at, datetime)
             row.expires_at = expires_at

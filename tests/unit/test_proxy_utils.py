@@ -32,6 +32,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -110,6 +111,34 @@ def test_build_upstream_headers_accept_override():
     inbound = {}
     headers = _build_upstream_headers(inbound, "token", None, accept="application/json")
     assert headers["Accept"] == "application/json"
+
+
+def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "default",
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="service-tier-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier="priority",
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert payload.service_tier == "priority"
 
 
 class _RingMembershipStub:
@@ -3814,6 +3843,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
         allowed_models=["gpt-5.1"],
         enforced_model=None,
         enforced_reasoning_effort=None,
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=utcnow(),
@@ -3826,6 +3856,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
         allowed_models=["gpt-5.2"],
         enforced_model="gpt-5.2",
         enforced_reasoning_effort="high",
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=utcnow(),
@@ -3892,6 +3923,7 @@ async def test_prepare_websocket_response_create_request_logs_affinity_metadata(
         allowed_models=["gpt-5.1"],
         enforced_model=None,
         enforced_reasoning_effort=None,
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=utcnow(),

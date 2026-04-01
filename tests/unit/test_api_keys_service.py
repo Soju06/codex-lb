@@ -71,6 +71,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         allowed_models: str | None | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
+        enforced_service_tier: str | None | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
@@ -84,6 +85,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "allowed_models": allowed_models,
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
+            "enforced_service_tier": enforced_service_tier,
             "expires_at": expires_at,
             "is_active": is_active,
             "key_hash": key_hash,
@@ -442,6 +444,47 @@ async def test_create_key_normalizes_enforced_reasoning_effort() -> None:
     )
 
     assert created.enforced_reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_create_key_normalizes_fast_service_tier_alias() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="service-tier-policy",
+            allowed_models=None,
+            enforced_service_tier="FAST",
+            expires_at=None,
+        )
+    )
+
+    assert created.enforced_service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_update_key_normalizes_service_tier_alias() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="service-tier-update",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            enforced_service_tier="fast",
+            enforced_service_tier_set=True,
+        ),
+    )
+
+    assert updated.enforced_service_tier == "priority"
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,7 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
         allowed_models=None,
         enforced_model=None,
         enforced_reasoning_effort=None,
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=datetime(2026, 3, 10),

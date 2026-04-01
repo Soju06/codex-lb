@@ -25,6 +25,7 @@ def _make_api_key(id: str = "ak_test_001122334455") -> ApiKeyData:
         allowed_models=None,
         enforced_model=None,
         enforced_reasoning_effort=None,
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=_NOW,

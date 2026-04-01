@@ -261,6 +261,7 @@ class ApiKey(Base):
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
+    enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

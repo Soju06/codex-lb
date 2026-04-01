@@ -377,6 +377,19 @@ def test_run_upgrade_repairs_branched_legacy_revision_ids_with_parallel_head(tmp
     assert result.current_revision == inspect_migration_state(url).head_revision
 
 
+def test_api_key_enforced_service_tier_column_exists_after_head_upgrade(tmp_path: Path) -> None:
+    db_path = tmp_path / "api-key-service-tier.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        api_key_columns = {column["name"] for column in inspect(connection).get_columns("api_keys")}
+
+    assert "enforced_service_tier" in api_key_columns
+
+
 def test_run_upgrade_backfills_additional_usage_quota_key_from_configured_registry(
     monkeypatch,
     tmp_path: Path,

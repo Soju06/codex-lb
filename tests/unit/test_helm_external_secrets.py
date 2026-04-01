@@ -73,6 +73,34 @@ def test_chart_managed_secret_keeps_pre_install_hook_path() -> None:
 
     assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
     assert '"helm.sh/hook": "post-install,pre-upgrade"' in rendered
+    assert "serviceAccountName: default" in rendered
+
+
+def test_existing_secret_install_keeps_pre_install_hook_path() -> None:
+    rendered = _helm_template(
+        "--set",
+        "auth.existingSecret=codex-lb-secrets",
+        "--set",
+        "migration.enabled=true",
+    )
+
+    assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
+    assert '"helm.sh/hook": "post-install,pre-upgrade"' in rendered
+    assert "serviceAccountName: default" in rendered
+
+
+def test_direct_external_database_install_uses_pre_install_hook_path() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "externalDatabase.url=postgresql+asyncpg://user:pass@db.example.com:5432/codexlb",
+        "--set",
+        "migration.enabled=true",
+    )
+
+    assert '"helm.sh/hook": "pre-install,pre-upgrade"' in rendered
+    assert "serviceAccountName: default" in rendered
 
 
 def test_deployment_rolls_when_configmap_backed_env_changes() -> None:
@@ -113,3 +141,40 @@ def test_manual_rollout_token_changes_deployment_template() -> None:
 
     assert "rollout-token" not in baseline
     assert 'rollout-token: "secret-rotation-2026-04-01"' in updated
+
+
+def test_external_database_existing_secret_is_used_for_database_url_env() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "externalDatabase.existingSecret=external-db-secret",
+    )
+
+    assert re.search(
+        r"name: CODEX_LB_DATABASE_URL\s+valueFrom:\s+secretKeyRef:\s+name: external-db-secret\s+key: database-url",
+        rendered,
+        re.S,
+    )
+
+
+def test_external_database_url_is_rendered_into_chart_managed_secret_when_postgresql_is_disabled() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "externalDatabase.url=postgresql+asyncpg://user:pass@db.example.com:5432/codexlb",
+    )
+
+    assert 'database-url: "postgresql+asyncpg://user:pass@db.example.com:5432/codexlb"' in rendered
+
+
+def test_network_policy_does_not_allow_http_ingress_from_all_namespaces_by_default() -> None:
+    rendered = _helm_template(
+        "-f",
+        str(_CHART_DIR / "values-prod.yaml"),
+        "--show-only",
+        "templates/networkpolicy.yaml",
+    )
+
+    assert "port: 2455" not in rendered

@@ -14,19 +14,16 @@ spec:
     - Ingress
     - Egress
   ingress:
+    {{- if .Values.networkPolicy.ingressNSMatchLabels }}
     # Allow HTTP traffic from ingress controller
     - ports:
         - port: 2455
           protocol: TCP
-      {{- if .Values.networkPolicy.ingressNSMatchLabels }}
       from:
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.ingressNSMatchLabels | nindent 14 }}
-      {{- else }}
-      from:
-        - namespaceSelector: {}
-      {{- end }}
+    {{- end }}
     # Allow metrics scraping from Prometheus
     - ports:
         - port: {{ .Values.metrics.port }}

@@ -207,7 +207,13 @@ async def _service_circuit_breaker_context(
     cb = get_circuit_breaker_for_account(account_id, effective_settings) if account_id else None
     is_probe = False
     if cb is not None:
-        is_probe = await cb.pre_call_check()
+        try:
+            is_probe = await cb.pre_call_check()
+        except BaseException:
+            close = getattr(cm, "close", None)
+            if callable(close):
+                close()
+            raise
     resp_ref: aiohttp.ClientResponse | None = None
     try:
         async with cm as resp:
@@ -235,6 +241,25 @@ async def _service_circuit_breaker_context(
     finally:
         if is_probe and cb is not None:
             await cb.release_half_open_probe()
+
+
+_HELD_HALF_OPEN_PROBE_FLAG = "_codex_lb_half_open_probe_held"
+_HELD_HALF_OPEN_PROBE_BREAKER = "_codex_lb_half_open_probe_breaker"
+
+
+def _bind_half_open_probe(websocket: aiohttp.ClientWebSocketResponse, circuit_breaker: object) -> None:
+    setattr(websocket, _HELD_HALF_OPEN_PROBE_FLAG, True)
+    setattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, circuit_breaker)
+
+
+async def _release_bound_half_open_probe(websocket: aiohttp.ClientWebSocketResponse | None) -> None:
+    if websocket is None or not getattr(websocket, _HELD_HALF_OPEN_PROBE_FLAG, False):
+        return
+    circuit_breaker = getattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, None)
+    setattr(websocket, _HELD_HALF_OPEN_PROBE_FLAG, False)
+    setattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, None)
+    if circuit_breaker is not None:
+        await cast(Any, circuit_breaker).release_half_open_probe()
 
 
 class StreamIdleTimeoutError(Exception):
@@ -961,19 +986,36 @@ async def _open_upstream_websocket(
     connect_timeout_seconds: float,
     max_msg_size: int,
     account_id: str | None = None,
+    hold_half_open_probe: bool = False,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
+    settings = get_settings()
+    circuit_breaker = get_circuit_breaker_for_account(account_id, settings) if account_id else None
+    is_probe = False
+    if circuit_breaker is not None:
+        is_probe = await circuit_breaker.pre_call_check()
+
     request_obj = getattr(session, "request", None)
     if not callable(request_obj):
-        websocket_cm = session.ws_connect(
-            url,
-            headers=headers,
-            receive_timeout=None,
-            autoping=True,
-            autoclose=True,
-            max_msg_size=max_msg_size,
-        )
-        websocket = await asyncio.wait_for(websocket_cm.__aenter__(), timeout=connect_timeout_seconds)
-        return websocket_cm, websocket
+        try:
+            websocket_cm = session.ws_connect(
+                url,
+                headers=headers,
+                receive_timeout=None,
+                autoping=True,
+                autoclose=True,
+                max_msg_size=max_msg_size,
+            )
+            websocket = await asyncio.wait_for(websocket_cm.__aenter__(), timeout=connect_timeout_seconds)
+            if hold_half_open_probe and is_probe and circuit_breaker is not None:
+                _bind_half_open_probe(websocket, circuit_breaker)
+            return websocket_cm, websocket
+        except Exception as exc:
+            if circuit_breaker is not None:
+                await circuit_breaker._record_failure(exc)
+            raise
+        finally:
+            if is_probe and circuit_breaker is not None and not hold_half_open_probe:
+                await circuit_breaker.release_half_open_probe()
     request = cast(Callable[..., Awaitable[aiohttp.ClientResponse]], request_obj)
 
     request_headers = CIMultiDict(headers)
@@ -985,11 +1027,6 @@ async def _open_upstream_websocket(
 
     timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
     request_fn = cast(Any, request)
-    settings = get_settings()
-    circuit_breaker = get_circuit_breaker_for_account(account_id, settings) if account_id else None
-    is_probe = False
-    if circuit_breaker is not None:
-        is_probe = await circuit_breaker.pre_call_check()
     try:
         try:
             resp = await request_fn(
@@ -1074,9 +1111,11 @@ async def _open_upstream_websocket(
             compress=0,
             client_notakeover=False,
         )
+        if hold_half_open_probe and is_probe and circuit_breaker is not None:
+            _bind_half_open_probe(websocket, circuit_breaker)
         return websocket, websocket
     finally:
-        if is_probe and circuit_breaker is not None:
+        if is_probe and circuit_breaker is not None and not hold_half_open_probe:
             await circuit_breaker.release_half_open_probe()
 
 
@@ -1190,6 +1229,7 @@ async def _stream_responses_via_websocket(
         connect_timeout_seconds=connect_timeout_seconds,
         max_msg_size=max_event_bytes,
         account_id=account_id,
+        hold_half_open_probe=True,
     )
 
     try:
@@ -1231,8 +1271,11 @@ async def _stream_responses_via_websocket(
         await _record_lifecycle_failure(exc)
         raise
     finally:
-        if websocket_cm is not None:
-            await websocket_cm.__aexit__(None, None, None)
+        try:
+            if websocket_cm is not None:
+                await websocket_cm.__aexit__(None, None, None)
+        finally:
+            await _release_bound_half_open_probe(websocket)
 
 
 def _build_websocket_response_create_payload(payload_dict: JsonObject) -> JsonObject:

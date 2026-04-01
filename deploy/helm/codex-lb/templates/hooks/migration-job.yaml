@@ -7,7 +7,7 @@ metadata:
   labels:
     {{- include "codex-lb.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": "post-install,pre-upgrade"
+    "helm.sh/hook": {{ include "codex-lb.migrationHookPhases" . | quote }}
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-failed
     {{- with .Values.commonAnnotations }}
@@ -23,7 +23,7 @@ spec:
         app.kubernetes.io/component: migration
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ include "codex-lb.serviceAccountName" . }}
+      serviceAccountName: {{ include "codex-lb.migrationServiceAccountName" . }}
       automountServiceAccountToken: false
       {{- with .Values.podSecurityContext }}
       securityContext:
@@ -79,38 +79,26 @@ spec:
             - -m
             - app.db.migrate
             - upgrade
-          envFrom:
-            - configMapRef:
-                name: {{ include "codex-lb.fullname" . }}
-            {{- with .Values.extraEnvFrom }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
           env:
+            {{- if or .Values.externalSecrets.enabled .Values.auth.existingSecret .Values.externalDatabase.existingSecret }}
             - name: CODEX_LB_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codex-lb.secretName" . }}
+                  name: {{ include "codex-lb.databaseUrlSecretName" . }}
                   key: {{ .Values.auth.secretKeys.databaseUrl }}
+            {{- else }}
+            - name: CODEX_LB_DATABASE_URL
+              value: {{ include "codex-lb.databaseUrl" . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
-            - name: encryption-key
-              mountPath: /var/lib/codex-lb/encryption.key
-              subPath: encryption.key
-              readOnly: true
             - name: tmp
               mountPath: /tmp
           resources:
             {{- toYaml .Values.migration.resources | nindent 12 }}
       volumes:
-        - name: encryption-key
-          secret:
-            secretName: {{ include "codex-lb.secretName" . }}
-            items:
-              - key: {{ .Values.auth.secretKeys.encryptionKey }}
-                path: encryption.key
-            defaultMode: 0444
         - name: tmp
           emptyDir: {}
 {{- end }}

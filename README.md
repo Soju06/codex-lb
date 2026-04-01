@@ -302,6 +302,19 @@ SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DAT
 
 Backup this directory to preserve your data.
 
+## Kubernetes
+
+```bash
+helm dependency build deploy/helm/codex-lb/
+helm install codex-lb deploy/helm/codex-lb/ \
+  --set postgresql.auth.password=changeme
+kubectl port-forward svc/codex-lb 2455:2455
+```
+
+Open [localhost:2455](http://localhost:2455) → Add account → Done.
+
+For production config, ingress, observability, and more see the [Helm chart README](deploy/helm/codex-lb/README.md).
+
 ## Development
 
 ```bash

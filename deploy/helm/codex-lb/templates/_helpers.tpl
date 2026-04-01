@@ -74,18 +74,44 @@ Secret name — returns existingSecret or generated name
 {{- end }}
 
 {{/*
+Database URL secret name — may differ from the app secret when using a dedicated external DB secret.
+*/}}
+{{- define "codex-lb.databaseUrlSecretName" -}}
+{{- if and (not .Values.postgresql.enabled) .Values.externalDatabase.existingSecret }}
+{{- .Values.externalDatabase.existingSecret }}
+{{- else }}
+{{- include "codex-lb.secretName" . }}
+{{- end }}
+{{- end }}
+
+{{/*
 Database URL — TWO code paths:
   1. postgresql.enabled: synthesize URL from sub-chart values
-  2. external: use externalDatabase.url value
+  2. external: use externalDatabase.url or synthesize from discrete fields
 This is used in secret.yaml to populate the database-url secret key.
 */}}
 {{- define "codex-lb.databaseUrl" -}}
 {{- if .Values.postgresql.enabled }}
 {{- printf "postgresql+asyncpg://%s:%s@%s-postgresql:5432/%s" .Values.postgresql.auth.username .Values.postgresql.auth.password .Release.Name .Values.postgresql.auth.database }}
-{{- else }}
+{{- else if .Values.externalDatabase.url }}
 {{- .Values.externalDatabase.url }}
+{{- else if and .Values.externalDatabase.host .Values.externalDatabase.user .Values.externalDatabase.database }}
+{{- printf "postgresql+asyncpg://%s@%s:%v/%s" .Values.externalDatabase.user .Values.externalDatabase.host (.Values.externalDatabase.port | default 5432) .Values.externalDatabase.database }}
+{{- else }}
+{{- "" }}
 {{- end }}
 {{- end }}
+
+{{/*
+Migration hook phases — default to pre-install when DB credentials are already available without ExternalSecrets materialization.
+*/}}
+{{- define "codex-lb.migrationHookPhases" -}}{{- if or .Values.externalSecrets.enabled .Values.postgresql.enabled -}}post-install,pre-upgrade{{- else -}}pre-install,pre-upgrade{{- end -}}{{- end }}
+
+{{/*
+Migration job service account — pre-install hooks cannot rely on chart-created ServiceAccounts.
+Use an operator-provided existing SA when explicitly configured; otherwise fall back to default.
+*/}}
+{{- define "codex-lb.migrationServiceAccountName" -}}{{- if and .Values.externalSecrets.enabled .Values.serviceAccount.create -}}{{- include "codex-lb.serviceAccountName" . -}}{{- else if .Values.serviceAccount.name -}}{{- .Values.serviceAccount.name -}}{{- else -}}default{{- end -}}{{- end }}
 
 {{/*
 Image string — resolves registry/repository:tag with optional digest override

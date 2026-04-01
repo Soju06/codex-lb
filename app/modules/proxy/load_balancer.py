@@ -214,29 +214,10 @@ class LoadBalancer:
                     selected_account_map = {}
                     continue
 
-                # Revalidate: if the selected account entered balancer-level
-                # error backoff during _persist_selection_state (concurrent
-                # record_errors), discard the selection and retry.  The threshold
-                # mirrors the suppression rule in core/balancer/logic.py (>=3
-                # errors + active exponential backoff window).
                 if selected_snapshot is not None:
                     _sel_runtime = self._runtime.get(selected_snapshot.id)
                     _sel_pre_ver = selected_version_at_pick
-                    _now = time.time()
-                    _in_error_backoff = (
-                        _sel_runtime is not None
-                        and _sel_runtime.version != _sel_pre_ver
-                        and (
-                            (
-                                _sel_runtime.error_count >= 3
-                                and _sel_runtime.last_error_at is not None
-                                and _now - _sel_runtime.last_error_at
-                                < min(300, 30 * (2 ** (_sel_runtime.error_count - 3)))
-                            )
-                            or (_sel_runtime.cooldown_until is not None and _sel_runtime.cooldown_until > _now)
-                        )
-                    )
-                    if _in_error_backoff:
+                    if _sel_runtime is not None and _sel_runtime.version != _sel_pre_ver:
                         selection_inputs = await load_selection_inputs()
                         if selection_inputs.error_code is not None and not selection_inputs.accounts:
                             return AccountSelection(

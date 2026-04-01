@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import asyncio
+import time
+from collections import deque
 from contextlib import nullcontext
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+import anyio
 import pytest
 
 from app.core import shutdown as shutdown_module
 from app.core.clients.proxy import ProxyResponseError
+from app.db.models import Account, AccountStatus
+
+if TYPE_CHECKING:
+    from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
-from app.modules.proxy.service import ProxyService, _AffinityPolicy, _HTTPBridgeSessionKey
+from app.modules.proxy.service import (
+    ProxyService,
+    _AffinityPolicy,
+    _HTTPBridgeSession,
+    _HTTPBridgeSessionKey,
+    _WebSocketUpstreamControl,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -44,6 +58,54 @@ async def test_new_sessions_rejected_during_drain() -> None:
     assert exc_info.value.payload["error"].get("code") == "bridge_drain_active"
 
     shutdown_module.set_bridge_drain_active(False)
+
+
+@pytest.mark.asyncio
+async def test_existing_live_sessions_are_reused_during_drain() -> None:
+    shutdown_module.set_bridge_drain_active(False)
+    service = ProxyService(repo_factory=cast(ProxyRepoFactory, nullcontext()))
+    key = _HTTPBridgeSessionKey("request", "drain-reuse-test", None)
+    account = Account(
+        id="acc-drain-reuse",
+        chatgpt_account_id="workspace-acc-drain-reuse",
+        email="drain-reuse@example.com",
+        plan_type="plus",
+        access_token_encrypted=b"token",
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    existing = _HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=_AffinityPolicy(),
+        request_model="gpt-5.4",
+        account=account,
+        upstream=cast("UpstreamResponsesWebSocket", object()),
+        upstream_control=_WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=30.0,
+    )
+    service._http_bridge_sessions[key] = existing
+
+    shutdown_module.set_bridge_drain_active(True)
+    try:
+        reused = await service._get_or_create_http_bridge_session(
+            key,
+            headers={},
+            affinity=_AffinityPolicy(),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=30.0,
+            max_sessions=16,
+        )
+    finally:
+        shutdown_module.set_bridge_drain_active(False)
+
+    assert reused is existing
 
 
 def test_two_instances_same_key_converges() -> None:

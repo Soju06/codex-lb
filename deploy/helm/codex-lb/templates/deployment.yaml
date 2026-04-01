@@ -150,7 +150,7 @@ spec:
             - name: CODEX_LB_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codex-lb.secretName" . }}
+                  name: {{ include "codex-lb.databaseUrlSecretName" . }}
                   key: {{ .Values.auth.secretKeys.databaseUrl }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

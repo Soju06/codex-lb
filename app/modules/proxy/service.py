@@ -1453,16 +1453,6 @@ class ProxyService:
             continuity_error: ProxyResponseError | None = None
 
             async with self._http_bridge_lock:
-                if shutdown_state.is_bridge_drain_active():
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(
-                            "bridge_drain_active",
-                            "HTTP bridge is draining — new sessions not accepted during shutdown",
-                            error_type="server_error",
-                        ),
-                    )
-
                 if incoming_turn_state is not None:
                     alias_index_key = _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
                     alias_key = self._http_bridge_turn_state_index.get(alias_index_key)
@@ -1528,6 +1518,16 @@ class ProxyService:
                         model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
                     )
                     return existing
+
+                if shutdown_state.is_bridge_drain_active():
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(
+                            "bridge_drain_active",
+                            "HTTP bridge is draining — new sessions not accepted during shutdown",
+                            error_type="server_error",
+                        ),
+                    )
 
                 owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
                 current_instance, ring = await _active_http_bridge_instance_ring(settings, self._ring_membership)

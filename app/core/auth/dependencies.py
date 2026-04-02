@@ -90,9 +90,7 @@ async def validate_usage_api_key(
     Bearer API key, regardless of the global ``api_key_auth_enabled`` setting.
     Raises ProxyAuthError when the key is missing or invalid.
     """
-    token = _extract_bearer_token(
-        None if credentials is None else f"Bearer {credentials.credentials}"
-    )
+    token = _extract_bearer_token(None if credentials is None else f"Bearer {credentials.credentials}")
     if not token:
         raise ProxyAuthError("Missing API key in Authorization header")
 

@@ -143,19 +143,16 @@ class ApiKeysRepository:
 
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary:
         """Return aggregate usage totals for a single API key (zeroes if no logs)."""
-        stmt = (
-            select(
-                func.count(RequestLog.id).label("request_count"),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(
-                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
-                    0,
-                ).label("output_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-            )
-            .where(RequestLog.api_key_id == key_id)
-        )
+        stmt = select(
+            func.count(RequestLog.id).label("request_count"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(
+                func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                0,
+            ).label("output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+        ).where(RequestLog.api_key_id == key_id)
         result = await self._session.execute(stmt)
         row = result.one()
         input_sum = int(row.input_tokens or 0)

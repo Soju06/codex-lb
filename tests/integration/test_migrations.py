@@ -485,7 +485,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
                 ).scalar_one()
-                assert routing_strategy == "usage_weighted"
+                assert routing_strategy == "capacity_weighted"
             assert "openai_cache_affinity_max_age_seconds" in dashboard_columns
             affinity_ttl = (
                 await session.execute(

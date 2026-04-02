@@ -25,7 +25,7 @@ def test_select_account_picks_lowest_used_percent():
         AccountState("a", AccountStatus.ACTIVE, used_percent=50.0),
         AccountState("b", AccountStatus.ACTIVE, used_percent=10.0),
     ]
-    result = select_account(states)
+    result = select_account(states, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 

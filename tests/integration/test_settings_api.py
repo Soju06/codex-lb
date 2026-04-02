@@ -13,7 +13,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["stickyThreadsEnabled"] is False
     assert payload["upstreamStreamTransport"] == "default"
     assert payload["preferEarlierResetAccounts"] is False
-    assert payload["routingStrategy"] == "usage_weighted"
+    assert payload["routingStrategy"] == "capacity_weighted"
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
     assert payload["stickyReallocationBudgetThresholdPct"] == 95.0

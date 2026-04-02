@@ -90,6 +90,7 @@ def select_account(
     prefer_earlier_reset: bool = False,
     routing_strategy: RoutingStrategy = "capacity_weighted",
     allow_backoff_fallback: bool = True,
+    deterministic_probe: bool = False,
 ) -> SelectionResult:
     current = now or time.time()
     available: list[AccountState] = []
@@ -186,7 +187,10 @@ def select_account(
         selected = min(available, key=_round_robin_sort_key)
     elif routing_strategy == "capacity_weighted":
         candidate_pool = _prefer_earlier_reset_candidates(available, current) if prefer_earlier_reset else available
-        selected = _select_capacity_weighted(candidate_pool)
+        if deterministic_probe:
+            selected = min(candidate_pool, key=_capacity_probe_sort_key)
+        else:
+            selected = _select_capacity_weighted(candidate_pool)
     else:
         selected = min(available, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)
@@ -206,6 +210,11 @@ def _remaining_secondary_credits(state: AccountState) -> float:
     else:
         used_pct = 0.0
     return max(0.0, capacity * (1.0 - min(used_pct, 100.0) / 100.0))
+
+
+def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, float, str]:
+    secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
+    return (-_remaining_secondary_credits(state), secondary_used, primary_used, last_selected, account_id)
 
 
 def _select_capacity_weighted(available: list[AccountState]) -> AccountState:

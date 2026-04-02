@@ -194,8 +194,8 @@ class DashboardSettings(Base):
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     routing_strategy: Mapped[str] = mapped_column(
         String,
-        default="usage_weighted",
-        server_default=text("'usage_weighted'"),
+        default="capacity_weighted",
+        server_default=text("'capacity_weighted'"),
         nullable=False,
     )
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(

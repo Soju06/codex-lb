@@ -52,6 +52,17 @@ def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
     return secondary_used, primary_used, last_selected, state.account_id
 
 
+def _reset_bucket_days(state: AccountState, current: float) -> int:
+    if state.secondary_reset_at is None:
+        return UNKNOWN_RESET_BUCKET_DAYS
+    return max(0, int((state.secondary_reset_at - current) // SECONDS_PER_DAY))
+
+
+def _prefer_earlier_reset_candidates(available: list[AccountState], current: float) -> list[AccountState]:
+    earliest_bucket = min(_reset_bucket_days(state, current) for state in available)
+    return [state for state in available if _reset_bucket_days(state, current) == earliest_bucket]
+
+
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
@@ -143,12 +154,7 @@ def select_account(
             return SelectionResult(None, "No available accounts")
 
     def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = UNKNOWN_RESET_BUCKET_DAYS
-        if state.secondary_reset_at is not None:
-            reset_bucket_days = max(
-                0,
-                int((state.secondary_reset_at - current) // SECONDS_PER_DAY),
-            )
+        reset_bucket_days = _reset_bucket_days(state, current)
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
 
@@ -159,7 +165,8 @@ def select_account(
     if routing_strategy == "round_robin":
         selected = min(available, key=_round_robin_sort_key)
     elif routing_strategy == "capacity_weighted":
-        selected = _select_capacity_weighted(available)
+        candidate_pool = _prefer_earlier_reset_candidates(available, current) if prefer_earlier_reset else available
+        selected = _select_capacity_weighted(candidate_pool)
     else:
         selected = min(available, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)

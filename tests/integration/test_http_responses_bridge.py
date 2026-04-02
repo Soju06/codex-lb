@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import time
 from collections import deque
@@ -1884,6 +1885,147 @@ async def test_v1_responses_http_bridge_session_id_reconnect_keeps_upstream_turn
     assert connect_headers_seen[1]["x-codex-turn-state"] == "upstream_turn_state_1"
     assert bridge_session.downstream_turn_state == "http_turn_alias_session"
     assert bridge_session.upstream_turn_state == "upstream_turn_state_2"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times_out(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_reconnect_cancel_timeout",
+        "http-bridge-reconnect-cancel-timeout@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    upstreams = [_FakeBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstreams.pop(0)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = proxy_module.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    affinity = proxy_module._sticky_key_for_responses_request(
+        payload,
+        {"x-codex-turn-state": "timeout_turn_state"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=None,
+    )
+    key = proxy_module._make_http_bridge_session_key(
+        payload,
+        headers={"x-codex-turn-state": "timeout_turn_state"},
+        affinity=affinity,
+        api_key=None,
+        request_id="req_timeout_turn_state",
+    )
+    bridge_session = await service._get_or_create_http_bridge_session(
+        key,
+        headers={"x-codex-turn-state": "timeout_turn_state"},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
+    original_upstream = bridge_session.upstream
+
+    blocker = asyncio.Event()
+
+    async def blocking_reader_task() -> None:
+        await blocker.wait()
+
+    blocking_reader = asyncio.create_task(blocking_reader_task())
+    bridge_session.upstream_reader = blocking_reader
+
+    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label):
+        del task, timeout_seconds, label
+        return False
+
+    monkeypatch.setattr(proxy_module, "_await_cancelled_task", fake_await_cancelled_task)
+
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-timeout-reconnect",
+        model=payload.model,
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.4", "input": []}),
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(
+            bridge_session,
+            request_state=request_state,
+            restart_reader=True,
+        )
+
+    error_payload = exc_info.value.payload["error"]
+    assert exc_info.value.status_code == 502
+    assert error_payload.get("code") == "upstream_unavailable"
+    assert "reader did not shut down cleanly" in (error_payload.get("message") or "")
+    assert bridge_session.closed is True
+    assert bridge_session.upstream is original_upstream
+    blocking_reader.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await blocking_reader
 
 
 @pytest.mark.asyncio

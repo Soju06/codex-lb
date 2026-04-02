@@ -117,14 +117,16 @@ async def _await_cancelled_task(
     *,
     timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
     label: str,
-) -> None:
+) -> bool:
     task.cancel()
     try:
         await asyncio.wait_for(task, timeout=timeout_seconds)
     except asyncio.CancelledError:
-        pass
+        return True
     except TimeoutError:
         logger.warning("Timed out waiting for %s cancellation", label)
+        return False
+    return True
 
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
@@ -2326,7 +2328,16 @@ class ProxyService:
         old_reader = session.upstream_reader if restart_reader else None
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
-                await _await_cancelled_task(old_reader, label="http bridge upstream reader")
+                cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
+                if not cancelled:
+                    session.closed = True
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "upstream_unavailable",
+                            "HTTP responses session bridge reader did not shut down cleanly",
+                        ),
+                    )
         try:
             await old_upstream.close()
         except Exception:

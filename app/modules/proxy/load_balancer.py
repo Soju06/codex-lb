@@ -336,6 +336,10 @@ class LoadBalancer:
                     )
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
+                    selected_snapshot = None
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
                     if attempt >= _MAX_SELECTION_ATTEMPTS:
                         break
                     selection_inputs = await load_selection_inputs()
@@ -345,10 +349,6 @@ class LoadBalancer:
                             error_message=selection_inputs.error_message,
                             error_code=selection_inputs.error_code,
                         )
-                    selected_snapshot = None
-                    error_message = None
-                    selected_states = []
-                    selected_account_map = {}
                     await asyncio.sleep(0)
                     continue
                 break

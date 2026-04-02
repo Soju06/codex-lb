@@ -95,7 +95,7 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.0.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -115,7 +115,7 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.0.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -146,7 +146,7 @@ jobs:
         run: cd frontend && bun run build
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.0.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -193,7 +193,7 @@ jobs:
         run: cd frontend && bun run build
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.0.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -213,7 +213,7 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.0.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -253,7 +253,7 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.0.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -289,7 +289,7 @@ jobs:
         run: cd frontend && bun run build
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.0.0
         with:
           python-version: "3.13"
           enable-cache: true

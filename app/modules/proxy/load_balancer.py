@@ -668,7 +668,7 @@ class LoadBalancer:
                         pool_best = select_account(
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
-                            routing_strategy=routing_strategy,
+                            routing_strategy="usage_weighted",
                         )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id

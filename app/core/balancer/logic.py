@@ -170,7 +170,12 @@ def _remaining_secondary_credits(state: AccountState) -> float:
     capacity = state.capacity_credits
     if capacity is None or capacity <= 0:
         return 0.0
-    used_pct = state.secondary_used_percent if state.secondary_used_percent is not None else 0.0
+    if state.secondary_used_percent is not None:
+        used_pct = state.secondary_used_percent
+    elif state.used_percent is not None:
+        used_pct = state.used_percent
+    else:
+        used_pct = 0.0
     return max(0.0, capacity * (1.0 - min(used_pct, 100.0) / 100.0))
 
 

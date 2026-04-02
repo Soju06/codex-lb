@@ -71,7 +71,7 @@ def test_select_account_secondary_reset_is_bucketed_by_day():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -94,7 +94,7 @@ def test_select_account_prefers_lower_secondary_used_with_same_reset_bucket():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -140,7 +140,7 @@ def test_select_account_ignores_reset_when_disabled():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=False)
+    result = select_account(states, now=now, prefer_earlier_reset=False, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "a"
 
@@ -818,15 +818,15 @@ def test_select_account_capacity_weighted_single_account_always_selected():
         assert result.account.account_id == "only"
 
 
-def test_select_account_capacity_weighted_none_capacity_treated_as_zero_weight():
+def test_select_account_capacity_weighted_zero_capacity_treated_as_zero_weight():
     random.seed(33)
-    none_capacity = AccountState(
-        "none-capacity",
+    zero_capacity = AccountState(
+        "zero-capacity",
         AccountStatus.ACTIVE,
         used_percent=10.0,
         secondary_used_percent=10.0,
         plan_type="plus",
-        capacity_credits=None,
+        capacity_credits=0.0,
     )
     weighted = AccountState(
         "weighted",
@@ -838,9 +838,70 @@ def test_select_account_capacity_weighted_none_capacity_treated_as_zero_weight()
     )
 
     for _ in range(200):
-        result = select_account([none_capacity, weighted], routing_strategy="capacity_weighted")
+        result = select_account([zero_capacity, weighted], routing_strategy="capacity_weighted")
         assert result.account is not None
         assert result.account.account_id == "weighted"
+
+
+def test_select_account_capacity_weighted_unknown_plan_uses_conservative_fallback_weight():
+    random.seed(34)
+    n = 2000
+    unknown_plan = AccountState(
+        "unknown-plan",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="unknown",
+        capacity_credits=None,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"unknown-plan": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account([unknown_plan, plus], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    unknown_ratio = counts["unknown-plan"] / n
+    assert 0.05 <= unknown_ratio <= 0.25
+    assert counts["plus"] > counts["unknown-plan"]
+
+
+def test_select_account_capacity_weighted_education_alias_uses_edu_capacity():
+    random.seed(35)
+    n = 2000
+    education = AccountState(
+        "education",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="education",
+        capacity_credits=None,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"education": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account([education, plus], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    education_ratio = counts["education"] / n
+    assert 0.45 <= education_ratio <= 0.55
 
 
 def test_select_account_capacity_weighted_three_tiers_distribution_matches_capacity():

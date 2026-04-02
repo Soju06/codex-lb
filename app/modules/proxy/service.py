@@ -4234,7 +4234,7 @@ class ProxyService:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        routing_strategy: RoutingStrategy = "usage_weighted",
+        routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
     ) -> AccountSelection:

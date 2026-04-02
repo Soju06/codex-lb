@@ -102,7 +102,7 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        routing_strategy: RoutingStrategy = "usage_weighted",
+        routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
@@ -812,6 +812,8 @@ class LoadBalancer:
             last_selected_at=runtime.last_selected_at,
             error_count=runtime.error_count,
             deactivation_reason=account.deactivation_reason,
+            plan_type=account.plan_type,
+            capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
         )
 
     def _sync_runtime_state(
@@ -1019,6 +1021,8 @@ def _state_from_account(
         last_selected_at=runtime.last_selected_at,
         error_count=runtime.error_count,
         deactivation_reason=account.deactivation_reason,
+        plan_type=account.plan_type,
+        capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
     )
 
 

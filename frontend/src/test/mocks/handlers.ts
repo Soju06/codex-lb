@@ -76,7 +76,7 @@ const SettingsPayloadSchema = z
 			.enum(["default", "auto", "http", "websocket"])
 			.optional(),
 		preferEarlierResetAccounts: z.boolean().optional(),
-		routingStrategy: z.enum(["usage_weighted", "round_robin"]).optional(),
+		routingStrategy: z.enum(["usage_weighted", "round_robin", "capacity_weighted"]).optional(),
 		openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
 		importWithoutOverwrite: z.boolean().optional(),
 		totpRequiredOnLogin: z.boolean().optional(),

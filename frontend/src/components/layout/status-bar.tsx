@@ -6,9 +6,15 @@ import { getDashboardOverview } from "@/features/dashboard/api";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
-function getRoutingLabel(strategy: "usage_weighted" | "round_robin", sticky: boolean, preferEarlier: boolean): string {
+function getRoutingLabel(strategy: "usage_weighted" | "round_robin" | "capacity_weighted", sticky: boolean, preferEarlier: boolean): string {
   if (strategy === "round_robin") {
     return sticky ? "Round robin + Sticky threads" : "Round robin";
+  }
+  if (strategy === "capacity_weighted") {
+    if (sticky && preferEarlier) return "Capacity weighted + Sticky + Early reset";
+    if (sticky) return "Capacity weighted + Sticky threads";
+    if (preferEarlier) return "Capacity weighted + Early reset";
+    return "Capacity weighted";
   }
   if (sticky && preferEarlier) return "Sticky + Early reset";
   if (sticky) return "Sticky threads";

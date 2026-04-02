@@ -47,7 +47,7 @@ def test_select_account_prefers_earlier_secondary_reset_bucket():
             secondary_reset_at=int(now + 2 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -116,7 +116,7 @@ def test_select_account_deprioritizes_missing_secondary_reset_at():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -713,3 +713,178 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
     assert result.latest_primary == {}
     assert result.latest_secondary == {}
+
+
+import random
+
+
+def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():
+    random.seed(11)
+    n = 2000
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=50.0,
+        secondary_used_percent=10.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=50.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"pro": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account([pro, plus], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    pro_ratio = counts["pro"] / n
+    expected_pro_ratio = 50400.0 / (50400.0 + 7560.0)
+    assert abs(pro_ratio - expected_pro_ratio) <= 0.05
+
+
+def test_select_account_capacity_weighted_same_tier_lower_usage_selected_more():
+    random.seed(22)
+    n = 2000
+    low_usage = AccountState(
+        "plus-low",
+        AccountStatus.ACTIVE,
+        used_percent=20.0,
+        secondary_used_percent=20.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    high_usage = AccountState(
+        "plus-high",
+        AccountStatus.ACTIVE,
+        used_percent=80.0,
+        secondary_used_percent=80.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"plus-low": 0, "plus-high": 0}
+    for _ in range(n):
+        result = select_account([low_usage, high_usage], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    low_ratio = counts["plus-low"] / n
+    expected_low_ratio = 0.8
+    assert abs(low_ratio - expected_low_ratio) <= 0.05
+
+
+def test_select_account_capacity_weighted_all_exhausted_falls_back_deterministically():
+    a = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=60.0,
+        secondary_used_percent=100.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    b = AccountState(
+        "b",
+        AccountStatus.ACTIVE,
+        used_percent=40.0,
+        secondary_used_percent=100.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    for _ in range(50):
+        result = select_account([a, b], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        assert result.account.account_id == "b"
+
+
+def test_select_account_capacity_weighted_single_account_always_selected():
+    only = AccountState(
+        "only",
+        AccountStatus.ACTIVE,
+        used_percent=77.0,
+        secondary_used_percent=55.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    for _ in range(100):
+        result = select_account([only], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        assert result.account.account_id == "only"
+
+
+def test_select_account_capacity_weighted_none_capacity_treated_as_zero_weight():
+    random.seed(33)
+    none_capacity = AccountState(
+        "none-capacity",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=None,
+    )
+    weighted = AccountState(
+        "weighted",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    for _ in range(200):
+        result = select_account([none_capacity, weighted], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        assert result.account.account_id == "weighted"
+
+
+def test_select_account_capacity_weighted_three_tiers_distribution_matches_capacity():
+    random.seed(44)
+    n = 2000
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=0.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=0.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    free = AccountState(
+        "free",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=0.0,
+        plan_type="free",
+        capacity_credits=1134.0,
+    )
+
+    counts = {"pro": 0, "plus": 0, "free": 0}
+    for _ in range(n):
+        result = select_account([pro, plus, free], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    pro_ratio = counts["pro"] / n
+    plus_ratio = counts["plus"] / n
+    free_ratio = counts["free"] / n
+    total_capacity = 50400.0 + 7560.0 + 1134.0
+
+    assert abs(pro_ratio - (50400.0 / total_capacity)) <= 0.05
+    assert abs(plus_ratio - (7560.0 / total_capacity)) <= 0.05
+    assert abs(free_ratio - (1134.0 / total_capacity)) <= 0.05
+    assert pro_ratio > plus_ratio > free_ratio

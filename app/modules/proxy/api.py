@@ -803,7 +803,7 @@ def _error_details_from_content(
     error = content.get("error")
     if not is_json_mapping(error):
         return None, None
-    error_mapping = cast(Mapping[str, JsonValue], error)
+    error_mapping = error
     code = error_mapping.get("code")
     message = error_mapping.get("message")
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None

@@ -8,6 +8,13 @@ _bridge_drain_active: bool = False
 _in_flight: int = 0
 
 
+def reset() -> None:
+    global _draining, _bridge_drain_active, _in_flight
+    _draining = False
+    _bridge_drain_active = False
+    _in_flight = 0
+
+
 def set_draining(val: bool = True) -> None:
     global _draining
     _draining = val

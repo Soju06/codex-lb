@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, insert, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DashboardRateLimitError
@@ -71,22 +71,29 @@ class DatabaseRateLimiter:
 
         now = datetime.now(UTC)
         window_start = now - timedelta(seconds=self.window_seconds)
+        key_column = RateLimitAttempt.__table__.c.key
+        type_column = RateLimitAttempt.__table__.c.type
+        attempted_at_column = RateLimitAttempt.__table__.c.attempted_at
 
         raw_result = await session.execute(
-            text(
-                "INSERT INTO rate_limit_attempts (key, type, attempted_at) "
-                "SELECT :key, :type, :now "
-                "WHERE (SELECT COUNT(*) FROM rate_limit_attempts "
-                "       WHERE key = :key AND type = :type AND attempted_at >= :window_start"
-                "      ) < :max_attempts"
-            ),
-            {
-                "key": key,
-                "type": self.type,
-                "now": now,
-                "window_start": window_start,
-                "max_attempts": self.max_attempts,
-            },
+            insert(RateLimitAttempt).from_select(
+                [key_column.name, type_column.name, attempted_at_column.name],
+                select(
+                    literal(key, type_=key_column.type),
+                    literal(self.type, type_=type_column.type),
+                    literal(now, type_=attempted_at_column.type),
+                ).where(
+                    select(func.count())
+                    .select_from(RateLimitAttempt)
+                    .where(
+                        RateLimitAttempt.key == key,
+                        RateLimitAttempt.type == self.type,
+                        RateLimitAttempt.attempted_at >= window_start,
+                    )
+                    .scalar_subquery()
+                    < self.max_attempts
+                ),
+            )
         )
         inserted = raw_result.rowcount > 0  # type: ignore[union-attr]
         await session.commit()

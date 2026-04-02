@@ -1444,6 +1444,73 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
 
 
 @pytest.mark.asyncio
+async def test_select_account_sticky_does_not_return_stale_selection_at_retry_cap(monkeypatch) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc-sticky-stale-retry-cap", "sticky-stale-retry-cap@example.com")
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=10.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    original_load_selection_inputs = balancer._load_selection_inputs
+    load_calls = 0
+
+    async def counted_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+        nonlocal load_calls
+        load_calls += 1
+        return await original_load_selection_inputs(model=model, additional_limit_name=additional_limit_name)
+
+    async def pinned_account_id(
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> str | None:
+        del key, kind, max_age_seconds
+        return account.id
+
+    async def always_stale_selected_persist(
+        accounts_repo: AccountsRepository,
+        account_map: dict[str, Account],
+        states: list[Any],
+    ) -> set[str]:
+        del accounts_repo, account_map, states
+        return {account.id}
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", counted_load_selection_inputs)
+    monkeypatch.setattr(sticky_repo, "get_account_id", pinned_account_id)
+    monkeypatch.setattr(balancer, "_persist_selection_state", always_stale_selected_persist)
+
+    selection = await balancer.select_account(
+        sticky_key="sticky-session-retry-cap",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+    )
+
+    assert load_calls >= 2
+    assert selection.account is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
     now = utcnow()

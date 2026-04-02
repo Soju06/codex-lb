@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-export const LIMIT_TYPES = ["total_tokens", "input_tokens", "output_tokens", "cost_usd"] as const;
-export const LIMIT_WINDOWS = ["daily", "weekly", "monthly"] as const;
+export const LIMIT_TYPES = ["total_tokens", "input_tokens", "output_tokens", "cost_usd", "credits"] as const;
+export const LIMIT_WINDOWS = ["daily", "weekly", "monthly", "5h", "7d"] as const;
 
 export type LimitType = (typeof LIMIT_TYPES)[number];
 export type LimitWindowType = (typeof LIMIT_WINDOWS)[number];

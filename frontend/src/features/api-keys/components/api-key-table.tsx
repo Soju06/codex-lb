@@ -34,6 +34,7 @@ const LIMIT_TYPE_SHORT: Record<LimitType, string> = {
   input_tokens: "Input",
   output_tokens: "Output",
   cost_usd: "Cost",
+  credits: "Credits",
 };
 
 function formatLimitSummary(limits: LimitRule[]): string {
@@ -42,13 +43,15 @@ function formatLimitSummary(limits: LimitRule[]): string {
     .map((l) => {
       const type = LIMIT_TYPE_SHORT[l.limitType];
       const isCost = l.limitType === "cost_usd";
+      const isCredits = l.limitType === "credits";
       const current = isCost
         ? `$${(l.currentValue / 1_000_000).toFixed(2)}`
         : formatCompactNumber(l.currentValue);
       const max = isCost
         ? `$${(l.maxValue / 1_000_000).toFixed(2)}`
         : formatCompactNumber(l.maxValue);
-      return `${type}: ${current}/${max} ${l.limitWindow}`;
+      const suffix = isCost ? l.limitWindow : isCredits ? `${l.limitWindow}` : l.limitWindow;
+      return `${type}: ${current}/${max} ${suffix}`;
     })
     .join(" | ");
 }

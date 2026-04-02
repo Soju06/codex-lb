@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from app.core.utils.time import utcnow
-from app.db.models import ApiKeyLimit, LimitType, LimitWindow
+from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
@@ -29,6 +29,122 @@ async def _create_api_key(
             )
         )
     return created.id, created.key
+
+
+async def _seed_upstream_usage(*, now) -> None:
+    suffix = str(int(now.timestamp() * 1_000_000))
+    account_a_id = f"acc-plus-a-{suffix}"
+    account_b_id = f"acc-plus-b-{suffix}"
+
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                Account(
+                    id=account_a_id,
+                    chatgpt_account_id=f"chatgpt-plus-a-{suffix}",
+                    email=f"plus-a-{suffix}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=b"a",
+                    refresh_token_encrypted=b"b",
+                    id_token_encrypted=b"c",
+                    last_refresh=now,
+                    status=AccountStatus.ACTIVE,
+                    reset_at=None,
+                ),
+                Account(
+                    id=account_b_id,
+                    chatgpt_account_id=f"chatgpt-plus-b-{suffix}",
+                    email=f"plus-b-{suffix}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=b"d",
+                    refresh_token_encrypted=b"e",
+                    id_token_encrypted=b"f",
+                    last_refresh=now,
+                    status=AccountStatus.ACTIVE,
+                    reset_at=None,
+                ),
+                UsageHistory(
+                    account_id=account_a_id,
+                    recorded_at=now,
+                    window="primary",
+                    used_percent=10.0,
+                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    window_minutes=300,
+                ),
+                UsageHistory(
+                    account_id=account_b_id,
+                    recorded_at=now,
+                    window="primary",
+                    used_percent=20.0,
+                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    window_minutes=300,
+                ),
+                UsageHistory(
+                    account_id=account_a_id,
+                    recorded_at=now,
+                    window="secondary",
+                    used_percent=20.0,
+                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    window_minutes=10080,
+                ),
+                UsageHistory(
+                    account_id=account_b_id,
+                    recorded_at=now,
+                    window="secondary",
+                    used_percent=30.0,
+                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    window_minutes=10080,
+                ),
+            ]
+        )
+        await session.commit()
+
+
+async def _seed_upstream_usage_partial(*, now, windows: tuple[str, ...]) -> None:
+    suffix = str(int(now.timestamp() * 1_000_000))
+    account_id = f"acc-plus-partial-{suffix}"
+
+    entries = [
+        Account(
+            id=account_id,
+            chatgpt_account_id=f"chatgpt-plus-partial-{suffix}",
+            email=f"plus-partial-{suffix}@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"a",
+            refresh_token_encrypted=b"b",
+            id_token_encrypted=b"c",
+            last_refresh=now,
+            status=AccountStatus.ACTIVE,
+            reset_at=None,
+        )
+    ]
+
+    if "primary" in windows:
+        entries.append(
+            UsageHistory(
+                account_id=account_id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=int((now + timedelta(hours=4)).timestamp()),
+                window_minutes=300,
+            )
+        )
+    if "secondary" in windows:
+        entries.append(
+            UsageHistory(
+                account_id=account_id,
+                recorded_at=now,
+                window="secondary",
+                used_percent=20.0,
+                reset_at=int((now + timedelta(days=6)).timestamp()),
+                window_minutes=10080,
+            )
+        )
+
+    async with SessionLocal() as session:
+        session.add_all(entries)
+        await session.commit()
 
 
 @pytest.mark.asyncio
@@ -178,6 +294,7 @@ async def test_v1_usage_scopes_usage_and_limits_to_authenticated_key(async_clien
             "remaining_value": 580,
             "model_filter": "gpt-5.4",
             "reset_at": limit_a_total_reset.isoformat() + "Z",
+            "source": "api_key_limit",
         },
         {
             "limit_type": "cost_usd",
@@ -187,6 +304,7 @@ async def test_v1_usage_scopes_usage_and_limits_to_authenticated_key(async_clien
             "remaining_value": 7500000,
             "model_filter": None,
             "reset_at": limit_a_cost_reset.isoformat() + "Z",
+            "source": "api_key_limit",
         },
     ]
 
@@ -198,3 +316,172 @@ async def test_v1_usage_still_works_when_global_api_key_auth_is_disabled(async_c
     response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exists(async_client):
+    _, plain_key = await _create_api_key(name="fallback-aggregate")
+    now = utcnow()
+    await _seed_upstream_usage(now=now)
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limits"][0] == {
+        "limit_type": "credits",
+        "limit_window": "5h",
+        "max_value": 450,
+        "current_value": 68,
+        "remaining_value": 382,
+        "model_filter": None,
+        "reset_at": payload["limits"][0]["reset_at"],
+        "source": "aggregate",
+    }
+    assert payload["limits"][1] == {
+        "limit_type": "credits",
+        "limit_window": "7d",
+        "max_value": 15120,
+        "current_value": 3780,
+        "remaining_value": 11340,
+        "model_filter": None,
+        "reset_at": payload["limits"][1]["reset_at"],
+        "source": "aggregate",
+    }
+    assert payload["limits"][0]["reset_at"].endswith("Z")
+    assert payload["limits"][1]["reset_at"].endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_overrides_aggregate_credit_windows_with_api_key_credit_limits(async_client):
+    key_id, plain_key = await _create_api_key(
+        name="credit-override",
+        limits=[
+            LimitRuleInput(limit_type="credits", limit_window="5h", max_value=60),
+            LimitRuleInput(limit_type="credits", limit_window="7d", max_value=1000),
+        ],
+    )
+    now = utcnow()
+    await _seed_upstream_usage(now=now)
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        await repo.replace_limits(
+            key_id,
+            [
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.FIVE_HOURS,
+                    max_value=60,
+                    current_value=999,
+                    model_filter=None,
+                    reset_at=now + timedelta(hours=5),
+                ),
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.SEVEN_DAYS,
+                    max_value=1000,
+                    current_value=10,
+                    model_filter=None,
+                    reset_at=now + timedelta(days=7),
+                ),
+            ],
+        )
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limits"] == [
+        {
+            "limit_type": "credits",
+            "limit_window": "5h",
+            "max_value": 60,
+            "current_value": 60,
+            "remaining_value": 0,
+            "model_filter": None,
+            "reset_at": payload["limits"][0]["reset_at"],
+            "source": "api_key_override",
+        },
+        {
+            "limit_type": "credits",
+            "limit_window": "7d",
+            "max_value": 1000,
+            "current_value": 1000,
+            "remaining_value": 0,
+            "model_filter": None,
+            "reset_at": payload["limits"][1]["reset_at"],
+            "source": "api_key_override",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_prefers_raw_limits_when_aggregate_credit_pair_is_partial(async_client):
+    key_id, plain_key = await _create_api_key(
+        name="fallback-partial-raw",
+        limits=[
+            LimitRuleInput(limit_type="total_tokens", limit_window="daily", max_value=300),
+            LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1000),
+        ],
+    )
+    now = utcnow()
+    await _seed_upstream_usage_partial(now=now, windows=("primary",))
+
+    daily_reset = now + timedelta(hours=2)
+    weekly_reset = now + timedelta(days=4)
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        await repo.replace_limits(
+            key_id,
+            [
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.TOTAL_TOKENS,
+                    limit_window=LimitWindow.DAILY,
+                    max_value=300,
+                    current_value=50,
+                    model_filter=None,
+                    reset_at=daily_reset,
+                ),
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.TOTAL_TOKENS,
+                    limit_window=LimitWindow.WEEKLY,
+                    max_value=1000,
+                    current_value=200,
+                    model_filter=None,
+                    reset_at=weekly_reset,
+                ),
+            ],
+        )
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limits"] == [
+        {
+            "limit_type": "total_tokens",
+            "limit_window": "daily",
+            "max_value": 300,
+            "current_value": 50,
+            "remaining_value": 250,
+            "model_filter": None,
+            "reset_at": daily_reset.isoformat() + "Z",
+            "source": "api_key_limit",
+        },
+        {
+            "limit_type": "total_tokens",
+            "limit_window": "weekly",
+            "max_value": 1000,
+            "current_value": 200,
+            "remaining_value": 800,
+            "model_filter": None,
+            "reset_at": weekly_reset.isoformat() + "Z",
+            "source": "api_key_limit",
+        },
+    ]

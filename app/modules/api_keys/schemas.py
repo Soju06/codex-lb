@@ -8,8 +8,8 @@ from app.modules.shared.schemas import DashboardModel
 
 
 class LimitRuleCreate(DashboardModel):
-    limit_type: str = Field(pattern=r"^(total_tokens|input_tokens|output_tokens|cost_usd)$")
-    limit_window: str = Field(pattern=r"^(daily|weekly|monthly)$")
+    limit_type: str = Field(pattern=r"^(total_tokens|input_tokens|output_tokens|cost_usd|credits)$")
+    limit_window: str = Field(pattern=r"^(daily|weekly|monthly|5h|7d)$")
     max_value: int = Field(ge=1)
     model_filter: str | None = None
 

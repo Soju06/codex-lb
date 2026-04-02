@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   applySecondaryConstraint,
+  buildDashboardView,
   buildDepletionView,
   buildRemainingItems,
 } from "@/features/dashboard/utils";
 import type { RemainingItem } from "@/features/dashboard/utils";
 import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
+import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
@@ -246,5 +248,44 @@ describe("buildRemainingItems", () => {
     expect(items[2].label).toBe("unique@example.com");
     expect(items[2].labelSuffix).toBe("");
     expect(items[2].isEmail).toBe(true);
+  });
+});
+
+describe("buildDashboardView", () => {
+  it("uses aggregate remaining credits for donut totals", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 63.5,
+          capacityCredits: 1125,
+          remainingCredits: 790.5,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: {
+          remainingPercent: 55.2,
+          capacityCredits: 37800,
+          remainingCredits: 28350,
+          resetAt: null,
+          windowMinutes: 10080,
+        },
+        cost: {
+          currency: "USD",
+          totalUsd7d: 1.82,
+        },
+        metrics: {
+          requests7d: 228,
+          tokensSecondaryWindow: 45000,
+          cachedTokensSecondaryWindow: 8200,
+          errorRate7d: 0.028,
+          topError: "rate_limit_exceeded",
+        },
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    expect(view.primaryUsageTotal).toBe(790.5);
+    expect(view.secondaryUsageTotal).toBe(28350);
   });
 });

@@ -50,6 +50,8 @@ export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
   secondaryUsageItems: RemainingItem[];
+  primaryUsageTotal: number;
+  secondaryUsageTotal: number;
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
@@ -223,6 +225,8 @@ export function buildDashboardView(
       ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
       : rawPrimaryItems,
     secondaryUsageItems,
+    primaryUsageTotal: overview.summary.primaryWindow.remainingCredits,
+    secondaryUsageTotal: overview.summary.secondaryWindow?.remainingCredits ?? 0,
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),

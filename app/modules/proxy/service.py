@@ -4562,8 +4562,10 @@ def _websocket_receive_timeout_for_pending_requests(
 
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
-    value = settings.routing_strategy or "usage_weighted"
-    return "round_robin" if value == "round_robin" else "usage_weighted"
+    value = settings.routing_strategy or "capacity_weighted"
+    if value in ("usage_weighted", "round_robin", "capacity_weighted"):
+        return value
+    return "capacity_weighted"
 
 
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:

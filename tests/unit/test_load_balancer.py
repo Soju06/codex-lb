@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import time
 from datetime import datetime
 
@@ -713,9 +714,6 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
     assert result.latest_primary == {}
     assert result.latest_secondary == {}
-
-
-import random
 
 
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():

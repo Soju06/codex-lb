@@ -4563,8 +4563,10 @@ def _websocket_receive_timeout_for_pending_requests(
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
     value = settings.routing_strategy or "capacity_weighted"
-    if value in ("usage_weighted", "round_robin", "capacity_weighted"):
-        return value
+    if value == "round_robin":
+        return "round_robin"
+    if value == "usage_weighted":
+        return "usage_weighted"
     return "capacity_weighted"
 
 

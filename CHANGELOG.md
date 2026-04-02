@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.10.0](https://github.com/Soju06/codex-lb/compare/v1.9.0...v1.10.0) (2026-04-02)
+
+
+### Features
+
+* **helm:** expose all caching subsystems in chart values ([cd39073](https://github.com/Soju06/codex-lb/commit/cd39073c4f2b9f086a00bf84c9cd80af27cc194a))
+
+
+### Bug Fixes
+
+* **ci:** lowercase GHCR owner in Helm OCI push ([03c14f6](https://github.com/Soju06/codex-lb/commit/03c14f61e132c81f483dd21f977e7f0dd32be083))
+* **helm:** harden defaults for multi-replica and streaming deployments ([70a348e](https://github.com/Soju06/codex-lb/commit/70a348e80bc6f46ec616e3ff497f056277049156))
+* **helm:** improve cache locality and align backpressure with capacity ([6c17201](https://github.com/Soju06/codex-lb/commit/6c1720189416da41a5c7c979ec8b523f0218c46a))
+
+
+### Documentation
+
+* **helm:** replace local-path install with OCI registry commands ([55ddeb7](https://github.com/Soju06/codex-lb/commit/55ddeb7300d6a1780ec748b3e1d940613333ab69))
+
 ## [1.9.0](https://github.com/Soju06/codex-lb/compare/v1.8.3...v1.9.0) (2026-04-02)
 
 

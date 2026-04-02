@@ -3,7 +3,13 @@ name: CI
 on:
   push:
     branches: ["main"]
+    paths-ignore:
+      - '**.md'
+      - '.all-contributorsrc'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - '.all-contributorsrc'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

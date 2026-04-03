@@ -1,4 +1,4 @@
-import { Check, CircleAlert, Copy, ExternalLink, Loader2 } from "lucide-react";
+import { Check, CircleAlert, Copy, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -38,7 +38,7 @@ function CopyButton({ text }: { text: string }) {
       type="button"
       size="sm"
       variant="ghost"
-      className="h-7 gap-1 px-2 text-xs"
+      className="h-7 cursor-pointer gap-1 px-2 text-xs disabled:cursor-not-allowed"
       onClick={() => void handleCopy()}
     >
       {copied ? (
@@ -93,7 +93,7 @@ function ManualCallbackInput({
         <Button
           type="button"
           size="sm"
-          className="h-8 px-3 text-xs"
+          className="h-8 cursor-pointer px-3 text-xs disabled:cursor-not-allowed"
           disabled={!callbackUrl.trim() || submitting}
           onClick={() => void handleSubmit()}
         >
@@ -149,6 +149,10 @@ export function OauthDialog({
     void onStart(selectedMethod);
   };
 
+  const handleRefreshBrowserLink = () => {
+    void onStart("browser");
+  };
+
   const handleChangeMethod = () => {
     onReset();
   };
@@ -172,7 +176,7 @@ export function OauthDialog({
               type="button"
               onClick={() => setSelectedMethod("browser")}
               className={cn(
-                "w-full rounded-lg border p-3 text-left transition-colors",
+                "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
                 selectedMethod === "browser"
                   ? "border-primary bg-primary/5"
                   : "hover:bg-muted/50",
@@ -187,7 +191,7 @@ export function OauthDialog({
               type="button"
               onClick={() => setSelectedMethod("device")}
               className={cn(
-                "w-full rounded-lg border p-3 text-left transition-colors",
+                "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
                 selectedMethod === "device"
                   ? "border-primary bg-primary/5"
                   : "hover:bg-muted/50",
@@ -206,11 +210,36 @@ export function OauthDialog({
           <div className="min-w-0 space-y-3 text-sm">
             {state.authorizationUrl ? (
               <div className="space-y-1.5">
-                <p className="text-xs font-medium text-muted-foreground">Authorization URL</p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-muted-foreground">Authorization URL</p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 cursor-pointer gap-1 px-2 text-xs disabled:cursor-not-allowed"
+                    disabled={state.status === "starting"}
+                    onClick={handleRefreshBrowserLink}
+                  >
+                    {state.status === "starting" ? (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Refreshing...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="h-3 w-3" />
+                        Refresh link
+                      </>
+                    )}
+                  </Button>
+                </div>
                 <div className="flex min-w-0 items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2">
                   <p className="min-w-0 flex-1 truncate font-mono text-xs">{state.authorizationUrl}</p>
                   <CopyButton text={state.authorizationUrl} />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Refresh the link if the current sign-in page has already been used.
+                </p>
               </div>
             ) : null}
             <ManualCallbackInput onSubmit={onManualCallback} />
@@ -281,10 +310,19 @@ export function OauthDialog({
         <DialogFooter>
           {stage === "intro" ? (
             <>
-              <Button type="button" variant="outline" onClick={() => close(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={() => close(false)}
+              >
                 Cancel
               </Button>
-              <Button type="button" onClick={handleStart}>
+              <Button
+                type="button"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={handleStart}
+              >
                 Start sign-in
               </Button>
             </>
@@ -292,11 +330,20 @@ export function OauthDialog({
 
           {stage === "browser" ? (
             <>
-              <Button type="button" variant="outline" onClick={handleChangeMethod}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={handleChangeMethod}
+              >
                 Change method
               </Button>
               {state.authorizationUrl ? (
-                <Button type="button" asChild>
+                <Button
+                  type="button"
+                  className="cursor-pointer disabled:cursor-not-allowed"
+                  asChild
+                >
                   <a href={state.authorizationUrl} target="_blank" rel="noreferrer">
                     <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
                     Open sign-in page
@@ -308,11 +355,20 @@ export function OauthDialog({
 
           {stage === "device" ? (
             <>
-              <Button type="button" variant="outline" onClick={handleChangeMethod}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={handleChangeMethod}
+              >
                 Change method
               </Button>
               {state.verificationUrl ? (
-                <Button type="button" asChild>
+                <Button
+                  type="button"
+                  className="cursor-pointer disabled:cursor-not-allowed"
+                  asChild
+                >
                   <a href={state.verificationUrl} target="_blank" rel="noreferrer">
                     <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
                     Open link
@@ -323,17 +379,30 @@ export function OauthDialog({
           ) : null}
 
           {stage === "success" ? (
-            <Button type="button" onClick={() => close(false)}>
+            <Button
+              type="button"
+              className="cursor-pointer disabled:cursor-not-allowed"
+              onClick={() => close(false)}
+            >
               Done
             </Button>
           ) : null}
 
           {stage === "error" ? (
             <>
-              <Button type="button" variant="outline" onClick={handleChangeMethod}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={handleChangeMethod}
+              >
                 Try again
               </Button>
-              <Button type="button" onClick={() => close(false)}>
+              <Button
+                type="button"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={() => close(false)}
+              >
                 Close
               </Button>
             </>

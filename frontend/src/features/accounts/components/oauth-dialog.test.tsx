@@ -162,4 +162,25 @@ describe("OauthDialog", () => {
       "http://localhost:1455/auth/callback?code=abc&state=expected",
     );
   });
+
+  it("refreshes the browser authorization link without leaving the dialog", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={onStart}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Refresh link" }));
+
+    expect(onStart).toHaveBeenCalledWith("browser");
+  });
 });

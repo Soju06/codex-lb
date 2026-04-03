@@ -878,16 +878,21 @@ async def test_v1_responses_http_bridge_non_owner_instance_falls_back_to_local_s
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_response_id_fails_closed(
+async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_response_id_strips_and_retries(
     app_instance,
     monkeypatch,
 ):
+    """When turn-state references a missing session but previous_response_id is
+    set, the system should strip previous_response_id and attempt to create a
+    fresh session rather than failing closed with 400."""
     _install_bridge_settings_with_limits(monkeypatch, enabled=True)
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    # Without accounts configured the session creation will fail with 503,
+    # but it must NOT fail with 400 previous_response_not_found.
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._get_or_create_http_bridge_session(
             proxy_module._HTTPBridgeSessionKey("turn_state_header", "http_turn_missing_alias", None),
@@ -904,16 +909,7 @@ async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_r
         )
 
     exc = exc_info.value
-    assert exc.status_code == 400
-    assert exc.payload["error"] == {
-        "message": (
-            "Previous response with id 'resp_missing_alias' not found. "
-            "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-        ),
-        "type": "invalid_request_error",
-        "code": "previous_response_not_found",
-        "param": "previous_response_id",
-    }
+    assert exc.payload["error"]["code"] != "previous_response_not_found"
 
 
 @pytest.mark.asyncio
@@ -2897,22 +2893,10 @@ async def test_v1_responses_http_bridge_requires_live_session_for_previous_respo
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
-    assert connect_count == 1
+    # With the strip-and-retry behavior, the second request creates a new
+    # bridge session (different prompt_cache_key), strips previous_response_id,
+    # and succeeds on the new session.
+    assert second.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -3688,22 +3672,11 @@ async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
-    assert connect_count == 1
+    # After the first upstream closes, the stale session is discarded.
+    # Instead of failing closed, the system strips previous_response_id
+    # and opens a fresh session on the second upstream.
+    assert second.status_code == 200
+    assert connect_count == 2
 
 
 @pytest.mark.asyncio
@@ -4923,7 +4896,12 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_waits_for_inflight_session_before_continuity_error(app_instance, monkeypatch):
+async def test_v1_responses_http_bridge_follower_with_previous_response_id_waits_for_inflight_session(
+    app_instance, monkeypatch
+):
+    """When a follower with previous_response_id arrives while a session is
+    being created for the same key, it should wait for the inflight session
+    and reuse it (instead of failing closed with 400)."""
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
     service._http_bridge_inflight_sessions.clear()
@@ -4986,25 +4964,15 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
         )
     )
     await asyncio.sleep(0.01)
-    assert follower.done()
+    # Follower now waits for inflight session instead of failing immediately
+    assert not follower.done()
 
     release_create.set()
     created_session = await creator
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await follower
+    follower_session = await follower
 
     assert service._http_bridge_sessions[key] is created_session
-    exc = exc_info.value
-    assert exc.status_code == 400
-    assert exc.payload["error"] == {
-        "message": (
-            "Previous response with id 'resp_inflight' not found. "
-            "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-        ),
-        "type": "invalid_request_error",
-        "code": "previous_response_not_found",
-        "param": "previous_response_id",
-    }
+    assert follower_session is created_session
 
 
 @pytest.mark.asyncio
@@ -5543,22 +5511,12 @@ async def test_v1_responses_http_bridge_send_failure_returns_previous_response_n
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
-    assert connect_count == 1
+    # With strip-and-retry, previous_response_id is stripped and retry is
+    # attempted.  Both the original and reconnected upstream fail on send,
+    # so the proxy reports 502 upstream_unavailable rather than the old 400
+    # previous_response_not_found.
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio
@@ -5660,22 +5618,11 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_r
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
-    assert connect_count == 1
+    # With strip-and-retry, previous_response_id is stripped and the
+    # precreated retry reconnects.  The upstream then closes cleanly
+    # before completing, so the proxy reports 502 stream_incomplete.
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] == "stream_incomplete"
 
 
 @pytest.mark.asyncio

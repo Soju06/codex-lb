@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env.local
+      - .env.prod
     ports:
       - "2455:2455"
       - "1455:1455"
@@ -16,7 +16,6 @@ services:
       - 0.0.0.0
       - --port
       - "2455"
-      - --reload
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     develop:
@@ -30,6 +29,8 @@ services:
           path: ./uv.lock
         - action: rebuild
           path: ./Dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   frontend:
@@ -57,6 +58,7 @@ services:
           path: ./frontend/package.json
         - action: rebuild
           path: ./frontend/bun.lock
+    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine

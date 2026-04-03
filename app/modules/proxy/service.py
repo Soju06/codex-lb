@@ -352,6 +352,9 @@ class ProxyService:
             max_sessions=max_sessions,
             previous_response_id=request_state.previous_response_id,
         )
+        if session.previous_response_id_stripped:
+            text_data = _strip_previous_response_id_from_text(text_data)
+            request_state.previous_response_id = None
         await self._submit_http_bridge_request(
             session,
             request_state=request_state,
@@ -1463,6 +1466,7 @@ class ProxyService:
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
+            strip_previous_response_id = False
 
             async with self._http_bridge_lock:
                 if incoming_turn_state is not None:
@@ -1494,16 +1498,12 @@ class ProxyService:
                         if self._http_bridge_inflight_sessions.get(key) is not None:
                             pass
                         elif previous_response_id is not None:
-                            raise ProxyResponseError(
-                                400,
-                                _http_bridge_previous_response_error_envelope(
-                                    previous_response_id,
-                                    (
-                                        "HTTP bridge continuity was lost. Replay x-codex-turn-state "
-                                        "or retry with a stable prompt_cache_key."
-                                    ),
-                                ),
+                            logger.warning(
+                                "HTTP bridge turn-state references missing session; will strip "
+                                "previous_response_id=%s and create fresh session",
+                                previous_response_id,
                             )
+                            strip_previous_response_id = True
                         else:
                             raise ProxyResponseError(
                                 409,
@@ -1586,73 +1586,68 @@ class ProxyService:
 
                 inflight_future = self._http_bridge_inflight_sessions.get(key)
                 if previous_response_id is not None:
-                    continuity_error = ProxyResponseError(
-                        400,
-                        _http_bridge_previous_response_error_envelope(
-                            previous_response_id,
-                            (
-                                "HTTP bridge continuity was lost. Replay x-codex-turn-state "
-                                "or retry with a stable prompt_cache_key."
-                            ),
-                        ),
+                    logger.warning(
+                        "HTTP bridge session discarded (stale account); will strip "
+                        "previous_response_id=%s and create fresh session",
+                        previous_response_id,
                     )
-                else:
-                    if inflight_future is None:
-                        while (
-                            len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions
-                            and self._http_bridge_sessions
-                        ):
-                            evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
-                            for candidate_key, candidate_session in self._http_bridge_sessions.items():
-                                pending_count = await self._http_bridge_pending_count(candidate_session)
-                                if pending_count:
-                                    continue
-                                evictable_sessions.append((candidate_key, candidate_session))
-                            if not evictable_sessions:
-                                break
-                            lru_key, lru_session = min(
-                                evictable_sessions,
-                                key=lambda item: _http_bridge_eviction_priority(item[1]),
-                            )
-                            _log_http_bridge_event(
-                                "evict_lru",
-                                lru_key,
-                                account_id=lru_session.account.id,
-                                model=lru_session.request_model,
-                                cache_key_family=lru_key.affinity_kind,
-                                model_class=_extract_model_class(lru_session.request_model)
-                                if lru_session.request_model
-                                else None,
-                            )
-                            self._http_bridge_sessions.pop(lru_key, None)
-                            sessions_to_close.append(lru_session)
-                        if len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions:
-                            if self._http_bridge_inflight_sessions:
-                                capacity_wait_future = next(iter(self._http_bridge_inflight_sessions.values()))
-                            else:
-                                _log_http_bridge_event(
-                                    "capacity_exhausted_active_sessions",
-                                    key,
-                                    account_id=None,
-                                    model=request_model,
-                                    pending_count=(
-                                        len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
-                                    ),
-                                    cache_key_family=key.affinity_kind,
-                                    model_class=_extract_model_class(request_model) if request_model else None,
-                                )
-                                raise ProxyResponseError(
-                                    429,
-                                    openai_error(
-                                        "rate_limit_exceeded",
-                                        "HTTP responses session bridge has no idle capacity",
-                                        error_type="rate_limit_error",
-                                    ),
-                                )
+                    strip_previous_response_id = True
+                if inflight_future is None:
+                    while (
+                        len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions
+                        and self._http_bridge_sessions
+                    ):
+                        evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
+                        for candidate_key, candidate_session in self._http_bridge_sessions.items():
+                            pending_count = await self._http_bridge_pending_count(candidate_session)
+                            if pending_count:
+                                continue
+                            evictable_sessions.append((candidate_key, candidate_session))
+                        if not evictable_sessions:
+                            break
+                        lru_key, lru_session = min(
+                            evictable_sessions,
+                            key=lambda item: _http_bridge_eviction_priority(item[1]),
+                        )
+                        _log_http_bridge_event(
+                            "evict_lru",
+                            lru_key,
+                            account_id=lru_session.account.id,
+                            model=lru_session.request_model,
+                            cache_key_family=lru_key.affinity_kind,
+                            model_class=_extract_model_class(lru_session.request_model)
+                            if lru_session.request_model
+                            else None,
+                        )
+                        self._http_bridge_sessions.pop(lru_key, None)
+                        sessions_to_close.append(lru_session)
+                    if len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions:
+                        if self._http_bridge_inflight_sessions:
+                            capacity_wait_future = next(iter(self._http_bridge_inflight_sessions.values()))
                         else:
-                            inflight_future = asyncio.get_running_loop().create_future()
-                            self._http_bridge_inflight_sessions[key] = inflight_future
-                            owns_creation = True
+                            _log_http_bridge_event(
+                                "capacity_exhausted_active_sessions",
+                                key,
+                                account_id=None,
+                                model=request_model,
+                                pending_count=(
+                                    len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
+                                ),
+                                cache_key_family=key.affinity_kind,
+                                model_class=_extract_model_class(request_model) if request_model else None,
+                            )
+                            raise ProxyResponseError(
+                                429,
+                                openai_error(
+                                    "rate_limit_exceeded",
+                                    "HTTP responses session bridge has no idle capacity",
+                                    error_type="rate_limit_error",
+                                ),
+                            )
+                    else:
+                        inflight_future = asyncio.get_running_loop().create_future()
+                        self._http_bridge_inflight_sessions[key] = inflight_future
+                        owns_creation = True
 
             for stale_session in sessions_to_close:
                 await self._close_http_bridge_session(stale_session)
@@ -1743,6 +1738,8 @@ class ProxyService:
                     if created_session.request_model
                     else None,
                 )
+            if strip_previous_response_id:
+                created_session.previous_response_id_stripped = True
             return created_session
 
     async def close_all_http_bridge_sessions(self) -> None:
@@ -2240,14 +2237,15 @@ class ProxyService:
         text_data: str,
     ) -> bool:
         if request_state.previous_response_id is not None:
-            _mark_request_state_previous_response_not_found(
-                request_state,
-                (
-                    "HTTP bridge continuity was lost before the request reached upstream. "
-                    "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-                ),
+            logger.warning(
+                "Stripping previous_response_id=%s from HTTP bridge retry due to upstream "
+                "continuity loss request_id=%s account_id=%s",
+                request_state.previous_response_id,
+                request_state.request_log_id or request_state.request_id,
+                session.account.id,
             )
-            return False
+            text_data = _strip_previous_response_id_from_text(text_data)
+            request_state.previous_response_id = None
         if request_state.replay_count >= 1:
             return False
         request_state.replay_count += 1
@@ -2285,18 +2283,20 @@ class ProxyService:
             if not request_state.request_text:
                 return False
             if request_state.previous_response_id is not None:
-                _mark_request_state_previous_response_not_found(
-                    request_state,
-                    (
-                        "HTTP bridge continuity was lost before upstream created the next "
-                        "response. Replay x-codex-turn-state or retry with a stable "
-                        "prompt_cache_key."
-                    ),
+                logger.warning(
+                    "Stripping previous_response_id=%s from HTTP bridge precreated retry "
+                    "request_id=%s account_id=%s",
+                    request_state.previous_response_id,
+                    request_state.request_log_id or request_state.request_id,
+                    session.account.id,
                 )
-                return False
+                request_state.previous_response_id = None
             if request_state.replay_count >= 1:
                 return False
             request_text = request_state.request_text
+            if request_text:
+                request_text = _strip_previous_response_id_from_text(request_text)
+                request_state.request_text = request_text
             request_state.replay_count += 1
         _log_http_bridge_event(
             "retry_precreated",
@@ -3270,6 +3270,7 @@ class ProxyService:
         any_attempt_logged = False
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
+        original_account_id: str | None = None
         try:
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -3335,6 +3336,19 @@ class ProxyService:
                     yield format_sse_event(event)
                     return
                 account = selection.account
+                if account is not None:
+                    if original_account_id is None:
+                        original_account_id = account.id
+                    elif account.id != original_account_id and payload.previous_response_id is not None:
+                        logger.warning(
+                            "Stripping previous_response_id=%s from stream payload due to account "
+                            "failover request_id=%s old_account=%s new_account=%s",
+                            payload.previous_response_id,
+                            request_id,
+                            original_account_id,
+                            account.id,
+                        )
+                        payload.previous_response_id = None
                 if not account:
                     # If a prior attempt stored a transient 500 and the caller
                     # expects HTTP error propagation, re-raise the original error
@@ -4412,6 +4426,7 @@ class _HTTPBridgeSession:
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     upstream_reader: asyncio.Task[None] | None = None
     closed: bool = False
+    previous_response_id_stripped: bool = False
 
 
 @dataclass(slots=True)
@@ -5163,6 +5178,21 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
     warmup_payload = dict(payload)
     warmup_payload["generate"] = False
     return json.dumps(warmup_payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _strip_previous_response_id_from_text(text_data: str) -> str:
+    """Remove ``previous_response_id`` from a JSON-encoded request payload.
+
+    Returns the modified JSON string.  If the key is absent or parsing fails
+    the original string is returned unchanged.
+    """
+    try:
+        obj = json.loads(text_data)
+    except (json.JSONDecodeError, TypeError):
+        return text_data
+    if not isinstance(obj, dict) or obj.pop("previous_response_id", None) is None:
+        return text_data
+    return json.dumps(obj, ensure_ascii=True, separators=(",", ":"))
 
 
 def _http_bridge_previous_response_error_envelope(

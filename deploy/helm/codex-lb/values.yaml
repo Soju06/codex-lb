@@ -342,9 +342,18 @@ postgresql:
       # @param postgresql.primary.persistence.size PostgreSQL PVC size
       size: 8Gi
 externalDatabase:
-  # @param externalDatabase.url Full external database URL (postgresql+asyncpg://...)
+  # @param externalDatabase.url Full external database URL (postgresql+asyncpg://user:pass@host:5432/db?sslmode=require)
+  # For production, use auth.existingSecret instead of passing the URL directly.
+  # When auth.existingSecret is set, create a Secret with key "database-url" containing the full URL
+  # and key "encryption-key" containing a 32-byte Fernet key.
+  #
+  # Example:
+  #   kubectl create secret generic codex-lb-secrets \
+  #     --from-literal=database-url="postgresql+asyncpg://user:pass@host:5432/db?sslmode=require" \
+  #     --from-literal=encryption-key="$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+  #   Then set: auth.existingSecret: "codex-lb-secrets"
   url: ""
-  # @param externalDatabase.host External database host (used if url is empty)
+  # @param externalDatabase.host External database host (used to build URL when externalDatabase.url is empty)
   host: ""
   # @param externalDatabase.port External database port
   port: 5432
@@ -352,7 +361,8 @@ externalDatabase:
   database: codexlb
   # @param externalDatabase.user External database username
   user: codexlb
-  # @param externalDatabase.existingSecret Secret containing external DB credentials
+  # @param externalDatabase.existingSecret Existing Secret with key "password" for the external database
+  # Used only when building the URL from host/port/database/user components (not when url is set directly).
   existingSecret: ""
 
 # @section Migration parameters

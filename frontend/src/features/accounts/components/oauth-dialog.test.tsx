@@ -43,6 +43,11 @@ const browserPendingState = {
   errorMessage: null,
 };
 
+const browserStartingState = {
+  ...browserPendingState,
+  status: "starting" as const,
+};
+
 const successState = {
   ...idleState,
   status: "success" as const,
@@ -182,5 +187,25 @@ describe("OauthDialog", () => {
     await user.click(screen.getByRole("button", { name: "Refresh link" }));
 
     expect(onStart).toHaveBeenCalledWith("browser");
+  });
+
+  it("renders a disabled loading refresh state while generating a fresh browser link", () => {
+    render(
+      <OauthDialog
+        open
+        state={browserStartingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Refreshing..." })).toBeDisabled();
+    expect(screen.getByText("Generating a fresh sign-in link...")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open sign-in page" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
   });
 });

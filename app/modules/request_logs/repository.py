@@ -100,6 +100,7 @@ class RequestLogsRepository:
         actual_service_tier: str | None = None,
         transport: str | None = None,
         api_key_id: str | None = None,
+        request_visibility: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         log = RequestLog(
@@ -122,6 +123,7 @@ class RequestLogsRepository:
             status=status,
             error_code=error_code,
             error_message=error_message,
+            request_visibility=request_visibility,
             requested_at=requested_at or utcnow(),
         )
         log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
@@ -245,6 +247,11 @@ class RequestLogsRepository:
             return {}
         result = await self._session.execute(select(ApiKey.id, ApiKey.name).where(ApiKey.id.in_(unique_ids)))
         return {key_id: name for key_id, name in result.all() if key_id and name}
+
+    async def get_by_request_id(self, request_id: str) -> RequestLog | None:
+        stmt = select(RequestLog).where(RequestLog.request_id == request_id).order_by(RequestLog.id.desc()).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     def _build_filters(
         self,

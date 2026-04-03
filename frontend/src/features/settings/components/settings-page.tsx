@@ -9,6 +9,7 @@ import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
+import { RequestVisibilitySettings } from "@/features/settings/components/request-visibility-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
@@ -56,6 +57,7 @@ export function SettingsPage() {
               busy={busy}
               onSave={handleSave}
             />
+            <RequestVisibilitySettings settings={settings} busy={busy} onSave={handleSave} />
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
             <Suspense fallback={null}>

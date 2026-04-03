@@ -3,6 +3,7 @@ import { get } from "@/lib/api-client";
 import {
   DashboardOverviewSchema,
   RequestLogFilterOptionsSchema,
+  RequestLogVisibilityResponseSchema,
   RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
 
@@ -78,4 +79,8 @@ export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
   appendMany(query, "modelOption", params.modelOptions);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return get(`${REQUEST_LOGS_PATH}/options${suffix}`, RequestLogFilterOptionsSchema);
+}
+
+export function getRequestLogVisibility(requestId: string) {
+  return get(`${REQUEST_LOGS_PATH}/${encodeURIComponent(requestId)}/visibility`, RequestLogVisibilityResponseSchema);
 }

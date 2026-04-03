@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import cast as typing_cast
 
 from app.core.usage.logs import RequestLogLike, cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
 from app.db.models import RequestLog
-from app.modules.request_logs.schemas import RequestLogEntry
+from app.modules.request_logs.schemas import RequestLogEntry, RequestLogVisibilityResponse
 
 RATE_LIMIT_CODES = {"rate_limit_exceeded", "usage_limit_reached"}
 QUOTA_CODES = {"insufficient_quota", "usage_not_included", "quota_exceeded"}
@@ -45,4 +46,22 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         cost_usd=cost_from_log(log_like, precision=6),
         latency_ms=log.latency_ms,
         latency_first_token_ms=log.latency_first_token_ms,
+    )
+
+
+def to_request_log_visibility(log: RequestLog) -> RequestLogVisibilityResponse:
+    if not log.request_visibility:
+        return RequestLogVisibilityResponse(
+            request_id=log.request_id,
+            captured=False,
+            unavailable_reason="not_captured",
+        )
+
+    payload = json.loads(log.request_visibility)
+    return RequestLogVisibilityResponse(
+        request_id=log.request_id,
+        captured=True,
+        truncated=bool(payload.get("truncated", False)),
+        headers={str(key): str(value) for key, value in dict(payload.get("headers") or {}).items()},
+        body=payload.get("body"),
     )

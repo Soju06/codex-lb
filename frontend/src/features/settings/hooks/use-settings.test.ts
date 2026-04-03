@@ -42,6 +42,8 @@ describe("useSettings", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      requestVisibilityMode: "temporary",
+      requestVisibilityDurationMinutes: 30,
     });
 
     await waitFor(() => {

@@ -107,6 +107,34 @@ export const RequestLogsResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 
+type DashboardJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: DashboardJsonValue }
+  | DashboardJsonValue[];
+
+const DashboardJsonValueSchema: z.ZodType<DashboardJsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(DashboardJsonValueSchema),
+    z.record(z.string(), DashboardJsonValueSchema),
+  ]),
+);
+
+export const RequestLogVisibilityResponseSchema = z.object({
+  requestId: z.string(),
+  captured: z.boolean(),
+  unavailableReason: z.enum(["not_captured"]).nullable().optional().default(null),
+  truncated: z.boolean().optional().default(false),
+  headers: z.record(z.string(), z.string()).optional().default({}),
+  body: DashboardJsonValueSchema.nullable().optional().default(null),
+});
+
 export const RequestLogModelOptionSchema = z.object({
   model: z.string(),
   reasoningEffort: z.string().nullable(),
@@ -135,6 +163,7 @@ export type MetricsTrends = z.infer<typeof MetricsTrendsSchema>;
 export type UsageWindow = z.infer<typeof UsageWindowSchema>;
 export type RequestLog = z.infer<typeof RequestLogSchema>;
 export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
+export type RequestLogVisibilityResponse = z.infer<typeof RequestLogVisibilityResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;

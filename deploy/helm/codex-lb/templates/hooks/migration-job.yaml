@@ -35,12 +35,12 @@ spec:
         {{- range $pullSecrets }}
         - name: {{ . }}
         {{- end }}
-       {{- end }}
-       {{- with (include "codex-lb.nodeSelector" .) }}
-       nodeSelector:
-         {{- . | nindent 8 }}
-       {{- end }}
-       {{- if .Values.postgresql.enabled }}
+      {{- end }}
+      {{- with (include "codex-lb.nodeSelector" .) }}
+      nodeSelector:
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgresql.enabled }}
       initContainers:
          - name: wait-for-db
            image: postgres:16-alpine

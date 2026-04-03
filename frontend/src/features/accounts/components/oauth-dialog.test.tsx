@@ -208,4 +208,43 @@ describe("OauthDialog", () => {
     expect(screen.queryByRole("link", { name: "Open sign-in page" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
   });
+
+  it("clears the pasted callback input when browser refresh disables the form", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const callbackInput = screen.getByPlaceholderText(
+      "http://localhost:1455/auth/callback?code=...&state=...",
+    );
+    await user.type(callbackInput, "http://localhost:1455/auth/callback?code=abc&state=expected");
+    expect(callbackInput).toHaveValue(
+      "http://localhost:1455/auth/callback?code=abc&state=expected",
+    );
+
+    rerender(
+      <OauthDialog
+        open
+        state={browserStartingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(callbackInput).toHaveValue("");
+    expect(callbackInput).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
+  });
 });

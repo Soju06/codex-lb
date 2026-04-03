@@ -46,7 +46,7 @@ from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.sse import parse_sse_data_json
-from app.db.models import Account, UsageHistory
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -347,6 +347,12 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
         return {}
 
     account_map = {account.id: account for account in await _load_accounts_by_id(session, account_ids)}
+    if not account_map:
+        return {}
+
+    active_account_ids = set(account_map)
+    primary_rows = [row for row in primary_rows if row.account_id in active_account_ids]
+    secondary_rows = [row for row in secondary_rows if row.account_id in active_account_ids]
     limits: dict[str, V1UsageLimitResponse] = {}
 
     for window_key, rows, label in (("primary", primary_rows, "5h"), ("secondary", secondary_rows, "7d")):
@@ -356,10 +362,9 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
         max_value = max(0, int(round(summary.capacity_credits or 0.0)))
         if max_value <= 0:
             continue
+        if summary.reset_at is None:
+            continue
         current_value = max(0, min(int(round(summary.used_credits or 0.0)), max_value))
-        reset_at = ""
-        if summary.reset_at is not None:
-            reset_at = datetime.fromtimestamp(summary.reset_at, tz=timezone.utc).isoformat().replace("+00:00", "Z")
         limits[label] = V1UsageLimitResponse(
             limit_type="credits",
             limit_window=label,
@@ -367,7 +372,7 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
             current_value=current_value,
             remaining_value=max(0, max_value - current_value),
             model_filter=None,
-            reset_at=reset_at,
+            reset_at=datetime.fromtimestamp(summary.reset_at, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
             source="aggregate",
         )
 
@@ -377,7 +382,12 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
 async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> list[Account]:
     if not account_ids:
         return []
-    result = await session.execute(select(Account).where(Account.id.in_(account_ids)))
+    result = await session.execute(
+        select(Account).where(
+            Account.id.in_(account_ids),
+            Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
+        )
+    )
     return list(result.scalars().all())
 
 

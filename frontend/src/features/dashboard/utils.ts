@@ -1,15 +1,4 @@
-import { Activity, AlertTriangle, Coins, DollarSign } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-
-import { buildDonutPalette } from "@/utils/colors";
-import { buildDuplicateAccountIdSet, formatCompactAccountId } from "@/utils/account-identifiers";
-import {
-  formatCachedTokensMeta,
-  formatCompactNumber,
-  formatCurrency,
-  formatRate,
-  formatWindowLabel,
-} from "@/utils/formatters";
+import { Activity, AlertTriangle, Coins, DollarSign, type LucideIcon } from "lucide-react";
 
 import type {
   AccountSummary,
@@ -19,6 +8,15 @@ import type {
   TrendPoint,
   UsageWindow,
 } from "@/features/dashboard/schemas";
+import { buildDuplicateAccountIdSet, formatCompactAccountId } from "@/utils/account-identifiers";
+import { buildDonutPalette } from "@/utils/colors";
+import {
+  formatCachedTokensMeta,
+  formatCompactNumber,
+  formatCurrency,
+  formatRate,
+  formatWindowLabel,
+} from "@/utils/formatters";
 
 export type RemainingItem = {
   accountId: string;
@@ -167,6 +165,10 @@ function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));
 }
 
+function sumRemainingItems(items: RemainingItem[]): number {
+  return items.reduce((total, item) => total + item.value, 0);
+}
+
 export function buildDashboardView(
   overview: DashboardOverview,
   requestLogs: RequestLog[],
@@ -218,14 +220,15 @@ export function buildDashboardView(
 
   const rawPrimaryItems = buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark);
   const secondaryUsageItems = buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark);
+  const primaryUsageItems = secondaryWindow
+    ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
+    : rawPrimaryItems;
 
   return {
     stats,
-    primaryUsageItems: secondaryWindow
-      ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
-      : rawPrimaryItems,
+    primaryUsageItems,
     secondaryUsageItems,
-    primaryUsageTotal: overview.summary.primaryWindow.remainingCredits,
+    primaryUsageTotal: sumRemainingItems(primaryUsageItems),
     secondaryUsageTotal: overview.summary.secondaryWindow?.remainingCredits ?? 0,
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),

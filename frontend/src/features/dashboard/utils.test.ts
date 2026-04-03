@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
 import {
   applySecondaryConstraint,
   buildDashboardView,
   buildDepletionView,
   buildRemainingItems,
+  type RemainingItem,
 } from "@/features/dashboard/utils";
-import type { RemainingItem } from "@/features/dashboard/utils";
-import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
 import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
@@ -252,20 +252,46 @@ describe("buildRemainingItems", () => {
 });
 
 describe("buildDashboardView", () => {
-  it("uses aggregate remaining credits for donut totals", () => {
+  it("derives the primary donut total from the constrained displayed slices", () => {
     const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "acc-1",
+          email: "one@example.com",
+          usage: {
+            primaryRemainingPercent: 90,
+            secondaryRemainingPercent: 1,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: 10080,
+        }),
+        account({
+          accountId: "acc-2",
+          email: "two@example.com",
+          usage: {
+            primaryRemainingPercent: 60,
+            secondaryRemainingPercent: 70,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: 10080,
+        }),
+      ],
       summary: {
         primaryWindow: {
-          remainingPercent: 63.5,
-          capacityCredits: 1125,
-          remainingCredits: 790.5,
+          remainingPercent: 75,
+          capacityCredits: 450,
+          remainingCredits: 337.5,
           resetAt: null,
           windowMinutes: 300,
         },
         secondaryWindow: {
-          remainingPercent: 55.2,
-          capacityCredits: 37800,
-          remainingCredits: 28350,
+          remainingPercent: 35.5,
+          capacityCredits: 15120,
+          remainingCredits: 5370,
           resetAt: null,
           windowMinutes: 10080,
         },
@@ -285,7 +311,9 @@ describe("buildDashboardView", () => {
 
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
 
-    expect(view.primaryUsageTotal).toBe(790.5);
-    expect(view.secondaryUsageTotal).toBe(28350);
+    expect(view.primaryUsageItems.map((item) => item.value)).toEqual([75.6, 135]);
+    expect(view.primaryUsageTotal).toBeCloseTo(210.6);
+    expect(view.primaryUsageTotal).toBeCloseTo(view.primaryUsageItems.reduce((total, item) => total + item.value, 0));
+    expect(view.secondaryUsageTotal).toBe(5370);
   });
 });

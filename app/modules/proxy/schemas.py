@@ -161,6 +161,7 @@ class V1UsageLimitResponse(BaseModel):
     remaining_value: int
     model_filter: str | None = None
     reset_at: str
+    source: str = "api_key_limit"
 
 
 class V1UsageResponse(BaseModel):

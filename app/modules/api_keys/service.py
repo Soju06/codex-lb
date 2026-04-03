@@ -707,10 +707,11 @@ class ApiKeysService:
                 limit_type=limit.limit_type.value,
                 limit_window=limit.limit_window.value,
                 max_value=limit.max_value,
-                current_value=limit.current_value,
-                remaining_value=max(0, limit.max_value - limit.current_value),
+                current_value=max(0, min(limit.current_value, limit.max_value)),
+                remaining_value=max(0, limit.max_value - max(0, min(limit.current_value, limit.max_value))),
                 model_filter=limit.model_filter,
                 reset_at=limit.reset_at,
+                source="api_key_override" if limit.limit_type == LimitType.CREDITS else "api_key_limit",
             )
             for limit in refreshed.limits
         ]
@@ -769,6 +770,7 @@ class ApiKeySelfLimitData:
     remaining_value: int
     model_filter: str | None
     reset_at: datetime
+    source: str = "api_key_limit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -975,6 +977,8 @@ def _reserve_budget_for_limit_type(
         return 8_192
     if limit_type == LimitType.COST_USD:
         return _reserve_cost_budget_microdollars(request_model, request_service_tier)
+    if limit_type == LimitType.CREDITS:
+        return 0
     return 1
 
 
@@ -1006,6 +1010,8 @@ def _compute_increment_for_limit_type(
         return output_tokens
     if limit_type == LimitType.COST_USD:
         return cost_microdollars
+    if limit_type == LimitType.CREDITS:
+        return 0
     return 0
 
 
@@ -1071,6 +1077,8 @@ def _limit_input_to_row(
     reset_at: datetime | None = None,
 ) -> ApiKeyLimit:
     window = LimitWindow(li.limit_window)
+    if li.limit_type == LimitType.CREDITS.value and li.model_filter is not None:
+        raise ValueError("credits limits do not support model_filter")
     return ApiKeyLimit(
         api_key_id=key_id,
         limit_type=LimitType(li.limit_type),
@@ -1145,6 +1153,10 @@ def _limit_identity_from_row(limit: ApiKeyLimit) -> tuple[str, str, str | None]:
 
 
 def _next_reset(now: datetime, window: LimitWindow) -> datetime:
+    if window == LimitWindow.FIVE_HOURS:
+        return now + timedelta(hours=5)
+    if window == LimitWindow.SEVEN_DAYS:
+        return now + timedelta(days=7)
     if window == LimitWindow.DAILY:
         return now + timedelta(days=1)
     if window == LimitWindow.WEEKLY:
@@ -1163,6 +1175,10 @@ def _advance_reset(reset_at: datetime, now: datetime, window: LimitWindow) -> da
 
 
 def _window_delta(window: LimitWindow) -> timedelta:
+    if window == LimitWindow.FIVE_HOURS:
+        return timedelta(hours=5)
+    if window == LimitWindow.SEVEN_DAYS:
+        return timedelta(days=7)
     if window == LimitWindow.DAILY:
         return timedelta(days=1)
     if window == LimitWindow.WEEKLY:

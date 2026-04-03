@@ -14,6 +14,18 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- $pullSecrets := concat (.Values.global.imagePullSecrets | default list) (.Values.image.pullSecrets | default list) }}
+      {{- if $pullSecrets }}
+      imagePullSecrets:
+        {{- range $pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       {{- with (include "codex-lb.nodeSelector" .) }}
       nodeSelector:
         {{- . | nindent 8 }}
@@ -21,6 +33,11 @@ spec:
       containers:
         - name: db-init
           image: {{ printf "%s/bitnami/postgresql:16" (.Values.global.imageRegistry | default "docker.io") }}
+          imagePullPolicy: IfNotPresent
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command: ["sh", "-ec"]
           args:
             - |

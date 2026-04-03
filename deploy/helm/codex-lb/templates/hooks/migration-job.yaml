@@ -36,7 +36,7 @@ spec:
         - name: {{ . }}
         {{- end }}
       {{- end }}
-      {{- with (include "codex-lb.nodeSelector" .) }}
+      {{- with (include "codex-lb.globalNodeSelector" .) }}
       nodeSelector:
         {{- . | nindent 8 }}
       {{- end }}

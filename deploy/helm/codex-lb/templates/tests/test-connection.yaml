@@ -15,7 +15,7 @@ spec:
     runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
-  {{- with (include "codex-lb.nodeSelector" .) }}
+  {{- with (include "codex-lb.globalNodeSelector" .) }}
   nodeSelector:
     {{- . | nindent 4 }}
   {{- end }}

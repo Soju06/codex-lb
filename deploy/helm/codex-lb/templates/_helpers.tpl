@@ -149,3 +149,12 @@ Merged nodeSelector: global.nodeSelector + local nodeSelector (local wins).
 {{- toYaml $merged }}
 {{- end }}
 {{- end -}}
+
+{{/*
+Global-only nodeSelector for hooks/tests so app-specific placement does not block installs.
+*/}}
+{{- define "codex-lb.globalNodeSelector" -}}
+{{- with (.Values.global.nodeSelector | default dict) }}
+{{- toYaml . }}
+{{- end }}
+{{- end -}}

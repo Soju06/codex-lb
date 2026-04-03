@@ -167,6 +167,8 @@ config:
 auth:
   # @param auth.existingSecret Name of existing Secret containing database-url and encryption-key
   existingSecret: ""
+  # @param auth.encryptionKey Fernet encryption key (auto-generated when empty and no existing Secret is used)
+  encryptionKey: ""
   secretKeys:
     # @param auth.secretKeys.databaseUrl Key in the Secret for the database URL
     databaseUrl: database-url

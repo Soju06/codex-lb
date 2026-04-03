@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.10.1](https://github.com/Soju06/codex-lb/compare/v1.10.0...v1.10.1) (2026-04-03)
+
+
+### Bug Fixes
+
+* **ci:** lowercase Trivy image-ref and bump all actions to latest ([3b94de4](https://github.com/Soju06/codex-lb/commit/3b94de4457a93b2ff220a33ea9b7a164c02e0b37))
+* **ci:** use exact tag v8.0.0 for setup-uv (no v8 major tag exists) ([c657c91](https://github.com/Soju06/codex-lb/commit/c657c91bf26b4d99bb783e7e4f3b4268d0a4028f))
+
+
+### Documentation
+
+* add L1st3r as a contributor for code, and test ([#318](https://github.com/Soju06/codex-lb/issues/318)) ([d0ff5a7](https://github.com/Soju06/codex-lb/commit/d0ff5a71212132f64ecf4e3b594059a7d648f45a))
+* external DB secrets guide, ServiceMonitor alternatives, production deployment guide ([#315](https://github.com/Soju06/codex-lb/issues/315)) ([8d558f6](https://github.com/Soju06/codex-lb/commit/8d558f6a9b3beafcbca36c92ba694f099c9ca115))
+
 ## [1.10.0](https://github.com/Soju06/codex-lb/compare/v1.9.0...v1.10.0) (2026-04-02)
 
 

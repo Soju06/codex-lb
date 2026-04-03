@@ -437,7 +437,10 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(additional_limit_name="codex_spark")
+    selection = await balancer.select_account(
+        additional_limit_name="codex_spark",
+        routing_strategy="usage_weighted",
+    )
 
     assert selection.account is not None
     assert selection.account.id == account_eligible.id

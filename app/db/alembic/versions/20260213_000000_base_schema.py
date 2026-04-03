@@ -12,6 +12,7 @@ import warnings
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SAWarning
 
 # revision identifiers, used by Alembic.
 revision = "20260213_000000_base_schema"
@@ -41,7 +42,7 @@ def _indexes(connection: Connection, table_name: str) -> set[str]:
         warnings.filterwarnings(
             "ignore",
             message="Skipped unsupported reflection of expression-based index",
-            category=sa.exc.SAWarning,
+            category=SAWarning,
         )
         return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
 

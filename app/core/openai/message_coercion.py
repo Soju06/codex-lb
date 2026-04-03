@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonValue
@@ -13,12 +12,12 @@ _SUPPORTED_MESSAGE_ROLES = frozenset({"system", "developer", "user", "assistant"
 def _json_dict_or_none(value: object) -> dict[str, JsonValue] | None:
     if not is_json_dict(value):
         return None
-    return cast(dict[str, JsonValue], value)
+    return value
 
 
 def _content_parts(content: JsonValue) -> list[JsonValue]:
     if is_json_list(content):
-        return cast(list[JsonValue], content)
+        return content
     return [content]
 
 
@@ -181,7 +180,7 @@ def _convert_tool_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]
     if isinstance(content, str):
         output = content
     elif is_json_list(content):
-        output = _concat_text_parts(cast(list[JsonValue], content))
+        output = _concat_text_parts(content)
         if not output and content:
             raise ClientPayloadError(
                 "tool message content array contains no valid text parts.",
@@ -245,7 +244,7 @@ def _get_assistant_refusal(message: dict[str, JsonValue]) -> str | None:
 
 def _to_content_list(normalized: JsonValue) -> list[JsonValue]:
     if is_json_list(normalized):
-        return cast(list[JsonValue], normalized)
+        return normalized
     if normalized is None or normalized == "":
         return []
     return [normalized]

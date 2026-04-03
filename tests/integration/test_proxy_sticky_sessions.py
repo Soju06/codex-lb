@@ -64,12 +64,14 @@ async def _set_routing_settings(
     *,
     sticky_threads_enabled: bool,
     prefer_earlier_reset_accounts: bool = False,
+    routing_strategy: str = "usage_weighted",
 ) -> None:
     response = await async_client.put(
         "/api/settings",
         json={
             "stickyThreadsEnabled": sticky_threads_enabled,
             "preferEarlierResetAccounts": prefer_earlier_reset_accounts,
+            "routingStrategy": routing_strategy,
         },
     )
     assert response.status_code == 200

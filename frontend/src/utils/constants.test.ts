@@ -38,6 +38,7 @@ describe("ROUTING_LABELS", () => {
   it("contains supported routing labels", () => {
     expect(ROUTING_LABELS.usage_weighted).toBe("usage weighted");
     expect(ROUTING_LABELS.round_robin).toBe("round robin");
+    expect(ROUTING_LABELS.capacity_weighted).toBe("capacity weighted");
     expect(ROUTING_LABELS.sticky).toBe("sticky");
   });
 });

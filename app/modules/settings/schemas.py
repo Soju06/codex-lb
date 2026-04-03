@@ -9,7 +9,7 @@ class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
     prefer_earlier_reset_accounts: bool
-    routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin)$")
+    routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
@@ -26,7 +26,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         pattern=r"^(default|auto|http|websocket)$",
     )
     prefer_earlier_reset_accounts: bool
-    routing_strategy: str | None = Field(default=None, pattern=r"^(usage_weighted|round_robin)$")
+    routing_strategy: str | None = Field(default=None, pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)

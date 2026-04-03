@@ -135,7 +135,7 @@ async def test_clear_for_key_resets_lockout(
             await limiter.check_and_record("ip:clear-test", session)
 
         # clear_for_key doesn't exist yet — this will raise AttributeError (xfail)
-        await limiter.clear_for_key("ip:clear-test", session)  # type: ignore[attr-defined]
+        await limiter.clear_for_key("ip:clear-test", session)
 
         # After clearing, should be able to attempt again
         await limiter.check_and_record("ip:clear-test", session)
@@ -151,7 +151,7 @@ async def test_check_only_does_not_increment_counter(
     async with async_session_factory() as session:
         # check() without recording — 10 checks should NOT block
         for _ in range(10):
-            await limiter.check("ip:check-only", session)  # type: ignore[attr-defined]
+            await limiter.check("ip:check-only", session)
 
         # Still able to record
         await limiter.check_and_record("ip:check-only", session)
@@ -166,14 +166,14 @@ async def test_record_failure_only_counts_failures(
 
     async with async_session_factory() as session:
         # 2 failures recorded explicitly
-        await limiter.record_failure("ip:failure-test", session)  # type: ignore[attr-defined]
-        await limiter.record_failure("ip:failure-test", session)  # type: ignore[attr-defined]
+        await limiter.record_failure("ip:failure-test", session)
+        await limiter.record_failure("ip:failure-test", session)
 
         # 1 success (clear) in between
-        await limiter.clear_for_key("ip:failure-test", session)  # type: ignore[attr-defined]
+        await limiter.clear_for_key("ip:failure-test", session)
 
         # 1 more failure after success — should only be 1 total
-        await limiter.record_failure("ip:failure-test", session)  # type: ignore[attr-defined]
+        await limiter.record_failure("ip:failure-test", session)
 
         # Should NOT be blocked (only 1 failure since last success)
-        await limiter.check("ip:failure-test", session)  # type: ignore[attr-defined]
+        await limiter.check("ip:failure-test", session)

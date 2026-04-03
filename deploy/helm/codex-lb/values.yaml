@@ -107,15 +107,15 @@ config:
   databaseMigrateOnStartup: false
   # @param config.databasePoolSize SQLAlchemy connection pool size
   # Connection pool budget: (databasePoolSize + databaseMaxOverflow) × maxReplicas MUST be ≤ PostgreSQL max_connections (default 100)
-  # For HPA maxReplicas=20: (3+2)×20=100. For maxReplicas=10: (8+2)×10=100.
-  # Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
-  databasePoolSize: 15
+  # Default (5+5)×10=100 fits HPA maxReplicas=10 against PG default max_connections.
+  # Prod overlay uses (3+2)×20=100. Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
+  databasePoolSize: 5
   # @param config.databaseMaxOverflow SQLAlchemy connection pool max overflow
-  databaseMaxOverflow: 10
+  databaseMaxOverflow: 5
   # @param config.upstreamBaseUrl Override OpenAI upstream base URL (empty = default)
   upstreamBaseUrl: ""
   # @param config.upstreamConnectTimeout Upstream connection timeout seconds
-  upstreamConnectTimeout: 30
+  upstreamConnectTimeout: 10
   # @param config.upstreamStreamTransport Upstream streaming transport (auto|websocket|http)
   upstreamStreamTransport: auto
   # @param config.logFormat Log output format (json|text)
@@ -125,21 +125,41 @@ config:
   # @param config.leaderElectionTtlSeconds Leader election TTL in seconds
   leaderElectionTtlSeconds: 30
   # @param config.circuitBreakerEnabled Enable circuit breaker for upstream requests
-  circuitBreakerEnabled: false
+  circuitBreakerEnabled: true
   # @param config.circuitBreakerFailureThreshold Number of failures before opening circuit
   circuitBreakerFailureThreshold: 5
   # @param config.circuitBreakerRecoveryTimeoutSeconds Seconds before half-open state
   circuitBreakerRecoveryTimeoutSeconds: 60
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
-  backpressureMaxConcurrentRequests: 500
+  backpressureMaxConcurrentRequests: 200
   # @param config.shutdownDrainTimeoutSeconds Graceful shutdown drain timeout
   shutdownDrainTimeoutSeconds: 30
   # @param config.httpConnectorLimit Global HTTP connection pool limit
   httpConnectorLimit: 100
   # @param config.httpConnectorLimitPerHost Per-host HTTP connection pool limit
   httpConnectorLimitPerHost: 50
+  # @param config.cacheAffinityMaxAgeSeconds TTL for prompt cache sticky sessions (account affinity)
+  cacheAffinityMaxAgeSeconds: 1800
+  # @param config.promptCacheKeyDerivationEnabled Auto-derive prompt cache keys when client omits them
+  promptCacheKeyDerivationEnabled: true
+  # @param config.sessionBridgeEnabled Enable in-memory upstream WebSocket session reuse
+  sessionBridgeEnabled: true
+  # @param config.sessionBridgeIdleTtlSeconds Idle TTL for general API session bridge sessions
+  sessionBridgeIdleTtlSeconds: 120
+  # @param config.sessionBridgeCodexIdleTtlSeconds Idle TTL for Codex session bridge sessions
+  sessionBridgeCodexIdleTtlSeconds: 900
+  # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions
+  sessionBridgeCodexPrewarmEnabled: true
+  # @param config.sessionBridgeMaxSessions Max in-memory bridge sessions per pod
+  sessionBridgeMaxSessions: 256
+  # @param config.sessionBridgeQueueLimit Max pending requests per bridge session
+  sessionBridgeQueueLimit: 8
   # @param config.sessionBridgeInstanceRing Comma-separated pod hostnames for session routing
   sessionBridgeInstanceRing: ""
+  # @param config.stickySessionCleanupEnabled Enable periodic cleanup of stale sticky sessions
+  stickySessionCleanupEnabled: true
+  # @param config.stickySessionCleanupIntervalSeconds Interval between sticky session cleanup runs
+  stickySessionCleanupIntervalSeconds: 300
 
 # @section Authentication parameters
 auth:
@@ -248,7 +268,7 @@ ingress:
     enabled: false
     # @param ingress.nginx.upstreamHashBy nginx upstream-hash-by annotation value. Empty = disabled.
     #        Set to "$http_authorization" for consistent hash routing by API key.
-    upstreamHashBy: ""
+    upstreamHashBy: "$http_authorization"
     # @param ingress.nginx.upstreamHashBySubset Enable subset mode for upstream-hash-by
     upstreamHashBySubset: false
     # @param ingress.nginx.upstreamHashBySubsetSize Subset size when subset mode is enabled

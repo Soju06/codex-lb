@@ -41,6 +41,7 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
+    async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
 
     async def update(
         self,
@@ -687,6 +688,40 @@ class ApiKeysService:
         )
         return _build_api_key_trends(key_id, buckets, since, now, _DETAIL_BUCKET_SECONDS)
 
+    async def get_key_usage_summary_for_self(self, key_id: str) -> ApiKeySelfUsageData | None:
+        """Return usage summary + current limits for a single key (self-service lookup)."""
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            return None
+
+        now = utcnow()
+        # Reset any expired limits before reading state
+        await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
+        refreshed = await self._repository.get_by_id(key_id)
+        if refreshed is None:
+            return None
+
+        usage = await self._repository.get_usage_summary_by_key_id(key_id)
+        limits = [
+            ApiKeySelfLimitData(
+                limit_type=limit.limit_type.value,
+                limit_window=limit.limit_window.value,
+                max_value=limit.max_value,
+                current_value=limit.current_value,
+                remaining_value=max(0, limit.max_value - limit.current_value),
+                model_filter=limit.model_filter,
+                reset_at=limit.reset_at,
+            )
+            for limit in refreshed.limits
+        ]
+        return ApiKeySelfUsageData(
+            request_count=usage.request_count,
+            total_tokens=usage.total_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            total_cost_usd=usage.total_cost_usd,
+            limits=limits,
+        )
+
     async def get_key_usage_7d(self, key_id: str) -> ApiKeyUsage7DayData | None:
         row = await self._repository.get_by_id(key_id)
         if row is None:
@@ -723,6 +758,26 @@ class ApiKeyUsage7DayData:
     total_cost_usd: float = 0.0
     total_requests: int = 0
     cached_input_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeySelfLimitData:
+    limit_type: str
+    limit_window: str
+    max_value: int
+    current_value: int
+    remaining_value: int
+    model_filter: str | None
+    reset_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeySelfUsageData:
+    request_count: int = 0
+    total_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_cost_usd: float = 0.0
+    limits: list[ApiKeySelfLimitData] = field(default_factory=list)
 
 
 def _normalize_name(name: str) -> str:

@@ -14,6 +14,7 @@ from app.core.auth.dependencies import (
     validate_codex_usage_identity,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
+    validate_usage_api_key,
 )
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
@@ -65,6 +66,8 @@ from app.modules.proxy.schemas import (
     ModelMetadata,
     RateLimitStatusPayload,
     ReasoningLevelSchema,
+    V1UsageLimitResponse,
+    V1UsageResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -239,6 +242,37 @@ async def v1_models(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _build_models_response(api_key)
+
+
+@v1_router.get("/usage", response_model=V1UsageResponse)
+async def v1_usage(
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> V1UsageResponse:
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        usage = await service.get_key_usage_summary_for_self(api_key.id)
+
+    if usage is None:
+        raise ProxyAuthError("Invalid API key")
+
+    return V1UsageResponse(
+        request_count=usage.request_count,
+        total_tokens=usage.total_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+        total_cost_usd=usage.total_cost_usd,
+        limits=[
+            V1UsageLimitResponse(
+                limit_type=limit.limit_type,
+                limit_window=limit.limit_window,
+                max_value=limit.max_value,
+                current_value=limit.current_value,
+                remaining_value=limit.remaining_value,
+                model_filter=limit.model_filter,
+                reset_at=limit.reset_at.isoformat() + "Z",
+            )
+            for limit in usage.limits
+        ],
+    )
 
 
 @transcribe_router.post("/transcribe")
@@ -769,7 +803,7 @@ def _error_details_from_content(
     error = content.get("error")
     if not is_json_mapping(error):
         return None, None
-    error_mapping = cast(Mapping[str, JsonValue], error)
+    error_mapping = error
     code = error_mapping.get("code")
     message = error_mapping.get("message")
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None

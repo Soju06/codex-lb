@@ -4234,7 +4234,7 @@ class ProxyService:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        routing_strategy: RoutingStrategy = "usage_weighted",
+        routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
     ) -> AccountSelection:
@@ -4562,8 +4562,12 @@ def _websocket_receive_timeout_for_pending_requests(
 
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
-    value = settings.routing_strategy or "usage_weighted"
-    return "round_robin" if value == "round_robin" else "usage_weighted"
+    value = settings.routing_strategy or "capacity_weighted"
+    if value == "round_robin":
+        return "round_robin"
+    if value == "usage_weighted":
+        return "usage_weighted"
+    return "capacity_weighted"
 
 
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:

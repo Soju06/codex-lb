@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
 from app.core.balancer.types import UpstreamError
+from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
 from app.core.utils.retry import backoff_seconds, parse_retry_after
 from app.db.models import AccountStatus
 
@@ -18,7 +20,17 @@ PERMANENT_FAILURE_CODES = {
 
 SECONDS_PER_DAY = 60 * 60 * 24
 UNKNOWN_RESET_BUCKET_DAYS = 10_000
-RoutingStrategy = Literal["usage_weighted", "round_robin"]
+RoutingStrategy = Literal["usage_weighted", "round_robin", "capacity_weighted"]
+UNKNOWN_PLAN_FALLBACK = "free"
+CAPACITY_PLAN_ALIASES = {
+    "education": "edu",
+    "k12": "edu",
+    "guest": "free",
+    "go": "free",
+    "free_workspace": "free",
+    "quorum": "free",
+    "unknown": "free",
+}
 
 
 @dataclass
@@ -34,6 +46,8 @@ class AccountState:
     last_selected_at: float | None = None
     error_count: int = 0
     deactivation_reason: str | None = None
+    plan_type: str | None = None
+    capacity_credits: float | None = None
 
 
 @dataclass
@@ -42,13 +56,41 @@ class SelectionResult:
     error_message: str | None
 
 
+def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
+    primary_used = state.used_percent if state.used_percent is not None else 0.0
+    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    last_selected = state.last_selected_at or 0.0
+    return secondary_used, primary_used, last_selected, state.account_id
+
+
+def _reset_bucket_days(state: AccountState, current: float) -> int:
+    if state.secondary_reset_at is None:
+        return UNKNOWN_RESET_BUCKET_DAYS
+    return max(0, int((state.secondary_reset_at - current) // SECONDS_PER_DAY))
+
+
+def _prefer_earlier_reset_candidates(available: list[AccountState], current: float) -> list[AccountState]:
+    earliest_bucket = min(_reset_bucket_days(state, current) for state in available)
+    return [state for state in available if _reset_bucket_days(state, current) == earliest_bucket]
+
+
+def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
+    normalized = (plan_type or "").strip().lower()
+    resolved_plan = CAPACITY_PLAN_ALIASES.get(normalized, normalized or UNKNOWN_PLAN_FALLBACK)
+    return PLAN_CAPACITY_CREDITS_SECONDARY.get(
+        resolved_plan,
+        PLAN_CAPACITY_CREDITS_SECONDARY[UNKNOWN_PLAN_FALLBACK],
+    )
+
+
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
     *,
     prefer_earlier_reset: bool = False,
-    routing_strategy: RoutingStrategy = "usage_weighted",
+    routing_strategy: RoutingStrategy = "capacity_weighted",
     allow_backoff_fallback: bool = True,
+    deterministic_probe: bool = False,
 ) -> SelectionResult:
     current = now or time.time()
     available: list[AccountState] = []
@@ -132,19 +174,8 @@ def select_account(
                 return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
             return SelectionResult(None, "No available accounts")
 
-    def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
-        primary_used = state.used_percent if state.used_percent is not None else 0.0
-        secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
-        last_selected = state.last_selected_at or 0.0
-        return secondary_used, primary_used, last_selected, state.account_id
-
     def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = UNKNOWN_RESET_BUCKET_DAYS
-        if state.secondary_reset_at is not None:
-            reset_bucket_days = max(
-                0,
-                int((state.secondary_reset_at - current) // SECONDS_PER_DAY),
-            )
+        reset_bucket_days = _reset_bucket_days(state, current)
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
 
@@ -154,9 +185,46 @@ def select_account(
 
     if routing_strategy == "round_robin":
         selected = min(available, key=_round_robin_sort_key)
+    elif routing_strategy == "capacity_weighted":
+        candidate_pool = _prefer_earlier_reset_candidates(available, current) if prefer_earlier_reset else available
+        if deterministic_probe:
+            selected = min(candidate_pool, key=_capacity_probe_sort_key)
+        else:
+            selected = _select_capacity_weighted(candidate_pool)
     else:
         selected = min(available, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)
+
+
+def _remaining_secondary_credits(state: AccountState) -> float:
+    """Return remaining absolute credits for the secondary (7-day) window."""
+    capacity = state.capacity_credits
+    if capacity is None:
+        capacity = _fallback_secondary_capacity_credits(state.plan_type)
+    elif capacity <= 0:
+        return 0.0
+    if state.secondary_used_percent is not None:
+        used_pct = state.secondary_used_percent
+    elif state.used_percent is not None:
+        used_pct = state.used_percent
+    else:
+        used_pct = 0.0
+    return max(0.0, capacity * (1.0 - min(used_pct, 100.0) / 100.0))
+
+
+def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, float, str]:
+    secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
+    return (-_remaining_secondary_credits(state), secondary_used, primary_used, last_selected, account_id)
+
+
+def _select_capacity_weighted(available: list[AccountState]) -> AccountState:
+    """Select an account with probability proportional to remaining secondary credits."""
+    weights = [_remaining_secondary_credits(s) for s in available]
+    total = sum(weights)
+    if total <= 0.0:
+        # All accounts exhausted — fall back to deterministic usage-weighted
+        return min(available, key=_usage_sort_key)
+    return random.choices(available, weights=weights, k=1)[0]
 
 
 def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:

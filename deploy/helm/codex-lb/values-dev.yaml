@@ -7,8 +7,19 @@ autoscaling:
 postgresql:
   enabled: true
 
+metrics:
+  enabled: false
+
 networkPolicy:
   enabled: false
+
+config:
+  databaseMigrateOnStartup: true
+  logFormat: text
+
+migration:
+  schemaGate:
+    enabled: false
 
 resources:
   requests:
@@ -17,6 +28,3 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
-
-config:
-  logFormat: text

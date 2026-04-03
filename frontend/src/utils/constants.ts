@@ -22,6 +22,7 @@ export const ERROR_LABELS = {
 export const ROUTING_LABELS = {
   usage_weighted: "usage weighted",
   round_robin: "round robin",
+  capacity_weighted: "capacity weighted",
   sticky: "sticky",
 } as const;
 

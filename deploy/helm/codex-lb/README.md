@@ -41,12 +41,23 @@ Key properties:
 Example:
 
 ```bash
-helm dependency build deploy/helm/codex-lb/
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.auth.password=change-me \
+  --set config.databaseMigrateOnStartup=true \
+  --set migration.schemaGate.enabled=false
+```
 
+<details>
+<summary>From source</summary>
+
+```bash
+helm dependency build deploy/helm/codex-lb/
 helm upgrade --install codex-lb deploy/helm/codex-lb/ \
   -f deploy/helm/codex-lb/values-bundled.yaml \
   --set postgresql.auth.password=change-me
 ```
+
+</details>
 
 ### 2. External DB
 
@@ -69,19 +80,30 @@ Supported DB wiring:
 Example using a direct URL:
 
 ```bash
-helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-external-db.yaml \
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
   --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
 ```
 
 Example using separate secrets:
 
 ```bash
-helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-external-db.yaml \
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
   --set externalDatabase.existingSecret=codex-lb-db \
   --set auth.existingSecret=codex-lb-app
 ```
+
+<details>
+<summary>From source</summary>
+
+```bash
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-external-db.yaml \
+  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+```
+
+</details>
 
 ### 3. External Secrets
 
@@ -97,31 +119,55 @@ Key properties:
 Example:
 
 ```bash
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
+  --set externalSecrets.enabled=true \
+  --set externalSecrets.secretStoreRef.name=my-store
+```
+
+<details>
+<summary>From source</summary>
+
+```bash
 helm upgrade --install codex-lb deploy/helm/codex-lb/ \
   -f deploy/helm/codex-lb/values-external-secrets.yaml \
   --set externalSecrets.secretStoreRef.name=my-store
 ```
 
+</details>
+
 ## Quick Start
+
+No repo clone required — install directly from the OCI registry.
 
 ### Docker Desktop / kind style cluster
 
 Bundled PostgreSQL:
 
 ```bash
-helm dependency build deploy/helm/codex-lb/
-helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-bundled.yaml \
-  --set postgresql.auth.password=local-dev-password
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.auth.password=local-dev-password \
+  --set config.databaseMigrateOnStartup=true \
+  --set migration.schemaGate.enabled=false
 ```
 
 ### Managed PostgreSQL
 
 ```bash
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
+  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+```
+
+### From source (development)
+
+If you need to customize the chart itself, clone the repo and install from path:
+
+```bash
 helm dependency build deploy/helm/codex-lb/
 helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-external-db.yaml \
-  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+  -f deploy/helm/codex-lb/values-bundled.yaml \
+  --set postgresql.auth.password=local-dev-password
 ```
 
 ## Included Value Overlays
@@ -246,7 +292,7 @@ gatewayApi:
 ## Upgrade Contract
 
 ```bash
-helm upgrade codex-lb deploy/helm/codex-lb/ <your values...>
+helm upgrade codex-lb oci://ghcr.io/soju06/charts/codex-lb <your values...>
 ```
 
 - External DB installs can migrate before Deployment creation.

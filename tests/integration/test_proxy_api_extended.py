@@ -15,6 +15,16 @@ from app.db.session import SessionLocal
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+async def _force_usage_weighted_routing(async_client) -> None:
+    current = await async_client.get("/api/settings")
+    assert current.status_code == 200
+    payload = current.json()
+    payload["routingStrategy"] = "usage_weighted"
+    response = await async_client.put("/api/settings", json=payload)
+    assert response.status_code == 200
+
+
 def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")

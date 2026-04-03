@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,7 +20,7 @@ _SUPPORTED_CHAT_ROLES = frozenset({"system", "developer", "user", "assistant", "
 
 def _content_parts(content: JsonValue) -> list[JsonValue]:
     if is_json_list(content):
-        return cast(list[JsonValue], content)
+        return content
     return [content]
 
 
@@ -36,7 +35,7 @@ def _part_type(part: Mapping[str, JsonValue]) -> str | None:
 def _json_mapping(value: object) -> Mapping[str, JsonValue] | None:
     if not is_json_mapping(value):
         return None
-    return cast(Mapping[str, JsonValue], value)
+    return value
 
 
 class ChatCompletionsRequest(BaseModel):

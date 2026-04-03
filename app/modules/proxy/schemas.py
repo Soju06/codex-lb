@@ -149,3 +149,25 @@ class ModelListResponse(BaseModel):
 
     object: str = "list"
     data: list[ModelListItem]
+
+
+class V1UsageLimitResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit_type: str
+    limit_window: str
+    max_value: int
+    current_value: int
+    remaining_value: int
+    model_filter: str | None = None
+    reset_at: str
+
+
+class V1UsageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
+    total_cost_usd: float
+    limits: list[V1UsageLimitResponse]

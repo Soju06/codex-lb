@@ -39,8 +39,20 @@ data:
   # HTTP connector
   CODEX_LB_HTTP_CONNECTOR_LIMIT: {{ .Values.config.httpConnectorLimit | toString | quote }}
   CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST: {{ .Values.config.httpConnectorLimitPerHost | toString | quote }}
+  # Cache affinity
+  CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS: {{ .Values.config.cacheAffinityMaxAgeSeconds | toString | quote }}
+  CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED: {{ .Values.config.promptCacheKeyDerivationEnabled | toString | quote }}
   # Session bridge
+  CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED: {{ .Values.config.sessionBridgeEnabled | toString | quote }}
+  CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS: {{ .Values.config.sessionBridgeIdleTtlSeconds | toString | quote }}
+  CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS: {{ .Values.config.sessionBridgeCodexIdleTtlSeconds | toString | quote }}
+  CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED: {{ .Values.config.sessionBridgeCodexPrewarmEnabled | toString | quote }}
+  CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_MAX_SESSIONS: {{ .Values.config.sessionBridgeMaxSessions | toString | quote }}
+  CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT: {{ .Values.config.sessionBridgeQueueLimit | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: {{ .Values.config.sessionBridgeInstanceRing | quote }}
+  # Sticky session cleanup
+  CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED: {{ .Values.config.stickySessionCleanupEnabled | toString | quote }}
+  CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS: {{ .Values.config.stickySessionCleanupIntervalSeconds | toString | quote }}
   {{- if .Values.tracing.enabled }}
   CODEX_LB_OTEL_ENABLED: "true"
   CODEX_LB_OTEL_EXPORTER_ENDPOINT: {{ .Values.tracing.endpoint | quote }}

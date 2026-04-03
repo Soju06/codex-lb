@@ -237,6 +237,16 @@
         "bug",
         "code"
       ]
+    },
+    {
+      "login": "Daltonganger",
+      "name": "Ruben",
+      "avatar_url": "https://avatars.githubusercontent.com/u/17501732?v=4",
+      "profile": "https://github.com/Daltonganger",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

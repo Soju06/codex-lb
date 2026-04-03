@@ -24,6 +24,16 @@ from app.core.openai.models import CompactResponsePayload
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+async def _force_usage_weighted_routing(async_client) -> None:
+    current = await async_client.get("/api/settings")
+    assert current.status_code == 200
+    payload = current.json()
+    payload["routingStrategy"] = "usage_weighted"
+    response = await async_client.put("/api/settings", json=payload)
+    assert response.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

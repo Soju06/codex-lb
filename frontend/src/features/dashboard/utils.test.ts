@@ -311,7 +311,9 @@ describe("buildDashboardView", () => {
 
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
 
-    expect(view.primaryUsageItems.map((item) => item.value)).toEqual([75.6, 135]);
+    expect(view.primaryUsageItems).toHaveLength(2);
+    expect(view.primaryUsageItems[0]?.value).toBeCloseTo(75.6);
+    expect(view.primaryUsageItems[1]?.value).toBeCloseTo(135);
     expect(view.primaryUsageTotal).toBeCloseTo(210.6);
     expect(view.primaryUsageTotal).toBeCloseTo(view.primaryUsageItems.reduce((total, item) => total + item.value, 0));
     expect(view.secondaryUsageTotal).toBe(5370);

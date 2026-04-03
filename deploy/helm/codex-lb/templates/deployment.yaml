@@ -54,6 +54,7 @@ spec:
     spec:
       serviceAccountName: {{ include "codex-lb.serviceAccountName" . }}
       automountServiceAccountToken: false
+      enableServiceLinks: false
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

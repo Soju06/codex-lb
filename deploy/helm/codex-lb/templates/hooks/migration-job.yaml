@@ -25,6 +25,7 @@ spec:
       restartPolicy: OnFailure
       serviceAccountName: {{ include "codex-lb.migrationServiceAccountName" . }}
       automountServiceAccountToken: false
+      enableServiceLinks: false
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -43,7 +44,7 @@ spec:
       {{- if .Values.postgresql.enabled }}
       initContainers:
          - name: wait-for-db
-           image: postgres:16-alpine
+           image: docker.io/library/postgres:16-alpine
            imagePullPolicy: IfNotPresent
            securityContext:
              allowPrivilegeEscalation: false

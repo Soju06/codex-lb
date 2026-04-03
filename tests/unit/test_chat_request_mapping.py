@@ -136,6 +136,35 @@ def test_chat_service_tier_is_preserved_in_responses_payload():
     assert dumped["service_tier"] == "priority"
 
 
+def test_chat_camel_case_aliases_are_normalized_before_bridge():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "serviceTier": "fast",
+        "promptCacheKey": "thread_123",
+        "reasoningEffort": "high",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+
+    assert req.service_tier == "priority"
+    assert req.model_extra is not None
+    assert req.model_extra.get("prompt_cache_key") == "thread_123"
+    assert req.model_extra.get("reasoning") == {"effort": "high"}
+
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+
+    assert dumped["service_tier"] == "priority"
+    assert dumped["prompt_cache_key"] == "thread_123"
+    reasoning = dumped.get("reasoning")
+    assert isinstance(reasoning, Mapping)
+    reasoning_map = cast(Mapping[str, JsonValue], reasoning)
+    assert reasoning_map.get("effort") == "high"
+    assert "serviceTier" not in dumped
+    assert "promptCacheKey" not in dumped
+    assert "reasoningEffort" not in dumped
+
+
 def test_chat_tools_are_normalized():
     payload = {
         "model": "gpt-5.2",
@@ -214,6 +243,55 @@ def test_chat_response_format_json_schema_maps_schema_fields():
     assert fmt.get("name") == "output"
     assert fmt.get("schema") == {"type": "object", "properties": {"ok": {"type": "boolean"}}}
     assert fmt.get("strict") is True
+
+
+def test_chat_top_level_normalization_does_not_mutate_nested_payload_keys():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "serviceTier": "priority",
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "do_thing",
+                    "description": "desc",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"serviceTier": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "output",
+                "schema": {
+                    "type": "object",
+                    "properties": {"promptCacheKey": {"type": "string"}},
+                },
+            },
+        },
+    }
+    responses = ChatCompletionsRequest.model_validate(payload).to_responses_request()
+    dumped = responses.to_payload()
+
+    tools = dumped.get("tools")
+    assert isinstance(tools, list)
+    first_tool = cast(Mapping[str, JsonValue], tools[0])
+    params = cast(Mapping[str, JsonValue], first_tool["parameters"])
+    tool_props = cast(Mapping[str, JsonValue], params["properties"])
+    assert "serviceTier" in tool_props
+    assert "service_tier" not in tool_props
+
+    text = dumped.get("text")
+    assert isinstance(text, dict)
+    fmt = cast(Mapping[str, JsonValue], text["format"])
+    schema = cast(Mapping[str, JsonValue], fmt["schema"])
+    schema_props = cast(Mapping[str, JsonValue], schema["properties"])
+    assert "promptCacheKey" in schema_props
+    assert "prompt_cache_key" not in schema_props
 
 
 def test_chat_stream_options_include_obfuscation_passthrough():

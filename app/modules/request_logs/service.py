@@ -8,9 +8,10 @@ from app.modules.request_logs.mappers import (
     RATE_LIMIT_CODES,
     normalize_log_status,
     to_request_log_entry,
+    to_request_log_visibility,
 )
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.request_logs.schemas import RequestLogEntry
+from app.modules.request_logs.schemas import RequestLogEntry, RequestLogVisibilityResponse
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,12 @@ class RequestLogsService:
             ],
             statuses=_normalize_status_values(status_values),
         )
+
+    async def get_visibility(self, request_id: str) -> RequestLogVisibilityResponse | None:
+        log = await self._repo.get_by_request_id(request_id)
+        if log is None:
+            return None
+        return to_request_log_visibility(log)
 
 
 def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:

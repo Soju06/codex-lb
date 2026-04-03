@@ -104,6 +104,8 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.request_logs.visibility import build_request_visibility_document
+from app.modules.settings.service import request_visibility_capture_enabled_now
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.updater import UsageUpdater
 
@@ -163,6 +165,22 @@ def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | 
     return upstream_stream_transport
 
 
+def _request_visibility_blob(
+    headers: Mapping[str, str],
+    body: object,
+    *,
+    enabled: bool | None = None,
+) -> str | None:
+    if enabled is None:
+        enabled = False
+    if not enabled:
+        return None
+    document = build_request_visibility_document(headers, body)
+    if document is None:
+        return None
+    return json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
 class ProxyService:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
@@ -189,17 +207,28 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
-        return self._stream_with_retry(
-            payload,
-            filtered,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=propagate_http_errors,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            request_transport=request_transport,
-        )
+        async def _run() -> AsyncIterator[str]:
+            settings = await get_settings_cache().get()
+            request_visibility = _request_visibility_blob(
+                filtered,
+                payload.to_payload(),
+                enabled=request_visibility_capture_enabled_now(settings),
+            )
+            async for line in self._stream_with_retry(
+                payload,
+                filtered,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_visibility=request_visibility,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=request_transport,
+            ):
+                yield line
+
+        return _run()
 
     def stream_http_responses(
         self,
@@ -216,17 +245,28 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         filtered = filter_inbound_headers(headers)
-        return self._stream_http_bridge_or_retry(
-            payload,
-            filtered,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=propagate_http_errors,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            downstream_turn_state=downstream_turn_state,
-        )
+        async def _run() -> AsyncIterator[str]:
+            settings = await get_settings_cache().get()
+            request_visibility = _request_visibility_blob(
+                filtered,
+                payload.to_payload(),
+                enabled=request_visibility_capture_enabled_now(settings),
+            )
+            async for line in self._stream_http_bridge_or_retry(
+                payload,
+                filtered,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_visibility=request_visibility,
+                suppress_text_done_events=suppress_text_done_events,
+                downstream_turn_state=downstream_turn_state,
+            ):
+                yield line
+
+        return _run()
 
     async def _stream_http_bridge_or_retry(
         self,
@@ -238,6 +278,7 @@ class ProxyService:
         openai_cache_affinity: bool,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        request_visibility: str | None,
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
     ) -> AsyncIterator[str]:
@@ -251,6 +292,7 @@ class ProxyService:
                 openai_cache_affinity=openai_cache_affinity,
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
+                request_visibility=request_visibility,
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
             ):
@@ -265,6 +307,7 @@ class ProxyService:
             openai_cache_affinity=openai_cache_affinity,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
+            request_visibility=request_visibility,
             suppress_text_done_events=suppress_text_done_events,
             idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_idle_ttl_seconds", 120.0),
             codex_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0),
@@ -285,6 +328,7 @@ class ProxyService:
         openai_cache_affinity: bool,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        request_visibility: str | None,
         suppress_text_done_events: bool,
         idle_ttl_seconds: float,
         codex_idle_ttl_seconds: float,
@@ -334,6 +378,7 @@ class ProxyService:
             headers,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
+            request_visibility=request_visibility,
             request_id=request_id,
         )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -404,6 +449,11 @@ class ProxyService:
         actual_service_tier: str | None = None
 
         settings = await get_settings_cache().get()
+        request_visibility = _request_visibility_blob(
+            filtered,
+            payload.to_payload(),
+            enabled=request_visibility_capture_enabled_now(settings),
+        )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
@@ -656,6 +706,7 @@ class ProxyService:
                 service_tier=_effective_service_tier(request_service_tier, actual_service_tier),
                 requested_service_tier=request_service_tier,
                 actual_service_tier=actual_service_tier,
+                request_visibility=request_visibility,
             )
             _maybe_log_proxy_service_tier_trace(
                 "compact",
@@ -1070,6 +1121,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
+        settings = await get_settings_cache().get()
         client_metadata = _response_create_client_metadata(payload, headers=headers)
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
@@ -1088,6 +1140,11 @@ class ProxyService:
             include_type_field=True,
             attach_event_queue=False,
             client_metadata=client_metadata,
+            request_visibility=_request_visibility_blob(
+                filter_inbound_headers(headers),
+                {"type": "response.create", **responses_payload.to_payload(), **({"client_metadata": client_metadata} if client_metadata else {})},
+                enabled=request_visibility_capture_enabled_now(settings),
+            ),
         )
         had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         affinity_policy = _sticky_key_for_responses_request(
@@ -1128,6 +1185,7 @@ class ProxyService:
         *,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        request_visibility: str | None,
         request_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         return self._prepare_response_bridge_request_state(
@@ -1137,6 +1195,7 @@ class ProxyService:
             include_type_field=True,
             attach_event_queue=True,
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            request_visibility=request_visibility,
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
         )
 
@@ -1149,6 +1208,7 @@ class ProxyService:
         include_type_field: bool,
         attach_event_queue: bool,
         client_metadata: Mapping[str, JsonValue] | None,
+        request_visibility: str | None,
         request_id: str | None = None,
         request_log_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
@@ -1173,6 +1233,7 @@ class ProxyService:
             event_queue=asyncio.Queue() if attach_event_queue else None,
             api_key=api_key,
             previous_response_id=payload.previous_response_id,
+            request_visibility=request_visibility,
         )
         text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
         request_state.request_text = text_data
@@ -2850,6 +2911,7 @@ class ProxyService:
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
                 latency_first_token_ms=request_state.latency_first_token_ms,
+                request_visibility=request_state.request_visibility,
             )
 
     async def _write_websocket_connect_failure(
@@ -2878,6 +2940,7 @@ class ProxyService:
             requested_service_tier=request_state.requested_service_tier,
             actual_service_tier=request_state.actual_service_tier,
             latency_first_token_ms=request_state.latency_first_token_ms,
+            request_visibility=request_state.request_visibility,
         )
 
     async def _emit_websocket_connect_failure(
@@ -2997,6 +3060,7 @@ class ProxyService:
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
                 latency_first_token_ms=request_state.latency_first_token_ms,
+                request_visibility=request_state.request_visibility,
             )
 
     async def _emit_websocket_terminal_error(
@@ -3231,6 +3295,7 @@ class ProxyService:
         openai_cache_affinity: bool,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
+        request_visibility: str | None,
         suppress_text_done_events: bool,
         request_transport: str,
     ) -> AsyncIterator[str]:
@@ -3290,6 +3355,7 @@ class ProxyService:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
                         transport=request_transport,
+                        request_visibility=request_visibility,
                     )
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
                     return
@@ -3322,6 +3388,7 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            request_visibility=request_visibility,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -3362,6 +3429,7 @@ class ProxyService:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
+                        request_visibility=request_visibility,
                     )
                     return
 
@@ -3387,6 +3455,7 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            request_visibility=request_visibility,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -3412,6 +3481,7 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            request_visibility=request_visibility,
                         )
                         event = response_failed_event(
                             "upstream_unavailable",
@@ -3442,6 +3512,7 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            request_visibility=request_visibility,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -3460,6 +3531,7 @@ class ProxyService:
                                 request_id,
                                 allow_retry_flag,
                                 request_started_at=start,
+                                request_visibility=request_visibility,
                                 allow_transient_retry=(
                                     transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1 or allow_retry_flag
                                 ),
@@ -3562,6 +3634,7 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                request_visibility=request_visibility,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -3595,6 +3668,7 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                request_visibility=request_visibility,
                             )
                             event = response_failed_event(
                                 "upstream_unavailable",
@@ -3624,6 +3698,7 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                request_visibility=request_visibility,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -3636,6 +3711,7 @@ class ProxyService:
                                 request_id,
                                 False,
                                 request_started_at=start,
+                                request_visibility=request_visibility,
                                 api_key=api_key,
                                 settlement=settlement,
                                 suppress_text_done_events=suppress_text_done_events,
@@ -3726,6 +3802,7 @@ class ProxyService:
                     transport=request_transport,
                     service_tier=payload.service_tier,
                     requested_service_tier=payload.service_tier,
+                    request_visibility=request_visibility,
                 )
         finally:
             if not settled and api_key is not None and api_key_reservation is not None:
@@ -3753,6 +3830,7 @@ class ProxyService:
         allow_retry: bool,
         *,
         request_started_at: float,
+        request_visibility: str | None = None,
         allow_transient_retry: bool = False,
         api_key: ApiKeyData | None,
         settlement: _StreamSettlement,
@@ -3945,6 +4023,7 @@ class ProxyService:
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
                 latency_first_token_ms=latency_first_token_ms,
+                request_visibility=request_visibility,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",
@@ -3973,6 +4052,7 @@ class ProxyService:
         service_tier: str | None = None,
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
+        request_visibility: str | None = None,
     ) -> None:
         with anyio.CancelScope(shield=True):
             try:
@@ -3996,6 +4076,7 @@ class ProxyService:
                         status=status,
                         error_code=error_code,
                         error_message=error_message,
+                        request_visibility=request_visibility,
                     )
             except Exception:
                 logger.warning(
@@ -4018,6 +4099,7 @@ class ProxyService:
         reasoning_effort: str | None,
         service_tier: str | None,
         transport: str = _REQUEST_TRANSPORT_HTTP,
+        request_visibility: str | None = None,
     ) -> None:
         await self._write_request_log(
             account_id=account_id,
@@ -4032,6 +4114,7 @@ class ProxyService:
             transport=transport,
             service_tier=service_tier,
             requested_service_tier=service_tier,
+            request_visibility=request_visibility,
         )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
@@ -4373,6 +4456,7 @@ class _WebSocketRequestState:
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     api_key: ApiKeyData | None = None
     request_text: str | None = None
+    request_visibility: str | None = None
     replay_count: int = 0
     skip_request_log: bool = False
     previous_response_id: str | None = None
@@ -4851,9 +4935,6 @@ def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCo
     extra_value = payload.model_extra.get("prompt_cache_key")
     if isinstance(extra_value, str) and extra_value:
         return extra_value
-    camel_value = payload.model_extra.get("promptCacheKey")
-    if isinstance(camel_value, str) and camel_value:
-        return camel_value
     return None
 
 

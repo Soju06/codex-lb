@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
+
+from app.db.session import SessionLocal
+from app.modules.settings.repository import SettingsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -21,6 +26,9 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
+    assert payload["requestVisibilityMode"] == "off"
+    assert payload["requestVisibilityExpiresAt"] is None
+    assert payload["requestVisibilityEnabled"] is False
 
     response = await async_client.put(
         "/api/settings",
@@ -35,6 +43,7 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": True,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
+            "requestVisibilityMode": "persistent",
         },
     )
     assert response.status_code == 200
@@ -50,6 +59,9 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
+    assert updated["requestVisibilityMode"] == "persistent"
+    assert updated["requestVisibilityExpiresAt"] is None
+    assert updated["requestVisibilityEnabled"] is True
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -65,3 +77,40 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+    assert payload["requestVisibilityMode"] == "persistent"
+    assert payload["requestVisibilityExpiresAt"] is None
+    assert payload["requestVisibilityEnabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_api_temporary_request_visibility_expiry_disables_capture(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "requestVisibilityMode": "temporary",
+            "requestVisibilityDurationMinutes": 1,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requestVisibilityMode"] == "temporary"
+    assert payload["requestVisibilityExpiresAt"] is not None
+    assert payload["requestVisibilityEnabled"] is True
+
+    expired_at = datetime.now(UTC) - timedelta(minutes=5)
+    async with SessionLocal() as session:
+        repo = SettingsRepository(session)
+        await repo.update(
+            request_visibility_mode="temporary",
+            request_visibility_expires_at=expired_at,
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requestVisibilityMode"] == "temporary"
+    assert payload["requestVisibilityEnabled"] is False
+    assert payload["requestVisibilityExpiresAt"] == expired_at.isoformat().replace("+00:00", "Z")

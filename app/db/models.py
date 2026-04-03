@@ -132,6 +132,7 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_visibility: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AuditLog(Base):
@@ -221,6 +222,13 @@ class DashboardSettings(Base):
         default=False,
         nullable=False,
     )
+    request_visibility_mode: Mapped[str] = mapped_column(
+        String,
+        default="off",
+        server_default=text("'off'"),
+        nullable=False,
+    )
+    request_visibility_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: Mapped[int] = mapped_column(

@@ -87,6 +87,9 @@ async def get_settings(
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        request_visibility_mode=settings.request_visibility_mode,
+        request_visibility_expires_at=settings.request_visibility_expires_at,
+        request_visibility_enabled=settings.request_visibility_enabled,
     )
 
 
@@ -139,6 +142,13 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                request_visibility_mode=(
+                    payload.request_visibility_mode
+                    if payload.request_visibility_mode is not None
+                    else current.request_visibility_mode
+                ),
+                request_visibility_expires_at=current.request_visibility_expires_at,
+                request_visibility_duration_minutes=payload.request_visibility_duration_minutes,
             )
         )
     except ValueError as exc:
@@ -156,6 +166,8 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "request_visibility_mode",
+            "request_visibility_expires_at",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
@@ -176,4 +188,7 @@ async def update_settings(
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,
         api_key_auth_enabled=updated.api_key_auth_enabled,
+        request_visibility_mode=updated.request_visibility_mode,
+        request_visibility_expires_at=updated.request_visibility_expires_at,
+        request_visibility_enabled=updated.request_visibility_enabled,
     )

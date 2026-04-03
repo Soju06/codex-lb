@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +31,8 @@ class SettingsRepository:
             totp_required_on_login=False,
             password_hash=None,
             api_key_auth_enabled=False,
+            request_visibility_mode="off",
+            request_visibility_expires_at=None,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
         )
@@ -57,6 +61,8 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
+        request_visibility_mode: str | None = None,
+        request_visibility_expires_at: datetime | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -81,6 +87,12 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
+        if request_visibility_mode is not None:
+            settings.request_visibility_mode = request_visibility_mode
+            if request_visibility_mode != "temporary":
+                settings.request_visibility_expires_at = None
+        if request_visibility_mode == "temporary" or request_visibility_expires_at is not None:
+            settings.request_visibility_expires_at = request_visibility_expires_at
         await self.commit_refresh(settings)
         return settings
 

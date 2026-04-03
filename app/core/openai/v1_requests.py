@@ -9,6 +9,7 @@ from app.core.openai.requests import (
     ResponsesReasoning,
     ResponsesRequest,
     ResponsesTextControls,
+    normalize_request_option_keys,
     validate_tool_types,
 )
 from app.core.types import JsonValue
@@ -34,6 +35,11 @@ class V1ResponsesRequest(BaseModel):
     truncation: str | None = None
     prompt_cache_key: str | None = None
     text: ResponsesTextControls | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_request_option_aliases_before_validation(cls, data: object) -> object:
+        return normalize_request_option_keys(data)
 
     @field_validator("input")
     @classmethod
@@ -99,6 +105,11 @@ class V1ResponsesCompactRequest(BaseModel):
     input: JsonValue | None = None
     instructions: str | None = None
     reasoning: ResponsesReasoning | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_request_option_aliases_before_validation(cls, data: object) -> object:
+        return normalize_request_option_keys(data)
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesCompactRequest":

@@ -1,4 +1,4 @@
-import { Inbox } from "lucide-react";
+import { Inbox, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { isEmailLabel } from "@/components/blur-email";
@@ -22,7 +22,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
+import { RequestVisibilityDrawer } from "@/features/dashboard/components/request-visibility-drawer";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
@@ -49,6 +56,9 @@ const TRANSPORT_CLASS_MAP: Record<string, string> = {
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
 };
 
+const FAST_BADGE_CLASS =
+  "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:border-amber-400/30 dark:text-amber-300";
+
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
@@ -71,6 +81,7 @@ export function RecentRequestsTable({
   onOffsetChange,
 }: RecentRequestsTableProps) {
   const [viewingError, setViewingError] = useState<string | null>(null);
+  const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
 
   const accountLabelMap = useMemo(() => {
@@ -103,37 +114,48 @@ export function RecentRequestsTable({
     );
   }
 
+  const openRequestVisibility = (request: RequestLog) => {
+    setSelectedRequest(request);
+  };
+
   return (
     <div className="space-y-3">
-    <div className="rounded-xl border bg-card">
-      <div className="relative overflow-x-auto">
-        <Table className="min-w-[1040px] table-fixed">
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
-              <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
-              <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
-              <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
-              <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
-              <TableHead className="w-28 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Error</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {requests.map((request) => {
-              const time = formatTimeLong(request.requestedAt);
-              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
-              const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
-              const errorMessage = request.errorMessage || request.errorCode || "-";
-              const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
-              const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
-              const showRequestedTier =
-                !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
+      <div className="rounded-xl border bg-card">
+        <div className="relative overflow-x-auto">
+          <Table className="min-w-[1040px] table-fixed">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
+                <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
+                <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
+                <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
+                <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
+                <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
+                <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
+                <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
+                <TableHead className="w-28 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Error</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {requests.map((request) => {
+                const time = formatTimeLong(request.requestedAt);
+                const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
+                const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
+                const errorMessage = request.errorMessage || request.errorCode || "-";
+                const hasLongError = errorMessage !== "-" && errorMessage.length > 72;
+                const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
+                const showRequestedTier =
+                  !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
+                const isFast = visibleServiceTier === "priority";
+                const showRequestedPriorityBolt = request.requestedServiceTier === "priority";
+                const showRequestedTierText = showRequestedTier && request.requestedServiceTier !== "priority";
 
-              return (
-                <TableRow key={request.requestId}>
+                return (
+                  <TableRow
+                    key={request.requestId}
+                    className="cursor-pointer"
+                    onClick={() => openRequestVisibility(request)}
+                  >
                   <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
                       <div className="text-sm font-medium">{time.time}</div>
@@ -150,14 +172,40 @@ export function RecentRequestsTable({
                   <TableCell className="truncate align-top text-xs text-muted-foreground">
                     {request.apiKeyName || "--"}
                   </TableCell>
-                  <TableCell className="truncate align-top">
-                    <div className="leading-tight">
-                      <span className="font-mono text-xs">
-                        {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
-                      </span>
-                      {showRequestedTier ? (
-                        <div className="text-[11px] text-muted-foreground">
-                          Requested {request.requestedServiceTier}
+                  <TableCell className="align-top">
+                      <div className="leading-tight">
+                        <div className="flex items-center gap-2 whitespace-nowrap">
+                          {showRequestedPriorityBolt ? (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span
+                                    role="img"
+                                    aria-label="Priority requested"
+                                    className="inline-flex items-center text-amber-600 dark:text-amber-400"
+                                  >
+                                    <Zap className="h-3.5 w-3.5" />
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" sideOffset={6}>
+                                  Priority requested for this request. If granted, pricing and quota usage increase.
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          ) : null}
+                          <span className="font-mono text-xs whitespace-nowrap">
+                            {formatModelLabel(request.model, request.reasoningEffort)}
+                          </span>
+                          {isFast ? (
+                            <Badge variant="outline" className={FAST_BADGE_CLASS}>
+                              <Zap className="mr-1 h-3 w-3" />
+                              Fast
+                            </Badge>
+                          ) : null}
+                        </div>
+                       {showRequestedTierText ? (
+                         <div className="text-[11px] text-muted-foreground">
+                           Requested {request.requestedServiceTier}
                         </div>
                       ) : null}
                     </div>
@@ -206,20 +254,23 @@ export function RecentRequestsTable({
                           variant="ghost"
                           size="sm"
                           className="h-5 shrink-0 px-1.5 text-[11px]"
-                          onClick={() => setViewingError(errorMessage)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setViewingError(errorMessage);
+                          }}
                         >
                           View
                         </Button>
                       ) : null}
                     </div>
                   </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
       </div>
-    </div>
 
       <div className="flex justify-end">
         <PaginationControls
@@ -246,6 +297,16 @@ export function RecentRequestsTable({
           <DialogFooter showCloseButton />
         </DialogContent>
       </Dialog>
+
+      <RequestVisibilityDrawer
+        request={selectedRequest}
+        open={selectedRequest !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedRequest(null);
+          }
+        }}
+      />
     </div>
   );
 }

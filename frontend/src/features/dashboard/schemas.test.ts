@@ -5,6 +5,7 @@ import {
   AccountAdditionalQuotaSchema,
   DashboardOverviewSchema,
   DepletionSchema,
+  RequestLogVisibilityResponseSchema,
   RequestLogsResponseSchema,
   UsageWindowSchema,
 } from "@/features/dashboard/schemas";
@@ -139,6 +140,53 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+  });
+});
+
+describe("RequestLogVisibilityResponseSchema", () => {
+  it("parses captured visibility payloads", () => {
+    const parsed = RequestLogVisibilityResponseSchema.parse({
+      requestId: "req-1",
+      captured: true,
+      unavailableReason: null,
+      truncated: false,
+      headers: {
+        "content-type": "application/json",
+      },
+      body: {
+        input: "hello",
+        metadata: { sessionToken: "[REDACTED]" },
+      },
+    });
+
+    expect(parsed.captured).toBe(true);
+    expect(parsed.headers["content-type"]).toBe("application/json");
+  });
+
+  it("parses unavailable visibility payloads", () => {
+    const parsed = RequestLogVisibilityResponseSchema.parse({
+      requestId: "req-legacy",
+      captured: false,
+      unavailableReason: "not_captured",
+      truncated: false,
+      headers: {},
+      body: null,
+    });
+
+    expect(parsed.captured).toBe(false);
+    expect(parsed.unavailableReason).toBe("not_captured");
+  });
+
+  it("rejects invalid unavailable reasons", () => {
+    const result = RequestLogVisibilityResponseSchema.safeParse({
+      requestId: "req-1",
+      captured: false,
+      unavailableReason: "missing",
+      headers: {},
+      body: null,
+    });
+
+    expect(result.success).toBe(false);
   });
 });
 

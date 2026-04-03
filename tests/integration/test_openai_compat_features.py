@@ -690,3 +690,29 @@ async def test_v1_chat_completions_preserves_prompt_cache_controls(async_client,
     assert resp.status_code == 200
     assert seen["payload"]["prompt_cache_key"] == "chat_thread_123"
     assert "prompt_cache_retention" not in seen["payload"]
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_normalizes_camel_case_aliases(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_aliases", "chat-aliases@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_chat_aliases")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Normalize these aliases."}],
+        "serviceTier": "fast",
+        "promptCacheKey": "chat_thread_alias",
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"]["service_tier"] == "priority"
+    assert seen["payload"]["prompt_cache_key"] == "chat_thread_alias"
+    assert "serviceTier" not in seen["payload"]
+    assert "promptCacheKey" not in seen["payload"]

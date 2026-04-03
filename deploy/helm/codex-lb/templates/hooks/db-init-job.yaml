@@ -27,14 +27,31 @@ spec:
               PGPASSWORD="$ADMIN_PASSWORD" psql \
                 -h "$DB_HOST" -p "$DB_PORT" -U "$ADMIN_USER" -d postgres <<'SQL'
               {{- range .Values.dbInit.databases }}
+              {{- $dbTag := printf "db_%s" ((printf "%s" .name) | sha256sum | trunc 12) }}
+              {{- $userTag := printf "user_%s" ((printf "%s" .user) | sha256sum | trunc 12) }}
+              {{- $passTag := printf "pass_%s" ((printf "%s" .password) | sha256sum | trunc 12) }}
               DO $$ BEGIN
-                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ .user }}') THEN
-                  CREATE ROLE {{ .user }} WITH LOGIN PASSWORD '{{ .password }}';
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = ${{ $userTag }}${{ .user }}${{ $userTag }}$) THEN
+                  EXECUTE format(
+                    'CREATE ROLE %I WITH LOGIN PASSWORD %L',
+                    ${{ $userTag }}${{ .user }}${{ $userTag }}$,
+                    ${{ $passTag }}${{ .password }}${{ $passTag }}$
+                  );
                 END IF;
               END $$;
-              SELECT format('CREATE DATABASE %I OWNER %I', '{{ .name }}', '{{ .user }}')
-              WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ .name }}')\gexec
-              GRANT ALL PRIVILEGES ON DATABASE {{ .name }} TO {{ .user }};
+              SELECT format(
+                'CREATE DATABASE %I OWNER %I',
+                ${{ $dbTag }}${{ .name }}${{ $dbTag }}$,
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )
+              WHERE NOT EXISTS (
+                SELECT FROM pg_database WHERE datname = ${{ $dbTag }}${{ .name }}${{ $dbTag }}$
+              )\gexec
+              SELECT format(
+                'GRANT ALL PRIVILEGES ON DATABASE %I TO %I',
+                ${{ $dbTag }}${{ .name }}${{ $dbTag }}$,
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
               {{- end }}
               SQL
           env:

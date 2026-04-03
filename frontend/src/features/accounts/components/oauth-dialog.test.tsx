@@ -203,6 +203,7 @@ describe("OauthDialog", () => {
     );
 
     expect(screen.getByRole("button", { name: "Refreshing..." })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Change method" })).toBeDisabled();
     expect(screen.getByText("Generating a fresh sign-in link...")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Open sign-in page" })).not.toBeInTheDocument();

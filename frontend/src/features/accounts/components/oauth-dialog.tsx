@@ -349,6 +349,7 @@ export function OauthDialog({
                 type="button"
                 variant="outline"
                 className="cursor-pointer disabled:cursor-not-allowed"
+                disabled={browserRefreshInProgress}
                 onClick={handleChangeMethod}
               >
                 Change method

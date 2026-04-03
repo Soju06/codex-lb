@@ -231,6 +231,21 @@ tolerations: []
 # @param priorityClassName Pod priority class name
 priorityClassName: ""
 
+# @section Service parameters
+service:
+  # @param service.type Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
+  type: ClusterIP
+  # @param service.port Service port
+  port: 2455
+  # @param service.nodePort NodePort number (only when type is NodePort)
+  nodePort: ""
+  # @param service.loadBalancerIP Static IP for LoadBalancer type
+  loadBalancerIP: ""
+  # @param service.loadBalancerSourceRanges Allowed source ranges for LoadBalancer
+  loadBalancerSourceRanges: []
+  # @param service.annotations Additional annotations for the Service
+  annotations: {}
+
 # @section Network parameters
 networkPolicy:
   # @param networkPolicy.enabled Enable NetworkPolicy with default-deny + whitelist

@@ -144,7 +144,7 @@ Image string — resolves registry/repository:tag with optional digest override
 Merged nodeSelector: global.nodeSelector + local nodeSelector (local wins).
 */}}
 {{- define "codex-lb.nodeSelector" -}}
-{{- $merged := mustMergeOverwrite (.Values.global.nodeSelector | default dict) (.Values.nodeSelector | default dict) -}}
+{{- $merged := mustMergeOverwrite (deepCopy (.Values.global.nodeSelector | default dict)) (.Values.nodeSelector | default dict) -}}
 {{- if $merged }}
 {{- toYaml $merged }}
 {{- end }}

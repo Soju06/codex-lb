@@ -79,6 +79,22 @@ class RequestLogsRepository:
             for row in result.all()
         ]
 
+    async def top_error_since(self, since: datetime) -> str | None:
+        stmt = (
+            select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
+            .where(
+                RequestLog.requested_at >= since,
+                RequestLog.status != "success",
+                RequestLog.error_code.is_not(None),
+            )
+            .group_by(RequestLog.error_code)
+            .order_by(func.count(RequestLog.id).desc(), RequestLog.error_code.asc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        row = result.first()
+        return str(row[0]) if row and row[0] else None
+
     async def add_log(
         self,
         account_id: str | None,

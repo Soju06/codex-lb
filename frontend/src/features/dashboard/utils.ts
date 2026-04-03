@@ -8,7 +8,7 @@ import {
   formatCompactNumber,
   formatCurrency,
   formatRate,
-  formatWindowLabel,
+  formatWindowMinutes,
 } from "@/utils/formatters";
 
 import type {
@@ -152,11 +152,11 @@ export function buildRemainingItems(
     .filter((item): item is RemainingItem => item !== null);
 }
 
-export function avgPerHour(cost7d: number, hours = 24 * 7): number {
-  if (!Number.isFinite(cost7d) || cost7d <= 0 || hours <= 0) {
+function avgPerUnit(total: number, units: number): number {
+  if (!Number.isFinite(total) || total <= 0 || units <= 0) {
     return 0;
   }
-  return cost7d / hours;
+  return total / units;
 }
 
 const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b"];
@@ -173,41 +173,54 @@ export function buildDashboardView(
   const primaryWindow = overview.windows.primary;
   const secondaryWindow = overview.windows.secondary;
   const metrics = overview.summary.metrics;
-  const cost = overview.summary.cost.totalUsd7d;
-  const secondaryLabel = formatWindowLabel("secondary", secondaryWindow?.windowMinutes ?? null);
+  const cost = overview.summary.cost.totalUsd;
+  const timeframeLabel = (() => {
+    const formatted = formatWindowMinutes(overview.timeframe.windowMinutes);
+    return formatted === "--" ? overview.timeframe.key : formatted;
+  })();
+  const timeframeHours = overview.timeframe.windowMinutes / 60;
+  const timeframeDays = overview.timeframe.windowMinutes / 1440;
+  const requestMeta =
+    timeframeHours <= 24
+      ? `Avg/hr ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeHours)))}`
+      : `Avg/day ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeDays)))}`;
+  const costMeta =
+    timeframeHours <= 24
+      ? `Avg/hr ${formatCurrency(avgPerUnit(cost, timeframeHours))}`
+      : `Avg/day ${formatCurrency(avgPerUnit(cost, timeframeDays))}`;
   const trends = overview.trends;
 
   const stats: DashboardStat[] = [
     {
-      label: "Requests (7d)",
-      value: formatCompactNumber(metrics?.requests7d ?? 0),
-      meta: `Avg/day ${formatCompactNumber(Math.round((metrics?.requests7d ?? 0) / 7))}`,
+      label: `Requests (${timeframeLabel})`,
+      value: formatCompactNumber(metrics?.requests ?? 0),
+      meta: requestMeta,
       icon: Activity,
       trend: trendPointsToValues(trends.requests),
       trendColor: TREND_COLORS[0],
     },
     {
-      label: `Tokens (${secondaryLabel})`,
-      value: formatCompactNumber(metrics?.tokensSecondaryWindow ?? 0),
-      meta: formatCachedTokensMeta(metrics?.tokensSecondaryWindow, metrics?.cachedTokensSecondaryWindow),
+      label: `Tokens (${timeframeLabel})`,
+      value: formatCompactNumber(metrics?.tokens ?? 0),
+      meta: formatCachedTokensMeta(metrics?.tokens, metrics?.cachedInputTokens),
       icon: Coins,
       trend: trendPointsToValues(trends.tokens),
       trendColor: TREND_COLORS[1],
     },
     {
-      label: "Cost (7d)",
+      label: `Cost (${timeframeLabel})`,
       value: formatCurrency(cost),
-      meta: `Avg/hr ${formatCurrency(avgPerHour(cost))}`,
+      meta: costMeta,
       icon: DollarSign,
       trend: trendPointsToValues(trends.cost),
       trendColor: TREND_COLORS[2],
     },
     {
-      label: "Error rate",
-      value: formatRate(metrics?.errorRate7d ?? null),
+      label: `Error rate (${timeframeLabel})`,
+      value: formatRate(metrics?.errorRate ?? null),
       meta: metrics?.topError
         ? `Top: ${metrics.topError}`
-        : `~${formatCompactNumber(Math.round((metrics?.errorRate7d ?? 0) * (metrics?.requests7d ?? 0)))} errors in 7d`,
+        : `~${formatCompactNumber(metrics?.errorCount ?? Math.round((metrics?.errorRate ?? 0) * (metrics?.requests ?? 0)))} errors in ${timeframeLabel}`,
       icon: AlertTriangle,
       trend: trendPointsToValues(trends.errorRate),
       trendColor: TREND_COLORS[3],

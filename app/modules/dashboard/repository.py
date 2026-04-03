@@ -54,6 +54,9 @@ class DashboardRepository:
     ) -> list[BucketModelAggregate]:
         return await self._logs_repo.aggregate_by_bucket(since, bucket_seconds)
 
+    async def top_error_since(self, since: datetime) -> str | None:
+        return await self._logs_repo.top_error_since(since)
+
     async def list_additional_quota_keys(
         self,
         *,

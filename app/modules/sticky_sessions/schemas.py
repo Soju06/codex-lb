@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.db.models import StickySessionKind
 from app.modules.shared.schemas import DashboardModel
@@ -37,6 +37,16 @@ class StickySessionDeleteResponse(DashboardModel):
 
 class StickySessionsDeleteRequest(DashboardModel):
     sessions: list[StickySessionIdentifier] = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_unique_sessions(self) -> "StickySessionsDeleteRequest":
+        seen: set[tuple[str, StickySessionKind]] = set()
+        for session in self.sessions:
+            target = (session.key, session.kind)
+            if target in seen:
+                raise ValueError("duplicate sticky session targets are not allowed")
+            seen.add(target)
+        return self
 
 
 class StickySessionDeleteFailure(DashboardModel):

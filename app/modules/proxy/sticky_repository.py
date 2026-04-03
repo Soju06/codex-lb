@@ -84,9 +84,7 @@ class StickySessionsRepository:
         statement = delete(StickySession).where(
             or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in targets))
         )
-        result = await self._session.execute(
-            statement.returning(StickySession.key, StickySession.kind)
-        )
+        result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
         await self._session.commit()
         return [(key, kind) for key, kind in result.all()]
 

@@ -62,6 +62,7 @@ export function StickySessionsSection() {
   const busy = deleteMutation.isPending || purgeMutation.isPending;
   const hasEntries = entries.length > 0;
   const hasAnyRows = total > 0;
+  const visibleRowIdSet = useMemo(() => new Set(entries.map((entry) => stickySessionRowId(entry))), [entries]);
   const selectedRowIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
   const selectedEntries = useMemo(
     () =>
@@ -85,17 +86,6 @@ export function StickySessionsSection() {
     }
   }, [entries.length, params.limit, params.offset, setOffset, stickySessionsQuery.isLoading, total]);
 
-  useEffect(() => {
-    if (selectedRowIds.length === 0) {
-      return;
-    }
-    const visibleRowIds = new Set(entries.map((entry) => stickySessionRowId(entry)));
-    setSelectedRowIds((current) => {
-      const next = current.filter((rowId) => visibleRowIds.has(rowId));
-      return next.length === current.length ? current : next;
-    });
-  }, [entries, selectedRowIds.length]);
-
   const setSelected = (target: StickySessionIdentifier, checked: boolean) => {
     const rowId = stickySessionRowId(target);
     setSelectedRowIds((current) => {
@@ -107,7 +97,10 @@ export function StickySessionsSection() {
   };
 
   const setAllVisibleSelected = (checked: boolean) => {
-    setSelectedRowIds(checked ? entries.map((entry) => stickySessionRowId(entry)) : []);
+    setSelectedRowIds((current) => {
+      const remaining = current.filter((rowId) => !visibleRowIdSet.has(rowId));
+      return checked ? [...remaining, ...entries.map((entry) => stickySessionRowId(entry))] : remaining;
+    });
   };
 
   return (

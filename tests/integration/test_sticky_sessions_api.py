@@ -331,6 +331,27 @@ async def test_sticky_sessions_api_reports_partial_failures_for_bulk_delete(asyn
 
 
 @pytest.mark.asyncio
+async def test_sticky_sessions_api_rejects_duplicate_bulk_delete_targets(async_client):
+    response = await async_client.post(
+        "/api/sticky-sessions/delete",
+        json={
+            "sessions": [
+                {"key": "shared-key", "kind": "prompt_cache"},
+                {"key": "shared-key", "kind": "prompt_cache"},
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "validation_error",
+            "message": "Invalid request payload",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_sticky_sessions_api_deletes_slash_containing_keys(async_client):
     accounts = await _create_accounts()
     await _set_affinity_ttl(60)

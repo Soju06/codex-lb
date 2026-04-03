@@ -508,7 +508,12 @@ export const handlers = [
 						}),
 					)
 					.min(1)
-					.max(500),
+					.max(500)
+					.refine(
+						(sessions) =>
+							new Set(sessions.map((session) => `${session.kind}:${session.key}`)).size === sessions.length,
+						"Duplicate sticky session targets are not allowed",
+					),
 			}),
 		)) ?? { sessions: [] };
 		const targets = new Set(payload.sessions.map((session) => `${session.kind}:${session.key}`));

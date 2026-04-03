@@ -20,7 +20,14 @@ export const StickySessionIdentifierSchema = z.object({
 });
 
 export const StickySessionsDeleteRequestSchema = z.object({
-  sessions: z.array(StickySessionIdentifierSchema).min(1).max(500),
+  sessions: z
+    .array(StickySessionIdentifierSchema)
+    .min(1)
+    .max(500)
+    .refine(
+      (sessions) => new Set(sessions.map((session) => `${session.kind}:${session.key}`)).size === sessions.length,
+      "Duplicate sticky session targets are not allowed",
+    ),
 });
 
 export const StickySessionDeleteFailureSchema = z.object({

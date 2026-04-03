@@ -7,8 +7,10 @@ from app.core.exceptions import DashboardNotFoundError
 from app.db.models import StickySessionKind
 from app.dependencies import StickySessionsContext, get_sticky_sessions_context
 from app.modules.sticky_sessions.schemas import (
+    StickySessionDeleteFailure,
     StickySessionDeleteResponse,
     StickySessionEntryResponse,
+    StickySessionIdentifier,
     StickySessionsDeleteRequest,
     StickySessionsDeleteResponse,
     StickySessionsListResponse,
@@ -68,13 +70,9 @@ async def delete_sticky_sessions(
     result = await context.service.delete_entries([(entry.key, entry.kind) for entry in payload.sessions])
     return StickySessionsDeleteResponse(
         deleted_count=result.deleted_count,
-        deleted=[
-            {"key": key, "kind": kind}
-            for key, kind in result.deleted
-        ],
+        deleted=[StickySessionIdentifier(key=key, kind=kind) for key, kind in result.deleted],
         failed=[
-            {"key": entry.key, "kind": entry.kind, "reason": entry.reason}
-            for entry in result.failed
+            StickySessionDeleteFailure(key=entry.key, kind=entry.kind, reason=entry.reason) for entry in result.failed
         ],
     )
 

@@ -15,8 +15,12 @@ spec:
     runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
+  {{- with .Values.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   containers:
-    - name: test-connection
+    - name: test-health
       image: busybox:1.37
       imagePullPolicy: IfNotPresent
       securityContext:
@@ -29,5 +33,10 @@ spec:
         - sh
         - -c
         - |
-          wget --spider --timeout=10 http://{{ include "codex-lb.fullname" . }}:2455/health || exit 1
-          echo "Connection test passed!"
+          echo "=== Health endpoint ==="
+          wget --spider --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health || exit 1
+          echo "Health check passed!"
+
+          echo "=== Startup probe ==="
+          wget -qO- --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health/ready || exit 1
+          echo "Readiness check passed!"

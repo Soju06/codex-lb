@@ -103,6 +103,7 @@ export function applySecondaryConstraint(
   return primaryItems.map((item) => {
     const secondaryItem = secondaryByAccount.get(item.accountId);
     if (!secondaryItem) return item;
+    if (secondaryItem.remainingPercent == null) return item;
     if (secondaryItem.value >= item.value) return item;
 
     const effectivePercent =

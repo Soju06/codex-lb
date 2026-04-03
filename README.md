@@ -365,6 +365,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Daltonganger"><img src="https://avatars.githubusercontent.com/u/17501732?v=4?s=100" width="100px;" alt="Ruben"/><br /><sub><b>Ruben</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Daltonganger" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Daltonganger" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/L1st3r"><img src="https://avatars.githubusercontent.com/u/336408?v=4?s=100" width="100px;" alt="Steve Santacroce"/><br /><sub><b>Steve Santacroce</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=L1st3r" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=L1st3r" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

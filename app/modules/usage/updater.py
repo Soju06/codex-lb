@@ -274,7 +274,12 @@ class UsageUpdater:
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             try:
                 account = await self._auth_manager.ensure_fresh(account, force=True)
-            except RefreshError:
+            except RefreshError as refresh_exc:
+                if refresh_exc.is_permanent:
+                    await self._deactivate_for_client_error(
+                        account,
+                        UsageFetchError(401, f"Permanent refresh failure: {refresh_exc.code}"),
+                    )
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             access_token = self._encryptor.decrypt(account.access_token_encrypted)
             try:
@@ -283,7 +288,7 @@ class UsageUpdater:
                     account_id=usage_account_id,
                 )
             except UsageFetchError as retry_exc:
-                if _should_deactivate_for_usage_error(retry_exc.status_code):
+                if _should_deactivate_for_usage_error(retry_exc.status_code) or retry_exc.status_code == 401:
                     await self._deactivate_for_client_error(account, retry_exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 

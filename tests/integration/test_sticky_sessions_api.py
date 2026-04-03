@@ -234,6 +234,43 @@ async def test_sticky_sessions_api_sorts_by_supported_fields(async_client):
 
 
 @pytest.mark.asyncio
+async def test_sticky_sessions_api_deletes_filtered_rows(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+    await _insert_sticky_session(
+        key="cleanup-alpha-1",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.STICKY_THREAD,
+        updated_at_offset_seconds=5,
+    )
+    await _insert_sticky_session(
+        key="cleanup-alpha-2",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=10,
+    )
+    await _insert_sticky_session(
+        key="cleanup-beta",
+        account_id=accounts[1].id,
+        kind=StickySessionKind.STICKY_THREAD,
+        updated_at_offset_seconds=15,
+    )
+
+    response = await async_client.post(
+        "/api/sticky-sessions/delete-filtered",
+        json={"accountQuery": "sticky-a", "keyQuery": "cleanup-alpha"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"deletedCount": 2}
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    assert {(entry["key"], entry["displayName"]) for entry in response.json()["entries"]} == {
+        ("cleanup-beta", "sticky-b@example.com")
+    }
+
+
+@pytest.mark.asyncio
 async def test_sticky_sessions_api_rejects_non_stale_purge_requests(async_client):
     accounts = await _create_accounts()
     await _set_affinity_ttl(60)

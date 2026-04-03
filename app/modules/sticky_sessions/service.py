@@ -132,6 +132,30 @@ class StickySessionsService:
 
         return StickySessionsDeleteData(deleted=deleted, failed=failed)
 
+    async def delete_filtered_entries(
+        self,
+        *,
+        kind: StickySessionKind | None = None,
+        stale_only: bool = False,
+        account_query: str | None = None,
+        key_query: str | None = None,
+    ) -> int:
+        settings = await self._settings_repository.get_or_create()
+        stale_cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+        if stale_only and kind not in (None, StickySessionKind.PROMPT_CACHE):
+            return 0
+        effective_kind = StickySessionKind.PROMPT_CACHE if stale_only else kind
+        normalized_account_query = account_query.strip() if account_query else None
+        normalized_key_query = key_query.strip() if key_query else None
+        targets = await self._repository.list_entry_identifiers(
+            kind=effective_kind,
+            updated_before=stale_cutoff if stale_only else None,
+            account_query=normalized_account_query,
+            key_query=normalized_key_query,
+        )
+        deleted = await self._repository.delete_entries(targets)
+        return len(deleted)
+
     async def purge_entries(self) -> int:
         settings = await self._settings_repository.get_or_create()
         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)

@@ -64,6 +64,16 @@ class StickySessionsDeleteResponse(DashboardModel):
     failed: list[StickySessionDeleteFailure] = Field(default_factory=list)
 
 
+class StickySessionsDeleteFilteredRequest(DashboardModel):
+    stale_only: bool = False
+    account_query: str = ""
+    key_query: str = ""
+
+
+class StickySessionsDeleteFilteredResponse(DashboardModel):
+    deleted_count: int
+
+
 class StickySessionsPurgeRequest(DashboardModel):
     stale_only: Literal[True] = True
 

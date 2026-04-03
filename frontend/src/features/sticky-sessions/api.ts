@@ -2,6 +2,8 @@ import { del, get, post } from "@/lib/api-client";
 
 import {
   StickySessionIdentifierSchema,
+  StickySessionsDeleteFilteredRequestSchema,
+  StickySessionsDeleteFilteredResponseSchema,
   StickySessionsDeleteRequestSchema,
   StickySessionsDeleteResponseSchema,
   StickySessionsListParamsSchema,
@@ -38,6 +40,13 @@ export function deleteStickySession(payload: unknown) {
 export function deleteStickySessions(payload: unknown) {
   const validated = StickySessionsDeleteRequestSchema.parse(payload);
   return post(`${STICKY_SESSIONS_PATH}/delete`, StickySessionsDeleteResponseSchema, {
+    body: validated,
+  });
+}
+
+export function deleteFilteredStickySessions(payload: unknown) {
+  const validated = StickySessionsDeleteFilteredRequestSchema.parse(payload);
+  return post(`${STICKY_SESSIONS_PATH}/delete-filtered`, StickySessionsDeleteFilteredResponseSchema, {
     body: validated,
   });
 }

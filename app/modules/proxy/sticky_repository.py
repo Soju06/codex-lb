@@ -89,6 +89,32 @@ class StickySessionsRepository:
         await self._session.commit()
         return [(key, kind) for key, kind in result.all()]
 
+    async def list_entry_identifiers(
+        self,
+        *,
+        kind: StickySessionKind | None = None,
+        updated_before: datetime | None = None,
+        account_query: str | None = None,
+        key_query: str | None = None,
+    ) -> list[tuple[str, StickySessionKind]]:
+        statement = (
+            self._apply_filters(
+                select(StickySession.key, StickySession.kind),
+                kind=kind,
+                updated_before=updated_before,
+                account_query=account_query,
+                key_query=key_query,
+            )
+            .join(Account, Account.id == StickySession.account_id)
+            .order_by(
+                StickySession.updated_at.desc(),
+                StickySession.created_at.desc(),
+                StickySession.key.asc(),
+            )
+        )
+        result = await self._session.execute(statement)
+        return [(key, kind) for key, kind in result.all()]
+
     async def list_entries(
         self,
         *,

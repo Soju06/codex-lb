@@ -3,6 +3,7 @@ import { useDeferredValue, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
+  deleteFilteredStickySessions,
   deleteStickySessions,
   listStickySessions,
   purgeStickySessions,
@@ -11,6 +12,7 @@ import type {
   StickySessionIdentifier,
   StickySessionSortBy,
   StickySessionSortDir,
+  StickySessionsDeleteFilteredResponse,
   StickySessionsDeleteResponse,
   StickySessionsListParams,
 } from "@/features/sticky-sessions/schemas";
@@ -91,6 +93,28 @@ export function useStickySessions() {
     },
   });
 
+  const deleteFilteredMutation = useMutation({
+    mutationFn: () =>
+      deleteFilteredStickySessions({
+        staleOnly: queryParams.staleOnly,
+        accountQuery: queryParams.accountQuery,
+        keyQuery: queryParams.keyQuery,
+      }),
+    onSuccess: async (response: StickySessionsDeleteFilteredResponse) => {
+      if (response.deletedCount > 0) {
+        toast.success(
+          response.deletedCount === 1 ? "Filtered sticky session deleted" : `Deleted ${response.deletedCount} filtered sessions`,
+        );
+      } else {
+        toast.error("No filtered sessions could be deleted");
+      }
+      await invalidate();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to delete filtered sticky sessions");
+    },
+  });
+
   const purgeMutation = useMutation({
     mutationFn: (staleOnly: boolean) => purgeStickySessions({ staleOnly }),
     onSuccess: (response) => {
@@ -111,6 +135,7 @@ export function useStickySessions() {
     setLimit,
     stickySessionsQuery,
     deleteMutation,
+    deleteFilteredMutation,
     purgeMutation,
   };
 }

@@ -34,6 +34,12 @@ The Settings page SHALL include sections for: routing settings (sticky threads, 
 - **THEN** the UI enables a `Delete Sessions` action
 - **AND** activating that action opens a confirmation dialog that shows the number of selected rows
 
+#### Scenario: Bulk delete all filtered sticky-session rows
+
+- **WHEN** the sticky-session list has active filters and at least one matching row
+- **THEN** the UI exposes a `Delete Filtered` action for the current filtered result set
+- **AND** activating that action opens a confirmation dialog that references the filtered row count
+
 #### Scenario: Bulk delete refresh preserves table context
 
 - **WHEN** a user confirms bulk deletion of selected sticky-session rows

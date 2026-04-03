@@ -50,6 +50,12 @@ The system SHALL provide dashboard APIs for listing sticky-session mappings, del
 - **WHEN** the dashboard requests bulk deletion for a mix of `codex_session`, `sticky_thread`, and `prompt_cache` mappings
 - **THEN** the system applies the same deletion behavior to each requested mapping regardless of kind
 
+#### Scenario: Delete all mappings that match the active filtered list query
+
+- **WHEN** the dashboard requests filtered bulk deletion with the active list filters
+- **THEN** the system deletes all sticky-session mappings that match that filtered query
+- **AND** the response reports the number of deleted mappings
+
 #### Scenario: Purge stale prompt-cache mappings
 
 - **WHEN** the dashboard requests a stale purge

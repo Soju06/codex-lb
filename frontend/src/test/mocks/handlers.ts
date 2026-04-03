@@ -562,6 +562,38 @@ export const handlers = [
 		});
 	}),
 
+	http.post("/api/sticky-sessions/delete-filtered", async ({ request }) => {
+		const payload = (await parseJsonBody(
+			request,
+			z.object({
+				staleOnly: z.boolean().default(false),
+				accountQuery: z.string().default(""),
+				keyQuery: z.string().default(""),
+			}),
+		)) ?? {
+			staleOnly: false,
+			accountQuery: "",
+			keyQuery: "",
+		};
+		const accountQuery = payload.accountQuery.trim().toLowerCase();
+		const keyQuery = payload.keyQuery.trim().toLowerCase();
+		const matched = state.stickySessions.filter((entry) => {
+			if (payload.staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
+				return false;
+			}
+			if (accountQuery && !entry.displayName.toLowerCase().includes(accountQuery)) {
+				return false;
+			}
+			if (keyQuery && !entry.key.toLowerCase().includes(keyQuery)) {
+				return false;
+			}
+			return true;
+		});
+		const targets = new Set(matched.map((entry) => `${entry.kind}:${entry.key}`));
+		state.stickySessions = state.stickySessions.filter((entry) => !targets.has(`${entry.kind}:${entry.key}`));
+		return HttpResponse.json({ deletedCount: matched.length });
+	}),
+
 	http.post("/api/sticky-sessions/purge", async ({ request }) => {
 		const payload = (await parseJsonBody(
 			request,

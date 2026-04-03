@@ -11,6 +11,8 @@ from app.modules.sticky_sessions.schemas import (
     StickySessionDeleteResponse,
     StickySessionEntryResponse,
     StickySessionIdentifier,
+    StickySessionsDeleteFilteredRequest,
+    StickySessionsDeleteFilteredResponse,
     StickySessionsDeleteRequest,
     StickySessionsDeleteResponse,
     StickySessionsListResponse,
@@ -90,6 +92,19 @@ async def delete_sticky_sessions(
             StickySessionDeleteFailure(key=entry.key, kind=entry.kind, reason=entry.reason) for entry in result.failed
         ],
     )
+
+
+@router.post("/delete-filtered", response_model=StickySessionsDeleteFilteredResponse)
+async def delete_filtered_sticky_sessions(
+    payload: StickySessionsDeleteFilteredRequest,
+    context: StickySessionsContext = Depends(get_sticky_sessions_context),
+) -> StickySessionsDeleteFilteredResponse:
+    deleted_count = await context.service.delete_filtered_entries(
+        stale_only=payload.stale_only,
+        account_query=payload.account_query,
+        key_query=payload.key_query,
+    )
+    return StickySessionsDeleteFilteredResponse(deleted_count=deleted_count)
 
 
 @router.delete("/{kind}/{key:path}", response_model=StickySessionDeleteResponse)

@@ -171,11 +171,46 @@ describe("useStickySessions", () => {
     warningSpy.mockRestore();
   });
 
+  it("deletes the current filtered result set", async () => {
+    const queryClient = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const filteredDeleteSpy = vi
+      .spyOn(stickySessionsApi, "deleteFilteredStickySessions")
+      .mockResolvedValueOnce({ deletedCount: 2 });
+
+    const { result } = renderHook(() => useStickySessions(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
+
+    act(() => {
+      result.current.setAccountQuery("sticky-a");
+      result.current.setKeyQuery("thread");
+    });
+
+    await result.current.deleteFilteredMutation.mutateAsync();
+
+    expect(filteredDeleteSpy).toHaveBeenCalledWith({
+      staleOnly: false,
+      accountQuery: "sticky-a",
+      keyQuery: "thread",
+    });
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["sticky-sessions", "list"] });
+    });
+
+    filteredDeleteSpy.mockRestore();
+  });
+
   it("uses fallback toast messages when sticky-session mutations fail", async () => {
     const queryClient = createTestQueryClient();
     const toastSpy = vi.spyOn(toast, "error").mockImplementation(() => "");
     const deleteSpy = vi
       .spyOn(stickySessionsApi, "deleteStickySessions")
+      .mockRejectedValueOnce(new Error(""));
+    const deleteFilteredSpy = vi
+      .spyOn(stickySessionsApi, "deleteFilteredStickySessions")
       .mockRejectedValueOnce(new Error(""));
     const purgeSpy = vi
       .spyOn(stickySessionsApi, "purgeStickySessions")
@@ -189,12 +224,15 @@ describe("useStickySessions", () => {
     await expect(
       result.current.deleteMutation.mutateAsync([{ key: "thread_123", kind: "prompt_cache" }]),
     ).rejects.toThrow();
+    await expect(result.current.deleteFilteredMutation.mutateAsync()).rejects.toThrow();
     await expect(result.current.purgeMutation.mutateAsync(true)).rejects.toThrow();
 
     expect(toastSpy).toHaveBeenCalledWith("Failed to delete sticky sessions");
+    expect(toastSpy).toHaveBeenCalledWith("Failed to delete filtered sticky sessions");
     expect(toastSpy).toHaveBeenCalledWith("Failed to purge sticky sessions");
 
     deleteSpy.mockRestore();
+    deleteFilteredSpy.mockRestore();
     purgeSpy.mockRestore();
     toastSpy.mockRestore();
   });

@@ -26,6 +26,11 @@ describe("StickySessionsSection", () => {
       isPending: false,
       error: null,
     };
+    const deleteFilteredMutation = {
+      mutateAsync: vi.fn().mockResolvedValue({ deletedCount: 2 }),
+      isPending: false,
+      error: null,
+    };
     const purgeMutation = {
       mutateAsync: vi.fn().mockResolvedValue(undefined),
       isPending: false,
@@ -77,6 +82,7 @@ describe("StickySessionsSection", () => {
         error: null,
       },
       deleteMutation,
+      deleteFilteredMutation,
       purgeMutation,
     } as never);
 
@@ -104,6 +110,8 @@ describe("StickySessionsSection", () => {
     expect(screen.getByRole("button", { name: "Updated ↓" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Key" }));
     expect(setSort).toHaveBeenLastCalledWith("key", "asc");
+
+    expect(screen.getByRole("button", { name: "Delete Filtered" })).toBeDisabled();
 
     await user.click(screen.getByRole("checkbox", { name: "Select all sticky sessions on current page" }));
     expect(screen.getByText("Selected")).toBeInTheDocument();
@@ -178,6 +186,11 @@ describe("StickySessionsSection", () => {
         isPending: false,
         error: null,
       },
+      deleteFilteredMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
       purgeMutation: {
         mutateAsync: vi.fn(),
         isPending: false,
@@ -233,6 +246,11 @@ describe("StickySessionsSection", () => {
         isPending: false,
         error: null,
       },
+      deleteFilteredMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
       purgeMutation: {
         mutateAsync: vi.fn(),
         isPending: false,
@@ -246,6 +264,64 @@ describe("StickySessionsSection", () => {
     expect(screen.getByText("3")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purge stale" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled();
+  });
+
+  it("shows delete-filtered when text filters are active", () => {
+    useStickySessionsMock.mockReturnValue({
+      params: {
+        staleOnly: false,
+        accountQuery: "sticky-a",
+        keyQuery: "",
+        sortBy: "updated_at",
+        sortDir: "desc",
+        offset: 0,
+        limit: 10,
+      },
+      setAccountQuery: vi.fn(),
+      setKeyQuery: vi.fn(),
+      setSort: vi.fn(),
+      setOffset: vi.fn(),
+      setLimit: vi.fn(),
+      stickySessionsQuery: {
+        data: {
+          entries: [
+            {
+              key: "session-1",
+              displayName: "sticky-a@example.com",
+              kind: "prompt_cache",
+              createdAt: "2026-03-10T12:00:00Z",
+              updatedAt: "2026-03-10T12:05:00Z",
+              expiresAt: "2026-03-10T12:10:00Z",
+              isStale: true,
+            },
+          ],
+          stalePromptCacheCount: 1,
+          total: 1,
+          hasMore: false,
+        },
+        isLoading: false,
+        error: null,
+      },
+      deleteMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
+      deleteFilteredMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
+      purgeMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
+    } as never);
+
+    render(<StickySessionsSection />);
+
+    expect(screen.getByRole("button", { name: "Delete Filtered" })).toBeEnabled();
   });
 
   it("shows pagination controls and advances pagination", async () => {
@@ -288,6 +364,11 @@ describe("StickySessionsSection", () => {
         error: null,
       },
       deleteMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
+      deleteFilteredMutation: {
         mutateAsync: vi.fn(),
         isPending: false,
         error: null,

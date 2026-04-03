@@ -321,7 +321,7 @@ async def test_dashboard_overview_invalid_timeframe_returns_validation_error(asy
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_top_error_ignores_partial_leading_bucket(
+async def test_dashboard_overview_summary_uses_exact_timeframe_even_when_trends_skip_partial_leading_bucket(
     async_client,
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -363,7 +363,8 @@ async def test_dashboard_overview_top_error_ignores_partial_leading_bucket(
     assert response.status_code == 200
 
     payload = response.json()
-    assert payload["summary"]["metrics"]["requests"] == 0
-    assert payload["summary"]["metrics"]["errorCount"] == 0
-    assert payload["summary"]["metrics"]["topError"] is None
+    assert payload["summary"]["metrics"]["requests"] == 1
+    assert payload["summary"]["metrics"]["tokens"] == 150
+    assert payload["summary"]["metrics"]["errorCount"] == 1
+    assert payload["summary"]["metrics"]["topError"] == "rate_limit_exceeded"
     assert all(point["v"] == 0 for point in payload["trends"]["requests"])

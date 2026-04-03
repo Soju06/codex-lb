@@ -22,6 +22,7 @@ from app.modules.dashboard.schemas import (
 )
 from app.modules.usage.builders import (
     align_bucket_window_start,
+    build_activity_summaries,
     build_trends_from_buckets,
     build_usage_window_response,
 )
@@ -70,12 +71,16 @@ class DashboardService:
             bucket_query_since,
             overview_timeframe.bucket_seconds,
         )
-        top_error = await self._repo.top_error_since(bucket_query_since)
-        trends, bucket_metrics, bucket_cost = build_trends_from_buckets(
+        trends, _, _ = build_trends_from_buckets(
             bucket_rows,
             bucket_since,
             bucket_seconds=overview_timeframe.bucket_seconds,
             bucket_count=overview_timeframe.bucket_count,
+        )
+        activity_aggregate = await self._repo.aggregate_activity_since(bucket_since)
+        top_error = await self._repo.top_error_since(bucket_since)
+        activity_metrics, activity_cost = build_activity_summaries(
+            activity_aggregate,
             top_error=top_error,
         )
 
@@ -83,8 +88,8 @@ class DashboardService:
             accounts=accounts,
             primary_rows=primary_rows,
             secondary_rows=secondary_rows,
-            activity_metrics=bucket_metrics,
-            activity_cost=bucket_cost,
+            activity_metrics=activity_metrics,
+            activity_cost=activity_cost,
         )
 
         secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)

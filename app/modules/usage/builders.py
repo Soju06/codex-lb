@@ -8,6 +8,7 @@ from app.core import usage as usage_core
 from app.core.usage.logs import cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
 from app.core.usage.types import (
     BucketModelAggregate,
+    RequestActivityAggregate,
     UsageCostByModel,
     UsageCostSummary,
     UsageMetricsSummary,
@@ -160,6 +161,34 @@ def build_trends_from_buckets(
     )
 
     return trends, metrics, total_cost
+
+
+def build_activity_summaries(
+    aggregate: RequestActivityAggregate,
+    *,
+    top_error: str | None = None,
+) -> tuple[ActivityMetricsSummary, ActivityCostSummary]:
+    total_requests = aggregate.request_count
+    total_tokens = aggregate.input_tokens + aggregate.output_tokens
+    error_rate: float | None = None
+    if total_requests > 0:
+        error_rate = aggregate.error_count / total_requests
+
+    return (
+        ActivityMetricsSummary(
+            requests=total_requests,
+            tokens=total_tokens,
+            cached_input_tokens=aggregate.cached_input_tokens,
+            error_rate=error_rate,
+            error_count=aggregate.error_count,
+            top_error=top_error,
+        ),
+        ActivityCostSummary(
+            currency="USD",
+            total_usd=round(aggregate.cost_usd, 6),
+            by_model=[],
+        ),
+    )
 
 
 def build_usage_summary_response(

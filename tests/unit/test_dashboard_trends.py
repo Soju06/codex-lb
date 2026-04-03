@@ -5,13 +5,12 @@ from datetime import datetime, timezone
 import pytest
 
 from app.core.usage.types import BucketModelAggregate
-from app.modules.usage.builders import build_trends_from_buckets
+from app.modules.usage.builders import align_bucket_window_start, build_trends_from_buckets
 
 BUCKET_SECONDS = 21600  # 6 hours
 SINCE = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
 SINCE_EPOCH = int(SINCE.timestamp())
-# first_bucket = floor(since / bucket) * bucket + bucket
-FIRST_SLOT_EPOCH = (SINCE_EPOCH // BUCKET_SECONDS) * BUCKET_SECONDS + BUCKET_SECONDS
+FIRST_SLOT_EPOCH = SINCE_EPOCH
 
 
 def _make_row(
@@ -41,6 +40,17 @@ def _make_row(
 
 
 class TestBuildTrendsFromBuckets:
+    def test_exact_boundary_since_keeps_first_bucket(self):
+        aligned = align_bucket_window_start(SINCE, BUCKET_SECONDS)
+        rows = [_make_row(slot_index=0, request_count=5)]
+
+        trends, metrics, _ = build_trends_from_buckets(rows, SINCE)
+
+        assert aligned == SINCE
+        assert trends.requests[0].t == SINCE
+        assert trends.requests[0].v == 5
+        assert metrics.requests == 5
+
     def test_empty_rows_produce_zero_filled_trends(self):
         trends, metrics, cost = build_trends_from_buckets([], SINCE)
 

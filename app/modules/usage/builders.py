@@ -58,7 +58,8 @@ def align_bucket_window_start(
     since_epoch = (
         int(since.replace(tzinfo=timezone.utc).timestamp()) if since.tzinfo is None else int(since.timestamp())
     )
-    first_bucket_epoch = (since_epoch // bucket_seconds) * bucket_seconds + bucket_seconds
+    remainder = since_epoch % bucket_seconds
+    first_bucket_epoch = since_epoch if remainder == 0 else since_epoch - remainder + bucket_seconds
     aligned = datetime.fromtimestamp(first_bucket_epoch, tz=timezone.utc)
     if since.tzinfo is None:
         return aligned.replace(tzinfo=None)
@@ -348,7 +349,9 @@ def _top_error_code(logs: list[RequestLog]) -> str | None:
 def _summary_payload_to_response(payload: UsageSummaryPayload) -> UsageSummaryResponse:
     return UsageSummaryResponse(
         primary_window=build_usage_window_summary_model(payload.primary_window),
-        secondary_window=build_usage_window_summary_model(payload.secondary_window) if payload.secondary_window else None,
+        secondary_window=(
+            build_usage_window_summary_model(payload.secondary_window) if payload.secondary_window else None
+        ),
         cost=_cost_summary_to_model(payload.cost),
         metrics=_metrics_summary_to_model(payload.metrics) if payload.metrics else None,
     )

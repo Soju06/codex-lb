@@ -91,9 +91,9 @@ def build_dashboard_overview_summary(
         metrics=DashboardUsageMetrics(
             requests=activity_metrics.requests,
             tokens=activity_metrics.tokens,
-            cachedInputTokens=activity_metrics.cached_input_tokens,
-            errorRate=activity_metrics.error_rate,
-            errorCount=activity_metrics.error_count,
-            topError=activity_metrics.top_error,
+            cached_input_tokens=activity_metrics.cached_input_tokens,
+            error_rate=activity_metrics.error_rate,
+            error_count=activity_metrics.error_count,
+            top_error=activity_metrics.top_error,
         ),
     )

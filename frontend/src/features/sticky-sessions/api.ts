@@ -25,6 +25,8 @@ export function listStickySessions(params: unknown) {
   if (validated.keyQuery) {
     searchParams.set("keyQuery", validated.keyQuery);
   }
+  searchParams.set("sortBy", validated.sortBy);
+  searchParams.set("sortDir", validated.sortDir);
   return get(`${STICKY_SESSIONS_PATH}?${searchParams.toString()}`, StickySessionsListResponseSchema);
 }
 

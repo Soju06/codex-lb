@@ -19,7 +19,13 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { useStickySessions } from "@/features/sticky-sessions/hooks/use-sticky-sessions";
-import type { StickySessionEntry, StickySessionIdentifier, StickySessionKind } from "@/features/sticky-sessions/schemas";
+import type {
+  StickySessionEntry,
+  StickySessionIdentifier,
+  StickySessionKind,
+  StickySessionSortBy,
+  StickySessionSortDir,
+} from "@/features/sticky-sessions/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
@@ -41,11 +47,26 @@ function stickySessionRowId(entry: StickySessionIdentifier): string {
 
 const EMPTY_STICKY_SESSION_ENTRIES: StickySessionEntry[] = [];
 
+function nextSortDirection(currentSortBy: StickySessionSortBy, currentSortDir: StickySessionSortDir, target: StickySessionSortBy) {
+  if (currentSortBy != target) {
+    return target === "updated_at" ? "desc" : "asc";
+  }
+  return currentSortDir === "asc" ? "desc" : "asc";
+}
+
+function sortIndicator(currentSortBy: StickySessionSortBy, currentSortDir: StickySessionSortDir, target: StickySessionSortBy) {
+  if (currentSortBy !== target) {
+    return null;
+  }
+  return currentSortDir === "asc" ? " ↑" : " ↓";
+}
+
 export function StickySessionsSection() {
   const {
     params,
     setAccountQuery,
     setKeyQuery,
+    setSort,
     setLimit,
     setOffset,
     stickySessionsQuery,
@@ -211,16 +232,36 @@ export function StickySessionsSection() {
                       />
                     </TableHead>
                     <TableHead className="w-[25%] min-w-[14rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Key
+                      <button
+                        type="button"
+                        className="cursor-pointer text-left transition-colors hover:text-foreground"
+                        onClick={() => setSort("key", nextSortDirection(params.sortBy, params.sortDir, "key"))}
+                      >
+                        {`Key${sortIndicator(params.sortBy, params.sortDir, "key") ?? ""}`}
+                      </button>
                     </TableHead>
                     <TableHead className="w-[14%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       Kind
                     </TableHead>
                     <TableHead className="w-[18%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Account
+                      <button
+                        type="button"
+                        className="cursor-pointer text-left transition-colors hover:text-foreground"
+                        onClick={() => setSort("account", nextSortDirection(params.sortBy, params.sortDir, "account"))}
+                      >
+                        {`Account${sortIndicator(params.sortBy, params.sortDir, "account") ?? ""}`}
+                      </button>
                     </TableHead>
                     <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Updated
+                      <button
+                        type="button"
+                        className="cursor-pointer text-left transition-colors hover:text-foreground"
+                        onClick={() =>
+                          setSort("updated_at", nextSortDirection(params.sortBy, params.sortDir, "updated_at"))
+                        }
+                      >
+                        {`Updated${sortIndicator(params.sortBy, params.sortDir, "updated_at") ?? ""}`}
+                      </button>
                     </TableHead>
                     <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       Expiry

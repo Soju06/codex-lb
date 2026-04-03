@@ -9,6 +9,8 @@ import {
 } from "@/features/sticky-sessions/api";
 import type {
   StickySessionIdentifier,
+  StickySessionSortBy,
+  StickySessionSortDir,
   StickySessionsDeleteResponse,
   StickySessionsListParams,
 } from "@/features/sticky-sessions/schemas";
@@ -21,6 +23,8 @@ export function useStickySessions() {
     staleOnly: false,
     accountQuery: "",
     keyQuery: "",
+    sortBy: "updated_at",
+    sortDir: "desc",
     offset: 0,
     limit: DEFAULT_STICKY_SESSIONS_LIMIT,
   });
@@ -64,6 +68,10 @@ export function useStickySessions() {
     setParams((current) => ({ ...current, keyQuery, offset: 0 }));
   };
 
+  const setSort = (sortBy: StickySessionSortBy, sortDir: StickySessionSortDir) => {
+    setParams((current) => ({ ...current, sortBy, sortDir, offset: 0 }));
+  };
+
   const deleteMutation = useMutation({
     mutationFn: (targets: StickySessionIdentifier[]) => deleteStickySessions({ sessions: targets }),
     onSuccess: async (response: StickySessionsDeleteResponse) => {
@@ -98,6 +106,7 @@ export function useStickySessions() {
     params,
     setAccountQuery,
     setKeyQuery,
+    setSort,
     setOffset,
     setLimit,
     stickySessionsQuery,

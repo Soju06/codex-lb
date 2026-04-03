@@ -194,6 +194,46 @@ async def test_sticky_sessions_api_filters_by_account_and_key(async_client):
 
 
 @pytest.mark.asyncio
+async def test_sticky_sessions_api_sorts_by_supported_fields(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+    await _insert_sticky_session(
+        key="sort-z",
+        account_id=accounts[1].id,
+        kind=StickySessionKind.STICKY_THREAD,
+        updated_at_offset_seconds=20,
+    )
+    await _insert_sticky_session(
+        key="sort-a",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.STICKY_THREAD,
+        updated_at_offset_seconds=10,
+    )
+    await _insert_sticky_session(
+        key="sort-m",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.STICKY_THREAD,
+        updated_at_offset_seconds=30,
+    )
+
+    response = await async_client.get("/api/sticky-sessions", params={"sortBy": "key", "sortDir": "asc"})
+    assert response.status_code == 200
+    assert [entry["key"] for entry in response.json()["entries"]] == ["sort-a", "sort-m", "sort-z"]
+
+    response = await async_client.get("/api/sticky-sessions", params={"sortBy": "account", "sortDir": "asc"})
+    assert response.status_code == 200
+    assert [entry["displayName"] for entry in response.json()["entries"]] == [
+        "sticky-a@example.com",
+        "sticky-a@example.com",
+        "sticky-b@example.com",
+    ]
+
+    response = await async_client.get("/api/sticky-sessions", params={"sortBy": "updated_at", "sortDir": "asc"})
+    assert response.status_code == 200
+    assert [entry["key"] for entry in response.json()["entries"]] == ["sort-m", "sort-z", "sort-a"]
+
+
+@pytest.mark.asyncio
 async def test_sticky_sessions_api_rejects_non_stale_purge_requests(async_client):
     accounts = await _create_accounts()
     await _set_affinity_ttl(60)

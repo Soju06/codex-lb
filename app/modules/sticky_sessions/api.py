@@ -14,6 +14,8 @@ from app.modules.sticky_sessions.schemas import (
     StickySessionsDeleteRequest,
     StickySessionsDeleteResponse,
     StickySessionsListResponse,
+    StickySessionSortBy,
+    StickySessionSortDir,
     StickySessionsPurgeRequest,
     StickySessionsPurgeResponse,
 )
@@ -31,6 +33,8 @@ async def list_sticky_sessions(
     stale_only: bool = Query(default=False, alias="staleOnly"),
     account_query: str | None = Query(default=None, alias="accountQuery"),
     key_query: str | None = Query(default=None, alias="keyQuery"),
+    sort_by: StickySessionSortBy = Query(default="updated_at", alias="sortBy"),
+    sort_dir: StickySessionSortDir = Query(default="desc", alias="sortDir"),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
@@ -40,6 +44,8 @@ async def list_sticky_sessions(
         stale_only=stale_only,
         account_query=account_query,
         key_query=key_query,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
         offset=offset,
         limit=limit,
     )

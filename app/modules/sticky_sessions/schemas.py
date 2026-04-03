@@ -8,6 +8,9 @@ from pydantic import Field, model_validator
 from app.db.models import StickySessionKind
 from app.modules.shared.schemas import DashboardModel
 
+StickySessionSortBy = Literal["updated_at", "created_at", "account", "key"]
+StickySessionSortDir = Literal["asc", "desc"]
+
 
 class StickySessionEntryResponse(DashboardModel):
     key: str

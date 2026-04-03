@@ -1,8 +1,12 @@
 import { z } from "zod";
 
 export const STICKY_SESSION_KINDS = ["codex_session", "sticky_thread", "prompt_cache"] as const;
+export const STICKY_SESSION_SORT_FIELDS = ["updated_at", "created_at", "account", "key"] as const;
+export const STICKY_SESSION_SORT_DIRECTIONS = ["asc", "desc"] as const;
 
 export const StickySessionKindSchema = z.enum(STICKY_SESSION_KINDS);
+export const StickySessionSortBySchema = z.enum(STICKY_SESSION_SORT_FIELDS);
+export const StickySessionSortDirSchema = z.enum(STICKY_SESSION_SORT_DIRECTIONS);
 
 export const StickySessionEntrySchema = z.object({
   key: z.string().min(1),
@@ -47,6 +51,8 @@ export const StickySessionsListParamsSchema = z.object({
   staleOnly: z.boolean().default(false),
   accountQuery: z.string().default(""),
   keyQuery: z.string().default(""),
+  sortBy: StickySessionSortBySchema.default("updated_at"),
+  sortDir: StickySessionSortDirSchema.default("desc"),
   offset: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(500).default(10),
 });
@@ -66,6 +72,8 @@ export const StickySessionsPurgeResponseSchema = z.object({
 });
 
 export type StickySessionKind = z.infer<typeof StickySessionKindSchema>;
+export type StickySessionSortBy = z.infer<typeof StickySessionSortBySchema>;
+export type StickySessionSortDir = z.infer<typeof StickySessionSortDirSchema>;
 export type StickySessionEntry = z.infer<typeof StickySessionEntrySchema>;
 export type StickySessionIdentifier = z.infer<typeof StickySessionIdentifierSchema>;
 export type StickySessionsDeleteRequest = z.infer<typeof StickySessionsDeleteRequestSchema>;

@@ -12,6 +12,7 @@ from sqlalchemy.sql import Insert
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, StickySession, StickySessionKind
+from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +96,12 @@ class StickySessionsRepository:
         updated_before: datetime | None = None,
         account_query: str | None = None,
         key_query: str | None = None,
+        sort_by: StickySessionSortBy = "updated_at",
+        sort_dir: StickySessionSortDir = "desc",
         offset: int = 0,
         limit: int | None = None,
     ) -> Sequence[StickySessionListEntryRecord]:
+        order_by = self._build_order_by(sort_by=sort_by, sort_dir=sort_dir)
         statement = (
             self._apply_filters(
                 select(StickySession, Account.email),
@@ -107,11 +111,7 @@ class StickySessionsRepository:
                 key_query=key_query,
             )
             .join(Account, Account.id == StickySession.account_id)
-            .order_by(
-                StickySession.updated_at.desc(),
-                StickySession.created_at.desc(),
-                StickySession.key.asc(),
-            )
+            .order_by(*order_by)
         )
         if offset > 0:
             statement = statement.offset(offset)
@@ -188,3 +188,41 @@ class StickySessionsRepository:
         if key_query:
             statement = statement.where(func.lower(StickySession.key).contains(key_query.lower()))
         return statement
+
+    @staticmethod
+    def _build_order_by(
+        *,
+        sort_by: StickySessionSortBy,
+        sort_dir: StickySessionSortDir,
+    ):
+        sort_column_map = {
+            "updated_at": StickySession.updated_at,
+            "created_at": StickySession.created_at,
+            "account": Account.email,
+            "key": StickySession.key,
+        }
+        primary = sort_column_map[sort_by]
+        primary_order = primary.asc() if sort_dir == "asc" else primary.desc()
+        if sort_by == "updated_at":
+            return (
+                primary_order,
+                StickySession.created_at.desc(),
+                StickySession.key.asc(),
+            )
+        if sort_by == "created_at":
+            return (
+                primary_order,
+                StickySession.updated_at.desc(),
+                StickySession.key.asc(),
+            )
+        if sort_by == "account":
+            return (
+                primary_order,
+                StickySession.updated_at.desc(),
+                StickySession.key.asc(),
+            )
+        return (
+            primary_order,
+            StickySession.updated_at.desc(),
+            StickySession.created_at.desc(),
+        )

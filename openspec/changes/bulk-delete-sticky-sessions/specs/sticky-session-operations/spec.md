@@ -27,6 +27,12 @@ The system SHALL provide dashboard APIs for listing sticky-session mappings, del
 - **THEN** the system returns only mappings whose sticky-session key matches that query
 - **AND** applies the same filter to the reported total before pagination
 
+#### Scenario: Sort mappings by a supported field
+
+- **WHEN** the dashboard requests sticky-session entries with a supported `sortBy` and `sortDir`
+- **THEN** the system orders the returned mappings by that sort
+- **AND** applies the same ordering consistently across paginated results
+
 #### Scenario: Delete one mapping
 
 - **WHEN** the dashboard deletes a sticky-session mapping by both `key` and `kind`

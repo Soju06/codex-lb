@@ -16,6 +16,12 @@ The Settings page SHALL include sections for: routing settings (sticky threads, 
 - **AND** resets pagination to the first page for the filtered result set
 - **AND** shows only rows that match the active filters
 
+#### Scenario: Reorder sticky-session mappings for cleanup
+
+- **WHEN** a user changes the sticky-session sort by clicking a supported sortable column header
+- **THEN** the app refetches the sticky-session list using the selected sort
+- **AND** preserves the active filters while resetting pagination to the first page
+
 #### Scenario: Select sticky-session rows on the current page
 
 - **WHEN** a user toggles row checkboxes in the sticky-session table

@@ -8,6 +8,7 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import StickySessionKind
 from app.modules.proxy.sticky_repository import StickySessionListEntryRecord, StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
+from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,8 @@ class StickySessionsService:
         stale_only: bool = False,
         account_query: str | None = None,
         key_query: str | None = None,
+        sort_by: StickySessionSortBy = "updated_at",
+        sort_dir: StickySessionSortDir = "desc",
         offset: int = 0,
         limit: int = 100,
     ) -> StickySessionListData:
@@ -90,6 +93,8 @@ class StickySessionsService:
             updated_before=stale_cutoff if stale_only else None,
             account_query=normalized_account_query,
             key_query=normalized_key_query,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
             offset=offset,
             limit=limit,
         )

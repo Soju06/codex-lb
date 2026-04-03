@@ -20,6 +20,7 @@ describe("StickySessionsSection", () => {
     const user = userEvent.setup();
     const setAccountQuery = vi.fn();
     const setKeyQuery = vi.fn();
+    const setSort = vi.fn();
     const deleteMutation = {
       mutateAsync: vi.fn().mockResolvedValue({ deletedCount: 2, deleted: [], failed: [] }),
       isPending: false,
@@ -36,11 +37,14 @@ describe("StickySessionsSection", () => {
         staleOnly: false,
         accountQuery: "",
         keyQuery: "",
+        sortBy: "updated_at",
+        sortDir: "desc",
         offset: 0,
         limit: 10,
       },
       setAccountQuery,
       setKeyQuery,
+      setSort,
       setOffset: vi.fn(),
       setLimit: vi.fn(),
       stickySessionsQuery: {
@@ -95,6 +99,12 @@ describe("StickySessionsSection", () => {
     fireEvent.change(screen.getByPlaceholderText("Filter by key..."), { target: { value: "session-1" } });
     expect(setKeyQuery).toHaveBeenLastCalledWith("session-1");
 
+    expect(screen.getByRole("button", { name: "Key" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Account" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Updated ↓" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Key" }));
+    expect(setSort).toHaveBeenLastCalledWith("key", "asc");
+
     await user.click(screen.getByRole("checkbox", { name: "Select all sticky sessions on current page" }));
     expect(screen.getByText("Selected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete Sessions" })).toBeEnabled();
@@ -143,11 +153,14 @@ describe("StickySessionsSection", () => {
         staleOnly: false,
         accountQuery: "",
         keyQuery: "",
+        sortBy: "updated_at",
+        sortDir: "desc",
         offset: 10,
         limit: 10,
       },
       setAccountQuery: vi.fn(),
       setKeyQuery: vi.fn(),
+      setSort: vi.fn(),
       setOffset,
       setLimit: vi.fn(),
       stickySessionsQuery: {
@@ -185,11 +198,14 @@ describe("StickySessionsSection", () => {
         staleOnly: false,
         accountQuery: "",
         keyQuery: "",
+        sortBy: "updated_at",
+        sortDir: "desc",
         offset: 0,
         limit: 10,
       },
       setAccountQuery: vi.fn(),
       setKeyQuery: vi.fn(),
+      setSort: vi.fn(),
       setOffset,
       setLimit,
       stickySessionsQuery: {
@@ -241,11 +257,14 @@ describe("StickySessionsSection", () => {
         staleOnly: false,
         accountQuery: "",
         keyQuery: "",
+        sortBy: "updated_at",
+        sortDir: "desc",
         offset: 0,
         limit: 10,
       },
       setAccountQuery: vi.fn(),
       setKeyQuery: vi.fn(),
+      setSort: vi.fn(),
       setOffset,
       setLimit: vi.fn(),
       stickySessionsQuery: {
@@ -285,7 +304,7 @@ describe("StickySessionsSection", () => {
     await user.click(screen.getByRole("button", { name: "Next page" }));
     expect(setOffset).toHaveBeenCalledWith(10);
 
-    expect(screen.getByRole("combobox")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Updated ↓" })).toBeInTheDocument();
     expect(screen.getByText("1–10 of 20")).toBeInTheDocument();
   });
 });

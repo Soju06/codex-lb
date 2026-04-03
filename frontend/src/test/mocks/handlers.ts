@@ -479,6 +479,8 @@ export const handlers = [
 		const staleOnly = url.searchParams.get("staleOnly") === "true";
 		const accountQuery = (url.searchParams.get("accountQuery") ?? "").trim().toLowerCase();
 		const keyQuery = (url.searchParams.get("keyQuery") ?? "").trim().toLowerCase();
+		const sortBy = url.searchParams.get("sortBy") ?? "updated_at";
+		const sortDir = url.searchParams.get("sortDir") ?? "desc";
 		const offset = Number(url.searchParams.get("offset") ?? "0");
 		const limit = Number(url.searchParams.get("limit") ?? "10");
 		const filteredEntries = state.stickySessions.filter((entry) => {
@@ -492,6 +494,20 @@ export const handlers = [
 				return false;
 			}
 			return true;
+		}).sort((left, right) => {
+			const direction = sortDir === "asc" ? 1 : -1;
+			if (sortBy === "account") {
+				return left.displayName.localeCompare(right.displayName) * direction;
+			}
+			if (sortBy === "key") {
+				return left.key.localeCompare(right.key) * direction;
+			}
+			const leftTime = Date.parse(sortBy === "created_at" ? left.createdAt : left.updatedAt);
+			const rightTime = Date.parse(sortBy === "created_at" ? right.createdAt : right.updatedAt);
+			if (leftTime !== rightTime) {
+				return (leftTime - rightTime) * direction;
+			}
+			return left.key.localeCompare(right.key);
 		});
 		const entries = filteredEntries.slice(offset, offset + limit);
 		const stalePromptCacheCount = state.stickySessions.filter(

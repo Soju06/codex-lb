@@ -6,6 +6,8 @@ global:
   imagePullSecrets: []
   # @param global.storageClass Global storage class for PVCs
   storageClass: ""
+  # @param global.nodeSelector Node selector labels applied to ALL pods (deployment, jobs, tests)
+  nodeSelector: {}
 
 # @section Common parameters
 # @param nameOverride Override the chart name
@@ -369,6 +371,28 @@ externalDatabase:
   user: codexlb
   # @param externalDatabase.existingSecret Secret containing external DB credentials
   existingSecret: ""
+
+# @section Database initialization parameters
+dbInit:
+  # @param dbInit.enabled Enable pre-install Job to create databases/users on external PostgreSQL
+  enabled: false
+  # @param dbInit.host External PostgreSQL host
+  host: ""
+  # @param dbInit.port External PostgreSQL port
+  port: "5432"
+  # @param dbInit.adminUser Admin username for creating databases/users
+  adminUser: "adminuser"
+  # @param dbInit.adminPassword Admin password (use adminPasswordSecret for production)
+  adminPassword: ""
+  # @param dbInit.adminPasswordSecret Reference to existing Secret for admin password
+  adminPasswordSecret: {}
+  #   name: pg-admin-secret
+  #   key: password
+  # @param dbInit.databases List of databases and users to create
+  databases:
+    - name: codexlb
+      user: codexlb
+      password: changeme
 
 # @section Migration parameters
 migration:

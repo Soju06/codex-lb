@@ -139,3 +139,13 @@ Image string — resolves registry/repository:tag with optional digest override
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- end }}
 {{- end }}
+
+{{/*
+Merged nodeSelector: global.nodeSelector + local nodeSelector (local wins).
+*/}}
+{{- define "codex-lb.nodeSelector" -}}
+{{- $merged := mustMerge (.Values.nodeSelector | default dict) (.Values.global.nodeSelector | default dict) -}}
+{{- if $merged }}
+{{- toYaml $merged }}
+{{- end }}
+{{- end -}}

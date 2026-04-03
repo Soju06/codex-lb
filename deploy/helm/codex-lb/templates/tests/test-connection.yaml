@@ -15,10 +15,6 @@ spec:
     runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
-  {{- with (include "codex-lb.nodeSelector" .) }}
-  nodeSelector:
-    {{- . | nindent 4 }}
-  {{- end }}
   containers:
     - name: test-connection
       image: busybox:1.37

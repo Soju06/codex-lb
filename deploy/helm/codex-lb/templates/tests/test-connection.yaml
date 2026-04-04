@@ -22,7 +22,7 @@ spec:
   {{- end }}
   containers:
     - name: test-health
-      image: docker.io/library/busybox:1.37
+      image: {{ printf "%s/library/busybox:1.37" (.Values.global.imageRegistry | default "docker.io") }}
       imagePullPolicy: IfNotPresent
       securityContext:
         allowPrivilegeEscalation: false

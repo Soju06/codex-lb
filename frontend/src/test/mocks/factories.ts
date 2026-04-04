@@ -31,12 +31,14 @@ import type {
 	DashboardOverview,
 	RequestLog,
 	RequestLogFilterOptions,
+	RequestLogVisibilityResponse,
 	RequestLogsResponse,
 } from "@/features/dashboard/schemas";
 import {
 	DashboardOverviewSchema,
 	RequestLogFilterOptionsSchema,
 	RequestLogSchema,
+	RequestLogVisibilityResponseSchema,
 	RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
 import type { DashboardSettings } from "@/features/settings/schemas";
@@ -53,6 +55,7 @@ export type {
 	DashboardOverview,
 	RequestLogsResponse,
 	RequestLogFilterOptions,
+	RequestLogVisibilityResponse,
 	DashboardSettings,
 	OauthStartResponse,
 	OauthStatusResponse,
@@ -285,6 +288,28 @@ export function createRequestLogFilterOptions(
 	});
 }
 
+export function createRequestLogVisibilityResponse(
+	overrides: Partial<RequestLogVisibilityResponse> = {},
+): RequestLogVisibilityResponse {
+	return RequestLogVisibilityResponseSchema.parse({
+		requestId: "req_1",
+		captured: true,
+		unavailableReason: null,
+		truncated: false,
+		headers: {
+			"content-type": "application/json",
+			"user-agent": "dashboard-tests",
+		},
+		body: {
+			input: "Hello world",
+			metadata: {
+				sessionToken: "[REDACTED]",
+			},
+		},
+		...overrides,
+	});
+}
+
 export function createDashboardAuthSession(
 	overrides: Partial<DashboardAuthSession> = {},
 ): DashboardAuthSession {
@@ -310,6 +335,9 @@ export function createDashboardSettings(
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
 		apiKeyAuthEnabled: true,
+		requestVisibilityMode: "off",
+		requestVisibilityExpiresAt: null,
+		requestVisibilityEnabled: false,
 		...overrides,
 	});
 }

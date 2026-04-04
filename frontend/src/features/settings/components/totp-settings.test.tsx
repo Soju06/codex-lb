@@ -27,6 +27,9 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  requestVisibilityMode: "off" as const,
+  requestVisibilityExpiresAt: null,
+  requestVisibilityEnabled: false,
 };
 
 function renderWithClient(ui: React.ReactElement) {

@@ -515,6 +515,8 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
         log_proxy_service_tier_trace=log_proxy_service_tier_trace,
+        request_visibility_mode="off",
+        request_visibility_expires_at=None,
     )
 
 
@@ -3207,6 +3209,166 @@ async def test_service_compact_budget_does_not_override_unbounded_read_timeout(m
     assert result.model_extra == {"output": []}
 
 
+@pytest.mark.asyncio
+async def test_compact_request_log_omits_visibility_when_flag_disabled(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_visibility_off")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=OpenAIResponsePayload.model_validate({"output": []})),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hello"}]}
+    )
+
+    await service.compact_responses(payload, {"Authorization": "Bearer secret", "User-Agent": "codex-test"})
+
+    assert request_logs.calls[0]["request_visibility"] is None
+
+
+@pytest.mark.asyncio
+async def test_compact_request_log_persists_redacted_visibility_when_flag_enabled(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.request_visibility_mode = "persistent"
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_visibility_on")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=OpenAIResponsePayload.model_validate({"output": []})),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}],
+            "service_tier": "priority",
+            "reasoning": {"effort": "high", "summary": "detailed"},
+            "metadata": {"apiKey": "sk-live", "nested": {"sessionToken": "secret-token"}},
+        }
+    )
+
+    await service.compact_responses(
+        payload,
+        {
+            "Authorization": "Bearer secret",
+            "Cookie": "session=secret",
+            "Content-Type": "application/json",
+            "Session_Id": "sid-compact",
+            "User-Agent": "codex-test",
+            "X-Codex-Conversation-Id": "conv_123",
+        },
+    )
+
+    visibility = json.loads(cast(str, request_logs.calls[0]["request_visibility"]))
+    assert visibility["headers"] == {
+        "content-type": "application/json",
+        "user-agent": "codex-test",
+    }
+    assert visibility["body"]["metadata"] == {
+        "apiKey": "[REDACTED]",
+        "nested": {"sessionToken": "[REDACTED]"},
+    }
+    assert visibility["body"]["instructions"] == "hi"
+    assert visibility["body"]["input"] == [{"role": "user", "content": "hello"}]
+    assert visibility["body"]["service_tier"] == "priority"
+    assert visibility["body"]["reasoning"] == {"effort": "high", "summary": "detailed"}
+    assert "authorization" not in visibility["headers"]
+    assert "cookie" not in visibility["headers"]
+    assert "session_id" not in visibility["headers"]
+    assert "x-codex-conversation-id" not in visibility["headers"]
+
+
+@pytest.mark.asyncio
+async def test_stream_request_log_persists_redacted_visibility_when_flag_enabled(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.request_visibility_mode = "persistent"
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_visibility_on")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_stream_visibility","service_tier":"priority"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hello there",
+            "input": [{"role": "user", "content": "keep me hidden"}],
+            "service_tier": "priority",
+            "reasoning": {"effort": "high", "summary": "detailed"},
+            "metadata": {"apiKey": "sk-live", "nested": {"sessionToken": "tok_123"}},
+            "stream": True,
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {
+                "Authorization": "Bearer secret",
+                "Content-Type": "application/json",
+                "User-Agent": "codex-test",
+                "Session_Id": "sid-stream",
+            },
+        )
+    ]
+
+    assert chunks
+    visibility = json.loads(cast(str, request_logs.calls[0]["request_visibility"]))
+    assert visibility["headers"] == {
+        "content-type": "application/json",
+        "user-agent": "codex-test",
+    }
+    assert visibility["body"]["instructions"] == "hello there"
+    assert visibility["body"]["input"] == [{"role": "user", "content": "keep me hidden"}]
+    assert visibility["body"]["service_tier"] == "priority"
+    assert visibility["body"]["reasoning"] == {"effort": "high", "summary": "detailed"}
+    assert visibility["body"]["metadata"] == {
+        "apiKey": "[REDACTED]",
+        "nested": {"sessionToken": "[REDACTED]"},
+    }
+
+
 def test_logged_error_json_response_emits_proxy_error_log(caplog):
     scope = {
         "type": "http",
@@ -3878,7 +4040,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
             "promptCacheKey": "thread_123",
             "promptCacheRetention": "12h",
             "tools": [{"type": "web_search_preview"}],
-            "service_tier": "priority",
+            "serviceTier": "fast",
             "reasoning": {"effort": "low"},
         },
         headers={"session_id": "sid-ignored"},
@@ -3909,6 +4071,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert normalized_payload["model"] == "gpt-5.2"
     assert normalized_payload["reasoning"] == {"effort": "high"}
     assert normalized_payload["service_tier"] == "priority"
+    assert "serviceTier" not in normalized_payload
 
 
 @pytest.mark.asyncio

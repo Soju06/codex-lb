@@ -244,6 +244,130 @@ def test_openai_compatible_top_level_verbosity_is_normalized():
     assert "verbosity" not in dumped
 
 
+def test_responses_normalizes_camel_case_top_level_aliases_before_validation():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "serviceTier": "fast",
+        "promptCacheKey": "thread_123",
+        "parallelToolCalls": True,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.service_tier == "priority"
+    assert request.prompt_cache_key == "thread_123"
+    assert request.parallel_tool_calls is True
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "priority"
+    assert dumped["prompt_cache_key"] == "thread_123"
+    assert dumped["parallel_tool_calls"] is True
+    assert "serviceTier" not in dumped
+    assert "promptCacheKey" not in dumped
+    assert "parallelToolCalls" not in dumped
+
+
+def test_responses_prefer_explicit_snake_case_over_camel_case_aliases():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "flex",
+        "serviceTier": "priority",
+        "prompt_cache_key": "snake_key",
+        "promptCacheKey": "camel_key",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.service_tier == "flex"
+    assert request.prompt_cache_key == "snake_key"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "flex"
+    assert dumped["prompt_cache_key"] == "snake_key"
+
+
+def test_responses_nested_targets_override_flat_aliases():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "reasoning": {"effort": "low", "summary": "detailed"},
+        "reasoningEffort": "high",
+        "reasoningSummary": "auto",
+        "text": {"verbosity": "high"},
+        "textVerbosity": "low",
+        "verbosity": "medium",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "low"
+    assert request.reasoning.summary == "detailed"
+    assert request.text is not None
+    assert request.text.verbosity == "high"
+    dumped = request.to_payload()
+    assert dumped["reasoning"] == {"effort": "low", "summary": "detailed"}
+    assert dumped["text"] == {"verbosity": "high"}
+
+
+def test_compact_request_normalizes_camel_case_aliases_before_validation():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "serviceTier": "fast",
+        "promptCacheKey": "thread_123",
+        "promptCacheRetention": "4h",
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.service_tier == "priority"
+    assert request.prompt_cache_key == "thread_123"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "priority"
+    assert dumped["prompt_cache_key"] == "thread_123"
+    assert "prompt_cache_retention" not in dumped
+    assert "serviceTier" not in dumped
+    assert "promptCacheKey" not in dumped
+
+
+def test_top_level_normalization_does_not_mutate_nested_payload_keys():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "serviceTier": "priority",
+        "tools": [
+            {
+                "type": "function",
+                "name": "do_thing",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "serviceTier": {"type": "string"},
+                        "promptCacheKey": {"type": "string"},
+                    },
+                },
+            }
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    tools = dumped["tools"]
+    assert isinstance(tools, list)
+    first_tool = tools[0]
+    assert isinstance(first_tool, dict)
+    parameters = first_tool["parameters"]
+    assert isinstance(parameters, dict)
+    properties = parameters["properties"]
+    assert isinstance(properties, dict)
+    assert "serviceTier" in properties
+    assert "promptCacheKey" in properties
+    assert "service_tier" not in properties
+    assert "prompt_cache_key" not in properties
+
+
 def test_v1_responses_preserves_service_tier():
     payload = {
         "model": "gpt-5.1",

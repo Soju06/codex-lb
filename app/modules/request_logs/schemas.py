@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
+from app.core.types import JsonValue
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -43,3 +45,12 @@ class RequestLogFilterOptionsResponse(DashboardModel):
     account_ids: list[str] = Field(default_factory=list)
     model_options: list[RequestLogModelOption] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)
+
+
+class RequestLogVisibilityResponse(DashboardModel):
+    request_id: str
+    captured: bool
+    unavailable_reason: Literal["not_captured"] | None = None
+    truncated: bool = False
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: JsonValue | None = None

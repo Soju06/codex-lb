@@ -1,0 +1,4 @@
+- [x] Update the resilience memory monitor to avoid importing Unix-only modules on Windows startup.
+- [x] Add a Windows-compatible RSS lookup path and a safe no-crash fallback when RSS cannot be measured.
+- [x] Add unit regression coverage for Windows import behavior and unavailable provider fallback behavior.
+- [x] Document the startup portability requirement in an OpenSpec delta.

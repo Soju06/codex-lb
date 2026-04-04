@@ -116,7 +116,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- $waitForDatabaseEnabled := and .Values.postgresql.enabled .Values.config.databaseMigrateOnStartup -}}
-      {{- $schemaGateEnabled := and .Values.postgresql.enabled .Values.migration.enabled (not .Values.config.databaseMigrateOnStartup) .Values.migration.schemaGate.enabled -}}
+      {{- $schemaGateEnabled := and .Values.migration.enabled (not .Values.config.databaseMigrateOnStartup) .Values.migration.schemaGate.enabled -}}
       {{- if or $waitForDatabaseEnabled $schemaGateEnabled }}
       initContainers:
         {{- if $waitForDatabaseEnabled }}

@@ -24,9 +24,9 @@ from app.core.auth.refresh import (
     pop_token_refresh_timeout_override,
     push_token_refresh_timeout_override,
 )
-from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy
+from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
-from app.core.balancer.types import UpstreamError
+from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
     filter_inbound_headers,
@@ -86,6 +86,7 @@ from app.modules.proxy.helpers import (
     _summarize_window,
     _upstream_error_from_openai,
     _window_snapshot,
+    classify_upstream_failure,
 )
 from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
@@ -600,13 +601,43 @@ class ProxyService:
                         if exc.retryable_same_contract and safe_retry_budget > 0:
                             safe_retry_budget -= 1
                             continue
+                        error = _parse_openai_error(exc.payload)
+                        code = _normalize_error_code(
+                            error.code if error else None,
+                            error.type if error else None,
+                        )
+                        classified = await self._handle_stream_error(
+                            account,
+                            _upstream_error_from_openai(error),
+                            code,
+                        )
+                        if getattr(base_settings, "deterministic_failover_enabled", True):
+                            action = failover_decision(
+                                failure_class=classified["failure_class"],
+                                downstream_visible=False,
+                                candidates_remaining=_COMPACT_MAX_ACCOUNT_ATTEMPTS - _account_attempt - 1,
+                            )
+                        else:
+                            action = "surface"
+                        logger.info(
+                            "Failover decision request_id=%s transport=compact account_id=%s "
+                            "attempt=%d failure_class=%s action=%s",
+                            request_id,
+                            account.id,
+                            _account_attempt + 1,
+                            classified["failure_class"],
+                            action,
+                        )
+                        if action == "failover_next":
+                            last_exc = exc
+                            transient_exhausted = True
+                            break
                         await self._settle_compact_api_key_usage(
                             api_key=api_key,
                             api_key_reservation=api_key_reservation,
                             response=None,
                             request_service_tier=request_service_tier,
                         )
-                        await self._handle_proxy_error(account, exc)
                         raise
                 if transient_exhausted:
                     continue  # outer loop: try different account
@@ -3471,8 +3502,37 @@ class ProxyService:
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
-                            # For ProxyResponseError, only intercept HTTP 500; re-raise others
                             if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
+                                error = _parse_openai_error(tex.payload)
+                                code = _normalize_error_code(
+                                    error.code if error else None,
+                                    error.type if error else None,
+                                )
+                                classified = await self._handle_stream_error(
+                                    account,
+                                    _upstream_error_from_openai(error),
+                                    code,
+                                )
+                                if getattr(base_settings, "deterministic_failover_enabled", True):
+                                    action = failover_decision(
+                                        failure_class=classified["failure_class"],
+                                        downstream_visible=False,
+                                        candidates_remaining=max_attempts - attempt - 1,
+                                    )
+                                else:
+                                    action = "surface"
+                                logger.info(
+                                    "Failover decision request_id=%s transport=stream account_id=%s "
+                                    "attempt=%d failure_class=%s action=%s",
+                                    request_id,
+                                    account.id,
+                                    attempt + 1,
+                                    classified["failure_class"],
+                                    action,
+                                )
+                                if action == "failover_next":
+                                    last_transient_exc = tex
+                                    break
                                 raise
                             transient_retries += 1
                             error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
@@ -4279,23 +4339,28 @@ class ProxyService:
         account: Account,
         error: UpstreamError,
         code: str,
-    ) -> None:
-        if code in {"rate_limit_exceeded", "usage_limit_reached"}:
-            await self._load_balancer.mark_rate_limit(account, error)
-            return
-        if code in {"insufficient_quota", "usage_not_included", "quota_exceeded"}:
-            await self._load_balancer.mark_quota_exceeded(account, error)
-            return
-        if code in PERMANENT_FAILURE_CODES:
-            await self._load_balancer.mark_permanent_failure(account, code)
-            return
-        await self._load_balancer.record_error(account)
-        logger.info(
-            "Recorded transient account error account_id=%s request_id=%s code=%s",
-            account.id,
-            get_request_id(),
-            code,
+    ) -> ClassifiedFailure:
+        classified = classify_upstream_failure(
+            error_code=code,
+            error=error,
+            http_status=None,
+            phase="first_event",
         )
+        if classified["failure_class"] == "rate_limit":
+            await self._load_balancer.mark_rate_limit(account, error)
+        elif classified["failure_class"] == "quota":
+            await self._load_balancer.mark_quota_exceeded(account, error)
+        elif code in PERMANENT_FAILURE_CODES:
+            await self._load_balancer.mark_permanent_failure(account, code)
+        else:
+            await self._load_balancer.record_error(account)
+            logger.info(
+                "Recorded transient account error account_id=%s request_id=%s code=%s",
+                account.id,
+                get_request_id(),
+                code,
+            )
+        return classified
 
 
 class _RetryableStreamError(Exception):

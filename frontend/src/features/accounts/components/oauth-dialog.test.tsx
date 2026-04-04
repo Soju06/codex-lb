@@ -43,6 +43,11 @@ const browserPendingState = {
   errorMessage: null,
 };
 
+const browserStartingState = {
+  ...browserPendingState,
+  status: "starting" as const,
+};
+
 const successState = {
   ...idleState,
   status: "success" as const,
@@ -161,5 +166,86 @@ describe("OauthDialog", () => {
     expect(onManualCallback).toHaveBeenCalledWith(
       "http://localhost:1455/auth/callback?code=abc&state=expected",
     );
+  });
+
+  it("refreshes the browser authorization link without leaving the dialog", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={onStart}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Refresh link" }));
+
+    expect(onStart).toHaveBeenCalledWith("browser");
+  });
+
+  it("renders a disabled loading refresh state while generating a fresh browser link", () => {
+    render(
+      <OauthDialog
+        open
+        state={browserStartingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Refreshing..." })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Change method" })).toBeDisabled();
+    expect(screen.getByText("Generating a fresh sign-in link...")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open sign-in page" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
+  });
+
+  it("clears the pasted callback input when browser refresh disables the form", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const callbackInput = screen.getByPlaceholderText(
+      "http://localhost:1455/auth/callback?code=...&state=...",
+    );
+    await user.type(callbackInput, "http://localhost:1455/auth/callback?code=abc&state=expected");
+    expect(callbackInput).toHaveValue(
+      "http://localhost:1455/auth/callback?code=abc&state=expected",
+    );
+
+    rerender(
+      <OauthDialog
+        open
+        state={browserStartingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(callbackInput).toHaveValue("");
+    expect(callbackInput).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
   });
 });

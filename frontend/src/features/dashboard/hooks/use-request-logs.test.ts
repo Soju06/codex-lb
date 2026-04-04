@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
-import { createElement, type PropsWithChildren } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { createElement, type PropsWithChildren, useEffect } from "react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
@@ -19,12 +19,31 @@ function createTestQueryClient(): QueryClient {
   });
 }
 
-function createWrapper(queryClient: QueryClient, initialEntry = "/dashboard") {
+function LocationSpy({ onChange }: { onChange?: (search: string) => void }) {
+  const location = useLocation();
+
+  useEffect(() => {
+    onChange?.(location.search);
+  }, [location.search, onChange]);
+
+  return null;
+}
+
+function createWrapper(
+  queryClient: QueryClient,
+  initialEntry = "/dashboard",
+  onLocationChange?: (search: string) => void,
+) {
   return function Wrapper({ children }: PropsWithChildren) {
     return createElement(
       QueryClientProvider,
       { client: queryClient },
-      createElement(MemoryRouter, { initialEntries: [initialEntry] }, children),
+      createElement(
+        MemoryRouter,
+        { initialEntries: [initialEntry] },
+        createElement(LocationSpy, { onChange: onLocationChange }),
+        children,
+      ),
     );
   };
 }
@@ -34,7 +53,7 @@ describe("useRequestLogs", () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(
       queryClient,
-      "/dashboard?search=rate&timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&status=rate_limit&limit=10&offset=20",
+      "/dashboard?overviewTimeframe=30d&search=rate&timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&status=rate_limit&limit=10&offset=20",
     );
 
     const { result } = renderHook(() => useRequestLogs(), { wrapper });
@@ -60,6 +79,29 @@ describe("useRequestLogs", () => {
     expect(key?.[2].search).toBe("rate");
     expect(key?.[2].limit).toBe(10);
     expect(key?.[2].offset).toBe(20);
+  });
+
+  it("preserves unrelated search params when request-log filters change", async () => {
+    const queryClient = createTestQueryClient();
+    let locationSearch = "";
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?overviewTimeframe=30d&limit=25&offset=0",
+      (search) => {
+        locationSearch = search;
+      },
+    );
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+
+    act(() => {
+      result.current.updateFilters({ search: "quota" });
+    });
+
+    await waitFor(() => expect(result.current.filters.search).toBe("quota"));
+    expect(locationSearch).toContain("overviewTimeframe=30d");
+    expect(locationSearch).toContain("search=quota");
   });
 
   it("supports pagination updates with total/hasMore response", async () => {

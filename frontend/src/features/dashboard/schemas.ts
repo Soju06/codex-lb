@@ -7,6 +7,15 @@ export { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema 
 export type { AccountSummary };
 export type { AccountAdditionalQuota as AdditionalQuota } from "@/features/accounts/schemas";
 
+export const OverviewTimeframeKeySchema = z.enum(["1d", "7d", "30d"]);
+export type OverviewTimeframe = z.infer<typeof OverviewTimeframeKeySchema>;
+export const DEFAULT_OVERVIEW_TIMEFRAME: OverviewTimeframe = "7d";
+
+export function parseOverviewTimeframe(value: string | null | undefined): OverviewTimeframe {
+  const parsed = OverviewTimeframeKeySchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_OVERVIEW_TIMEFRAME;
+}
+
 export const UsageHistoryItemSchema = z.object({
   accountId: z.string(),
   remainingPercentAvg: z.number().nullable(),
@@ -28,16 +37,24 @@ export const UsageSummaryWindowSchema = z.object({
   windowMinutes: z.number().nullable(),
 });
 
+export const DashboardOverviewTimeframeSchema = z.object({
+  key: OverviewTimeframeKeySchema,
+  windowMinutes: z.number().int().positive(),
+  bucketSeconds: z.number().int().positive(),
+  bucketCount: z.number().int().positive(),
+});
+
 export const UsageCostSchema = z.object({
   currency: z.string(),
-  totalUsd7d: z.number(),
+  totalUsd: z.number(),
 });
 
 export const DashboardMetricsSchema = z.object({
-  requests7d: z.number().nullable(),
-  tokensSecondaryWindow: z.number().nullable(),
-  cachedTokensSecondaryWindow: z.number().nullable(),
-  errorRate7d: z.number().nullable(),
+  requests: z.number().nullable(),
+  tokens: z.number().nullable(),
+  cachedInputTokens: z.number().nullable(),
+  errorRate: z.number().nullable(),
+  errorCount: z.number().nullable(),
   topError: z.string().nullable(),
 });
 
@@ -64,6 +81,7 @@ export const DepletionSchema = z.object({
 
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.string().datetime({ offset: true }).nullable(),
+  timeframe: DashboardOverviewTimeframeSchema,
   accounts: z.array(AccountSummarySchema),
   summary: z.object({
     primaryWindow: UsageSummaryWindowSchema,
@@ -130,6 +148,7 @@ export const FilterStateSchema = z.object({
 
 export type DashboardMetrics = z.infer<typeof DashboardMetricsSchema>;
 export type DashboardOverview = z.infer<typeof DashboardOverviewSchema>;
+export type DashboardOverviewTimeframe = z.infer<typeof DashboardOverviewTimeframeSchema>;
 export type TrendPoint = z.infer<typeof TrendPointSchema>;
 export type MetricsTrends = z.infer<typeof MetricsTrendsSchema>;
 export type UsageWindow = z.infer<typeof UsageWindowSchema>;

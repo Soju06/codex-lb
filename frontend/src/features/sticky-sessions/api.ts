@@ -2,6 +2,8 @@ import { del, get, post } from "@/lib/api-client";
 
 import {
   StickySessionIdentifierSchema,
+  StickySessionsDeleteFilteredRequestSchema,
+  StickySessionsDeleteFilteredResponseSchema,
   StickySessionsDeleteRequestSchema,
   StickySessionsDeleteResponseSchema,
   StickySessionsListParamsSchema,
@@ -19,6 +21,14 @@ export function listStickySessions(params: unknown) {
     offset: String(validated.offset),
     limit: String(validated.limit),
   });
+  if (validated.accountQuery) {
+    searchParams.set("accountQuery", validated.accountQuery);
+  }
+  if (validated.keyQuery) {
+    searchParams.set("keyQuery", validated.keyQuery);
+  }
+  searchParams.set("sortBy", validated.sortBy);
+  searchParams.set("sortDir", validated.sortDir);
   return get(`${STICKY_SESSIONS_PATH}?${searchParams.toString()}`, StickySessionsListResponseSchema);
 }
 
@@ -30,6 +40,13 @@ export function deleteStickySession(payload: unknown) {
 export function deleteStickySessions(payload: unknown) {
   const validated = StickySessionsDeleteRequestSchema.parse(payload);
   return post(`${STICKY_SESSIONS_PATH}/delete`, StickySessionsDeleteResponseSchema, {
+    body: validated,
+  });
+}
+
+export function deleteFilteredStickySessions(payload: unknown) {
+  const validated = StickySessionsDeleteFilteredRequestSchema.parse(payload);
+  return post(`${STICKY_SESSIONS_PATH}/delete-filtered`, StickySessionsDeleteFilteredResponseSchema, {
     body: validated,
   });
 }

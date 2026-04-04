@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pin } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { SpinnerBlock } from "@/components/ui/spinner";
 import {
   Table,
@@ -18,7 +19,13 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { useStickySessions } from "@/features/sticky-sessions/hooks/use-sticky-sessions";
-import type { StickySessionEntry, StickySessionIdentifier, StickySessionKind } from "@/features/sticky-sessions/schemas";
+import type {
+  StickySessionEntry,
+  StickySessionIdentifier,
+  StickySessionKind,
+  StickySessionSortBy,
+  StickySessionSortDir,
+} from "@/features/sticky-sessions/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
@@ -40,10 +47,36 @@ function stickySessionRowId(entry: StickySessionIdentifier): string {
 
 const EMPTY_STICKY_SESSION_ENTRIES: StickySessionEntry[] = [];
 
+function nextSortDirection(currentSortBy: StickySessionSortBy, currentSortDir: StickySessionSortDir, target: StickySessionSortBy) {
+  if (currentSortBy != target) {
+    return target === "updated_at" ? "desc" : "asc";
+  }
+  return currentSortDir === "asc" ? "desc" : "asc";
+}
+
+function sortIndicator(currentSortBy: StickySessionSortBy, currentSortDir: StickySessionSortDir, target: StickySessionSortBy) {
+  if (currentSortBy !== target) {
+    return null;
+  }
+  return currentSortDir === "asc" ? " ↑" : " ↓";
+}
+
 export function StickySessionsSection() {
-  const { params, setLimit, setOffset, stickySessionsQuery, deleteMutation, purgeMutation } = useStickySessions();
+  const {
+    params,
+    setAccountQuery,
+    setKeyQuery,
+    setSort,
+    setLimit,
+    setOffset,
+    stickySessionsQuery,
+    deleteMutation,
+    deleteFilteredMutation,
+    purgeMutation,
+  } = useStickySessions();
   const deleteDialog = useDialogState<StickySessionIdentifier>();
   const deleteSelectedDialog = useDialogState<StickySessionIdentifier[]>();
+  const deleteFilteredDialog = useDialogState<number>();
   const purgeDialog = useDialogState();
   const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
 
@@ -51,17 +84,20 @@ export function StickySessionsSection() {
     () =>
       getErrorMessageOrNull(stickySessionsQuery.error) ||
       getErrorMessageOrNull(deleteMutation.error) ||
+      getErrorMessageOrNull(deleteFilteredMutation.error) ||
       getErrorMessageOrNull(purgeMutation.error),
-    [stickySessionsQuery.error, deleteMutation.error, purgeMutation.error],
+    [stickySessionsQuery.error, deleteMutation.error, deleteFilteredMutation.error, purgeMutation.error],
   );
 
   const entries = stickySessionsQuery.data?.entries ?? EMPTY_STICKY_SESSION_ENTRIES;
   const staleCount = stickySessionsQuery.data?.stalePromptCacheCount ?? 0;
   const total = stickySessionsQuery.data?.total ?? 0;
   const hasMore = stickySessionsQuery.data?.hasMore ?? false;
-  const busy = deleteMutation.isPending || purgeMutation.isPending;
+  const busy = deleteMutation.isPending || deleteFilteredMutation.isPending || purgeMutation.isPending;
   const hasEntries = entries.length > 0;
   const hasAnyRows = total > 0;
+  const hasActiveTextFilter = params.accountQuery.trim().length > 0 || params.keyQuery.trim().length > 0;
+  const visibleRowIdSet = useMemo(() => new Set(entries.map((entry) => stickySessionRowId(entry))), [entries]);
   const selectedRowIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
   const selectedEntries = useMemo(
     () =>
@@ -76,6 +112,15 @@ export function StickySessionsSection() {
   const selectedDeleteTargets = deleteSelectedDialog.data ?? [];
   const selectedDeleteCount = selectedDeleteTargets.length;
 
+  useEffect(() => {
+    if (!stickySessionsQuery.isLoading && total > 0 && entries.length === 0 && params.offset > 0) {
+      const lastValidOffset = Math.max(0, Math.floor((total - 1) / params.limit) * params.limit);
+      if (lastValidOffset !== params.offset) {
+        setOffset(lastValidOffset);
+      }
+    }
+  }, [entries.length, params.limit, params.offset, setOffset, stickySessionsQuery.isLoading, total]);
+
   const setSelected = (target: StickySessionIdentifier, checked: boolean) => {
     const rowId = stickySessionRowId(target);
     setSelectedRowIds((current) => {
@@ -87,7 +132,10 @@ export function StickySessionsSection() {
   };
 
   const setAllVisibleSelected = (checked: boolean) => {
-    setSelectedRowIds(checked ? entries.map((entry) => stickySessionRowId(entry)) : []);
+    setSelectedRowIds((current) => {
+      const remaining = current.filter((rowId) => !visibleRowIdSet.has(rowId));
+      return checked ? [...remaining, ...entries.map((entry) => stickySessionRowId(entry))] : remaining;
+    });
   };
 
   return (
@@ -105,6 +153,21 @@ export function StickySessionsSection() {
       </div>
 
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Input
+          aria-label="Filter sticky sessions by account"
+          placeholder="Filter by account..."
+          value={params.accountQuery}
+          onChange={(event) => setAccountQuery(event.target.value)}
+        />
+        <Input
+          aria-label="Filter sticky sessions by key"
+          placeholder="Filter by key..."
+          value={params.keyQuery}
+          onChange={(event) => setKeyQuery(event.target.value)}
+        />
+      </div>
 
       <div className="flex flex-col gap-3 rounded-lg border px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
@@ -127,12 +190,22 @@ export function StickySessionsSection() {
           <Button
             type="button"
             size="sm"
+            variant="outline"
+            className="h-8 text-xs"
+            disabled={busy || !hasActiveTextFilter || total === 0}
+            onClick={() => deleteFilteredDialog.show(total)}
+          >
+            Delete Filtered
+          </Button>
+          <Button
+            type="button"
+            size="sm"
             variant="destructive"
             className="h-8 text-xs"
             disabled={busy || selectedCount === 0}
             onClick={() => deleteSelectedDialog.show(selectedEntries)}
           >
-            Remove selected
+            Delete Sessions
           </Button>
           <Button
             type="button"
@@ -166,23 +239,43 @@ export function StickySessionsSection() {
                   <TableRow>
                     <TableHead className="w-[5%] min-w-[3rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       <Checkbox
-                        aria-label="Select all visible sticky sessions"
+                        aria-label="Select all sticky sessions on current page"
                         checked={allVisibleSelected ? true : someVisibleSelected ? "indeterminate" : false}
                         disabled={busy || !hasEntries}
                         onCheckedChange={(checked) => setAllVisibleSelected(checked === true)}
                       />
                     </TableHead>
                     <TableHead className="w-[25%] min-w-[14rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Key
+                      <button
+                        type="button"
+                        className="cursor-pointer text-left transition-colors hover:text-foreground"
+                        onClick={() => setSort("key", nextSortDirection(params.sortBy, params.sortDir, "key"))}
+                      >
+                        {`Key${sortIndicator(params.sortBy, params.sortDir, "key") ?? ""}`}
+                      </button>
                     </TableHead>
                     <TableHead className="w-[14%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       Kind
                     </TableHead>
                     <TableHead className="w-[18%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Account
+                      <button
+                        type="button"
+                        className="cursor-pointer text-left transition-colors hover:text-foreground"
+                        onClick={() => setSort("account", nextSortDirection(params.sortBy, params.sortDir, "account"))}
+                      >
+                        {`Account${sortIndicator(params.sortBy, params.sortDir, "account") ?? ""}`}
+                      </button>
                     </TableHead>
                     <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Updated
+                      <button
+                        type="button"
+                        className="cursor-pointer text-left transition-colors hover:text-foreground"
+                        onClick={() =>
+                          setSort("updated_at", nextSortDirection(params.sortBy, params.sortDir, "updated_at"))
+                        }
+                      >
+                        {`Updated${sortIndicator(params.sortBy, params.sortDir, "updated_at") ?? ""}`}
+                      </button>
                     </TableHead>
                     <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       Expiry
@@ -272,7 +365,7 @@ export function StickySessionsSection() {
             ? `${kindLabel(deleteDialog.data.kind)} mapping ${deleteDialog.data.key} will stop pinning future requests.`
             : ""
         }
-        confirmLabel="Remove"
+        confirmLabel="Delete"
         onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
           if (!deleteDialog.data) {
@@ -286,21 +379,37 @@ export function StickySessionsSection() {
 
       <ConfirmDialog
         open={deleteSelectedDialog.open}
-        title="Remove selected sticky sessions"
+        title="Delete selected sticky sessions"
         description={
           selectedDeleteCount === 1
-            ? "The selected sticky session will stop pinning future requests."
-            : `${selectedDeleteCount} selected sticky sessions will stop pinning future requests.`
+            ? "Delete the selected sticky session? Failed deletions will be reported."
+            : `Delete ${selectedDeleteCount} selected sticky sessions? Failed deletions will be reported.`
         }
-        confirmLabel="Remove selected"
+        confirmLabel="Delete Sessions"
         onOpenChange={deleteSelectedDialog.onOpenChange}
         onConfirm={() => {
           if (selectedDeleteTargets.length === 0) {
             return;
           }
-          void deleteMutation.mutateAsync(selectedDeleteTargets).finally(() => {
-            setSelectedRowIds([]);
+          void deleteMutation.mutateAsync(selectedDeleteTargets).then((response) => {
+            setSelectedRowIds(response.failed.map((entry) => stickySessionRowId(entry)));
+          }).finally(() => {
             deleteSelectedDialog.hide();
+          });
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleteFilteredDialog.open}
+        title="Delete filtered sticky sessions"
+        description={`Delete all ${deleteFilteredDialog.data ?? 0} sticky sessions that match the current filters?`}
+        confirmLabel="Delete Filtered"
+        onOpenChange={deleteFilteredDialog.onOpenChange}
+        onConfirm={() => {
+          void deleteFilteredMutation.mutateAsync().then(() => {
+            setSelectedRowIds([]);
+          }).finally(() => {
+            deleteFilteredDialog.hide();
           });
         }}
       />

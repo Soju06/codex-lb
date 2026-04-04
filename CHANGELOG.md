@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.2](https://github.com/Soju06/codex-lb/compare/v1.10.1...v1.10.2) (2026-04-04)
+
+
+### Bug Fixes
+
+* **helm:** disable service links and use fully qualified image names ([#321](https://github.com/Soju06/codex-lb/issues/321)) ([c54edee](https://github.com/Soju06/codex-lb/commit/c54edeefa00b4271f6f80270462bb8ddcade5e92))
+* **helm:** one-click external database setup improvements ([#322](https://github.com/Soju06/codex-lb/issues/322)) ([4c3c945](https://github.com/Soju06/codex-lb/commit/4c3c9453a48aaced5e023447446da00d6843c7cf))
+
 ## [1.10.1](https://github.com/Soju06/codex-lb/compare/v1.10.0...v1.10.1) (2026-04-03)
 
 

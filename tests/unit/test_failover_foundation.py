@@ -362,14 +362,3 @@ class TestSelectAccountHealthTier:
         result = select_account(states, routing_strategy="capacity_weighted", deterministic_probe=True)
         assert result.account is not None
         assert result.account.account_id == "healthy"
-
-
-class TestSelectWithStickinessDrain:
-    def test_draining_pinned_skipped_for_prompt_cache(self) -> None:
-        states = [
-            AccountState("pinned", AccountStatus.ACTIVE, used_percent=90.0, health_tier=HEALTH_TIER_DRAINING),
-            AccountState("other", AccountStatus.ACTIVE, used_percent=50.0, health_tier=HEALTH_TIER_HEALTHY),
-        ]
-        result = select_account(states, routing_strategy="usage_weighted")
-        assert result.account is not None
-        assert result.account.account_id == "other"

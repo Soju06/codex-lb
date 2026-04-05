@@ -639,111 +639,102 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                if (
-                    pinned.status == AccountStatus.ACTIVE
-                    and pinned.health_tier == HEALTH_TIER_DRAINING
-                    and not reallocate_sticky
-                    and sticky_kind != StickySessionKind.CODEX_SESSION
-                ):
-                    pinned = None
-
-                if pinned is not None:
-                    # Check if pinned account has insufficient budget (< 5% remaining)
-                    # or rate limit is far away (reset_at more than 10 minutes away)
-                    now = time.time()
-                    budget_exhausted = (
-                        sticky_kind == StickySessionKind.PROMPT_CACHE
-                        and pinned.status != AccountStatus.RATE_LIMITED
-                        and pinned.used_percent is not None
-                        and pinned.used_percent > budget_threshold_pct
+                # Check if pinned account has insufficient budget (< 5% remaining)
+                # or rate limit is far away (reset_at more than 10 minutes away)
+                now = time.time()
+                budget_exhausted = (
+                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                    and pinned.status != AccountStatus.RATE_LIMITED
+                    and pinned.used_percent is not None
+                    and pinned.used_percent > budget_threshold_pct
+                )
+                rate_limit_far_away = (
+                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                    and pinned.status == AccountStatus.RATE_LIMITED
+                    and pinned.reset_at is not None
+                    and pinned.reset_at - now >= 600  # 10 minutes
+                )
+                if not (budget_exhausted or rate_limit_far_away):
+                    pinned_result = select_account(
+                        [pinned],
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        allow_backoff_fallback=False,
                     )
-                    rate_limit_far_away = (
-                        sticky_kind == StickySessionKind.PROMPT_CACHE
-                        and pinned.status == AccountStatus.RATE_LIMITED
-                        and pinned.reset_at is not None
-                        and pinned.reset_at - now >= 600  # 10 minutes
-                    )
-                    if not (budget_exhausted or rate_limit_far_away):
-                        pinned_result = select_account(
-                            [pinned],
+                    if pinned_result.account is not None:
+                        if sticky_max_age_seconds is not None:
+                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
+                        return pinned_result
+                else:
+                    # Before reallocating, check whether the pool has a
+                    # meaningfully better candidate.  When every account
+                    # is above the budget threshold, reallocating just
+                    # wastes DB writes and destroys prompt-cache locality
+                    # (thrashing).
+                    if budget_exhausted:
+                        pool_best = select_account(
+                            states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
-                            allow_backoff_fallback=False,
+                            deterministic_probe=True,
                         )
-                        if pinned_result.account is not None:
-                            if sticky_max_age_seconds is not None:
-                                await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                            return pinned_result
-                    else:
-                        # Before reallocating, check whether the pool has a
-                        # meaningfully better candidate.  When every account
-                        # is above the budget threshold, reallocating just
-                        # wastes DB writes and destroys prompt-cache locality
-                        # (thrashing).
-                        if budget_exhausted:
-                            pool_best = select_account(
-                                states,
+                        pool_also_exhausted = pool_best.account is not None and (
+                            pool_best.account.account_id == pinned.account_id
+                            or (
+                                pool_best.account.used_percent is not None
+                                and pool_best.account.used_percent > budget_threshold_pct
+                            )
+                        )
+                        if pool_also_exhausted:
+                            pinned_result = select_account(
+                                [pinned],
                                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                                 routing_strategy=routing_strategy,
-                                deterministic_probe=True,
+                                allow_backoff_fallback=False,
                             )
-                            pool_also_exhausted = pool_best.account is not None and (
-                                pool_best.account.account_id == pinned.account_id
-                                or (
-                                    pool_best.account.used_percent is not None
-                                    and pool_best.account.used_percent > budget_threshold_pct
-                                )
-                            )
-                            if pool_also_exhausted:
-                                pinned_result = select_account(
-                                    [pinned],
-                                    prefer_earlier_reset=prefer_earlier_reset_accounts,
-                                    routing_strategy=routing_strategy,
-                                    allow_backoff_fallback=False,
-                                )
-                                if pinned_result.account is not None:
-                                    if sticky_max_age_seconds is not None:
-                                        await sticky_repo.upsert(
-                                            sticky_key,
-                                            pinned.account_id,
-                                            kind=sticky_kind,
-                                        )
-                                    return pinned_result
-                        reallocate_sticky = True
-                    # Grace period: if the pinned account is rate-limited with a
-                    # known reset time within a short window, retry selection
-                    # with a small time advance to preserve prompt cache.
-                    # A shallow copy is used so the time-advanced selection does
-                    # not mutate the original state (which is later synced to DB
-                    # by _sync_state for all accounts).
-                    if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
-                        grace_copy = replace(pinned)
-                        grace_result = select_account(
-                            [grace_copy],
-                            now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
-                            prefer_earlier_reset=prefer_earlier_reset_accounts,
-                            routing_strategy=routing_strategy,
-                            allow_backoff_fallback=False,
-                        )
-                        if grace_result.account is not None:
-                            if sticky_max_age_seconds is not None:
-                                await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                            return grace_result
-                    if reallocate_sticky:
-                        await sticky_repo.delete(sticky_key, kind=sticky_kind)
-                    elif pinned.status not in _RECOVERABLE_STATUSES:
-                        # Permanently down (PAUSED/DEACTIVATED) — let the
-                        # fallback be persisted to rebind the mapping.
-                        pass
-                    elif sticky_max_age_seconds is not None:
-                        # TTL-based kind (PROMPT_CACHE): preserve the original
-                        # mapping so the next request returns to the warm-cache
-                        # account once it recovers.  The TTL will naturally
-                        # expire the mapping if recovery takes too long.
-                        persist_fallback = False
-                    # else: durable kind without TTL (CODEX_SESSION) — persist
-                    # fallback so the session sticks to one account during
-                    # the outage instead of bouncing across random fallbacks.
+                            if pinned_result.account is not None:
+                                if sticky_max_age_seconds is not None:
+                                    await sticky_repo.upsert(
+                                        sticky_key,
+                                        pinned.account_id,
+                                        kind=sticky_kind,
+                                    )
+                                return pinned_result
+                    reallocate_sticky = True
+                # Grace period: if the pinned account is rate-limited with a
+                # known reset time within a short window, retry selection
+                # with a small time advance to preserve prompt cache.
+                # A shallow copy is used so the time-advanced selection does
+                # not mutate the original state (which is later synced to DB
+                # by _sync_state for all accounts).
+                if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
+                    grace_copy = replace(pinned)
+                    grace_result = select_account(
+                        [grace_copy],
+                        now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        allow_backoff_fallback=False,
+                    )
+                    if grace_result.account is not None:
+                        if sticky_max_age_seconds is not None:
+                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
+                        return grace_result
+                if reallocate_sticky:
+                    await sticky_repo.delete(sticky_key, kind=sticky_kind)
+                elif pinned.status not in _RECOVERABLE_STATUSES:
+                    # Permanently down (PAUSED/DEACTIVATED) — let the
+                    # fallback be persisted to rebind the mapping.
+                    pass
+                elif sticky_max_age_seconds is not None:
+                    # TTL-based kind (PROMPT_CACHE): preserve the original
+                    # mapping so the next request returns to the warm-cache
+                    # account once it recovers.  The TTL will naturally
+                    # expire the mapping if recovery takes too long.
+                    persist_fallback = False
+                # else: durable kind without TTL (CODEX_SESSION) — persist
+                # fallback so the session sticks to one account during
+                # the outage instead of bouncing across random fallbacks.
             else:
                 await sticky_repo.delete(sticky_key, kind=sticky_kind)
 

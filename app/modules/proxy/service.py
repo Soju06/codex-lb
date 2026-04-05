@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import AsyncIterator, Mapping, NoReturn, cast
@@ -458,6 +458,7 @@ class ProxyService:
                     pop_compact_timeout_overrides(timeout_tokens)
 
             last_exc: ProxyResponseError | None = None
+            excluded_account_ids: set[str] = set()
             for _account_attempt in range(_COMPACT_MAX_ACCOUNT_ATTEMPTS):
                 selection = await self._select_account_with_budget(
                     deadline,
@@ -470,9 +471,12 @@ class ProxyService:
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     routing_strategy=routing_strategy,
                     model=payload.model,
+                    exclude_account_ids=excluded_account_ids,
                 )
                 account = selection.account
                 if not account:
+                    if last_exc is not None:
+                        raise last_exc
                     log_error_code = selection.error_code or "no_accounts"
                     log_error_message = selection.error_message or "No active accounts available"
                     raise ProxyResponseError(
@@ -596,6 +600,7 @@ class ProxyService:
                             # meeting the load balancer backoff threshold (error_count >= 3).
                             await self._load_balancer.record_errors(account, transient_retries - 1)
                             last_exc = exc
+                            excluded_account_ids.add(account.id)
                             transient_exhausted = True
                             break  # break inner loop → outer loop tries different account
                         if exc.retryable_same_contract and safe_retry_budget > 0:
@@ -610,6 +615,7 @@ class ProxyService:
                             account,
                             _upstream_error_from_openai(error),
                             code,
+                            http_status=exc.status_code,
                         )
                         if getattr(base_settings, "deterministic_failover_enabled", True):
                             action = failover_decision(
@@ -630,6 +636,7 @@ class ProxyService:
                         )
                         if action == "failover_next":
                             last_exc = exc
+                            excluded_account_ids.add(account.id)
                             transient_exhausted = True
                             break
                         await self._settle_compact_api_key_usage(
@@ -3301,6 +3308,7 @@ class ProxyService:
         any_attempt_logged = False
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
+        excluded_account_ids: set[str] = set()
         try:
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -3336,6 +3344,7 @@ class ProxyService:
                         prefer_earlier_reset_accounts=prefer_earlier_reset,
                         routing_strategy=routing_strategy,
                         model=payload.model,
+                        exclude_account_ids=excluded_account_ids,
                     )
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
@@ -3512,6 +3521,7 @@ class ProxyService:
                                     account,
                                     _upstream_error_from_openai(error),
                                     code,
+                                    http_status=tex.status_code,
                                 )
                                 if getattr(base_settings, "deterministic_failover_enabled", True):
                                     action = failover_decision(
@@ -3532,6 +3542,7 @@ class ProxyService:
                                 )
                                 if action == "failover_next":
                                     last_transient_exc = tex
+                                    excluded_account_ids.add(account.id)
                                     break
                                 raise
                             transient_retries += 1
@@ -3574,6 +3585,7 @@ class ProxyService:
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
+                            excluded_account_ids.add(account.id)
                             break  # outer loop: select different account
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)
@@ -4297,6 +4309,7 @@ class ProxyService:
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        exclude_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -4307,7 +4320,7 @@ class ProxyService:
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
-                return await self._load_balancer.select_account(
+                selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
@@ -4316,8 +4329,20 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,
+                    exclude_account_ids=exclude_account_ids,
                     budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                 )
+                if (
+                    selection.account is not None
+                    and exclude_account_ids is not None
+                    and selection.account.id in exclude_account_ids
+                ):
+                    return AccountSelection(
+                        account=None,
+                        error_message="No active accounts available",
+                        error_code="no_accounts",
+                    )
+                return selection
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
             _raise_proxy_budget_exhausted()
@@ -4332,6 +4357,7 @@ class ProxyService:
             account,
             _upstream_error_from_openai(error),
             code,
+            http_status=exc.status_code,
         )
 
     async def _handle_stream_error(
@@ -4339,11 +4365,12 @@ class ProxyService:
         account: Account,
         error: UpstreamError,
         code: str,
+        http_status: int | None = None,
     ) -> ClassifiedFailure:
         classified = classify_upstream_failure(
             error_code=code,
             error=error,
-            http_status=None,
+            http_status=http_status,
             phase="first_event",
         )
         if classified["failure_class"] == "rate_limit":

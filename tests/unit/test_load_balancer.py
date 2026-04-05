@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import time
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -621,6 +622,81 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
         runtime=runtime,
     )
     assert state.status == AccountStatus.ACTIVE
+
+
+def test_state_from_account_uses_configured_drain_primary_threshold(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(
+            soft_drain_enabled=True,
+            drain_primary_threshold_pct=75.0,
+            drain_secondary_threshold_pct=90.0,
+            drain_error_window_seconds=60.0,
+            drain_error_count_threshold=2,
+            probe_quiet_seconds=60.0,
+            probe_success_streak_required=3,
+        ),
+    )
+
+    account = _make_test_account(status=AccountStatus.ACTIVE)
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=80.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.health_tier == 1
+
+
+def test_state_from_account_uses_configured_probe_quiet_seconds(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(
+            soft_drain_enabled=True,
+            drain_primary_threshold_pct=85.0,
+            drain_secondary_threshold_pct=90.0,
+            drain_error_window_seconds=60.0,
+            drain_error_count_threshold=2,
+            probe_quiet_seconds=10.0,
+            probe_success_streak_required=3,
+        ),
+    )
+
+    account = _make_test_account(status=AccountStatus.ACTIVE)
+    runtime = RuntimeState(
+        health_tier=1,
+        drain_entered_at=now - 11.0,
+        probe_success_streak=0,
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=50.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=None,
+        runtime=runtime,
+    )
+
+    assert state.health_tier == 2
 
 
 def test_error_backoff_resets_error_count_when_expired():

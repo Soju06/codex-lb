@@ -319,6 +319,12 @@ def evaluate_health_tier(
     now: float | None = None,
     drain_entered_at: float | None = None,
     probe_success_streak: int = 0,
+    drain_primary_threshold_pct: float = DRAIN_PRIMARY_THRESHOLD_PCT,
+    drain_secondary_threshold_pct: float = DRAIN_SECONDARY_THRESHOLD_PCT,
+    drain_error_window_seconds: float = DRAIN_ERROR_WINDOW_SECONDS,
+    drain_error_count_threshold: int = DRAIN_ERROR_COUNT_THRESHOLD,
+    probe_quiet_seconds: float = PROBE_QUIET_SECONDS,
+    probe_success_streak_required: int = PROBE_SUCCESS_STREAK_REQUIRED,
 ) -> int:
     current = now or time.time()
 
@@ -332,16 +338,16 @@ def evaluate_health_tier(
 
     should_drain = False
 
-    if state.used_percent is not None and state.used_percent >= DRAIN_PRIMARY_THRESHOLD_PCT:
+    if state.used_percent is not None and state.used_percent >= drain_primary_threshold_pct:
         should_drain = True
 
-    if state.secondary_used_percent is not None and state.secondary_used_percent >= DRAIN_SECONDARY_THRESHOLD_PCT:
+    if state.secondary_used_percent is not None and state.secondary_used_percent >= drain_secondary_threshold_pct:
         should_drain = True
 
     if (
-        state.error_count >= DRAIN_ERROR_COUNT_THRESHOLD
+        state.error_count >= drain_error_count_threshold
         and state.last_error_at is not None
-        and current - state.last_error_at < DRAIN_ERROR_WINDOW_SECONDS
+        and current - state.last_error_at < drain_error_window_seconds
     ):
         should_drain = True
 
@@ -353,14 +359,14 @@ def evaluate_health_tier(
     if current_tier == HEALTH_TIER_DRAINING:
         if should_drain:
             return HEALTH_TIER_DRAINING
-        if drain_entered_at is not None and current - drain_entered_at >= PROBE_QUIET_SECONDS:
+        if drain_entered_at is not None and current - drain_entered_at >= probe_quiet_seconds:
             return HEALTH_TIER_PROBING
         return HEALTH_TIER_DRAINING
 
     if current_tier == HEALTH_TIER_PROBING:
         if should_drain:
             return HEALTH_TIER_DRAINING
-        if probe_success_streak >= PROBE_SUCCESS_STREAK_REQUIRED:
+        if probe_success_streak >= probe_success_streak_required:
             return HEALTH_TIER_HEALTHY
         return HEALTH_TIER_PROBING
 

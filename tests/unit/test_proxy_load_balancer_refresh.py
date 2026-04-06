@@ -362,6 +362,69 @@ async def test_select_account_filters_to_assigned_account_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_select_account_scope_does_not_prune_runtime_for_other_accounts() -> None:
+    retained = _make_account("acc-retained", "retained@example.com")
+    assigned = _make_account("acc-assigned", "assigned@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        retained.id: UsageHistory(
+            id=1,
+            account_id=retained.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        assigned.id: UsageHistory(
+            id=2,
+            account_id=assigned.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=20.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        retained.id: UsageHistory(
+            id=3,
+            account_id=retained.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        assigned.id: UsageHistory(
+            id=4,
+            account_id=assigned.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=20.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([retained, assigned])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[retained.id] = RuntimeState(cooldown_until=time.time() + 300.0, error_count=2)
+
+    selection = await balancer.select_account(account_ids=[assigned.id])
+
+    assert selection.account is not None
+    assert selection.account.id == assigned.id
+    assert retained.id in balancer._runtime
+    assert balancer._runtime[retained.id].cooldown_until is not None
+    assert balancer._runtime[retained.id].error_count == 2
+
+
+@pytest.mark.asyncio
 async def test_select_account_empty_explicit_scope_fails_closed() -> None:
     preferred = _make_account("acc-preferred", "preferred@example.com")
     fallback = _make_account("acc-fallback", "fallback@example.com")

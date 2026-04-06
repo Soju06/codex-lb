@@ -174,7 +174,11 @@ def is_local_request(request: HTTPConnection) -> bool:
     except ValueError:
         return False
     if address.is_loopback and not settings.firewall_trust_proxy_headers:
-        return not _has_forwarded_client_ip_hint(request.headers)
+        host_header = request.headers.get("host")
+        host_name = None
+        if host_header:
+            host_name = host_header.split(":", 1)[0].strip()
+        return is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers)
     if address.is_loopback and settings.firewall_trust_proxy_headers:
         return False
     return address.is_loopback

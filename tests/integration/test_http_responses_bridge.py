@@ -1409,6 +1409,7 @@ async def test_v1_responses_http_bridge_closes_disallowed_session_before_owner_m
     exc = exc_info.value
     assert exc.status_code == 409
     assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
+    assert key not in service._http_bridge_inflight_sessions
     assert key not in service._http_bridge_sessions
     assert alias_key not in service._http_bridge_turn_state_index
     assert stale_session.closed is True

@@ -1639,20 +1639,20 @@ class ProxyService:
                     self._http_bridge_sessions.pop(key, None)
                     sessions_to_close.append(existing)
 
-                inflight_future = self._http_bridge_inflight_sessions.get(key)
-                if previous_response_id is not None:
-                    continuity_error = ProxyResponseError(
-                        400,
-                        _http_bridge_previous_response_error_envelope(
-                            previous_response_id,
-                            (
-                                "HTTP bridge continuity was lost. Replay x-codex-turn-state "
-                                "or retry with a stable prompt_cache_key."
+                if owner_mismatch_error is None:
+                    inflight_future = self._http_bridge_inflight_sessions.get(key)
+                    if previous_response_id is not None:
+                        continuity_error = ProxyResponseError(
+                            400,
+                            _http_bridge_previous_response_error_envelope(
+                                previous_response_id,
+                                (
+                                    "HTTP bridge continuity was lost. Replay x-codex-turn-state "
+                                    "or retry with a stable prompt_cache_key."
+                                ),
                             ),
-                        ),
-                    )
-                else:
-                    if inflight_future is None:
+                        )
+                    elif inflight_future is None:
                         while (
                             len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions
                             and self._http_bridge_sessions

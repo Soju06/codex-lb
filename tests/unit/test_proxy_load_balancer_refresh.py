@@ -362,6 +362,20 @@ async def test_select_account_filters_to_assigned_account_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_select_account_empty_explicit_scope_fails_closed() -> None:
+    preferred = _make_account("acc-preferred", "preferred@example.com")
+    fallback = _make_account("acc-fallback", "fallback@example.com")
+    accounts_repo = StubAccountsRepository([preferred, fallback])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(account_ids=[])
+
+    assert selection.account is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_uses_cached_usage_without_inline_refresh(monkeypatch) -> None:
     async def fail_refresh_accounts(
         self,

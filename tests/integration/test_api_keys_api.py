@@ -8,6 +8,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select, update
 
+import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
@@ -173,6 +174,62 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
     )
     assert cleared.status_code == 200
     assert cleared.json()["assignedAccountIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
+    await _populate_test_registry()
+    monkeypatch.setattr(load_balancer_module, "_filter_accounts_for_model", lambda accounts, model: accounts)
+    assigned_account_id = await _import_account(async_client, "acc-scoped", "scoped@example.com")
+    await _import_account(async_client, "acc-fallback", "fallback@example.com")
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "deleted-scope-key"},
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    key = create.json()["key"]
+
+    update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"assignedAccountIds": [assigned_account_id]},
+    )
+    assert update.status_code == 200
+
+    delete = await async_client.delete(f"/api/accounts/{assigned_account_id}")
+    assert delete.status_code == 200
+
+    called = False
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        nonlocal called
+        called = True
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
+    assert called is False
 
 
 @pytest.mark.asyncio

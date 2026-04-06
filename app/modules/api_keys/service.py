@@ -53,6 +53,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
+        account_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
@@ -243,6 +244,7 @@ class ApiKeyData:
     last_used_at: datetime | None
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
+    account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
 
 
@@ -333,8 +335,10 @@ class ApiKeysService:
             if missing_account_ids:
                 missing = ", ".join(missing_account_ids)
                 raise ValueError(f"Unknown account ids: {missing}")
+            account_assignment_scope_enabled: bool | _Unset = bool(assigned_account_ids)
         else:
             assigned_account_ids = None
+            account_assignment_scope_enabled = _UNSET
 
         if payload.enforced_model_set:
             enforced_model = _normalize_model_slug(payload.enforced_model)
@@ -390,6 +394,7 @@ class ApiKeysService:
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
                 ),
                 enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
+                account_assignment_scope_enabled=account_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
                 commit=False,
@@ -1099,6 +1104,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         last_used_at=data.last_used_at,
         limits=data.limits,
         usage_summary=data.usage_summary,
+        account_assignment_scope_enabled=data.account_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
         key=key,
     )
@@ -1121,6 +1127,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         last_used_at=row.last_used_at,
         limits=limits,
         usage_summary=usage_summary,
+        account_assignment_scope_enabled=row.account_assignment_scope_enabled,
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
     )
 

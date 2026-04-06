@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -81,6 +81,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
+        account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
@@ -97,6 +98,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
             "enforced_service_tier": enforced_service_tier,
+            "account_assignment_scope_enabled": account_assignment_scope_enabled,
             "expires_at": expires_at,
             "is_active": is_active,
             "key_hash": key_hash,
@@ -505,6 +507,53 @@ async def test_update_key_normalizes_service_tier_alias() -> None:
     )
 
     assert updated.enforced_service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_update_key_tracks_assignment_scope_after_clear() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access",
+            refresh_token_encrypted=b"refresh",
+            id_token_encrypted=b"id",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="assignment-scope",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+
+    scoped = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            assigned_account_ids=["acc-a"],
+            assigned_account_ids_set=True,
+        ),
+    )
+    assert scoped.account_assignment_scope_enabled is True
+    assert scoped.assigned_account_ids == ["acc-a"]
+
+    cleared = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            assigned_account_ids=[],
+            assigned_account_ids_set=True,
+        ),
+    )
+    assert cleared.account_assignment_scope_enabled is False
+    assert cleared.assigned_account_ids == []
 
 
 @pytest.mark.asyncio

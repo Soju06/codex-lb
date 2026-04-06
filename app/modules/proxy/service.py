@@ -4366,7 +4366,11 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,
-                    account_ids=(api_key.assigned_account_ids if api_key and api_key.assigned_account_ids else None),
+                    account_ids=(
+                        api_key.assigned_account_ids
+                        if api_key is not None and api_key.account_assignment_scope_enabled
+                        else None
+                    ),
                     exclude_account_ids=exclude_account_ids,
                     budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                 )
@@ -5169,7 +5173,7 @@ def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -
 
 
 def _http_bridge_session_allows_api_key(session: "_HTTPBridgeSession", api_key: ApiKeyData | None) -> bool:
-    if api_key is None or not api_key.assigned_account_ids:
+    if api_key is None or not api_key.account_assignment_scope_enabled:
         return True
     return session.account.id in api_key.assigned_account_ids
 

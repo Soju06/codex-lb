@@ -404,7 +404,12 @@ class _TurnStateBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         return None
 
 
-def _make_api_key_data(*, key_id: str, assigned_account_ids: list[str]) -> proxy_module.ApiKeyData:
+def _make_api_key_data(
+    *,
+    key_id: str,
+    assigned_account_ids: list[str],
+    account_assignment_scope_enabled: bool | None = None,
+) -> proxy_module.ApiKeyData:
     return proxy_module.ApiKeyData(
         id=key_id,
         name="bridge-key",
@@ -417,6 +422,9 @@ def _make_api_key_data(*, key_id: str, assigned_account_ids: list[str]) -> proxy
         is_active=True,
         created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
         last_used_at=None,
+        account_assignment_scope_enabled=(
+            bool(assigned_account_ids) if account_assignment_scope_enabled is None else account_assignment_scope_enabled
+        ),
         assigned_account_ids=assigned_account_ids,
     )
 

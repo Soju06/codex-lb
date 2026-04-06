@@ -117,13 +117,13 @@ class LoadBalancer:
         budget_threshold_pct: float = 95.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
-        scoped_account_ids = set(account_ids or ())
+        scoped_account_ids = None if account_ids is None else set(account_ids)
 
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 additional_limit_name=additional_limit_name,
-                account_ids=scoped_account_ids or None,
+                account_ids=scoped_account_ids,
             )
             if excluded_ids and selection_inputs.accounts:
                 selection_inputs = _SelectionInputs(
@@ -396,7 +396,7 @@ class LoadBalancer:
         cache_key = (
             model,
             additional_limit_name,
-            tuple(sorted(set(account_ids))) if account_ids else None,
+            None if account_ids is None else tuple(sorted(set(account_ids))),
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
@@ -408,13 +408,24 @@ class LoadBalancer:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = all_accounts
-            if account_ids:
+            if account_ids is not None:
                 allowed_account_ids = set(account_ids)
                 accounts = [account for account in accounts if account.id in allowed_account_ids]
+            pre_model_filter_accounts = accounts
             if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
-                accounts = _filter_accounts_for_model(accounts, model)
+                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model)
             if model and not accounts:
                 if not all_accounts:
+                    selection_inputs = _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                    )
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
+                    return selection_inputs
+                if not pre_model_filter_accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},

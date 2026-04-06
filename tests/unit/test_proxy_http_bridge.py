@@ -18,7 +18,12 @@ from app.modules.proxy import service as proxy_service
 pytestmark = pytest.mark.unit
 
 
-def _make_api_key(*, key_id: str, assigned_account_ids: list[str]) -> proxy_service.ApiKeyData:
+def _make_api_key(
+    *,
+    key_id: str,
+    assigned_account_ids: list[str],
+    account_assignment_scope_enabled: bool | None = None,
+) -> proxy_service.ApiKeyData:
     return proxy_service.ApiKeyData(
         id=key_id,
         name="bridge-key",
@@ -31,6 +36,9 @@ def _make_api_key(*, key_id: str, assigned_account_ids: list[str]) -> proxy_serv
         is_active=True,
         created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
         last_used_at=None,
+        account_assignment_scope_enabled=(
+            bool(assigned_account_ids) if account_assignment_scope_enabled is None else account_assignment_scope_enabled
+        ),
         assigned_account_ids=assigned_account_ids,
     )
 
@@ -151,6 +159,83 @@ async def test_get_or_create_http_bridge_session_replaces_live_session_when_acco
         headers={},
         affinity=proxy_service._AffinityPolicy(key="bridge-key"),
         api_key=_make_api_key(key_id="key-1", assigned_account_ids=["acc-fresh"]),
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
+
+    assert reused is replacement_session
+    assert service._http_bridge_sessions[key] is replacement_session
+    assert stale_session.closed is True
+    assert any(call.args == (stale_session,) for call in close_session.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_replaces_live_session_when_scope_becomes_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("request", "bridge-key", "key-1")
+    stale_session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        request_model="gpt-5.4-mini",
+        account=cast(Any, SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    replacement_session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-fresh", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    service._http_bridge_sessions[key] = stale_session
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_create_http_bridge_session",
+        AsyncMock(return_value=replacement_session),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+    )
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
+
+    reused = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        api_key=_make_api_key(
+            key_id="key-1",
+            assigned_account_ids=[],
+            account_assignment_scope_enabled=True,
+        ),
         request_model="gpt-5.4",
         idle_ttl_seconds=120.0,
         max_sessions=8,

@@ -42,6 +42,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         enforced_service_tier=row.enforced_service_tier,
         expires_at=row.expires_at,
         is_active=row.is_active,
+        account_assignment_scope_enabled=row.account_assignment_scope_enabled,
         assigned_account_ids=row.assigned_account_ids,
         created_at=row.created_at,
         last_used_at=row.last_used_at,

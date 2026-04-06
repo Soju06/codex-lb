@@ -99,6 +99,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     payload = create.json()
     assert payload["name"] == "dev-key"
     assert payload["key"].startswith("sk-clb-")
+    assert payload["accountAssignmentScopeEnabled"] is False
     assert payload["assignedAccountIds"] == []
     assert len(payload["limits"]) == 1
     assert payload["limits"][0]["limitType"] == "total_tokens"
@@ -113,6 +114,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert len(rows) == 1
     assert rows[0]["id"] == key_id
     assert "key" not in rows[0]
+    assert rows[0]["accountAssignmentScopeEnabled"] is False
     assert rows[0]["assignedAccountIds"] == []
     assert len(rows[0]["limits"]) == 1
 
@@ -162,10 +164,12 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
         json={"assignedAccountIds": [first_account_id, second_account_id]},
     )
     assert update.status_code == 200
+    assert update.json()["accountAssignmentScopeEnabled"] is True
     assert update.json()["assignedAccountIds"] == [first_account_id, second_account_id]
 
     listed = await async_client.get("/api/api-keys/")
     assert listed.status_code == 200
+    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
     assert listed.json()[0]["assignedAccountIds"] == [first_account_id, second_account_id]
 
     cleared = await async_client.patch(
@@ -173,6 +177,7 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
         json={"assignedAccountIds": []},
     )
     assert cleared.status_code == 200
+    assert cleared.json()["accountAssignmentScopeEnabled"] is False
     assert cleared.json()["assignedAccountIds"] == []
 
 
@@ -210,6 +215,11 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
     delete = await async_client.delete(f"/api/accounts/{assigned_account_id}")
     assert delete.status_code == 200
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["assignedAccountIds"] == []
+    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
 
     called = False
 

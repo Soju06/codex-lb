@@ -216,6 +216,37 @@ describe("ApiKeyEditDialog", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.assignedAccountIds).toEqual([]);
   });
+
+  it("submits an empty assigned account list when a scoped key loses its assigned accounts", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({
+          accountAssignmentScopeEnabled: true,
+          assignedAccountIds: [],
+        })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const nameInput = screen.getByLabelText("Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.name).toBe("Renamed key");
+    expect(payload.assignedAccountIds).toEqual([]);
+  });
 });
 
 describe("hasLimitRuleChanges", () => {

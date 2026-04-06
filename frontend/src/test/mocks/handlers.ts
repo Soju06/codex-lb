@@ -745,6 +745,9 @@ export const handlers = [
 				: {}),
 			...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
 			...(payload.assignedAccountIds !== undefined
+				? { accountAssignmentScopeEnabled: payload.assignedAccountIds.length > 0 }
+				: {}),
+			...(payload.assignedAccountIds !== undefined
 				? { assignedAccountIds: payload.assignedAccountIds }
 				: {}),
 		};

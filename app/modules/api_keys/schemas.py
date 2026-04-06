@@ -66,6 +66,7 @@ class ApiKeyResponse(DashboardModel):
     enforced_service_tier: str | None
     expires_at: datetime | None
     is_active: bool
+    account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = Field(default_factory=list)
     created_at: datetime
     last_used_at: datetime | None

@@ -95,6 +95,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(limitRules);
+    const shouldSubmitAssignedAccountIds =
+      hasSelectionChange(apiKey.assignedAccountIds, selectedAccountIds) ||
+      (apiKey.accountAssignmentScopeEnabled && selectedAccountIds.length === 0);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
@@ -104,7 +107,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
-    if (hasSelectionChange(apiKey.assignedAccountIds, selectedAccountIds)) {
+    if (shouldSubmitAssignedAccountIds) {
       payload.assignedAccountIds = selectedAccountIds;
     }
     if (hasLimitRuleChanges(initialLimitRules, limitRules)) {

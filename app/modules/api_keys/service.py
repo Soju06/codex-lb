@@ -1127,7 +1127,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         last_used_at=row.last_used_at,
         limits=limits,
         usage_summary=usage_summary,
-        account_assignment_scope_enabled=row.account_assignment_scope_enabled,
+        account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
     )
 

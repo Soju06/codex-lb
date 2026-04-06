@@ -62,6 +62,15 @@ function limitsToCreateRules(apiKey: ApiKey): LimitRuleCreate[] {
   }));
 }
 
+function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
+  if (initialIds.length !== nextIds.length) {
+    return true;
+  }
+
+  const initialIdSet = new Set(initialIds);
+  return nextIds.some((accountId) => !initialIdSet.has(accountId));
+}
+
 function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -89,13 +98,15 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
-      assignedAccountIds: selectedAccountIds,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
+    if (hasSelectionChange(apiKey.assignedAccountIds, selectedAccountIds)) {
+      payload.assignedAccountIds = selectedAccountIds;
+    }
     if (hasLimitRuleChanges(initialLimitRules, limitRules)) {
       payload.limits = normalizedLimits;
     }

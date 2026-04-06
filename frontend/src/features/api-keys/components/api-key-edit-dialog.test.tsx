@@ -36,7 +36,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect("assignedAccountIds" in payload).toBe(false);
     expect("limits" in payload).toBe(false);
   });
 
@@ -66,7 +66,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.isActive).toBe(false);
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect("assignedAccountIds" in payload).toBe(false);
     expect("limits" in payload).toBe(false);
   });
 
@@ -95,7 +95,7 @@ describe("ApiKeyEditDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect("assignedAccountIds" in payload).toBe(false);
     expect(payload.limits).toEqual([
       {
         limitType: "total_tokens",
@@ -160,6 +160,61 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+  });
+
+  it("omits assigned accounts when editing an unrelated field", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ assignedAccountIds: ["acc_primary"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const nameInput = screen.getByLabelText("Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.name).toBe("Renamed key");
+    expect("assignedAccountIds" in payload).toBe(false);
+  });
+
+  it("submits an empty assigned account list when clearing scoped accounts", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ assignedAccountIds: ["acc_primary"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "1 account selected" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "All accounts" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.assignedAccountIds).toEqual([]);
   });
 });
 

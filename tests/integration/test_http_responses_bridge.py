@@ -1356,6 +1356,66 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_closes_disallowed_session_before_owner_mismatch_retry(
+    app_instance, monkeypatch
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-a",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    service = get_proxy_service_for_app(app_instance)
+    key = proxy_module._HTTPBridgeSessionKey("session_header", "shared-session", "key-assignments")
+    stale_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=["acc-stale"])
+    refreshed_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=["acc-fresh"])
+    upstream = _FakeBridgeUpstreamWebSocket()
+    stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+    alias_key = proxy_module._http_bridge_turn_state_alias_key("http_turn_owner_retry", key.api_key_id)
+
+    cast(Any, stale_session).account = SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE)
+    cast(Any, stale_session).api_key = stale_api_key
+    cast(Any, stale_session).upstream = upstream
+    stale_session.downstream_turn_state_aliases.add("http_turn_owner_retry")
+    service._http_bridge_sessions[key] = stale_session
+    service._http_bridge_turn_state_index[alias_key] = key
+
+    async def fake_http_bridge_owner_instance(session_key, settings, ring_membership=None):
+        del settings, ring_membership
+        assert session_key == key
+        return "instance-b"
+
+    async def fake_active_http_bridge_instance_ring(settings, ring_membership):
+        del settings, ring_membership
+        return "instance-a", ("instance-a", "instance-b")
+
+    monkeypatch.setattr(proxy_module, "_http_bridge_owner_instance", fake_http_bridge_owner_instance)
+    monkeypatch.setattr(proxy_module, "_active_http_bridge_instance_ring", fake_active_http_bridge_instance_ring)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            key,
+            headers={"session_id": "shared-session"},
+            affinity=proxy_module._AffinityPolicy(
+                key="shared-session",
+                kind=proxy_module.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=refreshed_api_key,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 409
+    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
+    assert key not in service._http_bridge_sessions
+    assert alias_key not in service._http_bridge_turn_state_index
+    assert stale_session.closed is True
+    assert upstream.closed is True
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
     async_client,
     app_instance,

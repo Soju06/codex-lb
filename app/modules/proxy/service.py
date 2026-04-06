@@ -1504,6 +1504,7 @@ class ProxyService:
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
+            owner_mismatch_error: ProxyResponseError | None = None
 
             async with self._http_bridge_lock:
                 if incoming_turn_state is not None:
@@ -1616,7 +1617,7 @@ class ProxyService:
                     )
                     if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
                         bridge_instance_mismatch_total.labels(outcome="retry").inc()
-                    raise ProxyResponseError(
+                    owner_mismatch_error = ProxyResponseError(
                         409,
                         openai_error(
                             "bridge_instance_mismatch",
@@ -1710,6 +1711,9 @@ class ProxyService:
 
             for stale_session in sessions_to_close:
                 await self._close_http_bridge_session(stale_session)
+
+            if owner_mismatch_error is not None:
+                raise owner_mismatch_error
 
             if continuity_error is not None:
                 raise continuity_error

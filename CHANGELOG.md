@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.11.0](https://github.com/Soju06/codex-lb/compare/v1.10.1...v1.11.0) (2026-04-06)
+
+
+### Features
+
+* **accounts:** add refreshable browser OAuth link ([#316](https://github.com/Soju06/codex-lb/issues/316)) ([aeaf106](https://github.com/Soju06/codex-lb/commit/aeaf106a507b3b82ff305184ffae114faecf74f6))
+* **dashboard:** add selectable overview timeframes ([#319](https://github.com/Soju06/codex-lb/issues/319)) ([d8d812f](https://github.com/Soju06/codex-lb/commit/d8d812f57f1463d8512dd6ac659f446e76bc5f94))
+* deterministic failover & soft drain ([#328](https://github.com/Soju06/codex-lb/issues/328)) ([fc77c76](https://github.com/Soju06/codex-lb/commit/fc77c7604af6ed4d621fd4e7a8435507e0f3e21e))
+* **v1-usage:** add credit-based Codex override windows ([#304](https://github.com/Soju06/codex-lb/issues/304)) ([6c3c556](https://github.com/Soju06/codex-lb/commit/6c3c5564c530d0670995577882038a00f5b46f8b))
+
+
+### Bug Fixes
+
+* **api:** for /backend-api/codex/model, return it in codex format ([#331](https://github.com/Soju06/codex-lb/issues/331)) ([c141a8a](https://github.com/Soju06/codex-lb/commit/c141a8ac963ebe25ed8e82ed7b9ab3057e4c083a))
+* avoid Windows startup crash in memory monitor and add manual reg… ([#329](https://github.com/Soju06/codex-lb/issues/329)) ([5c2d26e](https://github.com/Soju06/codex-lb/commit/5c2d26e8f11abf5bdaed13aed7904f097cc18e3f))
+* **dashboard:** show remaining totals in usage donuts ([#303](https://github.com/Soju06/codex-lb/issues/303)) ([7827941](https://github.com/Soju06/codex-lb/commit/78279417c1557753a93001a6586997fb204fe18d))
+* **helm:** disable service links and use fully qualified image names ([#321](https://github.com/Soju06/codex-lb/issues/321)) ([c54edee](https://github.com/Soju06/codex-lb/commit/c54edeefa00b4271f6f80270462bb8ddcade5e92))
+* **helm:** one-click external database setup improvements ([#322](https://github.com/Soju06/codex-lb/issues/322)) ([4c3c945](https://github.com/Soju06/codex-lb/commit/4c3c9453a48aaced5e023447446da00d6843c7cf))
+
+
+### Documentation
+
+* add Daltonganger as a contributor for bug ([#332](https://github.com/Soju06/codex-lb/issues/332)) ([1c8a7e5](https://github.com/Soju06/codex-lb/commit/1c8a7e5633b55dadeb8ccb2ae3791a23787b3a9f))
+* add L1st3r as a contributor for bug ([#335](https://github.com/Soju06/codex-lb/issues/335)) ([05a77d8](https://github.com/Soju06/codex-lb/commit/05a77d857ec90b101feee675a1dfb20f556b0188))
+* add mhughdo as a contributor for code, and test ([#333](https://github.com/Soju06/codex-lb/issues/333)) ([0fc01f6](https://github.com/Soju06/codex-lb/commit/0fc01f676fe826f6228140c529e75ca1e31076c2))
+* add salwinh as a contributor for code, and test ([#334](https://github.com/Soju06/codex-lb/issues/334)) ([7fed142](https://github.com/Soju06/codex-lb/commit/7fed14284a0c6025cf615856b6ca123b2d8cf463))
+
 ## [1.10.1](https://github.com/Soju06/codex-lb/compare/v1.10.0...v1.10.1) (2026-04-03)
 
 

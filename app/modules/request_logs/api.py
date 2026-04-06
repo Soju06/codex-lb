@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
+    RequestLogVisibilityResponse,
     RequestLogsResponse,
 )
 from app.modules.request_logs.service import RequestLogModelOption as ServiceRequestLogModelOption
@@ -71,6 +72,17 @@ async def list_request_logs(
         total=page.total,
         has_more=page.has_more,
     )
+
+
+@router.get("/{request_id}/visibility", response_model=RequestLogVisibilityResponse)
+async def get_request_log_visibility(
+    request_id: str,
+    context: RequestLogsContext = Depends(get_request_logs_context),
+) -> RequestLogVisibilityResponse:
+    visibility = await context.service.get_visibility(request_id)
+    if visibility is None:
+        raise HTTPException(status_code=404, detail="Request log not found")
+    return visibility
 
 
 @router.get("/options", response_model=RequestLogFilterOptionsResponse)

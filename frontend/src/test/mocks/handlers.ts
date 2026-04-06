@@ -21,6 +21,7 @@ import {
 	createOauthStartResponse,
 	createOauthStatusResponse,
 	createRequestLogFilterOptions,
+	createRequestLogVisibilityResponse,
 	createRequestLogsResponse,
 	type DashboardAuthSession,
 	type DashboardSettings,
@@ -82,8 +83,29 @@ const SettingsPayloadSchema = z
 		totpRequiredOnLogin: z.boolean().optional(),
 		totpConfigured: z.boolean().optional(),
 		apiKeyAuthEnabled: z.boolean().optional(),
+		requestVisibilityMode: z.enum(["off", "persistent", "temporary"]).optional(),
+		requestVisibilityDurationMinutes: z.number().int().positive().optional(),
 	})
 	.passthrough();
+
+function resolveRequestVisibilityState(
+	mode: string,
+	durationMinutes: number | undefined,
+	currentExpiresAt: string | null,
+) {
+	if (mode === "temporary") {
+		const expiresAt =
+			typeof durationMinutes === "number"
+				? new Date(Date.now() + durationMinutes * 60_000).toISOString()
+				: currentExpiresAt;
+		const enabled = expiresAt ? new Date(expiresAt).getTime() > Date.now() : false;
+		return { requestVisibilityExpiresAt: expiresAt, requestVisibilityEnabled: enabled };
+	}
+	return {
+		requestVisibilityExpiresAt: null,
+		requestVisibilityEnabled: mode === "persistent",
+	};
+}
 
 // ── Helpers ──
 
@@ -310,6 +332,39 @@ export const handlers = [
 		return HttpResponse.json(requestLogOptionsFromEntries(filtered));
 	}),
 
+	http.get("/api/request-logs/:requestId/visibility", ({ params }) => {
+		const requestId = String(params.requestId);
+		const entry = state.requestLogs.find((requestLog) => requestLog.requestId === requestId);
+		if (!entry) {
+			return HttpResponse.json(
+				{ error: { code: "request_log_not_found", message: "Request log not found" } },
+				{ status: 404 },
+			);
+		}
+
+		if (requestId === "req_1") {
+			return HttpResponse.json(
+				createRequestLogVisibilityResponse({
+					requestId,
+					body: {
+						input: "Explain the weather.",
+						metadata: { sessionToken: "[REDACTED]" },
+					},
+				}),
+			);
+		}
+
+		return HttpResponse.json(
+			createRequestLogVisibilityResponse({
+				requestId,
+				captured: false,
+				unavailableReason: "not_captured",
+				headers: {},
+				body: null,
+			}),
+		);
+	}),
+
 	http.get("/api/accounts", () => {
 		return HttpResponse.json({ accounts: state.accounts });
 	}),
@@ -467,9 +522,17 @@ export const handlers = [
 		if (!payload) {
 			return HttpResponse.json(state.settings);
 		}
+		const nextMode = payload.requestVisibilityMode ?? state.settings.requestVisibilityMode;
+		const requestVisibilityState = resolveRequestVisibilityState(
+			nextMode,
+			payload.requestVisibilityDurationMinutes,
+			state.settings.requestVisibilityExpiresAt,
+		);
 		state.settings = createDashboardSettings({
 			...state.settings,
 			...payload,
+			requestVisibilityMode: nextMode,
+			...requestVisibilityState,
 		});
 		return HttpResponse.json(state.settings);
 	}),

@@ -213,6 +213,8 @@ sqlite3 ~/.codex/state_5.sqlite \
 
 This overrides the built-in `openai` provider's endpoint to point at codex-lb while keeping the Responses API code path that handles reasoning properly.
 
+Most OpenAI-compatible model `options` are passed through to the upstream Responses API. Prefer canonical OpenAI field names such as `service_tier` and `prompt_cache_key`; common OpenCode aliases like `reasoningEffort` and `reasoningSummary` are normalized automatically.
+
 ```bash
 export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
 opencode

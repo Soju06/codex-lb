@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import Field
 
 from app.modules.shared.schemas import DashboardModel
@@ -17,6 +19,9 @@ class DashboardSettingsResponse(DashboardModel):
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    request_visibility_mode: str = Field(pattern=r"^(off|persistent|temporary)$")
+    request_visibility_expires_at: datetime | None = None
+    request_visibility_enabled: bool
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
@@ -33,6 +38,8 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None
+    request_visibility_mode: str | None = Field(default=None, pattern=r"^(off|persistent|temporary)$")
+    request_visibility_duration_minutes: int | None = Field(default=None, gt=0)
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

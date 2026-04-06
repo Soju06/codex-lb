@@ -9,6 +9,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
     ResponsesTextControls,
     ResponsesTextFormat,
+    normalize_request_option_keys,
     normalize_tool_type,
     validate_tool_types,
 )
@@ -62,6 +63,11 @@ class ChatCompletionsRequest(BaseModel):
     max_completion_tokens: int | None = None
     store: bool | None = None
     stream_options: ChatStreamOptions | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_request_option_aliases_before_validation(cls, data: object) -> object:
+        return normalize_request_option_keys(data)
 
     @field_validator("tools")
     @classmethod

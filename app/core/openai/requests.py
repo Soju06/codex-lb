@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -34,12 +35,61 @@ _INTERLEAVED_REASONING_KEYS = frozenset({"reasoning_content", "reasoning_details
 _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content", "reasoning_details"})
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
+_CAMEL_TO_SNAKE_BOUNDARY = re.compile(r"(?<!^)(?=[A-Z])")
+_TOP_LEVEL_OPENAI_COMPAT_ALIASES = frozenset(
+    {
+        "background",
+        "conversation",
+        "include",
+        "maxOutputTokens",
+        "maxToolCalls",
+        "parallelToolCalls",
+        "previousResponseId",
+        "promptCacheKey",
+        "promptCacheRetention",
+        "safetyIdentifier",
+        "serviceTier",
+        "store",
+        "stream",
+        "streamOptions",
+        "temperature",
+        "toolChoice",
+        "topLogprobs",
+    }
+)
 
 
 def _json_mapping_or_none(value: object) -> Mapping[str, JsonValue] | None:
     if not is_json_mapping(value):
         return None
     return value
+
+
+def _camel_to_snake(value: str) -> str:
+    return _CAMEL_TO_SNAKE_BOUNDARY.sub("_", value).lower()
+
+
+def normalize_request_option_keys(data: object) -> object:
+    """Canonicalize supported top-level OpenAI option aliases without touching nested payloads."""
+    if not is_json_mapping(data):
+        return data
+
+    normalized = dict(data)
+    _normalize_openai_compatible_aliases(normalized)
+
+    for alias in _TOP_LEVEL_OPENAI_COMPAT_ALIASES:
+        if alias not in normalized:
+            continue
+        canonical = _camel_to_snake(alias)
+        if canonical == alias:
+            continue
+        if canonical in normalized:
+            normalized.pop(alias, None)
+            continue
+        normalized[canonical] = normalized.pop(alias)
+
+    _normalize_service_tier_aliases(normalized)
+    return normalized
 
 
 def _json_parts(value: JsonValue) -> list[JsonValue]:
@@ -328,6 +378,11 @@ class ResponsesRequest(BaseModel):
     prompt_cache_key: str | None = None
     text: ResponsesTextControls | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_request_option_aliases_before_validation(cls, data: object) -> object:
+        return normalize_request_option_keys(data)
+
     @field_validator("input")
     @classmethod
     def _validate_input_type(cls, value: JsonValue) -> JsonValue:
@@ -430,15 +485,8 @@ class ResponsesCompactRequest(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_service_tier_aliases_before_validation(cls, data: object) -> object:
-        if not is_json_mapping(data):
-            return data
-        normalized = dict(data)
-        service_tier = normalized.get("service_tier")
-        normalized_service_tier = _normalize_service_tier_alias_value(service_tier)
-        if isinstance(normalized_service_tier, str):
-            normalized["service_tier"] = normalized_service_tier
-        return normalized
+    def _normalize_request_option_aliases_before_validation(cls, data: object) -> object:
+        return normalize_request_option_keys(data)
 
     @field_validator("store")
     @classmethod

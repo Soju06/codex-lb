@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -94,3 +95,77 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None
     assert older["transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_request_log_visibility_api_returns_captured_blob(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_visibility", "visibility@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_visibility",
+            request_id="req_visibility_1",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=2,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            request_visibility=json.dumps(
+                {
+                    "headers": {"content-type": "application/json", "user-agent": "codex-test"},
+                    "body": {"input": "hello", "apiKey": "[REDACTED]"},
+                    "truncated": False,
+                }
+            ),
+        )
+
+    response = await async_client.get("/api/request-logs/req_visibility_1/visibility")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "requestId": "req_visibility_1",
+        "captured": True,
+        "unavailableReason": None,
+        "truncated": False,
+        "headers": {"content-type": "application/json", "user-agent": "codex-test"},
+        "body": {"input": "hello", "apiKey": "[REDACTED]"},
+    }
+    assert "authorization" not in body["headers"]
+
+
+@pytest.mark.asyncio
+async def test_request_log_visibility_api_returns_not_captured_for_existing_row(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_visibility_empty", "visibility-empty@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_visibility_empty",
+            request_id="req_visibility_empty",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=0,
+            latency_ms=25,
+            status="success",
+            error_code=None,
+        )
+
+    response = await async_client.get("/api/request-logs/req_visibility_empty/visibility")
+    assert response.status_code == 200
+    assert response.json() == {
+        "requestId": "req_visibility_empty",
+        "captured": False,
+        "unavailableReason": "not_captured",
+        "truncated": False,
+        "headers": {},
+        "body": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_request_log_visibility_api_returns_404_for_unknown_request(async_client, db_setup):
+    response = await async_client.get("/api/request-logs/req_missing/visibility")
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "Request log not found"

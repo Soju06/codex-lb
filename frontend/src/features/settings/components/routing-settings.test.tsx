@@ -15,6 +15,9 @@ const BASE_SETTINGS: DashboardSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  requestVisibilityMode: "off",
+  requestVisibilityExpiresAt: null,
+  requestVisibilityEnabled: false,
 };
 
 describe("RoutingSettings", () => {

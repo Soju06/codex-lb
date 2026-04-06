@@ -69,6 +69,20 @@ spec:
                 ${{ $dbTag }}${{ .name }}${{ $dbTag }}$,
                 ${{ $userTag }}${{ .user }}${{ $userTag }}$
               )\gexec
+              \connect "{{ .name | replace "\"" "\"\"" }}"
+              SELECT format(
+                'GRANT ALL ON SCHEMA public TO %I',
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
+              SELECT format(
+                'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I',
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
+              SELECT format(
+                'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I',
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
+              \connect postgres
               {{- end }}
               SQL
           env:

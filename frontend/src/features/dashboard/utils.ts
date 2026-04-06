@@ -1,15 +1,4 @@
-import { Activity, AlertTriangle, Coins, DollarSign } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-
-import { buildDonutPalette } from "@/utils/colors";
-import { buildDuplicateAccountIdSet, formatCompactAccountId } from "@/utils/account-identifiers";
-import {
-  formatCachedTokensMeta,
-  formatCompactNumber,
-  formatCurrency,
-  formatRate,
-  formatWindowMinutes,
-} from "@/utils/formatters";
+import { Activity, AlertTriangle, Coins, DollarSign, type LucideIcon } from "lucide-react";
 
 import type {
   AccountSummary,
@@ -19,6 +8,15 @@ import type {
   TrendPoint,
   UsageWindow,
 } from "@/features/dashboard/schemas";
+import { buildDuplicateAccountIdSet, formatCompactAccountId } from "@/utils/account-identifiers";
+import { buildDonutPalette } from "@/utils/colors";
+import {
+  formatCachedTokensMeta,
+  formatCompactNumber,
+  formatCurrency,
+  formatRate,
+  formatWindowMinutes,
+} from "@/utils/formatters";
 
 export type RemainingItem = {
   accountId: string;
@@ -50,6 +48,8 @@ export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
   secondaryUsageItems: RemainingItem[];
+  primaryUsageTotal: number;
+  secondaryUsageTotal: number;
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
@@ -103,6 +103,7 @@ export function applySecondaryConstraint(
   return primaryItems.map((item) => {
     const secondaryItem = secondaryByAccount.get(item.accountId);
     if (!secondaryItem) return item;
+    if (secondaryItem.remainingPercent == null) return item;
     if (secondaryItem.value >= item.value) return item;
 
     const effectivePercent =
@@ -163,6 +164,10 @@ const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b"];
 
 function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));
+}
+
+function sumRemainingItems(items: RemainingItem[]): number {
+  return items.reduce((total, item) => total + item.value, 0);
 }
 
 export function buildDashboardView(
@@ -229,13 +234,16 @@ export function buildDashboardView(
 
   const rawPrimaryItems = buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark);
   const secondaryUsageItems = buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark);
+  const primaryUsageItems = secondaryWindow
+    ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
+    : rawPrimaryItems;
 
   return {
     stats,
-    primaryUsageItems: secondaryWindow
-      ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
-      : rawPrimaryItems,
+    primaryUsageItems,
     secondaryUsageItems,
+    primaryUsageTotal: sumRemainingItems(primaryUsageItems),
+    secondaryUsageTotal: overview.summary.secondaryWindow?.remainingCredits ?? 0,
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),

@@ -54,6 +54,7 @@ spec:
     spec:
       serviceAccountName: {{ include "codex-lb.serviceAccountName" . }}
       automountServiceAccountToken: false
+      enableServiceLinks: false
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -115,9 +116,11 @@ spec:
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or (and .Values.postgresql.enabled .Values.config.databaseMigrateOnStartup) (and .Values.migration.enabled (not .Values.config.databaseMigrateOnStartup) .Values.migration.schemaGate.enabled) }}
+      {{- $waitForDatabaseEnabled := and .Values.postgresql.enabled .Values.config.databaseMigrateOnStartup -}}
+      {{- $schemaGateEnabled := and .Values.migration.enabled (not .Values.config.databaseMigrateOnStartup) .Values.migration.schemaGate.enabled -}}
+      {{- if or $waitForDatabaseEnabled $schemaGateEnabled }}
       initContainers:
-        {{- if and .Values.postgresql.enabled .Values.config.databaseMigrateOnStartup }}
+        {{- if $waitForDatabaseEnabled }}
         - name: wait-for-database
           image: {{ include "codex-lb.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -146,7 +149,7 @@ spec:
           resources:
             {{- toYaml .Values.migration.resources | nindent 12 }}
         {{- end }}
-        {{- if and .Values.migration.enabled (not .Values.config.databaseMigrateOnStartup) .Values.migration.schemaGate.enabled }}
+        {{- if $schemaGateEnabled }}
         - name: wait-for-schema-head
           image: {{ include "codex-lb.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}

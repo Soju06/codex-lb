@@ -11,6 +11,7 @@ const LIMIT_TYPE_LABEL: Record<LimitType, string> = {
 	input_tokens: "Input Tokens",
 	output_tokens: "Output Tokens",
 	cost_usd: "Cost (USD)",
+	credits: "Credits",
 };
 
 export type ApiKeyInfoProps = {

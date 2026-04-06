@@ -165,8 +165,8 @@ export function DashboardPage() {
             <UsageDonuts
               primaryItems={view.primaryUsageItems}
               secondaryItems={view.secondaryUsageItems}
-              primaryTotal={overview?.summary.primaryWindow.capacityCredits ?? 0}
-              secondaryTotal={overview?.summary.secondaryWindow?.capacityCredits ?? 0}
+              primaryTotal={view.primaryUsageTotal}
+              secondaryTotal={view.secondaryUsageTotal}
               safeLinePrimary={view.safeLinePrimary}
               safeLineSecondary={view.safeLineSecondary}
             />

@@ -10,6 +10,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
+  enableServiceLinks: false
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
@@ -21,7 +22,7 @@ spec:
   {{- end }}
   containers:
     - name: test-health
-      image: busybox:1.37
+      image: {{ printf "%s/library/busybox:1.37" (.Values.global.imageRegistry | default "docker.io") }}
       imagePullPolicy: IfNotPresent
       securityContext:
         allowPrivilegeEscalation: false

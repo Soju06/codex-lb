@@ -10,9 +10,13 @@ from typing import TYPE_CHECKING, Iterable
 
 from app.core import usage as usage_core
 from app.core.balancer import (
+    HEALTH_TIER_DRAINING,
+    HEALTH_TIER_HEALTHY,
+    HEALTH_TIER_PROBING,
     AccountState,
     RoutingStrategy,
     SelectionResult,
+    evaluate_health_tier,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
@@ -64,6 +68,9 @@ class RuntimeState:
     error_count: int = 0
     version: int = 0
     blocked_at: float | None = None
+    health_tier: int = 0
+    drain_entered_at: float | None = None
+    probe_success_streak: int = 0
 
 
 @dataclass
@@ -786,6 +793,9 @@ class LoadBalancer:
             state.error_count += count
             state.last_error_at = time.time()
             self._sync_runtime_state(account, state)
+            runtime = self._runtime.get(account.id)
+            if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
+                runtime.probe_success_streak = 0
             async with self._repo_factory() as repos:
                 await self._persist_state_if_current(repos.accounts, account_snapshot, state)
 
@@ -797,6 +807,9 @@ class LoadBalancer:
             if runtime and runtime.error_count > 0:
                 runtime.error_count = 0
                 runtime.last_error_at = None
+                runtime.version += 1
+            if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
+                runtime.probe_success_streak += 1
                 runtime.version += 1
 
     def _state_for(self, account: Account) -> AccountState:
@@ -1010,6 +1023,41 @@ def _state_from_account(
         secondary_reset=secondary_reset,
     )
 
+    settings = get_settings()
+    if getattr(settings, "soft_drain_enabled", True):
+        new_tier = evaluate_health_tier(
+            AccountState(
+                account_id=account.id,
+                status=status,
+                used_percent=used_percent,
+                secondary_used_percent=secondary_used,
+                last_error_at=runtime.last_error_at,
+                error_count=runtime.error_count,
+                health_tier=runtime.health_tier,
+            ),
+            now=time.time(),
+            drain_entered_at=runtime.drain_entered_at,
+            probe_success_streak=runtime.probe_success_streak,
+            drain_primary_threshold_pct=getattr(settings, "drain_primary_threshold_pct", 85.0),
+            drain_secondary_threshold_pct=getattr(settings, "drain_secondary_threshold_pct", 90.0),
+            drain_error_window_seconds=getattr(settings, "drain_error_window_seconds", 60.0),
+            drain_error_count_threshold=getattr(settings, "drain_error_count_threshold", 2),
+            probe_quiet_seconds=getattr(settings, "probe_quiet_seconds", 60.0),
+            probe_success_streak_required=getattr(settings, "probe_success_streak_required", 3),
+        )
+        if new_tier == HEALTH_TIER_DRAINING and runtime.health_tier != HEALTH_TIER_DRAINING:
+            runtime.drain_entered_at = time.time()
+            runtime.probe_success_streak = 0
+        if new_tier == HEALTH_TIER_HEALTHY:
+            runtime.drain_entered_at = None
+            runtime.probe_success_streak = 0
+        runtime.health_tier = new_tier
+    else:
+        new_tier = HEALTH_TIER_HEALTHY
+        runtime.drain_entered_at = None
+        runtime.probe_success_streak = 0
+        runtime.health_tier = HEALTH_TIER_HEALTHY
+
     return AccountState(
         account_id=account.id,
         status=status,
@@ -1024,6 +1072,7 @@ def _state_from_account(
         deactivation_reason=account.deactivation_reason,
         plan_type=account.plan_type,
         capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
+        health_tier=new_tier,
     )
 
 

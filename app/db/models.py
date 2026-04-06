@@ -280,12 +280,15 @@ class LimitType(str, Enum):
     INPUT_TOKENS = "input_tokens"
     OUTPUT_TOKENS = "output_tokens"
     COST_USD = "cost_usd"
+    CREDITS = "credits"
 
 
 class LimitWindow(str, Enum):
     DAILY = "daily"
     WEEKLY = "weekly"
     MONTHLY = "monthly"
+    FIVE_HOURS = "5h"
+    SEVEN_DAYS = "7d"
 
 
 class ApiKeyLimit(Base):

@@ -5,7 +5,7 @@ from typing import Iterable
 from pydantic import ValidationError
 
 from app.core import usage as usage_core
-from app.core.balancer.types import UpstreamError
+from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
@@ -32,6 +32,35 @@ PLAN_TYPE_PRIORITY = (
     "quorum",
     "k12",
 )
+
+_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limit_reached"})
+_QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
+_TRANSIENT_CODES = frozenset({"server_error", "upstream_error", "stream_incomplete"})
+
+
+def classify_upstream_failure(
+    *,
+    error_code: str,
+    error: UpstreamError,
+    http_status: int | None,
+    phase: FailurePhase,
+) -> ClassifiedFailure:
+    failure_class: FailureClass
+    if error_code in _RATE_LIMIT_CODES:
+        failure_class = "rate_limit"
+    elif error_code in _QUOTA_CODES:
+        failure_class = "quota"
+    elif error_code in _TRANSIENT_CODES or (http_status is not None and http_status >= 500):
+        failure_class = "retryable_transient"
+    else:
+        failure_class = "non_retryable"
+    return ClassifiedFailure(
+        failure_class=failure_class,
+        phase=phase,
+        error_code=error_code,
+        error=error,
+        http_status=http_status,
+    )
 
 
 def _header_account_id(account_id: str | None) -> str | None:

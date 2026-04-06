@@ -33,6 +33,8 @@ export type PasswordSettingsProps = {
 
 export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
   const passwordRequired = useAuthStore((s) => s.passwordRequired);
+  const bootstrapRequired = useAuthStore((s) => s.bootstrapRequired);
+  const bootstrapTokenConfigured = useAuthStore((s) => s.bootstrapTokenConfigured);
   const refreshSession = useAuthStore((s) => s.refreshSession);
 
   const [activeDialog, setActiveDialog] = useState<PasswordDialog>(null);
@@ -40,7 +42,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
 
   const setupForm = useForm({
     resolver: zodResolver(PasswordSetupRequestSchema),
-    defaultValues: { password: "" },
+    defaultValues: { password: "", bootstrapToken: "" },
   });
 
   const changeForm = useForm({
@@ -67,10 +69,13 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
     removeForm.reset();
   };
 
-  const handleSetup = async (values: { password: string }) => {
+  const handleSetup = async (values: { password: string; bootstrapToken?: string }) => {
     setError(null);
     try {
-      await setupPassword(values);
+      await setupPassword({
+        password: values.password,
+        bootstrapToken: values.bootstrapToken?.trim() ? values.bootstrapToken.trim() : undefined,
+      });
       await refreshSession();
       toast.success("Password configured");
       closeDialog();
@@ -160,13 +165,20 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
       {/* Setup dialog */}
       <Dialog open={activeDialog === "setup"} onOpenChange={(open) => !open && closeDialog()}>
         <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Set password</DialogTitle>
-            <DialogDescription>Set a password for dashboard login.</DialogDescription>
-          </DialogHeader>
-          {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
-          <Form {...setupForm}>
-            <form onSubmit={setupForm.handleSubmit(handleSetup)} className="space-y-4">
+            <DialogHeader>
+              <DialogTitle>Set password</DialogTitle>
+              <DialogDescription>Set a password for dashboard login.</DialogDescription>
+            </DialogHeader>
+            {bootstrapRequired ? (
+              <AlertMessage variant="error">
+                {bootstrapTokenConfigured
+                  ? "Remote setup requires the dashboard bootstrap token."
+                  : "Remote setup is blocked until a dashboard bootstrap token is configured on the server."}
+              </AlertMessage>
+            ) : null}
+            {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+            <Form {...setupForm}>
+              <form onSubmit={setupForm.handleSubmit(handleSetup)} className="space-y-4">
               <FormField
                 control={setupForm.control}
                 name="password"
@@ -179,8 +191,23 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
                     <FormMessage />
                   </FormItem>
                 )}
-              />
-              <DialogFooter>
+                />
+                {bootstrapRequired ? (
+                  <FormField
+                    control={setupForm.control}
+                    name="bootstrapToken"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Bootstrap token</FormLabel>
+                        <FormControl>
+                          <Input {...field} type="password" autoComplete="one-time-code" placeholder="Enter bootstrap token" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
+                <DialogFooter>
                 <Button type="button" variant="outline" onClick={closeDialog} disabled={busy}>
                   Cancel
                 </Button>

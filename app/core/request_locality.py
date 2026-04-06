@@ -161,6 +161,22 @@ def _has_forwarded_client_ip_hint(headers: Mapping[str, str]) -> bool:
     return any(headers.get(header) for header in _FORWARDED_CLIENT_IP_HEADERS)
 
 
+def _parse_host_header_hostname(host_header: str | None) -> str | None:
+    if host_header is None:
+        return None
+    value = host_header.strip()
+    if not value:
+        return None
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing != -1:
+            return value[: closing + 1]
+        return value
+    if value.count(":") == 1:
+        return value.split(":", 1)[0].strip()
+    return value
+
+
 def is_local_request(request: HTTPConnection) -> bool:
     if _is_test_server_request(request):
         return True
@@ -174,10 +190,7 @@ def is_local_request(request: HTTPConnection) -> bool:
     except ValueError:
         return False
     if address.is_loopback and not settings.firewall_trust_proxy_headers:
-        host_header = request.headers.get("host")
-        host_name = None
-        if host_header:
-            host_name = host_header.split(":", 1)[0].strip()
+        host_name = _parse_host_header_hostname(request.headers.get("host"))
         return is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers)
     if address.is_loopback and settings.firewall_trust_proxy_headers:
         return False

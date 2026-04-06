@@ -27,3 +27,13 @@ def test_loopback_with_local_host_is_local() -> None:
 def test_loopback_with_non_local_host_is_not_local() -> None:
     request = _request(client_host="127.0.0.1", host="lb.example")
     assert is_local_request(request) is False
+
+
+def test_loopback_with_bracketed_ipv6_local_host_is_local() -> None:
+    request = _request(client_host="::1", host="[::1]:8000")
+    assert is_local_request(request) is True
+
+
+def test_loopback_with_unbracketed_ipv6_local_host_is_local() -> None:
+    request = _request(client_host="::1", host="::1")
+    assert is_local_request(request) is True

@@ -113,11 +113,10 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 setUnauthorizedHandler(() => {
-  useAuthStore.setState({
+  useAuthStore.setState((state) => ({
+    ...state,
     authenticated: false,
     initialized: true,
     error: null,
-    bootstrapRequired: false,
-    bootstrapTokenConfigured: false,
-  });
+  }));
 });

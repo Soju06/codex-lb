@@ -16,6 +16,8 @@ describe("AuthSessionSchema", () => {
       passwordRequired: true,
       totpRequiredOnLogin: false,
       totpConfigured: true,
+      bootstrapRequired: false,
+      bootstrapTokenConfigured: false,
     });
   });
 

@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -4929,10 +4929,10 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
             create_started.set()
             await release_create.wait()
             session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
-            session.account = SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE)
+            cast(Any, session).account = SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE)
             return session
         session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
-        session.account = SimpleNamespace(id="acc-fresh", status=AccountStatus.ACTIVE)
+        cast(Any, session).account = SimpleNamespace(id="acc-fresh", status=AccountStatus.ACTIVE)
         return session
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)

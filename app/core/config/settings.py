@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 from functools import lru_cache
 from ipaddress import ip_network
@@ -108,6 +109,7 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     firewall_trust_proxy_headers: bool = False
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
@@ -239,6 +241,23 @@ class Settings(BaseSettings):
                         normalized.append(instance_id)
             return normalized
         raise TypeError("http_responses_session_bridge_instance_ring must be a list or comma-separated string")
+
+    @field_validator("model_context_window_overrides", mode="before")
+    @classmethod
+    def _parse_model_context_window_overrides(cls, value: object) -> dict[str, int]:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return {}
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise TypeError("model_context_window_overrides must be a JSON object")
+            return {str(k): int(v) for k, v in parsed.items()}
+        if isinstance(value, dict):
+            return {str(k): int(v) for k, v in value.items()}
+        raise TypeError("model_context_window_overrides must be a JSON object string or dict")
 
     @field_validator("upstream_compact_timeout_seconds")
     @classmethod

@@ -555,13 +555,18 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
         support_verbosity=model.support_verbosity,
         default_verbosity=model.default_verbosity,
         supports_parallel_tool_calls=model.supports_parallel_tool_calls,
-        context_window=model.context_window,
+        context_window=_effective_context_window(model),
         input_modalities=list(model.input_modalities),
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
         visibility=_model_visibility(model),
         **extra,
     )
+
+
+def _effective_context_window(model: UpstreamModel) -> int:
+    overrides = get_settings().model_context_window_overrides
+    return overrides.get(model.slug, model.context_window)
 
 
 def _model_visibility(model: UpstreamModel) -> str:
@@ -573,7 +578,7 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
     return ModelMetadata(
         display_name=model.display_name,
         description=model.description,
-        context_window=model.context_window,
+        context_window=_effective_context_window(model),
         input_modalities=list(model.input_modalities),
         supported_reasoning_levels=[
             ReasoningLevelSchema(effort=rl.effort, description=rl.description)

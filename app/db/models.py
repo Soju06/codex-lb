@@ -16,10 +16,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    false,
     func,
     literal_column,
     text,
+    true,
 )
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -206,8 +206,8 @@ class DashboardSettings(Base):
     )
     import_without_overwrite: Mapped[bool] = mapped_column(
         Boolean,
-        default=False,
-        server_default=false(),
+        default=True,
+        server_default=true(),
         nullable=False,
     )
     totp_required_on_login: Mapped[bool] = mapped_column(

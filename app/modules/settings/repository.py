@@ -25,7 +25,7 @@ class SettingsRepository:
             prefer_earlier_reset_accounts=False,
             routing_strategy="capacity_weighted",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
-            import_without_overwrite=False,
+            import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
             api_key_auth_enabled=False,

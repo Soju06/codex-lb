@@ -84,9 +84,13 @@ class ApiKeysRepository:
         self._session = session
 
     def _select_api_key(self):
-        return select(ApiKey).execution_options(populate_existing=True).options(
-            selectinload(ApiKey.limits),
-            selectinload(ApiKey.account_assignments),
+        return (
+            select(ApiKey)
+            .execution_options(populate_existing=True)
+            .options(
+                selectinload(ApiKey.limits),
+                selectinload(ApiKey.account_assignments),
+            )
         )
 
     async def create(self, row: ApiKey) -> ApiKey:

@@ -112,15 +112,18 @@ class LoadBalancer:
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
         budget_threshold_pct: float = 95.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
+        scoped_account_ids = set(account_ids or ())
 
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 additional_limit_name=additional_limit_name,
+                account_ids=scoped_account_ids or None,
             )
             if excluded_ids and selection_inputs.accounts:
                 selection_inputs = _SelectionInputs(
@@ -388,8 +391,13 @@ class LoadBalancer:
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
-        cache_key = (model, additional_limit_name)
+        cache_key = (
+            model,
+            additional_limit_name,
+            tuple(sorted(set(account_ids))) if account_ids else None,
+        )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
             return _clone_selection_inputs(cached)
@@ -400,6 +408,9 @@ class LoadBalancer:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = all_accounts
+            if account_ids:
+                allowed_account_ids = set(account_ids)
+                accounts = [account for account in accounts if account.id in allowed_account_ids]
             if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
                 accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:

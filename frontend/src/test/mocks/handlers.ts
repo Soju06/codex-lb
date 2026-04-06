@@ -55,6 +55,7 @@ const ApiKeyUpdatePayloadSchema = z
 		name: z.string().optional(),
 		allowedModels: z.array(z.string()).nullable().optional(),
 		isActive: z.boolean().optional(),
+		assignedAccountIds: z.array(z.string()).optional(),
 		resetUsage: z.boolean().optional(),
 		limits: z
 			.array(
@@ -743,6 +744,9 @@ export const handlers = [
 				? { allowedModels: payload.allowedModels }
 				: {}),
 			...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
+			...(payload.assignedAccountIds !== undefined
+				? { assignedAccountIds: payload.assignedAccountIds }
+				: {}),
 		};
 
 		if (payload.limits) {

@@ -44,6 +44,7 @@ class ApiKeyUpdateRequest(DashboardModel):
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     is_active: bool | None = None
+    assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
     reset_usage: bool | None = None
 
@@ -65,6 +66,7 @@ class ApiKeyResponse(DashboardModel):
     enforced_service_tier: str | None
     expires_at: datetime | None
     is_active: bool
+    assigned_account_ids: list[str] = Field(default_factory=list)
     created_at: datetime
     last_used_at: datetime | None
     limits: list[LimitRuleResponse] = Field(default_factory=list)

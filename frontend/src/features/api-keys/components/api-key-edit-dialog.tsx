@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
+import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType, ServiceTierType } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
@@ -71,6 +72,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   });
 
   const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(apiKey.assignedAccountIds);
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
@@ -87,6 +89,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
+      assignedAccountIds: selectedAccountIds,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
@@ -129,6 +132,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">Allowed models</div>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Assigned accounts</div>
+              <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
             </div>
 
             <div className="space-y-1">

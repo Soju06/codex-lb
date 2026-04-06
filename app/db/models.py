@@ -75,6 +75,13 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
+        "ApiKeyAccountAssignment",
+        back_populates="account",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
 
 class UsageHistory(Base):
     __tablename__ = "usage_history"
@@ -273,6 +280,31 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    account_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
+        "ApiKeyAccountAssignment",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class ApiKeyAccountAssignment(Base):
+    __tablename__ = "api_key_accounts"
+
+    api_key_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="account_assignments")
+    account: Mapped["Account"] = relationship("Account", back_populates="api_key_assignments")
 
 
 class LimitType(str, Enum):
@@ -462,6 +494,7 @@ Index(
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)

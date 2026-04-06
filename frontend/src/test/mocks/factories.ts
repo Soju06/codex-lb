@@ -392,6 +392,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		allowedModels: ["gpt-5.1"],
 		expiresAt: offsetIso(30 * 24 * 60),
 		isActive: true,
+		assignedAccountIds: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
 		limits: [

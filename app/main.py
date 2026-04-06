@@ -9,7 +9,6 @@ from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import get_settings
@@ -22,6 +21,7 @@ from app.core.middleware import (
     add_request_decompression_middleware,
     add_request_id_middleware,
 )
+from app.core.middleware.inflight import InFlightMiddleware
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
 from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
@@ -64,25 +64,6 @@ def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
 
         return exc.errno in (_errno.EADDRINUSE, _errno.EADDRNOTAVAIL)
     return False
-
-
-class InFlightMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # Graceful drain waits for finite HTTP request lifetimes only. Long-lived
-        # websocket sessions are handled independently and must not pin drain.
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        shutdown_state = import_module("app.core.shutdown")
-        shutdown_state.increment_in_flight()
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            shutdown_state.decrement_in_flight()
 
 
 @asynccontextmanager

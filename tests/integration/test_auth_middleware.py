@@ -84,6 +84,20 @@ async def test_session_branch_allows_without_password_and_blocks_without_session
 
 
 @pytest.mark.asyncio
+async def test_remote_proxy_denied_before_auth_is_configured(app_instance):
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("203.0.113.11", 50001))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as remote_client:
+            response = await remote_client.get("/v1/models")
+            assert response.status_code == 401
+            assert response.json()["error"]["code"] == "invalid_api_key"
+
+            spoofed = await remote_client.get("/v1/models", headers={"Host": "localhost"})
+            assert spoofed.status_code == 401
+            assert spoofed.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
 async def test_remote_first_run_requires_bootstrap_token(app_instance, monkeypatch):
     monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
     from app.core.config.settings import get_settings

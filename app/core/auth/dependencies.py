@@ -5,6 +5,7 @@ import logging
 
 from fastapi import Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.requests import HTTPConnection
 
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.clients.usage import UsageFetchError, fetch_usage
@@ -38,15 +39,22 @@ def set_dashboard_error_format(request: Request) -> None:
 
 
 async def validate_proxy_api_key(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> ApiKeyData | None:
     authorization = None if credentials is None else f"Bearer {credentials.credentials}"
-    return await validate_proxy_api_key_authorization(authorization)
+    return await validate_proxy_api_key_authorization(authorization, request=request)
 
 
-async def validate_proxy_api_key_authorization(authorization: str | None) -> ApiKeyData | None:
+async def validate_proxy_api_key_authorization(
+    authorization: str | None,
+    *,
+    request: HTTPConnection | None = None,
+) -> ApiKeyData | None:
     settings = await get_settings_cache().get()
     if not settings.api_key_auth_enabled:
+        if request is not None and not is_local_request(request):
+            raise ProxyAuthError("Proxy authentication must be configured before remote access is allowed")
         return None
 
     token = _extract_bearer_token(authorization)
@@ -83,6 +91,7 @@ async def _validate_api_key_token(token: str) -> ApiKeyData:
 
 
 async def validate_usage_api_key(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> ApiKeyData:
     """Validate API key for self-service usage endpoint.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
-from fastapi import Request
+from starlette.requests import HTTPConnection
 
 from app.core.config.settings import get_settings
 
@@ -136,7 +136,7 @@ def _trusted_proxy_networks() -> tuple[IPv4Network | IPv6Network, ...]:
     return parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
 
 
-def resolve_request_client_host(request: Request) -> str | None:
+def resolve_request_client_host(request: HTTPConnection) -> str | None:
     settings = get_settings()
     socket_ip = request.client.host if request.client else None
     return resolve_connection_client_ip(
@@ -147,7 +147,7 @@ def resolve_request_client_host(request: Request) -> str | None:
     )
 
 
-def _is_test_server_request(request: Request) -> bool:
+def _is_test_server_request(request: HTTPConnection) -> bool:
     server = request.scope.get("server")
     if not isinstance(server, tuple) or not server:
         return False
@@ -161,7 +161,7 @@ def _has_forwarded_client_ip_hint(headers: Mapping[str, str]) -> bool:
     return any(headers.get(header) for header in _FORWARDED_CLIENT_IP_HEADERS)
 
 
-def is_local_request(request: Request) -> bool:
+def is_local_request(request: HTTPConnection) -> bool:
     if _is_test_server_request(request):
         return True
 

@@ -161,6 +161,64 @@ async def test_backend_codex_models_entry_has_upstream_fields(async_client):
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_preserves_upstream_visibility(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    entries = resp.json()["models"]
+    entry = next(m for m in entries if m["slug"] == "gpt-5.3-codex")
+    assert entry["visibility"] == "hide"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_filters_disallowed_models(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model("gpt-5.2", base_instructions="allowed"),
+        _make_upstream_model("gpt-5.3-codex", base_instructions="blocked"),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-restricted",
+            "allowedModels": ["gpt-5.2"],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+    entries = resp.json()["models"]
+    assert [entry["slug"] for entry in entries] == ["gpt-5.2"]
+    assert entries[0]["base_instructions"] == "allowed"
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_includes_supported_in_api_false_models(async_client):
     registry = get_model_registry()
     models = [

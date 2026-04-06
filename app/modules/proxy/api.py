@@ -325,10 +325,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         request_service_tier=None,
     )
 
-    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    if api_key and api_key.enforced_model:
-        forced = {api_key.enforced_model}
-        allowed_models = forced if allowed_models is None else (allowed_models & forced)
+    allowed_models = _allowed_models_for_api_key(api_key)
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
@@ -339,8 +336,9 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     entries: list[CodexModelEntry] = []
     for slug, model in models.items():
-        visibility = "list" if is_public_model(model, allowed_models) else "hide"
-        entries.append(_to_codex_model_entry(model, visibility=visibility))
+        if not is_public_model(model, allowed_models):
+            continue
+        entries.append(_to_codex_model_entry(model))
     await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
 
@@ -352,10 +350,7 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         request_service_tier=None,
     )
 
-    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    if api_key and api_key.enforced_model:
-        forced = {api_key.enforced_model}
-        allowed_models = forced if allowed_models is None else (allowed_models & forced)
+    allowed_models = _allowed_models_for_api_key(api_key)
     created = int(time.time())
 
     registry = get_model_registry()
@@ -381,7 +376,15 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
 
 
-def _to_codex_model_entry(model: UpstreamModel, *, visibility: str = "list") -> CodexModelEntry:
+def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
+    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    if api_key and api_key.enforced_model:
+        forced = {api_key.enforced_model}
+        return forced if allowed_models is None else (allowed_models & forced)
+    return allowed_models
+
+
+def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
     raw = model.raw
 
     extra: dict[str, JsonValue] = {}
@@ -430,9 +433,14 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str = "list") -> 
         input_modalities=list(model.input_modalities),
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
-        visibility=visibility,
+        visibility=_model_visibility(model),
         **extra,
     )
+
+
+def _model_visibility(model: UpstreamModel) -> str:
+    visibility = model.raw.get("visibility")
+    return visibility if isinstance(visibility, str) else "list"
 
 
 def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:

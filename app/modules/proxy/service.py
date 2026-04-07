@@ -2344,15 +2344,16 @@ class ProxyService:
 
     async def _retry_http_bridge_precreated_request(self, session: "_HTTPBridgeSession") -> bool:
         async with session.pending_lock:
-            if len(session.pending_requests) != 1:
+            retryable_requests = [
+                request_state
+                for request_state in session.pending_requests
+                if request_state.response_id is None
+                and request_state.awaiting_response_created
+                and bool(request_state.request_text)
+            ]
+            if len(retryable_requests) != 1:
                 return False
-            request_state = session.pending_requests[0]
-            if request_state.response_id is not None:
-                return False
-            if not request_state.awaiting_response_created:
-                return False
-            if not request_state.request_text:
-                return False
+            request_state = retryable_requests[0]
             if request_state.previous_response_id is not None:
                 _mark_request_state_previous_response_not_found(
                     request_state,
@@ -2366,6 +2367,7 @@ class ProxyService:
             if request_state.replay_count >= 1:
                 return False
             request_text = request_state.request_text
+            assert isinstance(request_text, str)
             request_state.replay_count += 1
         _log_http_bridge_event(
             "retry_precreated",

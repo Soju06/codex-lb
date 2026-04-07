@@ -215,7 +215,7 @@ class TestFailoverDecision:
 
 
 class TestEvaluateHealthTier:
-    def _make_state(self, *, health_tier: int = 0, **kwargs) -> AccountState:  # type: ignore[no-untyped-def]
+    def _make_state(self, *, health_tier: int = 0, **kwargs) -> AccountState:
         defaults: dict = {
             "account_id": "test",
             "status": AccountStatus.ACTIVE,

@@ -42,6 +42,21 @@ DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
 
 
+def _validate_context_window_entries(data: dict) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for k, v in data.items():
+        if isinstance(v, bool):
+            raise TypeError(f"model_context_window_overrides value for '{k}' must be a positive integer, got bool")
+        if not isinstance(v, int):
+            raise TypeError(
+                f"model_context_window_overrides value for '{k}' must be a positive integer, got {type(v).__name__}"
+            )
+        if v <= 0:
+            raise ValueError(f"model_context_window_overrides value for '{k}' must be a positive integer, got {v}")
+        result[str(k)] = v
+    return result
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
@@ -254,16 +269,9 @@ class Settings(BaseSettings):
             parsed = json.loads(value)
             if not isinstance(parsed, dict):
                 raise TypeError("model_context_window_overrides must be a JSON object")
-            return {str(k): int(v) for k, v in parsed.items()}
+            return _validate_context_window_entries(parsed)
         if isinstance(value, dict):
-            result: dict[str, int] = {}
-            for k, v in value.items():
-                if not isinstance(v, (int, float, str)):
-                    raise TypeError(
-                        f"model_context_window_overrides value must be numeric, got {type(v).__name__}"
-                    )
-                result[str(k)] = int(v)
-            return result
+            return _validate_context_window_entries(value)
         raise TypeError("model_context_window_overrides must be a JSON object string or dict")
 
     @field_validator("upstream_compact_timeout_seconds")

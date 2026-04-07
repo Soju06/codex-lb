@@ -274,11 +274,12 @@ async def test_model_context_window_override(async_client, monkeypatch):
     models = [_make_upstream_model("gpt-5.4")]
     await registry.update({"pro": models})
 
-    from app.core.config import settings as settings_module
+    from app.core.config.settings import get_settings
+    from app.modules.proxy import api as proxy_api_module
 
-    original_settings = settings_module.get_settings()
+    original_settings = get_settings()
     patched = original_settings.model_copy(update={"model_context_window_overrides": {"gpt-5.4": 515000}})
-    monkeypatch.setattr(settings_module, "get_settings", lambda: patched)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
 
     # /backend-api/codex/models
     resp = await async_client.get("/backend-api/codex/models")

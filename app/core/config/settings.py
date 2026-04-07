@@ -256,7 +256,14 @@ class Settings(BaseSettings):
                 raise TypeError("model_context_window_overrides must be a JSON object")
             return {str(k): int(v) for k, v in parsed.items()}
         if isinstance(value, dict):
-            return {str(k): int(v) for k, v in value.items()}
+            result: dict[str, int] = {}
+            for k, v in value.items():
+                if not isinstance(v, (int, float, str)):
+                    raise TypeError(
+                        f"model_context_window_overrides value must be numeric, got {type(v).__name__}"
+                    )
+                result[str(k)] = int(v)
+            return result
         raise TypeError("model_context_window_overrides must be a JSON object string or dict")
 
     @field_validator("upstream_compact_timeout_seconds")

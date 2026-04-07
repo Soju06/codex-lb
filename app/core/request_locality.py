@@ -181,6 +181,7 @@ def is_local_request(request: HTTPConnection) -> bool:
     if _is_test_server_request(request):
         return True
 
+    settings = get_settings()
     client_host = resolve_request_client_host(request)
     if not client_host:
         return False
@@ -190,5 +191,7 @@ def is_local_request(request: HTTPConnection) -> bool:
         return False
     if address.is_loopback:
         host_name = _parse_host_header_hostname(request.headers.get("host"))
+        if settings.firewall_trust_proxy_headers:
+            return is_local_host(host_name) and _has_forwarded_client_ip_hint(request.headers)
         return is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers)
     return address.is_loopback

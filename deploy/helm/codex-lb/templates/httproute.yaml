@@ -20,5 +20,5 @@ spec:
   rules:
     - backendRefs:
         - name: {{ include "codex-lb.fullname" . }}
-          port: 2455
+          port: {{ .Values.service.port }}
 {{- end }}

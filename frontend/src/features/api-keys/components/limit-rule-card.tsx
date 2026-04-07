@@ -23,12 +23,15 @@ const LIMIT_TYPE_LABELS: Record<LimitType, string> = {
   input_tokens: "Input Tokens",
   output_tokens: "Output Tokens",
   cost_usd: "Cost ($)",
+  credits: "Credits",
 };
 
 const WINDOW_LABELS: Record<LimitWindowType, string> = {
   daily: "Daily",
   weekly: "Weekly",
   monthly: "Monthly",
+  "5h": "5h",
+  "7d": "7d",
 };
 
 const LIMIT_TYPE_SET: ReadonlySet<string> = new Set(LIMIT_TYPES);
@@ -50,6 +53,7 @@ export type LimitRuleCardProps = {
 
 export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) {
   const isCost = rule.limitType === "cost_usd";
+  const isCredits = rule.limitType === "credits";
   const displayValue = isCost && rule.maxValue > 0
     ? String(rule.maxValue / 1_000_000)
     : rule.maxValue > 0
@@ -76,7 +80,11 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
 
   const handleLimitTypeChange = (v: string) => {
     if (isLimitType(v)) {
-      onChange({ ...rule, limitType: v });
+      onChange({
+        ...rule,
+        limitType: v,
+        modelFilter: v === "credits" ? null : rule.modelFilter,
+      });
     }
   };
 
@@ -133,7 +141,7 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
 
       <div>
         <label className="text-xs text-muted-foreground">
-          {isCost ? "Max value (USD)" : "Max value (tokens)"}
+          {isCost ? "Max value (USD)" : isCredits ? "Max value (credits)" : "Max value (tokens)"}
         </label>
         <Input
           type="number"
@@ -149,8 +157,11 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
         <label className="text-xs text-muted-foreground">Model filter</label>
         <ModelMultiSelect
           value={modelFilterArray}
-          onChange={(models) => onChange({ ...rule, modelFilter: models[0] || null })}
-          placeholder="All models"
+          onChange={(models) => {
+            if (isCredits) return;
+            onChange({ ...rule, modelFilter: models[0] || null });
+          }}
+          placeholder={isCredits ? "Credits limits apply globally" : "All models"}
         />
       </div>
     </div>

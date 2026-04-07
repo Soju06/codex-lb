@@ -8,15 +8,22 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
 from app.modules.accounts.mappers import build_account_summaries
+from app.modules.dashboard.builders import (
+    build_dashboard_overview_summary,
+    build_overview_timeframe,
+    resolve_overview_timeframe,
+)
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
+    DashboardOverviewTimeframeKey,
     DashboardUsageWindows,
     DepletionResponse,
 )
 from app.modules.usage.builders import (
+    align_bucket_window_start,
+    build_activity_summaries,
     build_trends_from_buckets,
-    build_usage_summary_response,
     build_usage_window_response,
 )
 from app.modules.usage.depletion_service import (
@@ -30,8 +37,12 @@ class DashboardService:
         self._repo = repo
         self._encryptor = TokenEncryptor()
 
-    async def get_overview(self) -> DashboardOverviewResponse:
+    async def get_overview(
+        self,
+        timeframe_key: DashboardOverviewTimeframeKey = "7d",
+    ) -> DashboardOverviewResponse:
         now = utcnow()
+        overview_timeframe = resolve_overview_timeframe(timeframe_key)
         accounts = await self._repo.list_accounts()
         primary_usage = await self._repo.latest_usage_by_account("primary")
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
@@ -51,22 +62,37 @@ class DashboardService:
             secondary_rows_raw,
         )
 
-        secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)
+        bucket_since = now - timedelta(minutes=overview_timeframe.window_minutes)
+        bucket_query_since = align_bucket_window_start(
+            bucket_since,
+            overview_timeframe.bucket_seconds,
+        )
+        bucket_rows = await self._repo.aggregate_logs_by_bucket(
+            bucket_query_since,
+            overview_timeframe.bucket_seconds,
+        )
+        trends, _, _ = build_trends_from_buckets(
+            bucket_rows,
+            bucket_since,
+            bucket_seconds=overview_timeframe.bucket_seconds,
+            bucket_count=overview_timeframe.bucket_count,
+        )
+        activity_aggregate = await self._repo.aggregate_activity_since(bucket_since)
+        top_error = await self._repo.top_error_since(bucket_since)
+        activity_metrics, activity_cost = build_activity_summaries(
+            activity_aggregate,
+            top_error=top_error,
+        )
 
-        # Use bucket aggregation instead of loading all logs
-        bucket_since = now - timedelta(minutes=secondary_minutes) if secondary_minutes else now - timedelta(days=7)
-        bucket_rows = await self._repo.aggregate_logs_by_bucket(bucket_since)
-        trends, bucket_metrics, bucket_cost = build_trends_from_buckets(bucket_rows, bucket_since)
-
-        summary = build_usage_summary_response(
+        summary = build_dashboard_overview_summary(
             accounts=accounts,
             primary_rows=primary_rows,
             secondary_rows=secondary_rows,
-            logs_secondary=[],
-            metrics_override=bucket_metrics,
-            cost_override=bucket_cost,
+            activity_metrics=activity_metrics,
+            activity_cost=activity_cost,
         )
 
+        secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)
         primary_window_minutes = usage_core.resolve_window_minutes("primary", primary_rows)
 
         windows = DashboardUsageWindows(
@@ -192,6 +218,7 @@ class DashboardService:
         additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, additional_ts),
+            timeframe=build_overview_timeframe(overview_timeframe),
             accounts=account_summaries,
             summary=summary,
             windows=windows,

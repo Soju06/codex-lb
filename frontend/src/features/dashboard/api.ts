@@ -1,9 +1,11 @@
 import { get } from "@/lib/api-client";
 
 import {
+  DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
+  type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 
 const DASHBOARD_PATH = "/api/dashboard";
@@ -27,6 +29,10 @@ export type RequestLogFacetFilters = {
   modelOptions?: string[];
 };
 
+export type DashboardOverviewParams = {
+  timeframe?: OverviewTimeframe;
+};
+
 function appendMany(params: URLSearchParams, key: string, values?: string[]): void {
   if (!values || values.length === 0) {
     return;
@@ -38,8 +44,10 @@ function appendMany(params: URLSearchParams, key: string, values?: string[]): vo
   }
 }
 
-export function getDashboardOverview() {
-  return get(`${DASHBOARD_PATH}/overview`, DashboardOverviewSchema);
+export function getDashboardOverview(params: DashboardOverviewParams = {}) {
+  const query = new URLSearchParams();
+  query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
+  return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {

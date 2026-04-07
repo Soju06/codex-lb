@@ -1,10 +1,21 @@
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 
 const ISO = "2026-01-01T12:00:00+00:00";
+
+const { toastSuccess, toastError } = vi.hoisted(() => ({
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: toastSuccess,
+    error: toastError,
+  },
+}));
 
 const PAGINATION_PROPS = {
   total: 1,
@@ -16,9 +27,19 @@ const PAGINATION_PROPS = {
 };
 
 describe("RecentRequestsTable", () => {
-  it("renders rows with status badges and supports error expansion", async () => {
-    const user = userEvent.setup();
+  beforeEach(() => {
+    toastSuccess.mockReset();
+    toastError.mockReset();
+  });
+
+  it("renders rows with status badges and supports request details and copy actions", async () => {
     const longError = "Rate limit reached while processing this request ".repeat(3);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
 
     render(
       <RecentRequestsTable
@@ -63,13 +84,32 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("Requested priority")).toBeInTheDocument();
     expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
+    expect(screen.getByText("rate_limit_exceeded")).toBeInTheDocument();
 
-    const viewButton = screen.getByRole("button", { name: "View" });
-    await user.click(viewButton);
+    const viewButton = screen.getByRole("button", { name: "View Details" });
+    fireEvent.click(viewButton);
     const dialog = screen.getByRole("dialog");
     expect(dialog).toBeInTheDocument();
-    expect(screen.getByText("Error Detail")).toBeInTheDocument();
+    expect(screen.getByText("Request Details")).toBeInTheDocument();
+    expect(screen.getByText("req-1")).toBeInTheDocument();
+    expect(screen.getAllByText("rate_limit_exceeded")[0]).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy Request ID" }));
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith("req-1");
+    expect(toastSuccess).toHaveBeenCalledWith("Copied to clipboard");
+    expect(screen.getByRole("button", { name: "Copy Request ID Copied" })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy Error" }));
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith(longError);
   });
 
   it("renders empty state", () => {
@@ -107,5 +147,41 @@ describe("RecentRequestsTable", () => {
     );
 
     expect(screen.getAllByText("--")[0]).toBeInTheDocument();
+  });
+
+  it("shows details action for error-code-only rows", async () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-legacy",
+            apiKeyName: null,
+            requestId: "req-error-code",
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            status: "error",
+            errorCode: "upstream_error",
+            errorMessage: null,
+            tokens: 1,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByText("upstream_error")[0]).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View Details" }));
+
+    expect(screen.getByRole("dialog")).toHaveTextContent("upstream_error");
+    expect(screen.getByRole("dialog")).toHaveTextContent("Full Error");
   });
 });

@@ -24,6 +24,16 @@ from app.core.openai.models import CompactResponsePayload
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+async def _force_usage_weighted_routing(async_client) -> None:
+    current = await async_client.get("/api/settings")
+    assert current.status_code == 200
+    payload = current.json()
+    payload["routingStrategy"] = "usage_weighted"
+    response = await async_client.put("/api/settings", json=payload)
+    assert response.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -295,6 +305,36 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
     b_calls = [aid for aid in seen_account_ids if aid == "acc_h5fo_b"]
     assert len(a_calls) == 3
     assert len(b_calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_client, monkeypatch):
+    await _import_account(async_client, "acc_h502_a", "h502_a@example.com")
+    await _import_account(async_client, "acc_h502_b", "h502_b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_h502_a":
+            raise ProxyResponseError(
+                502,
+                openai_error("bad_gateway", "Bad gateway"),
+                failure_phase="status",
+            )
+        yield _success_sse_event()
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    assert len(completed) == 1
+    assert seen_account_ids[:2] == ["acc_h502_a", "acc_h502_b"]
 
 
 # ===========================================================================
@@ -587,3 +627,33 @@ async def test_compact_502_still_uses_safe_retry_budget(async_client, monkeypatc
     # safe_retry_budget=1 → retried once, same account
     assert call_count == 2
     assert seen_account_ids[0] == seen_account_ids[1]
+
+
+@pytest.mark.asyncio
+async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failover(async_client, monkeypatch):
+    await _import_account(async_client, "acc_sticky_503_a", "sticky503a@example.com")
+    await _import_account(async_client, "acc_sticky_503_b", "sticky503b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_sticky_503_a":
+            raise ProxyResponseError(
+                503,
+                openai_error("bad_gateway", "Bad gateway"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"x-codex-session-id": "sticky-session-503"},
+    )
+    assert response.status_code == 200
+    assert response.json()["object"] == "response.compaction"
+    assert seen_account_ids[:2] == ["acc_sticky_503_a", "acc_sticky_503_b"]

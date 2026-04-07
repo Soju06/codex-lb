@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import random
 import time
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +26,7 @@ def test_select_account_picks_lowest_used_percent():
         AccountState("a", AccountStatus.ACTIVE, used_percent=50.0),
         AccountState("b", AccountStatus.ACTIVE, used_percent=10.0),
     ]
-    result = select_account(states)
+    result = select_account(states, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -47,7 +49,7 @@ def test_select_account_prefers_earlier_secondary_reset_bucket():
             secondary_reset_at=int(now + 2 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -70,7 +72,7 @@ def test_select_account_secondary_reset_is_bucketed_by_day():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -93,7 +95,7 @@ def test_select_account_prefers_lower_secondary_used_with_same_reset_bucket():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -116,7 +118,7 @@ def test_select_account_deprioritizes_missing_secondary_reset_at():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True)
+    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -139,7 +141,7 @@ def test_select_account_ignores_reset_when_disabled():
             secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=False)
+    result = select_account(states, now=now, prefer_earlier_reset=False, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "a"
 
@@ -622,6 +624,81 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
     assert state.status == AccountStatus.ACTIVE
 
 
+def test_state_from_account_uses_configured_drain_primary_threshold(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(
+            soft_drain_enabled=True,
+            drain_primary_threshold_pct=75.0,
+            drain_secondary_threshold_pct=90.0,
+            drain_error_window_seconds=60.0,
+            drain_error_count_threshold=2,
+            probe_quiet_seconds=60.0,
+            probe_success_streak_required=3,
+        ),
+    )
+
+    account = _make_test_account(status=AccountStatus.ACTIVE)
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=80.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.health_tier == 1
+
+
+def test_state_from_account_uses_configured_probe_quiet_seconds(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(
+            soft_drain_enabled=True,
+            drain_primary_threshold_pct=85.0,
+            drain_secondary_threshold_pct=90.0,
+            drain_error_window_seconds=60.0,
+            drain_error_count_threshold=2,
+            probe_quiet_seconds=10.0,
+            probe_success_streak_required=3,
+        ),
+    )
+
+    account = _make_test_account(status=AccountStatus.ACTIVE)
+    runtime = RuntimeState(
+        health_tier=1,
+        drain_entered_at=now - 11.0,
+        probe_success_streak=0,
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=50.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=None,
+        runtime=runtime,
+    )
+
+    assert state.health_tier == 2
+
+
 def test_error_backoff_resets_error_count_when_expired():
     now = 1_700_000_000.0
     state = AccountState(
@@ -713,3 +790,393 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
     assert result.latest_primary == {}
     assert result.latest_secondary == {}
+
+
+def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():
+    random.seed(11)
+    n = 2000
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=50.0,
+        secondary_used_percent=10.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=50.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"pro": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account([pro, plus], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    pro_ratio = counts["pro"] / n
+    expected_pro_ratio = 50400.0 / (50400.0 + 7560.0)
+    assert abs(pro_ratio - expected_pro_ratio) <= 0.05
+
+
+def test_select_account_capacity_weighted_same_tier_lower_usage_selected_more():
+    random.seed(22)
+    n = 2000
+    low_usage = AccountState(
+        "plus-low",
+        AccountStatus.ACTIVE,
+        used_percent=20.0,
+        secondary_used_percent=20.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    high_usage = AccountState(
+        "plus-high",
+        AccountStatus.ACTIVE,
+        used_percent=80.0,
+        secondary_used_percent=80.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"plus-low": 0, "plus-high": 0}
+    for _ in range(n):
+        result = select_account([low_usage, high_usage], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    low_ratio = counts["plus-low"] / n
+    expected_low_ratio = 0.8
+    assert abs(low_ratio - expected_low_ratio) <= 0.05
+
+
+def test_select_account_capacity_weighted_all_exhausted_falls_back_deterministically():
+    a = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=60.0,
+        secondary_used_percent=100.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    b = AccountState(
+        "b",
+        AccountStatus.ACTIVE,
+        used_percent=40.0,
+        secondary_used_percent=100.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    for _ in range(50):
+        result = select_account([a, b], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        assert result.account.account_id == "b"
+
+
+def test_select_account_capacity_weighted_single_account_always_selected():
+    only = AccountState(
+        "only",
+        AccountStatus.ACTIVE,
+        used_percent=77.0,
+        secondary_used_percent=55.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    for _ in range(100):
+        result = select_account([only], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        assert result.account.account_id == "only"
+
+
+def test_select_account_capacity_weighted_zero_capacity_treated_as_zero_weight():
+    random.seed(33)
+    zero_capacity = AccountState(
+        "zero-capacity",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=0.0,
+    )
+    weighted = AccountState(
+        "weighted",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    for _ in range(200):
+        result = select_account([zero_capacity, weighted], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        assert result.account.account_id == "weighted"
+
+
+def test_select_account_capacity_weighted_unknown_plan_uses_conservative_fallback_weight():
+    random.seed(34)
+    n = 2000
+    unknown_plan = AccountState(
+        "unknown-plan",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="unknown",
+        capacity_credits=None,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"unknown-plan": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account([unknown_plan, plus], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    unknown_ratio = counts["unknown-plan"] / n
+    assert 0.05 <= unknown_ratio <= 0.25
+    assert counts["plus"] > counts["unknown-plan"]
+
+
+def test_select_account_capacity_weighted_education_alias_uses_edu_capacity():
+    random.seed(35)
+    n = 2000
+    education = AccountState(
+        "education",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="education",
+        capacity_credits=None,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"education": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account([education, plus], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    education_ratio = counts["education"] / n
+    assert 0.45 <= education_ratio <= 0.55
+
+
+def test_select_account_capacity_weighted_three_tiers_distribution_matches_capacity():
+    random.seed(44)
+    n = 2000
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=0.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=0.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    free = AccountState(
+        "free",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=0.0,
+        plan_type="free",
+        capacity_credits=1134.0,
+    )
+
+    counts = {"pro": 0, "plus": 0, "free": 0}
+    for _ in range(n):
+        result = select_account([pro, plus, free], routing_strategy="capacity_weighted")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    pro_ratio = counts["pro"] / n
+    plus_ratio = counts["plus"] / n
+    free_ratio = counts["free"] / n
+    total_capacity = 50400.0 + 7560.0 + 1134.0
+
+    assert abs(pro_ratio - (50400.0 / total_capacity)) <= 0.05
+    assert abs(plus_ratio - (7560.0 / total_capacity)) <= 0.05
+    assert abs(free_ratio - (1134.0 / total_capacity)) <= 0.05
+    assert pro_ratio > plus_ratio > free_ratio
+
+
+def test_select_account_capacity_weighted_prefers_earlier_reset_bucket():
+    random.seed(55)
+    now = time.time()
+    early = AccountState(
+        "early",
+        AccountStatus.ACTIVE,
+        used_percent=80.0,
+        secondary_used_percent=80.0,
+        secondary_reset_at=int(now + 2 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    late = AccountState(
+        "late",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        secondary_reset_at=int(now + 4 * 24 * 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    for _ in range(100):
+        result = select_account(
+            [early, late],
+            now=now,
+            prefer_earlier_reset=True,
+            routing_strategy="capacity_weighted",
+        )
+        assert result.account is not None
+        assert result.account.account_id == "early"
+
+
+def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_bucket():
+    random.seed(66)
+    n = 2000
+    now = time.time()
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        secondary_reset_at=int(now + 3 * 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        secondary_reset_at=int(now + 2 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    late = AccountState(
+        "late",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 5 * 24 * 3600),
+        plan_type="enterprise",
+        capacity_credits=50400.0,
+    )
+
+    counts = {"pro": 0, "plus": 0, "late": 0}
+    for _ in range(n):
+        result = select_account(
+            [pro, plus, late],
+            now=now,
+            prefer_earlier_reset=True,
+            routing_strategy="capacity_weighted",
+        )
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    assert counts["late"] == 0
+    pro_ratio = counts["pro"] / n
+    expected_pro_ratio = 50400.0 / (50400.0 + 7560.0)
+    assert abs(pro_ratio - expected_pro_ratio) <= 0.05
+
+
+def test_select_account_capacity_weighted_with_prefer_deprioritizes_missing_reset():
+    random.seed(77)
+    now = time.time()
+    missing_reset = AccountState(
+        "missing-reset",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=None,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    known_reset = AccountState(
+        "known-reset",
+        AccountStatus.ACTIVE,
+        used_percent=95.0,
+        secondary_used_percent=95.0,
+        secondary_reset_at=int(now + 2 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    for _ in range(100):
+        result = select_account(
+            [missing_reset, known_reset],
+            now=now,
+            prefer_earlier_reset=True,
+            routing_strategy="capacity_weighted",
+        )
+        assert result.account is not None
+        assert result.account.account_id == "known-reset"
+
+
+def test_select_account_capacity_weighted_with_prefer_falls_back_when_earliest_bucket_zero_weight():
+    random.seed(88)
+    now = time.time()
+    earliest_high_usage = AccountState(
+        "earliest-high-usage",
+        AccountStatus.ACTIVE,
+        used_percent=30.0,
+        secondary_used_percent=100.0,
+        secondary_reset_at=int(now + 2 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    earliest_lower_usage = AccountState(
+        "earliest-lower-usage",
+        AccountStatus.ACTIVE,
+        used_percent=20.0,
+        secondary_used_percent=100.0,
+        secondary_reset_at=int(now + 3 * 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    later_healthy = AccountState(
+        "later-healthy",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3 * 24 * 3600),
+        plan_type="enterprise",
+        capacity_credits=50400.0,
+    )
+
+    for _ in range(100):
+        result = select_account(
+            [earliest_high_usage, earliest_lower_usage, later_healthy],
+            now=now,
+            prefer_earlier_reset=True,
+            routing_strategy="capacity_weighted",
+        )
+        assert result.account is not None
+        assert result.account.account_id == "earliest-lower-usage"

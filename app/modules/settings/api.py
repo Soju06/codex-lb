@@ -82,6 +82,7 @@ async def get_settings(
         routing_strategy=settings.routing_strategy,
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
+        http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
         sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
@@ -119,6 +120,11 @@ async def update_settings(
                     if payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds is not None
                     else current.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
                 ),
+                http_responses_session_bridge_gateway_safe_mode=(
+                    payload.http_responses_session_bridge_gateway_safe_mode
+                    if payload.http_responses_session_bridge_gateway_safe_mode is not None
+                    else current.http_responses_session_bridge_gateway_safe_mode
+                ),
                 sticky_reallocation_budget_threshold_pct=(
                     payload.sticky_reallocation_budget_threshold_pct
                     if payload.sticky_reallocation_budget_threshold_pct is not None
@@ -153,6 +159,7 @@ async def update_settings(
             "prefer_earlier_reset_accounts",
             "routing_strategy",
             "openai_cache_affinity_max_age_seconds",
+            "http_responses_session_bridge_gateway_safe_mode",
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
@@ -171,6 +178,7 @@ async def update_settings(
         routing_strategy=updated.routing_strategy,
         openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=updated.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
+        http_responses_session_bridge_gateway_safe_mode=updated.http_responses_session_bridge_gateway_safe_mode,
         sticky_reallocation_budget_threshold_pct=updated.sticky_reallocation_budget_threshold_pct,
         import_without_overwrite=updated.import_without_overwrite,
         totp_required_on_login=updated.totp_required_on_login,

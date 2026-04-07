@@ -7,9 +7,10 @@ import { Button } from "@/components/ui/button";
 export type CopyButtonProps = {
   value: string;
   label?: string;
+  iconOnly?: boolean;
 };
 
-export function CopyButton({ value, label = "Copy" }: CopyButtonProps) {
+export function CopyButton({ value, label = "Copy", iconOnly = false }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -24,9 +25,16 @@ export function CopyButton({ value, label = "Copy" }: CopyButtonProps) {
   };
 
   return (
-    <Button type="button" variant="outline" size="sm" onClick={handleCopy}>
-      {copied ? <Check className="mr-2 h-4 w-4" /> : <Copy className="mr-2 h-4 w-4" />}
-      {copied ? "Copied" : label}
+    <Button
+      type="button"
+      variant="outline"
+      size={iconOnly ? "icon-sm" : "sm"}
+      onClick={handleCopy}
+      aria-label={copied ? `${label} Copied` : label}
+      title={copied ? "Copied" : label}
+    >
+      {copied ? <Check className={iconOnly ? "h-4 w-4" : "mr-2 h-4 w-4"} /> : <Copy className={iconOnly ? "h-4 w-4" : "mr-2 h-4 w-4"} />}
+      {iconOnly ? null : copied ? "Copied" : label}
     </Button>
   );
 }

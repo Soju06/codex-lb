@@ -41,12 +41,23 @@ Key properties:
 Example:
 
 ```bash
-helm dependency build deploy/helm/codex-lb/
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.auth.password=change-me \
+  --set config.databaseMigrateOnStartup=true \
+  --set migration.schemaGate.enabled=false
+```
 
+<details>
+<summary>From source</summary>
+
+```bash
+helm dependency build deploy/helm/codex-lb/
 helm upgrade --install codex-lb deploy/helm/codex-lb/ \
   -f deploy/helm/codex-lb/values-bundled.yaml \
   --set postgresql.auth.password=change-me
 ```
+
+</details>
 
 ### 2. External DB
 
@@ -69,19 +80,30 @@ Supported DB wiring:
 Example using a direct URL:
 
 ```bash
-helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-external-db.yaml \
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
   --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
 ```
 
 Example using separate secrets:
 
 ```bash
-helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-external-db.yaml \
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
   --set externalDatabase.existingSecret=codex-lb-db \
   --set auth.existingSecret=codex-lb-app
 ```
+
+<details>
+<summary>From source</summary>
+
+```bash
+helm upgrade --install codex-lb deploy/helm/codex-lb/ \
+  -f deploy/helm/codex-lb/values-external-db.yaml \
+  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+```
+
+</details>
 
 ### 3. External Secrets
 
@@ -97,31 +119,55 @@ Key properties:
 Example:
 
 ```bash
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
+  --set externalSecrets.enabled=true \
+  --set externalSecrets.secretStoreRef.name=my-store
+```
+
+<details>
+<summary>From source</summary>
+
+```bash
 helm upgrade --install codex-lb deploy/helm/codex-lb/ \
   -f deploy/helm/codex-lb/values-external-secrets.yaml \
   --set externalSecrets.secretStoreRef.name=my-store
 ```
 
+</details>
+
 ## Quick Start
+
+No repo clone required — install directly from the OCI registry.
 
 ### Docker Desktop / kind style cluster
 
 Bundled PostgreSQL:
 
 ```bash
-helm dependency build deploy/helm/codex-lb/
-helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-bundled.yaml \
-  --set postgresql.auth.password=local-dev-password
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.auth.password=local-dev-password \
+  --set config.databaseMigrateOnStartup=true \
+  --set migration.schemaGate.enabled=false
 ```
 
 ### Managed PostgreSQL
 
 ```bash
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  --set postgresql.enabled=false \
+  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+```
+
+### From source (development)
+
+If you need to customize the chart itself, clone the repo and install from path:
+
+```bash
 helm dependency build deploy/helm/codex-lb/
 helm upgrade --install codex-lb deploy/helm/codex-lb/ \
-  -f deploy/helm/codex-lb/values-external-db.yaml \
-  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+  -f deploy/helm/codex-lb/values-bundled.yaml \
+  --set postgresql.auth.password=local-dev-password
 ```
 
 ## Included Value Overlays
@@ -199,6 +245,184 @@ total_connections = (databasePoolSize + databaseMaxOverflow) × replicas
 
 Keep this within your PostgreSQL `max_connections` budget or place PgBouncer in front of the database.
 
+## Production Deployment
+
+Multi-replica production deployments require careful coordination of database connectivity, session routing, and graceful shutdown. This section covers the key patterns and tuning parameters.
+
+### Prerequisites for Multi-Replica
+
+Single-replica deployments can use SQLite, but **multi-replica requires PostgreSQL**:
+
+- **Database**: PostgreSQL is mandatory for multi-replica because:
+  - SQLite does not support concurrent writes from multiple pods
+  - Leader election requires a shared database backend
+  - Session bridge ring membership is stored in the database
+  
+- **Leader Election**: Enabled by default (`config.leaderElectionEnabled=true`)
+  - Ensures only one pod performs background tasks (e.g., session cleanup, metrics aggregation)
+  - Uses database-backed locking with a TTL (`config.leaderElectionTtlSeconds=30`)
+  - If the leader crashes, another pod acquires the lock within 30 seconds
+  
+- **Circuit Breaker**: Enabled by default (`config.circuitBreakerEnabled=true`)
+  - Protects upstream API endpoints from cascading failures
+  - Opens after `config.circuitBreakerFailureThreshold=5` consecutive failures
+  - Enters half-open state after `config.circuitBreakerRecoveryTimeoutSeconds=60` seconds
+  - Prevents thundering herd when upstream is degraded
+
+### Session Bridge Ring
+
+The session bridge is an in-memory cache of upstream WebSocket connections, shared across the pod ring.
+
+**Automatic Ring Membership (PostgreSQL)**
+
+When using PostgreSQL, ring membership is **automatic and database-backed**:
+
+- Each pod registers itself in the database on startup
+- The `sessionBridgeInstanceRing` field is **optional** and only needed for manual pod list override
+- Pods discover each other via database queries; no manual configuration required
+- Ring membership is cleaned up automatically when pods terminate
+
+**Manual Ring Override (Advanced)**
+
+If you need to manually specify the pod ring (e.g., for testing or debugging):
+
+```yaml
+config:
+  sessionBridgeInstanceRing: "codex-lb-0.codex-lb.default.svc.cluster.local,codex-lb-1.codex-lb.default.svc.cluster.local"
+```
+
+This is rarely needed in production; the database-backed discovery is preferred.
+
+### Connection Pool Budget
+
+Each pod maintains its own SQLAlchemy connection pool. The total connections across all replicas must fit within PostgreSQL's `max_connections`:
+
+```
+(databasePoolSize + databaseMaxOverflow) × maxReplicas ≤ PostgreSQL max_connections
+```
+
+**Example for `values-prod.yaml`:**
+
+```yaml
+config:
+  databasePoolSize: 3
+  databaseMaxOverflow: 2
+autoscaling:
+  maxReplicas: 20
+```
+
+Calculation: `(3 + 2) × 20 = 100` connections, which fits within PostgreSQL's default `max_connections=100`.
+
+**Tuning:**
+
+- Increase `databasePoolSize` if pods frequently wait for connections
+- Increase `databaseMaxOverflow` for temporary spikes, but keep it small (overflow is slower)
+- Reduce `maxReplicas` if you cannot increase PostgreSQL's `max_connections`
+- Use PgBouncer or pgcat as a connection pooler in front of PostgreSQL if needed
+
+### values-prod.yaml Reference
+
+The `values-prod.yaml` overlay is pre-configured for production multi-replica deployments:
+
+```yaml
+replicaCount: 3                    # Start with 3 replicas
+postgresql:
+  enabled: false                   # Use external PostgreSQL
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600  # 10 min cooldown (see below)
+affinity:
+  podAntiAffinity: hard            # Spread pods across nodes
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone  # Spread across zones
+networkPolicy:
+  enabled: true                    # Restrict ingress/egress
+metrics:
+  serviceMonitor:
+    enabled: true                  # Prometheus scraping
+  prometheusRule:
+    enabled: true                  # Alerting rules
+  grafanaDashboard:
+    enabled: true                  # Pre-built dashboards
+externalSecrets:
+  enabled: true                    # Use External Secrets Operator
+```
+
+Install with:
+
+```bash
+helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
+  -f deploy/helm/codex-lb/values-prod.yaml \
+  --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+```
+
+### Graceful Shutdown Tuning
+
+Graceful shutdown coordinates three timeout parameters to drain in-flight requests and session bridge connections:
+
+```
+preStopSleepSeconds (15s) → shutdownDrainTimeoutSeconds (30s) → terminationGracePeriodSeconds (60s)
+```
+
+**Timeline:**
+
+1. **preStopSleepSeconds (15s)**: Pod receives SIGTERM
+   - Sleep briefly to allow load balancer to remove the pod from rotation
+   - Prevents new requests from arriving during shutdown
+   
+2. **shutdownDrainTimeoutSeconds (30s)**: Drain in-flight requests
+   - HTTP server stops accepting new connections
+   - Existing requests are allowed to complete (up to 30 seconds)
+   - Session bridge connections are gracefully closed
+   
+3. **terminationGracePeriodSeconds (60s)**: Hard deadline
+   - Total time from SIGTERM to SIGKILL
+   - Must be ≥ `preStopSleepSeconds + shutdownDrainTimeoutSeconds`
+   - Default 60s allows 15s + 30s + 15s buffer
+
+**Tuning:**
+
+- Increase `preStopSleepSeconds` if your load balancer takes longer to deregister
+- Increase `shutdownDrainTimeoutSeconds` if requests typically take >30s to complete
+- Increase `terminationGracePeriodSeconds` proportionally (must be larger than the sum)
+- Keep the buffer small; long shutdown times delay pod replacement
+
+Example for long-running requests:
+
+```yaml
+preStopSleepSeconds: 20
+shutdownDrainTimeoutSeconds: 60
+terminationGracePeriodSeconds: 90
+```
+
+### Scale-Down Caution
+
+The `stabilizationWindowSeconds: 600` (10 minutes) in `values-prod.yaml` is intentionally high.
+
+**Why?**
+
+- Session bridge connections have idle TTLs (`sessionBridgeIdleTtlSeconds=120` for API, `sessionBridgeCodexIdleTtlSeconds=900` for Codex)
+- When a pod scales down, its in-memory sessions are lost
+- Clients reconnecting to a different pod must re-establish upstream connections
+- A 10-minute cooldown prevents rapid scale-down/up cycles that would thrash session state
+
+**Behavior:**
+
+- HPA will scale down at most 1 pod every 2 minutes (when cooldown is active)
+- If load drops suddenly, scale-down is delayed by up to 10 minutes
+- This trades off faster scale-down for session stability
+
+**Tuning:**
+
+- Reduce `stabilizationWindowSeconds` if you prioritize cost over session stability
+- Increase it if you see frequent session reconnections during scale events
+- Monitor `sessionBridgeInstanceRing` size changes in logs to detect scale-down impact
+
 ## Security
 
 The chart targets the Kubernetes Restricted Pod Security Standard.
@@ -246,7 +470,7 @@ gatewayApi:
 ## Upgrade Contract
 
 ```bash
-helm upgrade codex-lb deploy/helm/codex-lb/ <your values...>
+helm upgrade codex-lb oci://ghcr.io/soju06/charts/codex-lb <your values...>
 ```
 
 - External DB installs can migrate before Deployment creation.

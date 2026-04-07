@@ -485,7 +485,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
                 ).scalar_one()
-                assert routing_strategy == "usage_weighted"
+                assert routing_strategy == "capacity_weighted"
             assert "openai_cache_affinity_max_age_seconds" in dashboard_columns
             affinity_ttl = (
                 await session.execute(
@@ -503,6 +503,13 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 )
             ).scalar_one()
             assert http_responses_ttl == 3600
+            assert "http_responses_session_bridge_gateway_safe_mode" in dashboard_columns
+            gateway_safe_mode = (
+                await session.execute(
+                    text("SELECT http_responses_session_bridge_gateway_safe_mode FROM dashboard_settings WHERE id=1")
+                )
+            ).scalar_one()
+            assert gateway_safe_mode in (False, 0)
             assert "sticky_reallocation_budget_threshold_pct" in dashboard_columns
             sticky_budget_threshold = (
                 await session.execute(

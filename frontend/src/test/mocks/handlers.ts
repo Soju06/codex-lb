@@ -55,6 +55,7 @@ const ApiKeyUpdatePayloadSchema = z
 		name: z.string().optional(),
 		allowedModels: z.array(z.string()).nullable().optional(),
 		isActive: z.boolean().optional(),
+		assignedAccountIds: z.array(z.string()).optional(),
 		resetUsage: z.boolean().optional(),
 		limits: z
 			.array(
@@ -76,7 +77,7 @@ const SettingsPayloadSchema = z
 			.enum(["default", "auto", "http", "websocket"])
 			.optional(),
 		preferEarlierResetAccounts: z.boolean().optional(),
-		routingStrategy: z.enum(["usage_weighted", "round_robin"]).optional(),
+		routingStrategy: z.enum(["usage_weighted", "round_robin", "capacity_weighted"]).optional(),
 		openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
 		importWithoutOverwrite: z.boolean().optional(),
 		totpRequiredOnLogin: z.boolean().optional(),
@@ -477,13 +478,38 @@ export const handlers = [
 	http.get("/api/sticky-sessions", ({ request }) => {
 		const url = new URL(request.url);
 		const staleOnly = url.searchParams.get("staleOnly") === "true";
+		const accountQuery = (url.searchParams.get("accountQuery") ?? "").trim().toLowerCase();
+		const keyQuery = (url.searchParams.get("keyQuery") ?? "").trim().toLowerCase();
+		const sortBy = url.searchParams.get("sortBy") ?? "updated_at";
+		const sortDir = url.searchParams.get("sortDir") ?? "desc";
 		const offset = Number(url.searchParams.get("offset") ?? "0");
 		const limit = Number(url.searchParams.get("limit") ?? "10");
-		const filteredEntries = staleOnly
-			? state.stickySessions.filter(
-					(entry) => entry.kind === "prompt_cache" && entry.isStale,
-				)
-			: state.stickySessions;
+		const filteredEntries = state.stickySessions.filter((entry) => {
+			if (staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
+				return false;
+			}
+			if (accountQuery && !entry.displayName.toLowerCase().includes(accountQuery)) {
+				return false;
+			}
+			if (keyQuery && !entry.key.toLowerCase().includes(keyQuery)) {
+				return false;
+			}
+			return true;
+		}).sort((left, right) => {
+			const direction = sortDir === "asc" ? 1 : -1;
+			if (sortBy === "account") {
+				return left.displayName.localeCompare(right.displayName) * direction;
+			}
+			if (sortBy === "key") {
+				return left.key.localeCompare(right.key) * direction;
+			}
+			const leftTime = Date.parse(sortBy === "created_at" ? left.createdAt : left.updatedAt);
+			const rightTime = Date.parse(sortBy === "created_at" ? right.createdAt : right.updatedAt);
+			if (leftTime !== rightTime) {
+				return (leftTime - rightTime) * direction;
+			}
+			return left.key.localeCompare(right.key);
+		});
 		const entries = filteredEntries.slice(offset, offset + limit);
 		const stalePromptCacheCount = state.stickySessions.filter(
 			(entry) => entry.kind === "prompt_cache" && entry.isStale,
@@ -508,15 +534,65 @@ export const handlers = [
 						}),
 					)
 					.min(1)
-					.max(500),
+					.max(500)
+					.refine(
+						(sessions) =>
+							new Set(sessions.map((session) => `${session.kind}:${session.key}`)).size === sessions.length,
+						"Duplicate sticky session targets are not allowed",
+					),
 			}),
 		)) ?? { sessions: [] };
 		const targets = new Set(payload.sessions.map((session) => `${session.kind}:${session.key}`));
-		const before = state.stickySessions.length;
+		const deleted = state.stickySessions
+			.filter((entry) => targets.has(`${entry.kind}:${entry.key}`))
+			.map((entry) => ({ key: entry.key, kind: entry.kind }));
+		const deletedTargets = new Set(deleted.map((entry) => `${entry.kind}:${entry.key}`));
 		state.stickySessions = state.stickySessions.filter(
 			(entry) => !targets.has(`${entry.kind}:${entry.key}`),
 		);
-		return HttpResponse.json({ deletedCount: before - state.stickySessions.length });
+		return HttpResponse.json({
+			deletedCount: deleted.length,
+			deleted,
+			failed: payload.sessions
+				.filter((session) => !deletedTargets.has(`${session.kind}:${session.key}`))
+				.map((session) => ({
+					key: session.key,
+					kind: session.kind,
+					reason: "not_found",
+				})),
+		});
+	}),
+
+	http.post("/api/sticky-sessions/delete-filtered", async ({ request }) => {
+		const payload = (await parseJsonBody(
+			request,
+			z.object({
+				staleOnly: z.boolean().default(false),
+				accountQuery: z.string().default(""),
+				keyQuery: z.string().default(""),
+			}),
+		)) ?? {
+			staleOnly: false,
+			accountQuery: "",
+			keyQuery: "",
+		};
+		const accountQuery = payload.accountQuery.trim().toLowerCase();
+		const keyQuery = payload.keyQuery.trim().toLowerCase();
+		const matched = state.stickySessions.filter((entry) => {
+			if (payload.staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
+				return false;
+			}
+			if (accountQuery && !entry.displayName.toLowerCase().includes(accountQuery)) {
+				return false;
+			}
+			if (keyQuery && !entry.key.toLowerCase().includes(keyQuery)) {
+				return false;
+			}
+			return true;
+		});
+		const targets = new Set(matched.map((entry) => `${entry.kind}:${entry.key}`));
+		state.stickySessions = state.stickySessions.filter((entry) => !targets.has(`${entry.kind}:${entry.key}`));
+		return HttpResponse.json({ deletedCount: matched.length });
 	}),
 
 	http.post("/api/sticky-sessions/purge", async ({ request }) => {
@@ -668,6 +744,12 @@ export const handlers = [
 				? { allowedModels: payload.allowedModels }
 				: {}),
 			...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
+			...(payload.assignedAccountIds !== undefined
+				? { accountAssignmentScopeEnabled: payload.assignedAccountIds.length > 0 }
+				: {}),
+			...(payload.assignedAccountIds !== undefined
+				? { assignedAccountIds: payload.assignedAccountIds }
+				: {}),
 		};
 
 		if (payload.limits) {

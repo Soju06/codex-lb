@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.balancer import AccountState
+from app.core.balancer import AccountState, RoutingStrategy
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy.load_balancer import LoadBalancer
 
@@ -59,6 +59,7 @@ async def _invoke_stickiness(
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
     budget_threshold_pct: float = 95.0,
+    routing_strategy: RoutingStrategy = "usage_weighted",
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
@@ -82,7 +83,7 @@ async def _invoke_stickiness(
         sticky_max_age_seconds=sticky_max_age_seconds,
         budget_threshold_pct=budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
-        routing_strategy="usage_weighted",
+        routing_strategy=routing_strategy,
         sticky_repo=sticky_repo,
     )
 
@@ -257,6 +258,70 @@ async def test_pool_exhausted_but_better_candidate_exists_reallocates():
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_round_robin_pool_health_check_uses_round_robin_probe():
+    now = time.time()
+    acc_a = AccountState("a", AccountStatus.ACTIVE, used_percent=96.0, last_selected_at=now - 10)
+    acc_b = AccountState("b", AccountStatus.ACTIVE, used_percent=50.0, last_selected_at=now - 1)
+    acc_c = AccountState("c", AccountStatus.ACTIVE, used_percent=97.0, last_selected_at=now - 100)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b, acc_c],
+        "key-round-robin",
+        repo,
+        reallocate_sticky=False,
+        routing_strategy="round_robin",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key-round-robin", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_capacity_weighted_pool_health_check_uses_capacity_probe():
+    acc_a = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=96.0,
+        secondary_used_percent=96.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    acc_b = AccountState(
+        "b",
+        AccountStatus.ACTIVE,
+        used_percent=50.0,
+        secondary_used_percent=50.0,
+        plan_type="free",
+        capacity_credits=1134.0,
+    )
+    acc_c = AccountState(
+        "c",
+        AccountStatus.ACTIVE,
+        used_percent=97.0,
+        secondary_used_percent=97.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b, acc_c],
+        "key-capacity-weighted",
+        repo,
+        reallocate_sticky=False,
+        routing_strategy="capacity_weighted",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key-capacity-weighted", "a", kind=StickySessionKind.PROMPT_CACHE)
 
 
 @pytest.mark.asyncio

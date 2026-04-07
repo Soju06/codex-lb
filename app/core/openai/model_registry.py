@@ -36,7 +36,8 @@ class UpstreamModel:
     minimal_client_version: str | None
     priority: int
     available_in_plans: frozenset[str]
-    raw: dict[str, JsonValue] = field(hash=False, compare=False)
+    base_instructions: str = ""
+    raw: dict[str, JsonValue] = field(default_factory=dict, hash=False, compare=False)
 
 
 @dataclass

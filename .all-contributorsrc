@@ -237,6 +237,48 @@
         "bug",
         "code"
       ]
+    },
+    {
+      "login": "Daltonganger",
+      "name": "Ruben",
+      "avatar_url": "https://avatars.githubusercontent.com/u/17501732?v=4",
+      "profile": "https://github.com/Daltonganger",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "L1st3r",
+      "name": "Steve Santacroce",
+      "avatar_url": "https://avatars.githubusercontent.com/u/336408?v=4",
+      "profile": "https://github.com/L1st3r",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "mhughdo",
+      "name": "Hugh Do",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15611134?v=4",
+      "profile": "https://github.com/mhughdo",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "salwinh",
+      "name": "Hubert Salwin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6965142?v=4",
+      "profile": "https://github.com/salwinh",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

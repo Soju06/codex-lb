@@ -32,8 +32,10 @@ import type {
 	RequestLog,
 	RequestLogFilterOptions,
 	RequestLogsResponse,
+	OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 import {
+	DEFAULT_OVERVIEW_TIMEFRAME,
 	DashboardOverviewSchema,
 	RequestLogFilterOptionsSchema,
 	RequestLogSchema,
@@ -113,19 +115,51 @@ export function createDefaultAccounts(): AccountSummary[] {
 function createTrendPoints(
 	baseValue: number,
 	count = 28,
+	bucketSeconds = 6 * 3600,
 ): Array<{ t: string; v: number }> {
 	return Array.from({ length: count }, (_, i) => ({
-		t: new Date(BASE_TIME.getTime() - (count - i) * 6 * 3600_000).toISOString(),
+		t: new Date(BASE_TIME.getTime() - (count - i) * bucketSeconds * 1000).toISOString(),
 		v: Math.max(0, baseValue + Math.sin(i) * baseValue * 0.3),
 	}));
+}
+
+function createOverviewTimeframe(
+	key: OverviewTimeframe = DEFAULT_OVERVIEW_TIMEFRAME,
+) {
+	switch (key) {
+		case "1d":
+			return {
+				key,
+				windowMinutes: 1_440,
+				bucketSeconds: 3_600,
+				bucketCount: 24,
+			};
+		case "30d":
+			return {
+				key,
+				windowMinutes: 43_200,
+				bucketSeconds: 86_400,
+				bucketCount: 30,
+			};
+		case "7d":
+		default:
+			return {
+				key: "7d" as const,
+				windowMinutes: 10_080,
+				bucketSeconds: 21_600,
+				bucketCount: 28,
+			};
+	}
 }
 
 export function createDashboardOverview(
 	overrides: Partial<DashboardOverview> = {},
 ): DashboardOverview {
+	const timeframe = overrides.timeframe ?? createOverviewTimeframe();
 	const accounts = overrides.accounts ?? createDefaultAccounts();
 	const response = {
 		lastSyncAt: offsetIso(-5),
+		timeframe,
 		accounts,
 		summary: {
 			primaryWindow: {
@@ -144,13 +178,14 @@ export function createDashboardOverview(
 			},
 			cost: {
 				currency: "USD",
-				totalUsd7d: 1.82,
+				totalUsd: 1.82,
 			},
 			metrics: {
-				requests7d: 228,
-				tokensSecondaryWindow: 45_000,
-				cachedTokensSecondaryWindow: 8_200,
-				errorRate7d: 0.028,
+				requests: 228,
+				tokens: 45_000,
+				cachedInputTokens: 8_200,
+				errorRate: 0.028,
+				errorCount: 6,
 				topError: "rate_limit_exceeded",
 			},
 		},
@@ -179,10 +214,10 @@ export function createDashboardOverview(
 			},
 		},
 		trends: {
-			requests: createTrendPoints(8),
-			tokens: createTrendPoints(1600),
-			cost: createTrendPoints(0.065),
-			errorRate: createTrendPoints(0.03),
+			requests: createTrendPoints(8, timeframe.bucketCount, timeframe.bucketSeconds),
+			tokens: createTrendPoints(1600, timeframe.bucketCount, timeframe.bucketSeconds),
+			cost: createTrendPoints(0.065, timeframe.bucketCount, timeframe.bucketSeconds),
+			errorRate: createTrendPoints(0.03, timeframe.bucketCount, timeframe.bucketSeconds),
 		},
 		depletionPrimary: {
 			risk: 0.55,
@@ -357,6 +392,8 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		allowedModels: ["gpt-5.1"],
 		expiresAt: offsetIso(30 * 24 * 60),
 		isActive: true,
+		accountAssignmentScopeEnabled: false,
+		assignedAccountIds: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
 		limits: [

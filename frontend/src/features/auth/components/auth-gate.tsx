@@ -3,6 +3,7 @@ import type { PropsWithChildren } from "react";
 
 import { CodexLogo } from "@/components/brand/codex-logo";
 import { SpinnerBlock } from "@/components/ui/spinner";
+import { BootstrapSetupScreen } from "@/features/auth/components/bootstrap-setup-screen";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { TotpDialog } from "@/features/auth/components/totp-dialog";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -13,6 +14,7 @@ export function AuthGate({ children }: PropsWithChildren) {
   const loading = useAuthStore((state) => state.loading);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
   const authenticated = useAuthStore((state) => state.authenticated);
+  const bootstrapRequired = useAuthStore((state) => state.bootstrapRequired);
   const totpRequiredOnLogin = useAuthStore((state) => state.totpRequiredOnLogin);
 
   useEffect(() => {
@@ -26,6 +28,10 @@ export function AuthGate({ children }: PropsWithChildren) {
         <SpinnerBlock />
       </div>
     );
+  }
+
+  if (bootstrapRequired && !passwordRequired) {
+    return <BootstrapSetupScreen />;
   }
 
   if (passwordRequired && !authenticated) {

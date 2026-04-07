@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 
@@ -7,6 +7,7 @@ import { AlertMessage } from "@/components/alert-message";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
 import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
+import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
@@ -14,7 +15,12 @@ import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
-import type { AccountSummary } from "@/features/dashboard/schemas";
+import {
+  DEFAULT_OVERVIEW_TIMEFRAME,
+  parseOverviewTimeframe,
+  type AccountSummary,
+  type OverviewTimeframe,
+} from "@/features/dashboard/schemas";
 import { useThemeStore } from "@/hooks/use-theme";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import { formatModelLabel, formatSlug } from "@/utils/formatters";
@@ -23,9 +29,14 @@ const MODEL_OPTION_DELIMITER = ":::";
 
 export function DashboardPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
-  const dashboardQuery = useDashboard();
+  const overviewTimeframe = useMemo(
+    () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
+    [searchParams],
+  );
+  const dashboardQuery = useDashboard(overviewTimeframe);
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
   const { resumeMutation } = useAccountMutations();
 
@@ -34,6 +45,19 @@ export function DashboardPage() {
   const handleRefresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
   }, [queryClient]);
+
+  const handleOverviewTimeframeChange = useCallback(
+    (timeframe: OverviewTimeframe) => {
+      const next = new URLSearchParams(searchParams);
+      if (timeframe === DEFAULT_OVERVIEW_TIMEFRAME) {
+        next.delete("overviewTimeframe");
+      } else {
+        next.set("overviewTimeframe", timeframe);
+      }
+      setSearchParams(next);
+    },
+    [searchParams, setSearchParams],
+  );
 
   const handleAccountAction = useCallback(
     (account: AccountSummary, action: string) => {
@@ -113,15 +137,21 @@ export function DashboardPage() {
             Overview, account health, and recent request logs.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handleRefresh}
-          disabled={isRefreshing}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-          title="Refresh dashboard"
-        >
-          <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} />
-        </button>
+        <div className="flex items-center gap-2">
+          <OverviewTimeframeSelect
+            value={overviewTimeframe}
+            onChange={handleOverviewTimeframeChange}
+          />
+          <button
+            type="button"
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            title="Refresh dashboard"
+          >
+            <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}

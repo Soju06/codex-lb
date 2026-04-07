@@ -10,9 +10,13 @@ from typing import TYPE_CHECKING, Iterable
 
 from app.core import usage as usage_core
 from app.core.balancer import (
+    HEALTH_TIER_DRAINING,
+    HEALTH_TIER_HEALTHY,
+    HEALTH_TIER_PROBING,
     AccountState,
     RoutingStrategy,
     SelectionResult,
+    evaluate_health_tier,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
@@ -39,6 +43,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_SELECTION_ATTEMPTS = 4
+
 _STICKY_GRACE_PERIOD_SECONDS = 10.0
 _RECOVERABLE_STATUSES = frozenset(
     {
@@ -62,6 +68,9 @@ class RuntimeState:
     error_count: int = 0
     version: int = 0
     blocked_at: float | None = None
+    health_tier: int = 0
+    drain_entered_at: float | None = None
+    probe_success_streak: int = 0
 
 
 @dataclass
@@ -76,6 +85,7 @@ class _SelectionInputs:
     accounts: list[Account]
     latest_primary: dict[str, UsageHistory]
     latest_secondary: dict[str, UsageHistory]
+    runtime_accounts: list[Account] | None = None
     error_message: str | None = None
     error_code: str | None = None
 
@@ -100,24 +110,28 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        routing_strategy: RoutingStrategy = "usage_weighted",
+        routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
         budget_threshold_pct: float = 95.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
+        scoped_account_ids = None if account_ids is None else set(account_ids)
 
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 additional_limit_name=additional_limit_name,
+                account_ids=scoped_account_ids,
             )
             if excluded_ids and selection_inputs.accounts:
                 selection_inputs = _SelectionInputs(
                     accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
+                    runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
                 )
@@ -140,13 +154,14 @@ class LoadBalancer:
             )
 
         selected_snapshot: Account | None = None
-        selected_version_at_pick: int = 0
         error_message: str | None = None
         selected_states: list[AccountState] = []
         selected_account_map: dict[str, Account] = {}
         if sticky_key is None:
+            attempt = 0
             while True:
-                self._prune_runtime(selection_inputs.accounts)
+                attempt += 1
+                self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
                 states, account_map = _build_states(
                     accounts=selection_inputs.accounts,
                     latest_primary=selection_inputs.latest_primary,
@@ -189,11 +204,20 @@ class LoadBalancer:
                         selected_snapshot.status = result.account.status
                         selected_snapshot.deactivation_reason = result.account.deactivation_reason
                         selected_snapshot.reset_at = selected_reset_at
-                        selected_version_at_pick = self._runtime.get(selected.id, RuntimeState()).version
                 else:
                     error_message = result.error_message
 
-                pre_persist_versions = {aid: runtime.version for aid, runtime in self._runtime.items()}
+                pre_persist_runtime_state = {
+                    aid: (
+                        runtime.reset_at,
+                        runtime.cooldown_until,
+                        runtime.error_count,
+                        runtime.last_error_at,
+                    )
+                    for aid, runtime in self._runtime.items()
+                }
+                pre_persist_cache_generation = self._selection_inputs_cache.generation
+
                 async with self._repo_factory() as repos:
                     stale_account_ids = await self._persist_selection_state(
                         repos.accounts,
@@ -202,6 +226,10 @@ class LoadBalancer:
                     )
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
+                    if attempt >= _MAX_SELECTION_ATTEMPTS:
+                        selected_snapshot = None
+                        error_message = None
+                        break
                     selection_inputs = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return AccountSelection(
@@ -215,10 +243,34 @@ class LoadBalancer:
                     selected_account_map = {}
                     continue
 
-                if selected_snapshot is not None:
-                    _sel_runtime = self._runtime.get(selected_snapshot.id)
-                    _sel_pre_ver = selected_version_at_pick
-                    if _sel_runtime is not None and _sel_runtime.version != _sel_pre_ver:
+                if (
+                    selected_snapshot is not None
+                    and self._selection_inputs_cache.generation != pre_persist_cache_generation
+                    and attempt < _MAX_SELECTION_ATTEMPTS
+                ):
+                    selection_inputs = await load_selection_inputs()
+                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=selection_inputs.error_message,
+                            error_code=selection_inputs.error_code,
+                        )
+                    selected_snapshot = None
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
+                    await asyncio.sleep(0)
+                    continue
+
+                if selected_snapshot is None and error_message == "No available accounts":
+                    runtime_recovered = any(
+                        self._runtime.get(account_id, RuntimeState()).reset_at != before[0]
+                        or self._runtime.get(account_id, RuntimeState()).cooldown_until != before[1]
+                        or self._runtime.get(account_id, RuntimeState()).error_count != before[2]
+                        or self._runtime.get(account_id, RuntimeState()).last_error_at != before[3]
+                        for account_id, before in pre_persist_runtime_state.items()
+                    )
+                    if runtime_recovered and attempt < _MAX_SELECTION_ATTEMPTS:
                         selection_inputs = await load_selection_inputs()
                         if selection_inputs.error_code is not None and not selection_inputs.accounts:
                             return AccountSelection(
@@ -226,27 +278,19 @@ class LoadBalancer:
                                 error_message=selection_inputs.error_message,
                                 error_code=selection_inputs.error_code,
                             )
-                        selected_snapshot = None
                         error_message = None
                         selected_states = []
                         selected_account_map = {}
+                        await asyncio.sleep(0)
                         continue
 
-                if selected_snapshot is None and error_message == "No available accounts":
-                    runtime_recovered = any(
-                        self._runtime.get(aid, RuntimeState()).version != pre_persist_versions.get(aid, 0)
-                        for aid in account_map
-                    )
-                    if runtime_recovered:
-                        error_message = None
-                        selected_states = []
-                        selected_account_map = {}
-                        pre_persist_versions = {aid: runtime.version for aid, runtime in self._runtime.items()}
-                        continue
                 break
+
         else:
+            attempt = 0
             while True:
-                self._prune_runtime(selection_inputs.accounts)
+                attempt += 1
+                self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
                 states, account_map = _build_states(
                     accounts=selection_inputs.accounts,
                     latest_primary=selection_inputs.latest_primary,
@@ -304,6 +348,12 @@ class LoadBalancer:
                     )
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
+                    selected_snapshot = None
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
+                    if attempt >= _MAX_SELECTION_ATTEMPTS:
+                        break
                     selection_inputs = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return AccountSelection(
@@ -311,10 +361,7 @@ class LoadBalancer:
                             error_message=selection_inputs.error_message,
                             error_code=selection_inputs.error_code,
                         )
-                    selected_snapshot = None
-                    error_message = None
-                    selected_states = []
-                    selected_account_map = {}
+                    await asyncio.sleep(0)
                     continue
                 break
 
@@ -346,8 +393,13 @@ class LoadBalancer:
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
-        cache_key = (model, additional_limit_name)
+        cache_key = (
+            model,
+            additional_limit_name,
+            None if account_ids is None else tuple(sorted(set(account_ids))),
+        )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
             return _clone_selection_inputs(cached)
@@ -358,14 +410,30 @@ class LoadBalancer:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = all_accounts
+            if account_ids is not None:
+                allowed_account_ids = set(account_ids)
+                accounts = [account for account in accounts if account.id in allowed_account_ids]
+            pre_model_filter_accounts = accounts
             if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
-                accounts = _filter_accounts_for_model(accounts, model)
+                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model)
             if model and not accounts:
                 if not all_accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
+                    )
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
+                    return selection_inputs
+                if not pre_model_filter_accounts:
+                    selection_inputs = _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
                     await self._selection_inputs_cache.set(
                         _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -375,6 +443,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
@@ -395,6 +464,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=error_message,
                         error_code=error_code,
                     )
@@ -407,6 +477,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
                 await self._selection_inputs_cache.set(
                     _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -425,6 +496,7 @@ class LoadBalancer:
                 latest_secondary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
+                runtime_accounts=[_clone_account(account) for account in all_accounts],
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -634,6 +706,7 @@ class LoadBalancer:
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
+                            deterministic_probe=True,
                         )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
@@ -750,6 +823,9 @@ class LoadBalancer:
             state.error_count += count
             state.last_error_at = time.time()
             self._sync_runtime_state(account, state)
+            runtime = self._runtime.get(account.id)
+            if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
+                runtime.probe_success_streak = 0
             async with self._repo_factory() as repos:
                 await self._persist_state_if_current(repos.accounts, account_snapshot, state)
 
@@ -761,6 +837,9 @@ class LoadBalancer:
             if runtime and runtime.error_count > 0:
                 runtime.error_count = 0
                 runtime.last_error_at = None
+                runtime.version += 1
+            if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
+                runtime.probe_success_streak += 1
                 runtime.version += 1
 
     def _state_for(self, account: Account) -> AccountState:
@@ -777,6 +856,8 @@ class LoadBalancer:
             last_selected_at=runtime.last_selected_at,
             error_count=runtime.error_count,
             deactivation_reason=account.deactivation_reason,
+            plan_type=account.plan_type,
+            capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
         )
 
     def _sync_runtime_state(
@@ -972,6 +1053,41 @@ def _state_from_account(
         secondary_reset=secondary_reset,
     )
 
+    settings = get_settings()
+    if getattr(settings, "soft_drain_enabled", True):
+        new_tier = evaluate_health_tier(
+            AccountState(
+                account_id=account.id,
+                status=status,
+                used_percent=used_percent,
+                secondary_used_percent=secondary_used,
+                last_error_at=runtime.last_error_at,
+                error_count=runtime.error_count,
+                health_tier=runtime.health_tier,
+            ),
+            now=time.time(),
+            drain_entered_at=runtime.drain_entered_at,
+            probe_success_streak=runtime.probe_success_streak,
+            drain_primary_threshold_pct=getattr(settings, "drain_primary_threshold_pct", 85.0),
+            drain_secondary_threshold_pct=getattr(settings, "drain_secondary_threshold_pct", 90.0),
+            drain_error_window_seconds=getattr(settings, "drain_error_window_seconds", 60.0),
+            drain_error_count_threshold=getattr(settings, "drain_error_count_threshold", 2),
+            probe_quiet_seconds=getattr(settings, "probe_quiet_seconds", 60.0),
+            probe_success_streak_required=getattr(settings, "probe_success_streak_required", 3),
+        )
+        if new_tier == HEALTH_TIER_DRAINING and runtime.health_tier != HEALTH_TIER_DRAINING:
+            runtime.drain_entered_at = time.time()
+            runtime.probe_success_streak = 0
+        if new_tier == HEALTH_TIER_HEALTHY:
+            runtime.drain_entered_at = None
+            runtime.probe_success_streak = 0
+        runtime.health_tier = new_tier
+    else:
+        new_tier = HEALTH_TIER_HEALTHY
+        runtime.drain_entered_at = None
+        runtime.probe_success_streak = 0
+        runtime.health_tier = HEALTH_TIER_HEALTHY
+
     return AccountState(
         account_id=account.id,
         status=status,
@@ -984,6 +1100,9 @@ def _state_from_account(
         last_selected_at=runtime.last_selected_at,
         error_count=runtime.error_count,
         deactivation_reason=account.deactivation_reason,
+        plan_type=account.plan_type,
+        capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
+        health_tier=new_tier,
     )
 
 
@@ -1043,6 +1162,11 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         latest_secondary={
             account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
+        runtime_accounts=(
+            None
+            if selection_inputs.runtime_accounts is None
+            else [_clone_account(account) for account in selection_inputs.runtime_accounts]
+        ),
         error_message=selection_inputs.error_message,
         error_code=selection_inputs.error_code,
     )

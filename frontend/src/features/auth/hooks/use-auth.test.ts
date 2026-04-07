@@ -21,6 +21,8 @@ const sessionBase: AuthSession = {
   passwordRequired: true,
   totpRequiredOnLogin: false,
   totpConfigured: true,
+  bootstrapRequired: false,
+  bootstrapTokenConfigured: false,
 };
 
 function resetAuthStore(): void {
@@ -29,6 +31,8 @@ function resetAuthStore(): void {
     authenticated: false,
     totpRequiredOnLogin: false,
     totpConfigured: false,
+    bootstrapRequired: false,
+    bootstrapTokenConfigured: false,
     loading: false,
     initialized: false,
     error: null,

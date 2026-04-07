@@ -1,5 +1,97 @@
 # Changelog
 
+## [1.11.0](https://github.com/Soju06/codex-lb/compare/v1.10.1...v1.11.0) (2026-04-06)
+
+
+### Features
+
+* **accounts:** add refreshable browser OAuth link ([#316](https://github.com/Soju06/codex-lb/issues/316)) ([aeaf106](https://github.com/Soju06/codex-lb/commit/aeaf106a507b3b82ff305184ffae114faecf74f6))
+* **dashboard:** add selectable overview timeframes ([#319](https://github.com/Soju06/codex-lb/issues/319)) ([d8d812f](https://github.com/Soju06/codex-lb/commit/d8d812f57f1463d8512dd6ac659f446e76bc5f94))
+* deterministic failover & soft drain ([#328](https://github.com/Soju06/codex-lb/issues/328)) ([fc77c76](https://github.com/Soju06/codex-lb/commit/fc77c7604af6ed4d621fd4e7a8435507e0f3e21e))
+* **v1-usage:** add credit-based Codex override windows ([#304](https://github.com/Soju06/codex-lb/issues/304)) ([6c3c556](https://github.com/Soju06/codex-lb/commit/6c3c5564c530d0670995577882038a00f5b46f8b))
+
+
+### Bug Fixes
+
+* **api:** for /backend-api/codex/model, return it in codex format ([#331](https://github.com/Soju06/codex-lb/issues/331)) ([c141a8a](https://github.com/Soju06/codex-lb/commit/c141a8ac963ebe25ed8e82ed7b9ab3057e4c083a))
+* avoid Windows startup crash in memory monitor and add manual reg… ([#329](https://github.com/Soju06/codex-lb/issues/329)) ([5c2d26e](https://github.com/Soju06/codex-lb/commit/5c2d26e8f11abf5bdaed13aed7904f097cc18e3f))
+* **dashboard:** show remaining totals in usage donuts ([#303](https://github.com/Soju06/codex-lb/issues/303)) ([7827941](https://github.com/Soju06/codex-lb/commit/78279417c1557753a93001a6586997fb204fe18d))
+* **helm:** disable service links and use fully qualified image names ([#321](https://github.com/Soju06/codex-lb/issues/321)) ([c54edee](https://github.com/Soju06/codex-lb/commit/c54edeefa00b4271f6f80270462bb8ddcade5e92))
+* **helm:** one-click external database setup improvements ([#322](https://github.com/Soju06/codex-lb/issues/322)) ([4c3c945](https://github.com/Soju06/codex-lb/commit/4c3c9453a48aaced5e023447446da00d6843c7cf))
+
+
+### Documentation
+
+* add Daltonganger as a contributor for bug ([#332](https://github.com/Soju06/codex-lb/issues/332)) ([1c8a7e5](https://github.com/Soju06/codex-lb/commit/1c8a7e5633b55dadeb8ccb2ae3791a23787b3a9f))
+* add L1st3r as a contributor for bug ([#335](https://github.com/Soju06/codex-lb/issues/335)) ([05a77d8](https://github.com/Soju06/codex-lb/commit/05a77d857ec90b101feee675a1dfb20f556b0188))
+* add mhughdo as a contributor for code, and test ([#333](https://github.com/Soju06/codex-lb/issues/333)) ([0fc01f6](https://github.com/Soju06/codex-lb/commit/0fc01f676fe826f6228140c529e75ca1e31076c2))
+* add salwinh as a contributor for code, and test ([#334](https://github.com/Soju06/codex-lb/issues/334)) ([7fed142](https://github.com/Soju06/codex-lb/commit/7fed14284a0c6025cf615856b6ca123b2d8cf463))
+
+## [1.10.1](https://github.com/Soju06/codex-lb/compare/v1.10.0...v1.10.1) (2026-04-03)
+
+
+### Bug Fixes
+
+* **ci:** lowercase Trivy image-ref and bump all actions to latest ([3b94de4](https://github.com/Soju06/codex-lb/commit/3b94de4457a93b2ff220a33ea9b7a164c02e0b37))
+* **ci:** use exact tag v8.0.0 for setup-uv (no v8 major tag exists) ([c657c91](https://github.com/Soju06/codex-lb/commit/c657c91bf26b4d99bb783e7e4f3b4268d0a4028f))
+
+
+### Documentation
+
+* add L1st3r as a contributor for code, and test ([#318](https://github.com/Soju06/codex-lb/issues/318)) ([d0ff5a7](https://github.com/Soju06/codex-lb/commit/d0ff5a71212132f64ecf4e3b594059a7d648f45a))
+* external DB secrets guide, ServiceMonitor alternatives, production deployment guide ([#315](https://github.com/Soju06/codex-lb/issues/315)) ([8d558f6](https://github.com/Soju06/codex-lb/commit/8d558f6a9b3beafcbca36c92ba694f099c9ca115))
+
+## [1.10.0](https://github.com/Soju06/codex-lb/compare/v1.9.0...v1.10.0) (2026-04-02)
+
+
+### Features
+
+* **helm:** expose all caching subsystems in chart values ([cd39073](https://github.com/Soju06/codex-lb/commit/cd39073c4f2b9f086a00bf84c9cd80af27cc194a))
+
+
+### Bug Fixes
+
+* **ci:** lowercase GHCR owner in Helm OCI push ([03c14f6](https://github.com/Soju06/codex-lb/commit/03c14f61e132c81f483dd21f977e7f0dd32be083))
+* **helm:** harden defaults for multi-replica and streaming deployments ([70a348e](https://github.com/Soju06/codex-lb/commit/70a348e80bc6f46ec616e3ff497f056277049156))
+* **helm:** improve cache locality and align backpressure with capacity ([6c17201](https://github.com/Soju06/codex-lb/commit/6c1720189416da41a5c7c979ec8b523f0218c46a))
+
+
+### Documentation
+
+* **helm:** replace local-path install with OCI registry commands ([55ddeb7](https://github.com/Soju06/codex-lb/commit/55ddeb7300d6a1780ec748b3e1d940613333ab69))
+
+## [1.9.0](https://github.com/Soju06/codex-lb/compare/v1.8.3...v1.9.0) (2026-04-02)
+
+
+### Features
+
+* add a "API" page to see details of the API keys ([#269](https://github.com/Soju06/codex-lb/issues/269)) ([938c734](https://github.com/Soju06/codex-lb/commit/938c7344b2cfc62ecbc7519abf60b04f9ddf9fcd))
+* add stickysession selection box to select multiple sessions too be deleted ([#286](https://github.com/Soju06/codex-lb/issues/286)) ([c64b860](https://github.com/Soju06/codex-lb/commit/c64b8604afcf3afcdac040fed823a51b95cb4955))
+* **api-keys:** add per-key enforced service tier ([#288](https://github.com/Soju06/codex-lb/issues/288)) ([cc851a5](https://github.com/Soju06/codex-lb/commit/cc851a5eedf8375f4df7e2a909d28b48023f08c4))
+* **api-keys:** add self-service /v1/usage endpoint ([#295](https://github.com/Soju06/codex-lb/issues/295)) ([652f600](https://github.com/Soju06/codex-lb/commit/652f60080109ea1ac25f4a0d2bc5124f9587ca08))
+* **balancer:** add capacity-weighted routing for tier-aware load distribution ([#297](https://github.com/Soju06/codex-lb/issues/297)) ([fa8eab4](https://github.com/Soju06/codex-lb/commit/fa8eab4eb6844e9b737d705327ea6b926cc49419))
+
+
+### Bug Fixes
+
+* **balancer:** trust usage data over stale runtime_reset for early quota resets ([#289](https://github.com/Soju06/codex-lb/issues/289)) ([a269b37](https://github.com/Soju06/codex-lb/commit/a269b3769a6a115921e3d54f9b32b535f9bb2f2b))
+* **chat:** prevent duplicated tool-call arguments in chat completions ([#287](https://github.com/Soju06/codex-lb/issues/287)) ([41ceb4f](https://github.com/Soju06/codex-lb/commit/41ceb4f24d07cacfff9f8b21dad50c4458414278))
+* **deploy:** restore Docker auto-migration, cache/rate-limiter fixes, Helm/K8s CI/CD ([#274](https://github.com/Soju06/codex-lb/issues/274)) ([16391ae](https://github.com/Soju06/codex-lb/commit/16391aec7c76096fb20218e353731d44a9cbc4f8))
+* **docker:** resolve distroless ARM64 build by detecting arch-specific lib paths ([b21d4bd](https://github.com/Soju06/codex-lb/commit/b21d4bd498714aac3ab785c361008a3f2238b688))
+* prevent sticky session thrashing when all accounts exceed budget threshold ([#279](https://github.com/Soju06/codex-lb/issues/279)) ([502db37](https://github.com/Soju06/codex-lb/commit/502db371232d6fc905985c140b0b80d96472aaea))
+* **proxy:** resolve k8s-era TC regressions ([#290](https://github.com/Soju06/codex-lb/issues/290)) ([020784a](https://github.com/Soju06/codex-lb/commit/020784a38b731381e05e4c8fef7505525c60fd84))
+* **tests:** stabilize proxy retry logging assertions ([0f86737](https://github.com/Soju06/codex-lb/commit/0f867376df870516551416b3df650adedd85ed05))
+
+
+### Performance Improvements
+
+* **usage:** replace DISTINCT ON with lateral join in latest_by_account ([#277](https://github.com/Soju06/codex-lb/issues/277)) ([8be87a6](https://github.com/Soju06/codex-lb/commit/8be87a64f1576f770b11de171f947b68e74420b3))
+
+
+### Documentation
+
+* add Daltonganger as a contributor for code, and test ([#298](https://github.com/Soju06/codex-lb/issues/298)) ([7f17d72](https://github.com/Soju06/codex-lb/commit/7f17d72ecfd26aa20877c4d6ec37f71417e48897))
+
 ## [1.8.3](https://github.com/Soju06/codex-lb/compare/v1.8.2...v1.8.3) (2026-03-30)
 
 

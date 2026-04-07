@@ -8,6 +8,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select, update
 
+import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
@@ -98,6 +99,8 @@ async def test_api_keys_crud_and_regenerate(async_client):
     payload = create.json()
     assert payload["name"] == "dev-key"
     assert payload["key"].startswith("sk-clb-")
+    assert payload["accountAssignmentScopeEnabled"] is False
+    assert payload["assignedAccountIds"] == []
     assert len(payload["limits"]) == 1
     assert payload["limits"][0]["limitType"] == "total_tokens"
     assert payload["limits"][0]["maxValue"] == 1000
@@ -111,6 +114,8 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert len(rows) == 1
     assert rows[0]["id"] == key_id
     assert "key" not in rows[0]
+    assert rows[0]["accountAssignmentScopeEnabled"] is False
+    assert rows[0]["assignedAccountIds"] == []
     assert len(rows[0]["limits"]) == 1
 
     updated = await async_client.patch(
@@ -138,6 +143,183 @@ async def test_api_keys_crud_and_regenerate(async_client):
     listed_after_delete = await async_client.get("/api/api-keys/")
     assert listed_after_delete.status_code == 200
     assert listed_after_delete.json() == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_persists_assigned_account_ids(async_client):
+    first_account_id = await _import_account(async_client, "acc-assigned-a", "assigned-a@example.com")
+    second_account_id = await _import_account(async_client, "acc-assigned-b", "assigned-b@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "assigned-key",
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+
+    update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"assignedAccountIds": [first_account_id, second_account_id]},
+    )
+    assert update.status_code == 200
+    assert update.json()["accountAssignmentScopeEnabled"] is True
+    assert update.json()["assignedAccountIds"] == [first_account_id, second_account_id]
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+    assert listed.json()[0]["assignedAccountIds"] == [first_account_id, second_account_id]
+
+    cleared = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"assignedAccountIds": []},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["accountAssignmentScopeEnabled"] is False
+    assert cleared.json()["assignedAccountIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
+    await _populate_test_registry()
+    monkeypatch.setattr(load_balancer_module, "_filter_accounts_for_model", lambda accounts, model: accounts)
+    assigned_account_id = await _import_account(async_client, "acc-scoped", "scoped@example.com")
+    await _import_account(async_client, "acc-fallback", "fallback@example.com")
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "deleted-scope-key"},
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    key = create.json()["key"]
+
+    update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"assignedAccountIds": [assigned_account_id]},
+    )
+    assert update.status_code == 200
+
+    delete = await async_client.delete(f"/api/accounts/{assigned_account_id}")
+    assert delete.status_code == 200
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["assignedAccountIds"] == []
+    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+
+    called = False
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        nonlocal called
+        called = True
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_rejects_unknown_assigned_account_ids(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "invalid-assignment-key"},
+    )
+    assert create.status_code == 200
+
+    update = await async_client.patch(
+        f"/api/api-keys/{create.json()['id']}",
+        json={"assignedAccountIds": ["missing-account"]},
+    )
+    assert update.status_code == 400
+    assert update.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_does_not_persist_assignments_when_limits_are_invalid(async_client):
+    assigned_account_id = await _import_account(async_client, "acc-atomic", "atomic@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "atomic-assignment-key"},
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+
+    update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "assignedAccountIds": [assigned_account_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 100},
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 200},
+            ],
+        },
+    )
+    assert update.status_code == 400
+    assert update.json()["error"]["code"] == "invalid_api_key_payload"
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["assignedAccountIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_rolls_back_base_fields_when_assignment_write_fails(async_client, monkeypatch):
+    assigned_account_id = await _import_account(async_client, "acc-rollback", "rollback@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "rollback-assignment-key"},
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+
+    original_replace = ApiKeysRepository.replace_account_assignments
+
+    async def fail_replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True):
+        del account_ids, commit
+        await original_replace(self, key_id, [], commit=False)
+        raise RuntimeError("simulated assignment write failure")
+
+    monkeypatch.setattr(ApiKeysRepository, "replace_account_assignments", fail_replace_account_assignments)
+
+    with pytest.raises(RuntimeError, match="simulated assignment write failure"):
+        await async_client.patch(
+            f"/api/api-keys/{key_id}",
+            json={
+                "name": "should-not-persist",
+                "assignedAccountIds": [assigned_account_id],
+            },
+        )
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["name"] == "rollback-assignment-key"
+    assert listed.json()[0]["assignedAccountIds"] == []
 
 
 @pytest.mark.asyncio

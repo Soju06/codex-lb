@@ -136,7 +136,7 @@ The guard SHALL raise a domain exception on authentication failure. The exceptio
 
 ### Requirement: Session state endpoint
 
-The system SHALL expose `GET /api/dashboard-auth/session` returning the current authentication state including `password_required` (whether a password is configured), `authenticated` (whether the session is fully valid), `totp_required_on_login`, and `totp_configured`.
+The system SHALL expose `GET /api/dashboard-auth/session` returning the current authentication state including `password_required` (whether a password is configured), `authenticated` (whether the session is fully valid), `totp_required_on_login`, `totp_configured`, and bootstrap flags used for first-run remote setup.
 
 #### Scenario: No password configured
 
@@ -152,6 +152,11 @@ The system SHALL expose `GET /api/dashboard-auth/session` returning the current 
 
 - **WHEN** session has `pw=true, tv=false` and `totp_required_on_login` is true
 - **THEN** the response contains `{ "passwordRequired": true, "authenticated": false, "totpRequiredOnLogin": true, "totpConfigured": true }`
+
+#### Scenario: Remote bootstrap required before first password setup
+
+- **WHEN** `password_hash` is NULL, `totp_required_on_login` is false, and the session request comes from a non-local client
+- **THEN** the response contains `{ "passwordRequired": false, "authenticated": false, "bootstrapRequired": true }`
 
 ### Requirement: TOTP setup requires password session
 
@@ -215,7 +220,7 @@ The system SHALL rate-limit failed password login attempts using the existing `T
 
 ### Requirement: Frontend login gate
 
-The SPA SHALL check `GET /api/dashboard-auth/session` on load. When `passwordRequired` is true and `authenticated` is false, the SPA MUST display only the login form (password input, then conditional TOTP input). Dashboard, accounts, and settings tabs MUST be hidden until authenticated. The TOTP input MUST use an HTML dialog, not `window.prompt()`.
+The SPA SHALL check `GET /api/dashboard-auth/session` on load. When `passwordRequired` is true and `authenticated` is false, the SPA MUST display only the login form (password input, then conditional TOTP input). When `bootstrapRequired` is true and `passwordRequired` is false, the SPA MUST display a dedicated remote-bootstrap password setup flow that does not depend on loading `/api/settings`. Dashboard, accounts, and settings tabs MUST be hidden until authentication or bootstrap completes. The TOTP input MUST use an HTML dialog, not `window.prompt()`.
 
 #### Scenario: SPA loads with password required
 
@@ -229,6 +234,11 @@ The SPA SHALL check `GET /api/dashboard-auth/session` on load. When `passwordReq
 
 #### Scenario: No password configured
 
-- **WHEN** the SPA loads and the session endpoint returns `passwordRequired: false`
+- **WHEN** the SPA loads and the session endpoint returns `passwordRequired: false, bootstrapRequired: false`
 - **THEN** the full dashboard UI is shown immediately
 
+#### Scenario: Remote bootstrap flow is shown before settings data loads
+
+- **WHEN** the SPA loads and the session endpoint returns `passwordRequired: false, bootstrapRequired: true`
+- **THEN** the SPA renders the password bootstrap UI directly
+- **AND** it MUST NOT require a successful `/api/settings` response before showing the password setup form

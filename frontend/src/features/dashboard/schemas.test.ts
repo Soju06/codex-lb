@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   AccountSummarySchema,
   AccountAdditionalQuotaSchema,
+  DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DepletionSchema,
+  parseOverviewTimeframe,
   RequestLogsResponseSchema,
   UsageWindowSchema,
 } from "@/features/dashboard/schemas";
@@ -22,6 +24,12 @@ describe("DashboardOverviewSchema", () => {
   it("parses overview payload without request_logs", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -34,13 +42,14 @@ describe("DashboardOverviewSchema", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 12.5,
+          totalUsd: 12.5,
         },
         metrics: {
-          requests7d: 500,
-          tokensSecondaryWindow: 2000,
-          cachedTokensSecondaryWindow: 300,
-          errorRate7d: 0.02,
+          requests: 500,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
           topError: null,
         },
       },
@@ -61,6 +70,12 @@ describe("DashboardOverviewSchema", () => {
   it("drops legacy request_logs field from parse result", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -73,7 +88,7 @@ describe("DashboardOverviewSchema", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 0,
+          totalUsd: 0,
         },
         metrics: null,
       },
@@ -139,6 +154,13 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+  });
+});
+
+describe("overview timeframe parsing", () => {
+  it("defaults invalid values to 7d", () => {
+    expect(parseOverviewTimeframe("invalid")).toBe(DEFAULT_OVERVIEW_TIMEFRAME);
+    expect(parseOverviewTimeframe(null)).toBe(DEFAULT_OVERVIEW_TIMEFRAME);
   });
 });
 
@@ -271,6 +293,12 @@ describe("DashboardOverviewSchema with additional quotas", () => {
   it("parses with additionalQuotas array", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -283,7 +311,7 @@ describe("DashboardOverviewSchema with additional quotas", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 12.5,
+          totalUsd: 12.5,
         },
         metrics: null,
       },
@@ -330,6 +358,12 @@ describe("DashboardOverviewSchema with additional quotas", () => {
   it("defaults additionalQuotas to empty array for backward compatibility", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -342,7 +376,7 @@ describe("DashboardOverviewSchema with additional quotas", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 12.5,
+          totalUsd: 12.5,
         },
         metrics: null,
       },

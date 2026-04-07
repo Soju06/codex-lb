@@ -41,7 +41,7 @@ describe("CopyButton", () => {
 
     expect(writeText).toHaveBeenCalledWith("secret-value");
     expect(toastSuccess).toHaveBeenCalledWith("Copied to clipboard");
-    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Copied" })).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(1_200);
@@ -63,5 +63,22 @@ describe("CopyButton", () => {
     });
 
     expect(toastError).toHaveBeenCalledWith("Failed to copy");
+  });
+
+  it("supports icon-only copy buttons with accessible labeling", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(<CopyButton value="secret-value" label="Copy Request ID" iconOnly />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy Request ID" }));
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith("secret-value");
+    expect(screen.getByRole("button", { name: "Copy Request ID Copied" })).toBeInTheDocument();
   });
 });

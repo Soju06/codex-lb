@@ -10,7 +10,7 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
-from app.core.usage.types import BucketModelAggregate
+from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestLog
@@ -78,6 +78,45 @@ class RequestLogsRepository:
             )
             for row in result.all()
         ]
+
+    async def aggregate_activity_since(self, since: datetime) -> RequestActivityAggregate:
+        stmt = select(
+            func.count().label("request_count"),
+            func.coalesce(
+                func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)),
+                0,
+            ).label("error_count"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+        ).where(RequestLog.requested_at >= since)
+        result = await self._session.execute(stmt)
+        row = result.one()
+        return RequestActivityAggregate(
+            request_count=int(row.request_count),
+            error_count=int(row.error_count),
+            input_tokens=int(row.input_tokens),
+            output_tokens=int(row.output_tokens),
+            cached_input_tokens=int(row.cached_input_tokens),
+            cost_usd=float(row.cost_usd or 0.0),
+        )
+
+    async def top_error_since(self, since: datetime) -> str | None:
+        stmt = (
+            select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
+            .where(
+                RequestLog.requested_at >= since,
+                RequestLog.status != "success",
+                RequestLog.error_code.is_not(None),
+            )
+            .group_by(RequestLog.error_code)
+            .order_by(func.count(RequestLog.id).desc(), RequestLog.error_code.asc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        row = result.first()
+        return str(row[0]) if row and row[0] else None
 
     async def add_log(
         self,

@@ -6,6 +6,8 @@ global:
   imagePullSecrets: []
   # @param global.storageClass Global storage class for PVCs
   storageClass: ""
+  # @param global.nodeSelector Node selector labels applied to ALL pods (deployment, jobs, tests)
+  nodeSelector: {}
 
 # @section Common parameters
 # @param nameOverride Override the chart name
@@ -21,6 +23,8 @@ revisionHistoryLimit: 3
 
 # @section Image parameters
 image:
+  # NOTE: Use fully qualified image names (e.g., docker.io/library/busybox:1.37)
+  # for compatibility with cri-o runtimes that enforce short-name resolution policies.
   # @param image.registry Container image registry
   registry: ghcr.io
   # @param image.repository Container image repository
@@ -107,15 +111,15 @@ config:
   databaseMigrateOnStartup: false
   # @param config.databasePoolSize SQLAlchemy connection pool size
   # Connection pool budget: (databasePoolSize + databaseMaxOverflow) × maxReplicas MUST be ≤ PostgreSQL max_connections (default 100)
-  # For HPA maxReplicas=20: (3+2)×20=100. For maxReplicas=10: (8+2)×10=100.
-  # Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
-  databasePoolSize: 15
+  # Default (5+5)×10=100 fits HPA maxReplicas=10 against PG default max_connections.
+  # Prod overlay uses (3+2)×20=100. Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
+  databasePoolSize: 5
   # @param config.databaseMaxOverflow SQLAlchemy connection pool max overflow
-  databaseMaxOverflow: 10
+  databaseMaxOverflow: 5
   # @param config.upstreamBaseUrl Override OpenAI upstream base URL (empty = default)
   upstreamBaseUrl: ""
   # @param config.upstreamConnectTimeout Upstream connection timeout seconds
-  upstreamConnectTimeout: 30
+  upstreamConnectTimeout: 10
   # @param config.upstreamStreamTransport Upstream streaming transport (auto|websocket|http)
   upstreamStreamTransport: auto
   # @param config.logFormat Log output format (json|text)
@@ -125,26 +129,48 @@ config:
   # @param config.leaderElectionTtlSeconds Leader election TTL in seconds
   leaderElectionTtlSeconds: 30
   # @param config.circuitBreakerEnabled Enable circuit breaker for upstream requests
-  circuitBreakerEnabled: false
+  circuitBreakerEnabled: true
   # @param config.circuitBreakerFailureThreshold Number of failures before opening circuit
   circuitBreakerFailureThreshold: 5
   # @param config.circuitBreakerRecoveryTimeoutSeconds Seconds before half-open state
   circuitBreakerRecoveryTimeoutSeconds: 60
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
-  backpressureMaxConcurrentRequests: 500
+  backpressureMaxConcurrentRequests: 200
   # @param config.shutdownDrainTimeoutSeconds Graceful shutdown drain timeout
   shutdownDrainTimeoutSeconds: 30
   # @param config.httpConnectorLimit Global HTTP connection pool limit
   httpConnectorLimit: 100
   # @param config.httpConnectorLimitPerHost Per-host HTTP connection pool limit
   httpConnectorLimitPerHost: 50
+  # @param config.cacheAffinityMaxAgeSeconds TTL for prompt cache sticky sessions (account affinity)
+  cacheAffinityMaxAgeSeconds: 1800
+  # @param config.promptCacheKeyDerivationEnabled Auto-derive prompt cache keys when client omits them
+  promptCacheKeyDerivationEnabled: true
+  # @param config.sessionBridgeEnabled Enable in-memory upstream WebSocket session reuse
+  sessionBridgeEnabled: true
+  # @param config.sessionBridgeIdleTtlSeconds Idle TTL for general API session bridge sessions
+  sessionBridgeIdleTtlSeconds: 120
+  # @param config.sessionBridgeCodexIdleTtlSeconds Idle TTL for Codex session bridge sessions
+  sessionBridgeCodexIdleTtlSeconds: 900
+  # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions
+  sessionBridgeCodexPrewarmEnabled: true
+  # @param config.sessionBridgeMaxSessions Max in-memory bridge sessions per pod
+  sessionBridgeMaxSessions: 256
+  # @param config.sessionBridgeQueueLimit Max pending requests per bridge session
+  sessionBridgeQueueLimit: 8
   # @param config.sessionBridgeInstanceRing Comma-separated pod hostnames for session routing
   sessionBridgeInstanceRing: ""
+  # @param config.stickySessionCleanupEnabled Enable periodic cleanup of stale sticky sessions
+  stickySessionCleanupEnabled: true
+  # @param config.stickySessionCleanupIntervalSeconds Interval between sticky session cleanup runs
+  stickySessionCleanupIntervalSeconds: 300
 
 # @section Authentication parameters
 auth:
   # @param auth.existingSecret Name of existing Secret containing database-url and encryption-key
   existingSecret: ""
+  # @param auth.encryptionKey Fernet encryption key (auto-generated when empty and no existing Secret is used)
+  encryptionKey: ""
   secretKeys:
     # @param auth.secretKeys.databaseUrl Key in the Secret for the database URL
     databaseUrl: database-url
@@ -211,6 +237,21 @@ tolerations: []
 # @param priorityClassName Pod priority class name
 priorityClassName: ""
 
+# @section Service parameters
+service:
+  # @param service.type Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
+  type: ClusterIP
+  # @param service.port Service port
+  port: 2455
+  # @param service.nodePort NodePort number (only when type is NodePort)
+  nodePort: ""
+  # @param service.loadBalancerIP Static IP for LoadBalancer type
+  loadBalancerIP: ""
+  # @param service.loadBalancerSourceRanges Allowed source ranges for LoadBalancer
+  loadBalancerSourceRanges: []
+  # @param service.annotations Additional annotations for the Service
+  annotations: {}
+
 # @section Network parameters
 networkPolicy:
   # @param networkPolicy.enabled Enable NetworkPolicy with default-deny + whitelist
@@ -248,7 +289,7 @@ ingress:
     enabled: false
     # @param ingress.nginx.upstreamHashBy nginx upstream-hash-by annotation value. Empty = disabled.
     #        Set to "$http_authorization" for consistent hash routing by API key.
-    upstreamHashBy: ""
+    upstreamHashBy: "$http_authorization"
     # @param ingress.nginx.upstreamHashBySubset Enable subset mode for upstream-hash-by
     upstreamHashBySubset: false
     # @param ingress.nginx.upstreamHashBySubsetSize Subset size when subset mode is enabled
@@ -275,6 +316,13 @@ metrics:
   port: 9090
   serviceMonitor:
     # @param metrics.serviceMonitor.enabled Create a ServiceMonitor for Prometheus Operator
+    # Defaults to false because it requires the Prometheus Operator CRDs to be installed.
+    # Enable this when running kube-prometheus-stack or standalone Prometheus Operator.
+    # Without ServiceMonitor, configure prometheus.io annotations for scraping:
+    #   commonAnnotations:
+    #     prometheus.io/scrape: "true"
+    #     prometheus.io/port: "9090"
+    #     prometheus.io/path: "/metrics"
     enabled: false
     # @param metrics.serviceMonitor.interval Metrics scrape interval
     interval: 30s
@@ -286,6 +334,8 @@ metrics:
     relabelings: []
   prometheusRule:
     # @param metrics.prometheusRule.enabled Create PrometheusRule for alerting
+    # Requires Prometheus Operator. Includes alerts for: high error rate, circuit breaker open,
+    # all accounts exhausted, high request latency. See templates/prometheusrule.yaml for details.
     enabled: false
     # @param metrics.prometheusRule.additionalLabels Additional labels for PrometheusRule
     additionalLabels: {}
@@ -322,9 +372,18 @@ postgresql:
       # @param postgresql.primary.persistence.size PostgreSQL PVC size
       size: 8Gi
 externalDatabase:
-  # @param externalDatabase.url Full external database URL (postgresql+asyncpg://...)
+  # @param externalDatabase.url Full external database URL (postgresql+asyncpg://user:pass@host:5432/db?sslmode=require)
+  # For production, use auth.existingSecret instead of passing the URL directly.
+  # When auth.existingSecret is set, create a Secret with key "database-url" containing the full URL
+  # and key "encryption-key" containing a 32-byte Fernet key.
+  #
+  # Example:
+  #   kubectl create secret generic codex-lb-secrets \
+  #     --from-literal=database-url="postgresql+asyncpg://user:pass@host:5432/db?sslmode=require" \
+  #     --from-literal=encryption-key="$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+  #   Then set: auth.existingSecret: "codex-lb-secrets"
   url: ""
-  # @param externalDatabase.host External database host (used if url is empty)
+  # @param externalDatabase.host External database host (used to build URL when externalDatabase.url is empty)
   host: ""
   # @param externalDatabase.port External database port
   port: 5432
@@ -332,8 +391,30 @@ externalDatabase:
   database: codexlb
   # @param externalDatabase.user External database username
   user: codexlb
-  # @param externalDatabase.existingSecret Secret containing external DB credentials
+  # @param externalDatabase.existingSecret Existing Secret with key "password" for the external database
   existingSecret: ""
+
+# @section Database initialization parameters
+dbInit:
+  # @param dbInit.enabled Enable pre-install Job to create databases/users on external PostgreSQL
+  enabled: false
+  # @param dbInit.host External PostgreSQL host
+  host: ""
+  # @param dbInit.port External PostgreSQL port
+  port: "5432"
+  # @param dbInit.adminUser Admin username for creating databases/users
+  adminUser: "adminuser"
+  # @param dbInit.adminPassword Admin password (use adminPasswordSecret for production)
+  adminPassword: ""
+  # @param dbInit.adminPasswordSecret Reference to existing Secret for admin password
+  adminPasswordSecret: {}
+  #   name: pg-admin-secret
+  #   key: password
+  # @param dbInit.databases List of databases and users to create
+  databases:
+    - name: codexlb
+      user: codexlb
+      password: changeme
 
 # @section Migration parameters
 migration:

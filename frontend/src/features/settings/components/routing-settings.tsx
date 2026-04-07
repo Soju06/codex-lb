@@ -77,16 +77,17 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
           <div className="flex items-center justify-between gap-4 p-3">
             <div>
               <p className="text-sm font-medium">Routing strategy</p>
-              <p className="text-xs text-muted-foreground">Choose usage-based balancing or strict round robin.</p>
+              <p className="text-xs text-muted-foreground">Choose how requests are distributed across accounts.</p>
             </div>
             <Select
               value={settings.routingStrategy}
-              onValueChange={(value) => save({ routingStrategy: value as "usage_weighted" | "round_robin" })}
+              onValueChange={(value) => save({ routingStrategy: value as "usage_weighted" | "round_robin" | "capacity_weighted" })}
             >
               <SelectTrigger className="h-8 w-44 text-xs" disabled={busy}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align="end">
+                <SelectItem value="capacity_weighted">Capacity weighted</SelectItem>
                 <SelectItem value="usage_weighted">Usage weighted</SelectItem>
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>

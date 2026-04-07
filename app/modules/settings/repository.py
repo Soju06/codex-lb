@@ -23,7 +23,7 @@ class SettingsRepository:
             sticky_threads_enabled=False,
             upstream_stream_transport="default",
             prefer_earlier_reset_accounts=False,
-            routing_strategy="usage_weighted",
+            routing_strategy="capacity_weighted",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             import_without_overwrite=False,
             totp_required_on_login=False,
@@ -53,6 +53,7 @@ class SettingsRepository:
         routing_strategy: str | None = None,
         openai_cache_affinity_max_age_seconds: int | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
+        http_responses_session_bridge_gateway_safe_mode: bool | None = None,
         sticky_reallocation_budget_threshold_pct: float | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
@@ -73,6 +74,8 @@ class SettingsRepository:
             settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds = (
                 http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             )
+        if http_responses_session_bridge_gateway_safe_mode is not None:
+            settings.http_responses_session_bridge_gateway_safe_mode = http_responses_session_bridge_gateway_safe_mode
         if sticky_reallocation_budget_threshold_pct is not None:
             settings.sticky_reallocation_budget_threshold_pct = sticky_reallocation_budget_threshold_pct
         if import_without_overwrite is not None:

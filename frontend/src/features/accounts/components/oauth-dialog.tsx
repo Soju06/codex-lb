@@ -1,4 +1,4 @@
-import { Check, CircleAlert, Copy, ExternalLink, Loader2 } from "lucide-react";
+import { Check, CircleAlert, Copy, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -38,7 +38,7 @@ function CopyButton({ text }: { text: string }) {
       type="button"
       size="sm"
       variant="ghost"
-      className="h-7 gap-1 px-2 text-xs"
+      className="h-7 cursor-pointer gap-1 px-2 text-xs disabled:cursor-not-allowed"
       onClick={() => void handleCopy()}
     >
       {copied ? (
@@ -58,11 +58,19 @@ function CopyButton({ text }: { text: string }) {
 
 function ManualCallbackInput({
   onSubmit,
+  disabled = false,
 }: {
   onSubmit: (callbackUrl: string) => Promise<void>;
+  disabled?: boolean;
 }) {
   const [callbackUrl, setCallbackUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (disabled) {
+      setCallbackUrl("");
+    }
+  }, [disabled]);
 
   const handleSubmit = useCallback(async () => {
     if (!callbackUrl.trim()) return;
@@ -87,14 +95,15 @@ function ManualCallbackInput({
           type="text"
           value={callbackUrl}
           onChange={(e) => setCallbackUrl(e.target.value)}
+          disabled={disabled}
           placeholder="http://localhost:1455/auth/callback?code=...&state=..."
-          className="flex-1 rounded-lg border bg-muted/20 px-3 py-2 font-mono text-xs outline-none focus:ring-1 focus:ring-primary"
+          className="flex-1 rounded-lg border bg-muted/20 px-3 py-2 font-mono text-xs outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
         />
         <Button
           type="button"
           size="sm"
-          className="h-8 px-3 text-xs"
-          disabled={!callbackUrl.trim() || submitting}
+          className="h-8 cursor-pointer px-3 text-xs disabled:cursor-not-allowed"
+          disabled={disabled || !callbackUrl.trim() || submitting}
           onClick={() => void handleSubmit()}
         >
           {submitting ? "Submitting..." : "Submit"}
@@ -126,6 +135,7 @@ export function OauthDialog({
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
   const stage = getStage(state);
   const completedRef = useRef(false);
+  const browserRefreshInProgress = stage === "browser" && state.status === "starting";
 
   useEffect(() => {
     if (stage === "success" && !completedRef.current) {
@@ -147,6 +157,10 @@ export function OauthDialog({
 
   const handleStart = () => {
     void onStart(selectedMethod);
+  };
+
+  const handleRefreshBrowserLink = () => {
+    void onStart("browser");
   };
 
   const handleChangeMethod = () => {
@@ -172,7 +186,7 @@ export function OauthDialog({
               type="button"
               onClick={() => setSelectedMethod("browser")}
               className={cn(
-                "w-full rounded-lg border p-3 text-left transition-colors",
+                "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
                 selectedMethod === "browser"
                   ? "border-primary bg-primary/5"
                   : "hover:bg-muted/50",
@@ -187,7 +201,7 @@ export function OauthDialog({
               type="button"
               onClick={() => setSelectedMethod("device")}
               className={cn(
-                "w-full rounded-lg border p-3 text-left transition-colors",
+                "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
                 selectedMethod === "device"
                   ? "border-primary bg-primary/5"
                   : "hover:bg-muted/50",
@@ -204,16 +218,46 @@ export function OauthDialog({
         {/* Browser stage */}
         {stage === "browser" ? (
           <div className="min-w-0 space-y-3 text-sm">
-            {state.authorizationUrl ? (
-              <div className="space-y-1.5">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
                 <p className="text-xs font-medium text-muted-foreground">Authorization URL</p>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 cursor-pointer gap-1 px-2 text-xs disabled:cursor-not-allowed"
+                  disabled={browserRefreshInProgress}
+                  onClick={handleRefreshBrowserLink}
+                >
+                  {browserRefreshInProgress ? (
+                    <>
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Refreshing...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="h-3 w-3" />
+                      Refresh link
+                    </>
+                  )}
+                </Button>
+              </div>
+              {browserRefreshInProgress ? (
+                <div className="flex items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Generating a fresh sign-in link...</span>
+                </div>
+              ) : state.authorizationUrl ? (
                 <div className="flex min-w-0 items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2">
                   <p className="min-w-0 flex-1 truncate font-mono text-xs">{state.authorizationUrl}</p>
                   <CopyButton text={state.authorizationUrl} />
                 </div>
-              </div>
-            ) : null}
-            <ManualCallbackInput onSubmit={onManualCallback} />
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                Refresh the link if the current sign-in page has already been used.
+              </p>
+            </div>
+            <ManualCallbackInput onSubmit={onManualCallback} disabled={browserRefreshInProgress} />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>Waiting for authorization to complete...</span>
@@ -281,10 +325,19 @@ export function OauthDialog({
         <DialogFooter>
           {stage === "intro" ? (
             <>
-              <Button type="button" variant="outline" onClick={() => close(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={() => close(false)}
+              >
                 Cancel
               </Button>
-              <Button type="button" onClick={handleStart}>
+              <Button
+                type="button"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={handleStart}
+              >
                 Start sign-in
               </Button>
             </>
@@ -292,11 +345,21 @@ export function OauthDialog({
 
           {stage === "browser" ? (
             <>
-              <Button type="button" variant="outline" onClick={handleChangeMethod}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                disabled={browserRefreshInProgress}
+                onClick={handleChangeMethod}
+              >
                 Change method
               </Button>
-              {state.authorizationUrl ? (
-                <Button type="button" asChild>
+              {state.authorizationUrl && !browserRefreshInProgress ? (
+                <Button
+                  type="button"
+                  className="cursor-pointer disabled:cursor-not-allowed"
+                  asChild
+                >
                   <a href={state.authorizationUrl} target="_blank" rel="noreferrer">
                     <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
                     Open sign-in page
@@ -308,11 +371,20 @@ export function OauthDialog({
 
           {stage === "device" ? (
             <>
-              <Button type="button" variant="outline" onClick={handleChangeMethod}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={handleChangeMethod}
+              >
                 Change method
               </Button>
               {state.verificationUrl ? (
-                <Button type="button" asChild>
+                <Button
+                  type="button"
+                  className="cursor-pointer disabled:cursor-not-allowed"
+                  asChild
+                >
                   <a href={state.verificationUrl} target="_blank" rel="noreferrer">
                     <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
                     Open link
@@ -323,17 +395,30 @@ export function OauthDialog({
           ) : null}
 
           {stage === "success" ? (
-            <Button type="button" onClick={() => close(false)}>
+            <Button
+              type="button"
+              className="cursor-pointer disabled:cursor-not-allowed"
+              onClick={() => close(false)}
+            >
               Done
             </Button>
           ) : null}
 
           {stage === "error" ? (
             <>
-              <Button type="button" variant="outline" onClick={handleChangeMethod}>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={handleChangeMethod}
+              >
                 Try again
               </Button>
-              <Button type="button" onClick={() => close(false)}>
+              <Button
+                type="button"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                onClick={() => close(false)}
+              >
                 Close
               </Button>
             </>

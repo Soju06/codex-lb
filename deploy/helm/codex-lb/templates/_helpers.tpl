@@ -139,3 +139,22 @@ Image string — resolves registry/repository:tag with optional digest override
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- end }}
 {{- end }}
+
+{{/*
+Merged nodeSelector: global.nodeSelector + local nodeSelector (local wins).
+*/}}
+{{- define "codex-lb.nodeSelector" -}}
+{{- $merged := mustMergeOverwrite (deepCopy (.Values.global.nodeSelector | default dict)) (.Values.nodeSelector | default dict) -}}
+{{- if $merged }}
+{{- toYaml $merged }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Global-only nodeSelector for hooks/tests so app-specific placement does not block installs.
+*/}}
+{{- define "codex-lb.globalNodeSelector" -}}
+{{- with (.Values.global.nodeSelector | default dict) }}
+{{- toYaml . }}
+{{- end }}
+{{- end -}}

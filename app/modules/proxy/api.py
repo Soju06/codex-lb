@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from collections.abc import AsyncIterator, Mapping
+from datetime import datetime, timezone
 from typing import cast
 
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import usage as usage_core
 from app.core.auth.dependencies import (
     set_openai_error_format,
     validate_codex_usage_identity,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
+    validate_usage_api_key,
 )
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
@@ -38,8 +44,10 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
+from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.sse import parse_sse_data_json
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -47,6 +55,8 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
+    ApiKeySelfLimitData,
+    ApiKeySelfUsageData,
     ApiKeysService,
     ApiKeyUsageReservationData,
 )
@@ -60,12 +70,17 @@ from app.modules.proxy.request_policy import (
     validate_model_access,
 )
 from app.modules.proxy.schemas import (
+    CodexModelEntry,
+    CodexModelsResponse,
     ModelListItem,
     ModelListResponse,
     ModelMetadata,
     RateLimitStatusPayload,
     ReasoningLevelSchema,
+    V1UsageLimitResponse,
+    V1UsageResponse,
 )
+from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -227,11 +242,11 @@ async def v1_responses_websocket(
     )
 
 
-@router.get("/models", response_model=ModelListResponse)
+@router.get("/models", response_model=CodexModelsResponse)
 async def models(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _build_models_response(api_key)
+    return await _build_codex_models_response(api_key)
 
 
 @v1_router.get("/models", response_model=ModelListResponse)
@@ -239,6 +254,154 @@ async def v1_models(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _build_models_response(api_key)
+
+
+@v1_router.get("/usage", response_model=V1UsageResponse)
+async def v1_usage(
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> V1UsageResponse:
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        usage = await service.get_key_usage_summary_for_self(api_key.id)
+        aggregate_limits = await _build_aggregate_credit_limits(session)
+
+    if usage is None:
+        raise ProxyAuthError("Invalid API key")
+
+    return V1UsageResponse(
+        request_count=usage.request_count,
+        total_tokens=usage.total_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+        total_cost_usd=usage.total_cost_usd,
+        limits=_build_v1_usage_limits(usage, aggregate_limits),
+    )
+
+
+def _build_v1_usage_limits(
+    usage: ApiKeySelfUsageData,
+    aggregate_limits: dict[str, V1UsageLimitResponse],
+) -> list[V1UsageLimitResponse]:
+    raw_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
+    credit_overrides = {
+        limit.limit_window: limit
+        for limit in usage.limits
+        if limit.limit_type == "credits" and limit.model_filter is None
+    }
+
+    if aggregate_limits:
+        merged: list[V1UsageLimitResponse] = []
+        for window in ("5h", "7d"):
+            aggregate = aggregate_limits.get(window)
+            if aggregate is None:
+                continue
+            merged.append(_apply_credit_override(aggregate, credit_overrides.get(window)))
+        if {item.limit_window for item in merged} == {"5h", "7d"}:
+            return merged
+
+    return raw_limits
+
+
+def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitResponse:
+    current_value = max(0, min(limit.current_value, limit.max_value))
+    return V1UsageLimitResponse(
+        limit_type=limit.limit_type,
+        limit_window=limit.limit_window,
+        max_value=limit.max_value,
+        current_value=current_value,
+        remaining_value=max(0, limit.max_value - current_value),
+        model_filter=limit.model_filter,
+        reset_at=limit.reset_at.isoformat() + "Z",
+        source=limit.source,
+    )
+
+
+def _apply_credit_override(
+    aggregate_limit: V1UsageLimitResponse,
+    override_limit: ApiKeySelfLimitData | None,
+) -> V1UsageLimitResponse:
+    if override_limit is None:
+        return aggregate_limit
+
+    override_max = max(0, override_limit.max_value)
+    current_value = max(0, min(aggregate_limit.current_value, override_max))
+    return V1UsageLimitResponse(
+        limit_type="credits",
+        limit_window=aggregate_limit.limit_window,
+        max_value=override_max,
+        current_value=current_value,
+        remaining_value=max(0, override_max - current_value),
+        model_filter=None,
+        reset_at=aggregate_limit.reset_at,
+        source="api_key_override",
+    )
+
+
+async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1UsageLimitResponse]:
+    usage_repository = UsageRepository(session)
+    primary_latest = await usage_repository.latest_by_account(window="primary")
+    secondary_latest = await usage_repository.latest_by_account(window="secondary")
+
+    primary_rows = [_usage_entry_to_window_row(entry) for entry in primary_latest.values()]
+    secondary_rows = [_usage_entry_to_window_row(entry) for entry in secondary_latest.values()]
+    primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
+
+    account_ids = {row.account_id for row in primary_rows} | {row.account_id for row in secondary_rows}
+    if not account_ids:
+        return {}
+
+    account_map = {account.id: account for account in await _load_accounts_by_id(session, account_ids)}
+    if not account_map:
+        return {}
+
+    active_account_ids = set(account_map)
+    primary_rows = [row for row in primary_rows if row.account_id in active_account_ids]
+    secondary_rows = [row for row in secondary_rows if row.account_id in active_account_ids]
+    limits: dict[str, V1UsageLimitResponse] = {}
+
+    for window_key, rows, label in (("primary", primary_rows, "5h"), ("secondary", secondary_rows, "7d")):
+        if not rows:
+            continue
+        summary = usage_core.summarize_usage_window(rows, account_map, window_key)
+        max_value = max(0, int(round(summary.capacity_credits or 0.0)))
+        if max_value <= 0:
+            continue
+        if summary.reset_at is None:
+            continue
+        current_value = max(0, min(int(round(summary.used_credits or 0.0)), max_value))
+        limits[label] = V1UsageLimitResponse(
+            limit_type="credits",
+            limit_window=label,
+            max_value=max_value,
+            current_value=current_value,
+            remaining_value=max(0, max_value - current_value),
+            model_filter=None,
+            reset_at=datetime.fromtimestamp(summary.reset_at, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            source="aggregate",
+        )
+
+    return limits
+
+
+async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> list[Account]:
+    if not account_ids:
+        return []
+    result = await session.execute(
+        select(Account).where(
+            Account.id.in_(account_ids),
+            Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
+        )
+    )
+    return list(result.scalars().all())
+
+
+def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
+    return UsageWindowRow(
+        account_id=entry.account_id,
+        used_percent=entry.used_percent,
+        reset_at=entry.reset_at,
+        window_minutes=entry.window_minutes,
+        recorded_at=entry.recorded_at,
+    )
 
 
 @transcribe_router.post("/transcribe")
@@ -282,6 +445,31 @@ async def v1_audio_transcriptions(
     )
 
 
+async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=None,
+        request_service_tier=None,
+    )
+
+    allowed_models = _allowed_models_for_api_key(api_key)
+
+    registry = get_model_registry()
+    models = registry.get_models_with_fallback()
+
+    if not models:
+        await _release_reservation(reservation)
+        return JSONResponse(content=CodexModelsResponse(models=[]).model_dump(mode="json"))
+
+    entries: list[CodexModelEntry] = []
+    for slug, model in models.items():
+        if not is_public_model(model, allowed_models):
+            continue
+        entries.append(_to_codex_model_entry(model))
+    await _release_reservation(reservation)
+    return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
+
+
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     reservation = await _enforce_request_limits(
         api_key,
@@ -289,10 +477,7 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         request_service_tier=None,
     )
 
-    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    if api_key and api_key.enforced_model:
-        forced = {api_key.enforced_model}
-        allowed_models = forced if allowed_models is None else (allowed_models & forced)
+    allowed_models = _allowed_models_for_api_key(api_key)
     created = int(time.time())
 
     registry = get_model_registry()
@@ -316,6 +501,73 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         )
     await _release_reservation(reservation)
     return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
+
+
+def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
+    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    if api_key and api_key.enforced_model:
+        forced = {api_key.enforced_model}
+        return forced if allowed_models is None else (allowed_models & forced)
+    return allowed_models
+
+
+def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
+    raw = model.raw
+
+    extra: dict[str, JsonValue] = {}
+    skip_keys = {
+        "slug",
+        "display_name",
+        "description",
+        "base_instructions",
+        "default_reasoning_level",
+        "supported_reasoning_levels",
+        "supported_in_api",
+        "priority",
+        "minimal_client_version",
+        "supports_reasoning_summaries",
+        "support_verbosity",
+        "default_verbosity",
+        "supports_parallel_tool_calls",
+        "context_window",
+        "input_modalities",
+        "available_in_plans",
+        "prefer_websockets",
+        "visibility",
+    }
+    for key, value in raw.items():
+        if key not in skip_keys and isinstance(value, (bool, int, float, str, type(None), list, Mapping)):
+            extra[key] = value
+
+    return CodexModelEntry(
+        slug=model.slug,
+        display_name=model.display_name,
+        description=model.description,
+        base_instructions=model.base_instructions,
+        default_reasoning_level=model.default_reasoning_level,
+        supported_reasoning_levels=[
+            ReasoningLevelSchema(effort=rl.effort, description=rl.description)
+            for rl in model.supported_reasoning_levels
+        ],
+        supported_in_api=model.supported_in_api,
+        priority=model.priority,
+        minimal_client_version=model.minimal_client_version,
+        supports_reasoning_summaries=model.supports_reasoning_summaries,
+        support_verbosity=model.support_verbosity,
+        default_verbosity=model.default_verbosity,
+        supports_parallel_tool_calls=model.supports_parallel_tool_calls,
+        context_window=model.context_window,
+        input_modalities=list(model.input_modalities),
+        available_in_plans=sorted(model.available_in_plans),
+        prefer_websockets=model.prefer_websockets,
+        visibility=_model_visibility(model),
+        **extra,
+    )
+
+
+def _model_visibility(model: UpstreamModel) -> str:
+    visibility = model.raw.get("visibility")
+    return visibility if isinstance(visibility, str) else "list"
 
 
 def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
@@ -769,7 +1021,7 @@ def _error_details_from_content(
     error = content.get("error")
     if not is_json_mapping(error):
         return None, None
-    error_mapping = cast(Mapping[str, JsonValue], error)
+    error_mapping = error
     code = error_mapping.get("code")
     message = error_mapping.get("message")
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
@@ -782,7 +1034,13 @@ async def _validate_proxy_websocket_request(
     if denial is not None:
         return None, denial
     try:
-        api_key = await validate_proxy_api_key_authorization(websocket.headers.get("authorization"))
+        if "request" in inspect.signature(validate_proxy_api_key_authorization).parameters:
+            api_key = await validate_proxy_api_key_authorization(
+                websocket.headers.get("authorization"),
+                request=websocket,
+            )
+        else:
+            api_key = await validate_proxy_api_key_authorization(websocket.headers.get("authorization"))
     except ProxyAuthError as exc:
         return None, JSONResponse(
             status_code=exc.status_code,

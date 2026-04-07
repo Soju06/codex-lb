@@ -284,13 +284,14 @@ If you deploy multiple replicas behind a load balancer, configure front-door aff
 
 Without front-door affinity, each replica will maintain its own in-memory bridge pool and HTTP continuity can fragment across instances.
 
-If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring so the proxy can fail closed with `bridge_instance_mismatch` rather than silently creating a second bridge on the wrong replica.
+If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring. In strict mode the proxy fails closed with `bridge_instance_mismatch` for hard continuity keys; in gateway-safe mode prompt-cache-only bridge requests can tolerate a locality miss and continue locally.
 
 ### Failure interpretation
 
 - `queue_full`: one bridge key is overloaded; increase bridge capacity carefully or reduce per-session concurrency upstream.
 - `capacity_exhausted_active_sessions`: the bridge pool hit `max_sessions` while every existing session still had pending work. The proxy intentionally refused the new request with `429` instead of evicting an active session. Mitigate by increasing pool size carefully, reducing concurrent bridge fan-out, or improving front-door affinity so related calls land on the same replica.
-- `owner_mismatch` / `bridge_instance_mismatch`: deterministic replica ownership is enabled for a stable bridge key and the request landed on the wrong instance. Fix ingress affinity or route the stable bridge key to the logged owner instance. Requests that only have an unstable per-request bridge key are intentionally exempt from owner enforcement.
+- `owner_mismatch` / `bridge_instance_mismatch`: a hard continuity key (`x-codex-turn-state` or explicit session header) landed on the wrong instance. Fix ingress affinity or route that continuity key to the logged owner instance.
+- `prompt_cache_locality_miss` / `soft_local_rebind`: gateway-safe mode tolerated a prompt-cache locality miss and created or reused a local bridge session instead of returning `bridge_instance_mismatch`. Investigate front-door stickiness if this is frequent, because cache reuse and bridge continuity can still fragment across replicas.
 - `reconnect`: the bridge recreated an upstream websocket before response creation and retried once.
 - `terminal_error` with `previous_response_not_found`: continuity was already broken upstream; inspect replica affinity, bridge eviction timing, or upstream resets.
 - plain `transport = "http"` request logs are still expected for bridged HTTP requests; the internal upstream websocket does not change external transport accounting.

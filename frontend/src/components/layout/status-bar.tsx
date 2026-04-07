@@ -3,12 +3,19 @@ import { Activity, ArrowRightLeft, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { getDashboardOverview } from "@/features/dashboard/api";
+import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
-function getRoutingLabel(strategy: "usage_weighted" | "round_robin", sticky: boolean, preferEarlier: boolean): string {
+function getRoutingLabel(strategy: "usage_weighted" | "round_robin" | "capacity_weighted", sticky: boolean, preferEarlier: boolean): string {
   if (strategy === "round_robin") {
     return sticky ? "Round robin + Sticky threads" : "Round robin";
+  }
+  if (strategy === "capacity_weighted") {
+    if (sticky && preferEarlier) return "Capacity weighted + Sticky + Early reset";
+    if (sticky) return "Capacity weighted + Sticky threads";
+    if (preferEarlier) return "Capacity weighted + Early reset";
+    return "Capacity weighted";
   }
   if (sticky && preferEarlier) return "Sticky + Early reset";
   if (sticky) return "Sticky threads";
@@ -18,8 +25,8 @@ function getRoutingLabel(strategy: "usage_weighted" | "round_robin", sticky: boo
 
 export function StatusBar() {
   const { data: lastSyncAt = null } = useQuery({
-    queryKey: ["dashboard", "overview"],
-    queryFn: getDashboardOverview,
+    queryKey: ["dashboard", "overview", DEFAULT_OVERVIEW_TIMEFRAME],
+    queryFn: () => getDashboardOverview({ timeframe: DEFAULT_OVERVIEW_TIMEFRAME }),
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
     select: (data) => data.lastSyncAt,

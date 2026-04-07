@@ -30,6 +30,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN mkdir -p /var/lib/codex-lb
 
+# Stage arch-specific shared libraries for distroless copy
+RUN ARCH="$(uname -m)" && \
+    mkdir -p /staged-libs/lib /staged-libs/usr/lib && \
+    cp -a "/lib/${ARCH}-linux-gnu" "/staged-libs/lib/${ARCH}-linux-gnu" && \
+    cp -a "/usr/lib/${ARCH}-linux-gnu" "/staged-libs/usr/lib/${ARCH}-linux-gnu"
+
 FROM gcr.io/distroless/base-debian12:nonroot AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -38,8 +44,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY --from=python-build /lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
-COPY --from=python-build /usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu
+COPY --from=python-build /staged-libs/lib/ /lib/
+COPY --from=python-build /staged-libs/usr/lib/ /usr/lib/
 COPY --from=python-build /usr/local /usr/local
 COPY --from=python-build /opt/venv /opt/venv
 COPY --from=python-build --chown=nonroot:nonroot /var/lib/codex-lb /var/lib/codex-lb

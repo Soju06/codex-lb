@@ -11,11 +11,31 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHART_DIR = _REPO_ROOT / "deploy" / "helm" / "codex-lb"
+_DEPENDENCY_BUILD_COMPLETE = False
+
+
+def _ensure_chart_dependencies() -> None:
+    global _DEPENDENCY_BUILD_COMPLETE
+    if _DEPENDENCY_BUILD_COMPLETE:
+        return
+
+    if shutil.which("helm") is None:
+        pytest.skip("helm is required for chart rendering tests")
+
+    subprocess.run(
+        ["helm", "dependency", "build", str(_CHART_DIR)],
+        cwd=_REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _DEPENDENCY_BUILD_COMPLETE = True
 
 
 def _helm_template(*args: str) -> str:
     if shutil.which("helm") is None:
         pytest.skip("helm is required for chart rendering tests")
+    _ensure_chart_dependencies()
     completed = subprocess.run(
         ["helm", "template", "codex-lb", str(_CHART_DIR), *args],
         cwd=_REPO_ROOT,

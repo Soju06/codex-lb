@@ -4,13 +4,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Integer, cast, func, select, update
+from sqlalchemy import Integer, cast, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.utils.time import utcnow
 from app.db.models import (
+    Account,
     ApiKey,
+    ApiKeyAccountAssignment,
     ApiKeyLimit,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
@@ -81,24 +83,40 @@ class ApiKeysRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    def _select_api_key(self):
+        return (
+            select(ApiKey)
+            .execution_options(populate_existing=True)
+            .options(
+                selectinload(ApiKey.limits),
+                selectinload(ApiKey.account_assignments),
+            )
+        )
+
     async def create(self, row: ApiKey) -> ApiKey:
         self._session.add(row)
         await self._session.commit()
-        await self._session.refresh(row)
-        return row
+        created = await self.get_by_id(row.id)
+        assert created is not None
+        return created
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
-        return await self._session.get(ApiKey, key_id)
+        result = await self._session.execute(self._select_api_key().where(ApiKey.id == key_id))
+        return result.scalar_one_or_none()
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
-        result = await self._session.execute(
-            select(ApiKey).options(selectinload(ApiKey.limits)).where(ApiKey.key_hash == key_hash)
-        )
+        result = await self._session.execute(self._select_api_key().where(ApiKey.key_hash == key_hash))
         return result.scalar_one_or_none()
 
     async def list_all(self) -> list[ApiKey]:
-        result = await self._session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
+        result = await self._session.execute(self._select_api_key().order_by(ApiKey.created_at.desc()))
         return list(result.scalars().unique().all())
+
+    async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]:
+        if not account_ids:
+            return []
+        result = await self._session.execute(select(Account).where(Account.id.in_(account_ids)))
+        return list(result.scalars().all())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
         stmt = (
@@ -141,6 +159,31 @@ class ApiKeysRepository:
 
         return summaries
 
+    async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary:
+        """Return aggregate usage totals for a single API key (zeroes if no logs)."""
+        stmt = select(
+            func.count(RequestLog.id).label("request_count"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(
+                func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                0,
+            ).label("output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+        ).where(RequestLog.api_key_id == key_id)
+        result = await self._session.execute(stmt)
+        row = result.one()
+        input_sum = int(row.input_tokens or 0)
+        output_sum = int(row.output_tokens or 0)
+        cached_sum = int(row.cached_input_tokens or 0)
+        cached_sum = max(0, min(cached_sum, input_sum))
+        return ApiKeyUsageSummary(
+            request_count=int(row.request_count or 0),
+            total_tokens=input_sum + output_sum,
+            cached_input_tokens=cached_sum,
+            total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+        )
+
     async def update(
         self,
         key_id: str,
@@ -150,10 +193,12 @@ class ApiKeysRepository:
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
+        account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
+        commit: bool = True,
     ) -> ApiKey | None:
         row = await self.get_by_id(key_id)
         if row is None:
@@ -173,6 +218,9 @@ class ApiKeysRepository:
         if enforced_service_tier is not _UNSET:
             assert enforced_service_tier is None or isinstance(enforced_service_tier, str)
             row.enforced_service_tier = enforced_service_tier
+        if account_assignment_scope_enabled is not _UNSET:
+            assert isinstance(account_assignment_scope_enabled, bool)
+            row.account_assignment_scope_enabled = account_assignment_scope_enabled
         if expires_at is not _UNSET:
             assert expires_at is None or isinstance(expires_at, datetime)
             row.expires_at = expires_at
@@ -185,9 +233,9 @@ class ApiKeysRepository:
         if key_prefix is not _UNSET:
             assert isinstance(key_prefix, str)
             row.key_prefix = key_prefix
-        await self._session.commit()
-        await self._session.refresh(row)
-        return row
+        if commit:
+            await self._session.commit()
+        return await self.get_by_id(key_id)
 
     async def delete(self, key_id: str) -> bool:
         row = await self.get_by_id(key_id)
@@ -226,7 +274,7 @@ class ApiKeysRepository:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
 
-    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]:
+    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit], *, commit: bool = True) -> list[ApiKeyLimit]:
         existing = await self.get_limits_by_key(key_id)
         existing_by_key = {_limit_key(limit): limit for limit in existing}
         incoming_keys = {_limit_key(limit) for limit in limits}
@@ -246,11 +294,22 @@ class ApiKeysRepository:
             if _limit_key(old_limit) not in incoming_keys:
                 await self._session.delete(old_limit)
 
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
         parent = await self._session.get(ApiKey, key_id)
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
+
+    async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
+        await self._session.execute(delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.api_key_id == key_id))
+        for account_id in account_ids:
+            self._session.add(ApiKeyAccountAssignment(api_key_id=key_id, account_id=account_id))
+        if commit:
+            await self._session.commit()
+        parent = await self._session.get(ApiKey, key_id)
+        if parent is not None:
+            await self._session.refresh(parent, attribute_names=["account_assignments"])
 
     async def increment_limit_usage(
         self,

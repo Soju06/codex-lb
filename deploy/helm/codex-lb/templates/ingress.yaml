@@ -4,9 +4,14 @@
 {{- $_ := set $annotations "cert-manager.io/cluster-issuer" .Values.ingress.certManager.clusterIssuer }}
 {{- end }}
 {{- if .Values.ingress.nginx.enabled }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-body-size" "0" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-read-timeout" "600" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-send-timeout" "600" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-http-version" "1.1" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-buffering" "off" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-request-buffering" "off" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-body-size" "50m" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-read-timeout" "3600" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-send-timeout" "3600" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-next-upstream" "error" }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-next-upstream-tries" "1" }}
 {{- $_ := set $annotations "nginx.ingress.kubernetes.io/limit-rps" "100" }}
 {{- end }}
 {{- if .Values.ingress.nginx.upstreamHashBy }}

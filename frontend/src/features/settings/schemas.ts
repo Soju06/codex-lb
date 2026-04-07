@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RoutingStrategySchema = z.enum(["usage_weighted", "round_robin"]);
+export const RoutingStrategySchema = z.enum(["usage_weighted", "round_robin", "capacity_weighted"]);
 export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", "websocket"]);
 
 export const DashboardSettingsSchema = z.object({

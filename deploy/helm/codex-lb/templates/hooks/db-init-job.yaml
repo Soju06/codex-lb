@@ -1,0 +1,105 @@
+{{- if and .Values.dbInit.enabled (not .Values.postgresql.enabled) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-db-init" (include "codex-lb.fullname" . | trunc 52 | trimSuffix "-") }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- $pullSecrets := concat (.Values.global.imagePullSecrets | default list) (.Values.image.pullSecrets | default list) }}
+      {{- if $pullSecrets }}
+      imagePullSecrets:
+        {{- range $pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- with (include "codex-lb.globalNodeSelector" .) }}
+      nodeSelector:
+        {{- . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: db-init
+          image: {{ printf "%s/bitnami/postgresql:16" (.Values.global.imageRegistry | default "docker.io") }}
+          imagePullPolicy: IfNotPresent
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["sh", "-ec"]
+          args:
+            - |
+              PGPASSWORD="$ADMIN_PASSWORD" psql \
+                -h "$DB_HOST" -p "$DB_PORT" -U "$ADMIN_USER" -d postgres <<'SQL'
+              {{- range .Values.dbInit.databases }}
+              {{- $dbTag := printf "db_%s" ((printf "%s" .name) | sha256sum | trunc 12) }}
+              {{- $userTag := printf "user_%s" ((printf "%s" .user) | sha256sum | trunc 12) }}
+              {{- $passTag := printf "pass_%s" ((printf "%s" .password) | sha256sum | trunc 12) }}
+              DO $$ BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = ${{ $userTag }}${{ .user }}${{ $userTag }}$) THEN
+                  EXECUTE format(
+                    'CREATE ROLE %I WITH LOGIN PASSWORD %L',
+                    ${{ $userTag }}${{ .user }}${{ $userTag }}$,
+                    ${{ $passTag }}${{ .password }}${{ $passTag }}$
+                  );
+                END IF;
+              END $$;
+              SELECT format(
+                'CREATE DATABASE %I OWNER %I',
+                ${{ $dbTag }}${{ .name }}${{ $dbTag }}$,
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )
+              WHERE NOT EXISTS (
+                SELECT FROM pg_database WHERE datname = ${{ $dbTag }}${{ .name }}${{ $dbTag }}$
+              )\gexec
+              SELECT format(
+                'GRANT ALL PRIVILEGES ON DATABASE %I TO %I',
+                ${{ $dbTag }}${{ .name }}${{ $dbTag }}$,
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
+              \connect "{{ .name | replace "\"" "\"\"" }}"
+              SELECT format(
+                'GRANT ALL ON SCHEMA public TO %I',
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
+              SELECT format(
+                'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I',
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
+              SELECT format(
+                'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I',
+                ${{ $userTag }}${{ .user }}${{ $userTag }}$
+              )\gexec
+              \connect postgres
+              {{- end }}
+              SQL
+          env:
+            - name: DB_HOST
+              value: {{ .Values.dbInit.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.dbInit.port | default "5432" | quote }}
+            - name: ADMIN_USER
+              value: {{ .Values.dbInit.adminUser | quote }}
+            - name: ADMIN_PASSWORD
+              {{- if .Values.dbInit.adminPasswordSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbInit.adminPasswordSecret.name }}
+                  key: {{ .Values.dbInit.adminPasswordSecret.key }}
+              {{- else }}
+              value: {{ .Values.dbInit.adminPassword | quote }}
+              {{- end }}
+  backoffLimit: 3
+{{- end }}

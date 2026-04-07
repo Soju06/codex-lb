@@ -10,14 +10,19 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
+  enableServiceLinks: false
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
+  {{- with (include "codex-lb.globalNodeSelector" .) }}
+  nodeSelector:
+    {{- . | nindent 4 }}
+  {{- end }}
   containers:
-    - name: test-connection
-      image: busybox:1.37
+    - name: test-health
+      image: {{ printf "%s/library/busybox:1.37" (.Values.global.imageRegistry | default "docker.io") }}
       imagePullPolicy: IfNotPresent
       securityContext:
         allowPrivilegeEscalation: false
@@ -29,5 +34,10 @@ spec:
         - sh
         - -c
         - |
-          wget --spider --timeout=10 http://{{ include "codex-lb.fullname" . }}:2455/health || exit 1
-          echo "Connection test passed!"
+          echo "=== Health endpoint ==="
+          wget --spider --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health || exit 1
+          echo "Health check passed!"
+
+          echo "=== Startup probe ==="
+          wget -qO- --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health/ready || exit 1
+          echo "Readiness check passed!"

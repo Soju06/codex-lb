@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -40,12 +39,12 @@ _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal
 def _json_mapping_or_none(value: object) -> Mapping[str, JsonValue] | None:
     if not is_json_mapping(value):
         return None
-    return cast(Mapping[str, JsonValue], value)
+    return value
 
 
 def _json_parts(value: JsonValue) -> list[JsonValue]:
     if is_json_list(value):
-        return cast(list[JsonValue], value)
+        return value
     return [value]
 
 
@@ -56,7 +55,7 @@ def normalize_tool_type(tool_type: str) -> str:
 def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     if not is_json_mapping(choice):
         return choice
-    choice_mapping = cast(Mapping[str, JsonValue], choice)
+    choice_mapping = choice
     tool_type = choice_mapping.get("type")
     if isinstance(tool_type, str):
         normalized_type = normalize_tool_type(tool_type)
@@ -73,7 +72,7 @@ def validate_tool_types(tools: list[JsonValue]) -> list[JsonValue]:
         if not is_json_mapping(tool):
             normalized_tools.append(tool)
             continue
-        tool_mapping = cast(Mapping[str, JsonValue], tool)
+        tool_mapping = tool
         tool_type = tool_mapping.get("type")
         if isinstance(tool_type, str):
             normalized_type = normalize_tool_type(tool_type)
@@ -91,20 +90,20 @@ def _has_input_file_id(input_items: list[JsonValue]) -> bool:
     for item in input_items:
         if not is_json_mapping(item):
             continue
-        item_mapping = cast(Mapping[str, JsonValue], item)
+        item_mapping = item
         if _is_input_file_with_id(item_mapping):
             return True
         content = item_mapping.get("content")
         if is_json_list(content):
-            parts = cast(list[JsonValue], content)
+            parts = content
         elif is_json_mapping(content):
-            parts = [cast(Mapping[str, JsonValue], content)]
+            parts = [content]
         else:
             parts = []
         for part in parts:
             if not is_json_mapping(part):
                 continue
-            if _is_input_file_with_id(cast(Mapping[str, JsonValue], part)):
+            if _is_input_file_with_id(part):
                 return True
     return False
 
@@ -283,7 +282,7 @@ def _extract_text_content_part(part: JsonValue, allowed_types: frozenset[str]) -
 def _json_list_or_none(value: JsonValue) -> list[JsonValue] | None:
     if not is_json_list(value):
         return None
-    return cast(list[JsonValue], value)
+    return value
 
 
 class ResponsesReasoning(BaseModel):
@@ -338,7 +337,7 @@ class ResponsesRequest(BaseModel):
                 raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = cast(list[JsonValue], value)
+            input_items = value
             if _has_input_file_id(input_items):
                 raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(input_items)
@@ -423,7 +422,7 @@ class ResponsesCompactRequest(BaseModel):
                 raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = cast(list[JsonValue], value)
+            input_items = value
             if _has_input_file_id(input_items):
                 raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(input_items)
@@ -475,7 +474,7 @@ def _canonicalize_tools(payload: dict[str, JsonValue]) -> None:
     tools = payload.get("tools")
     if not is_json_list(tools):
         return
-    tool_list = cast(list[JsonValue], tools)
+    tool_list = tools
     if not tool_list:
         return
     sorted_tools = sorted(tool_list, key=_tool_sort_key)
@@ -485,13 +484,13 @@ def _canonicalize_tools(payload: dict[str, JsonValue]) -> None:
 def _tool_sort_key(tool: JsonValue) -> str:
     if not is_json_mapping(tool):
         return ""
-    tool_map = cast(Mapping[str, JsonValue], tool)
+    tool_map = tool
     name = tool_map.get("name")
     if isinstance(name, str):
         return name
     func = tool_map.get("function")
     if is_json_mapping(func):
-        func_name = cast(Mapping[str, JsonValue], func).get("name")
+        func_name = func.get("name")
         if isinstance(func_name, str):
             return func_name
     return ""
@@ -499,10 +498,10 @@ def _tool_sort_key(tool: JsonValue) -> str:
 
 def _sort_keys_recursive(value: JsonValue) -> JsonValue:
     if is_json_mapping(value):
-        mapping = cast(Mapping[str, JsonValue], value)
+        mapping = value
         return {k: _sort_keys_recursive(v) for k, v in sorted(mapping.items())}
     if is_json_list(value):
-        return [_sort_keys_recursive(item) for item in cast(list[JsonValue], value)]
+        return [_sort_keys_recursive(item) for item in value]
     return value
 
 

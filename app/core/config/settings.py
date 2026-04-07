@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
+    http_responses_session_bridge_gateway_safe_mode: bool = False
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     sticky_session_cleanup_enabled: bool = True
@@ -145,6 +146,7 @@ class Settings(BaseSettings):
 
     bulkhead_proxy_limit: int = 200
     bulkhead_dashboard_limit: int = 50
+    dashboard_bootstrap_token: str | None = None
 
     memory_warning_threshold_mb: int = 0
     memory_reject_threshold_mb: int = 0

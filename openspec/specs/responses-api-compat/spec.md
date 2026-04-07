@@ -254,12 +254,19 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **THEN** the service sends one internal `response.create` prewarm with `generate=false` before the client-visible request
 - **AND** the client-visible response contract remains unchanged
 
-#### Scenario: bridge enforces deterministic owner instance only for stable bridge keys
+#### Scenario: bridge enforces deterministic owner instance for hard continuity keys
 - **WHEN** operators configure multiple eligible bridge instance ids
-- **AND** a request uses a stable bridge key derived from turn-state, session header, or prompt-cache key
+- **AND** a request uses a bridge key derived from `x-codex-turn-state` or an explicit session header
 - **AND** that request lands on a non-owner instance
 - **THEN** the service fails the request fast with `bridge_instance_mismatch`
 - **AND** it MUST NOT create a fresh local bridge session for that key on the wrong instance
+
+#### Scenario: gateway-safe prompt-cache bridge requests tolerate wrong-replica arrival
+- **WHEN** operators enable HTTP bridge gateway-safe mode
+- **AND** a request uses a bridge key derived only from `prompt_cache_key` or a derived prompt-cache key
+- **AND** that request lands on a non-owner instance
+- **THEN** the service MAY create or reuse a local bridge session on that instance
+- **AND** it MUST NOT return `bridge_instance_mismatch` solely because prompt-cache locality was missed
 
 ### Requirement: Websocket responses advertise and honor Codex turn-state affinity
 When serving websocket Responses endpoints, the service MUST advertise an `x-codex-turn-state` header during websocket accept. If the client reconnects and presents that same `x-codex-turn-state`, the service MUST treat it as the highest-priority Codex-affinity key for upstream routing on that websocket turn. On `/v1/responses`, a proxy-generated turn-state MUST NOT override the first request's prompt-cache routing unless the client explicitly sends the turn-state back.

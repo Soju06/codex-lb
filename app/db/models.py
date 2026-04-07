@@ -235,6 +235,12 @@ class DashboardSettings(Base):
         server_default=text("3600"),
         nullable=False,
     )
+    http_responses_session_bridge_gateway_safe_mode: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     sticky_reallocation_budget_threshold_pct: Mapped[float] = mapped_column(
         Float,
         default=95.0,

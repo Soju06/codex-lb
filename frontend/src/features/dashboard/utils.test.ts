@@ -262,7 +262,7 @@ describe("buildRemainingItems", () => {
 });
 
 describe("buildDashboardView", () => {
-  it("derives the primary donut total from the constrained displayed slices", () => {
+  it("keeps donut totals anchored to window capacity even when displayed slices are constrained", () => {
     const overview = createDashboardOverview({
       accounts: [
         account({
@@ -325,9 +325,9 @@ describe("buildDashboardView", () => {
     expect(view.primaryUsageItems).toHaveLength(2);
     expect(view.primaryUsageItems[0]?.value).toBeCloseTo(75.6);
     expect(view.primaryUsageItems[1]?.value).toBeCloseTo(135);
-    expect(view.primaryUsageTotal).toBeCloseTo(210.6);
-    expect(view.primaryUsageTotal).toBeCloseTo(view.primaryUsageItems.reduce((total, item) => total + item.value, 0));
-    expect(view.secondaryUsageTotal).toBe(5370);
+    expect(overview.summary.primaryWindow.capacityCredits).toBe(450);
+    expect(overview.summary.secondaryWindow?.capacityCredits).toBe(15120);
+    expect(view.primaryUsageItems.reduce((total, item) => total + item.value, 0)).toBeCloseTo(210.6);
   });
 
   it("keeps primary totals intact for accounts without secondary usage data", () => {
@@ -407,6 +407,6 @@ describe("buildDashboardView", () => {
     expect(view.primaryUsageItems).toHaveLength(1);
     expect(view.primaryUsageItems[0]?.value).toBeCloseTo(202.5);
     expect(view.primaryUsageItems[0]?.remainingPercent).toBe(90);
-    expect(view.primaryUsageTotal).toBeCloseTo(202.5);
+    expect(overview.summary.primaryWindow.capacityCredits).toBe(225);
   });
 });

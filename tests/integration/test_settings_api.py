@@ -16,6 +16,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["routingStrategy"] == "capacity_weighted"
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
+    assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is False
     assert payload["stickyReallocationBudgetThresholdPct"] == 95.0
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
@@ -31,6 +32,7 @@ async def test_settings_api_get_and_update(async_client):
             "routingStrategy": "round_robin",
             "openaiCacheAffinityMaxAgeSeconds": 180,
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
+            "httpResponsesSessionBridgeGatewaySafeMode": True,
             "stickyReallocationBudgetThresholdPct": 90.0,
             "importWithoutOverwrite": True,
             "totpRequiredOnLogin": False,
@@ -45,6 +47,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["routingStrategy"] == "round_robin"
     assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
+    assert updated["httpResponsesSessionBridgeGatewaySafeMode"] is True
     assert updated["stickyReallocationBudgetThresholdPct"] == 90.0
     assert updated["importWithoutOverwrite"] is True
     assert updated["totpRequiredOnLogin"] is False
@@ -60,6 +63,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["routingStrategy"] == "round_robin"
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
+    assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is True
     assert payload["stickyReallocationBudgetThresholdPct"] == 90.0
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False

@@ -14,6 +14,8 @@ type AuthState = {
   authenticated: boolean;
   totpRequiredOnLogin: boolean;
   totpConfigured: boolean;
+  bootstrapRequired: boolean;
+  bootstrapTokenConfigured: boolean;
   loading: boolean;
   initialized: boolean;
   error: string | null;
@@ -30,6 +32,8 @@ function applySession(set: (next: Partial<AuthState>) => void, session: AuthSess
     authenticated: session.authenticated,
     totpRequiredOnLogin: session.totpRequiredOnLogin,
     totpConfigured: session.totpConfigured,
+    bootstrapRequired: session.bootstrapRequired ?? false,
+    bootstrapTokenConfigured: session.bootstrapTokenConfigured ?? false,
     initialized: true,
     error: null,
   });
@@ -41,6 +45,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   authenticated: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
+  bootstrapRequired: false,
+  bootstrapTokenConfigured: false,
   loading: false,
   initialized: false,
   error: null,
@@ -79,6 +85,8 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({
         authenticated: false,
         totpRequiredOnLogin: false,
+        bootstrapRequired: false,
+        bootstrapTokenConfigured: false,
       });
       await useAuthStore.getState().refreshSession();
     } finally {
@@ -105,9 +113,10 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 setUnauthorizedHandler(() => {
-  useAuthStore.setState({
+  useAuthStore.setState((state) => ({
+    ...state,
     authenticated: false,
     initialized: true,
     error: null,
-  });
+  }));
 });

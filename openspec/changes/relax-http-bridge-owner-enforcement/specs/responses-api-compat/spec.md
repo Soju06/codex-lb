@@ -1,0 +1,18 @@
+### MODIFIED Requirements
+
+### Requirement: HTTP Responses routes preserve upstream websocket session continuity
+When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the service MUST preserve upstream Responses websocket session continuity on a stable per-session bridge key instead of opening a brand new upstream session for every eligible request. The bridge key MUST use an explicit session/conversation header when present; otherwise it MUST use normalized `prompt_cache_key`, and when the client omits `prompt_cache_key` the service MUST derive a stable key from the same cache-affinity inputs already used for OpenAI prompt-cache routing. While bridged, the service MUST preserve the external HTTP/SSE contract, MUST continue request logging with `transport = "http"`, and MUST keep requests from different bridge keys isolated from one another.
+
+#### Scenario: bridge enforces deterministic owner instance for hard continuity keys
+- **WHEN** operators configure multiple eligible bridge instance ids
+- **AND** a request uses a bridge key derived from `x-codex-turn-state` or an explicit session header
+- **AND** that request lands on a non-owner instance
+- **THEN** the service fails the request fast with `bridge_instance_mismatch`
+- **AND** it MUST NOT create a fresh local bridge session for that key on the wrong instance
+
+#### Scenario: gateway-safe prompt-cache bridge requests tolerate wrong-replica arrival
+- **WHEN** operators enable HTTP bridge gateway-safe mode
+- **AND** a request uses a bridge key derived only from `prompt_cache_key` or a derived prompt-cache key
+- **AND** that request lands on a non-owner instance
+- **THEN** the service MAY create or reuse a local bridge session on that instance
+- **AND** it MUST NOT return `bridge_instance_mismatch` solely because prompt-cache locality was missed

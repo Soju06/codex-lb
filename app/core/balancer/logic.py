@@ -130,9 +130,6 @@ def select_account(
         A ``SelectionResult`` containing the selected ``AccountState`` and no
         error message when routing can proceed, or ``None`` plus a
         human-readable error message when no account is eligible.
-
-    Raises:
-        None.
     """
     current = now or time.time()
     available: list[AccountState] = []

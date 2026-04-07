@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
-
 from pydantic import Field
 
 from app.modules.shared.schemas import DashboardModel
@@ -45,13 +43,13 @@ class UsageHistoryItem(DashboardModel):
 
 class UsageHistoryResponse(DashboardModel):
     window_hours: int
-    accounts: List[UsageHistoryItem] = Field(default_factory=list)
+    accounts: list[UsageHistoryItem] = Field(default_factory=list)
 
 
 class UsageWindowResponse(DashboardModel):
     window_key: str
     window_minutes: int | None = None
-    accounts: List[UsageHistoryItem] = Field(default_factory=list)
+    accounts: list[UsageHistoryItem] = Field(default_factory=list)
 
 
 class TrendPoint(DashboardModel):
@@ -60,7 +58,7 @@ class TrendPoint(DashboardModel):
 
 
 class MetricsTrends(DashboardModel):
-    requests: List[TrendPoint] = Field(default_factory=list)
-    tokens: List[TrendPoint] = Field(default_factory=list)
-    cost: List[TrendPoint] = Field(default_factory=list)
-    error_rate: List[TrendPoint] = Field(default_factory=list)
+    requests: list[TrendPoint] = Field(default_factory=list)
+    tokens: list[TrendPoint] = Field(default_factory=list)
+    cost: list[TrendPoint] = Field(default_factory=list)
+    error_rate: list[TrendPoint] = Field(default_factory=list)

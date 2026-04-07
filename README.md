@@ -230,7 +230,12 @@ opencode
 {
   "agents": {
     "defaults": {
-      "model": { "primary": "codex-lb/gpt-5.3-codex" }
+      "model": { "primary": "codex-lb/gpt-5.4" },
+      "models": {
+        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } }
+        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } }
+        "codex-lb/gpt-5.3-codex": { "params": { "cacheRetention": "short" } }
+      }
     }
   },
   "models": {
@@ -239,10 +244,35 @@ opencode
       "codex-lb": {
         "baseUrl": "http://127.0.0.1:2455/v1",
         "apiKey": "${CODEX_LB_API_KEY}",   // or "dummy" if API key auth is disabled
-        "api": "openai-completions",
+        "api": "openai-responses",
         "models": [
-          { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex" },
-          { "id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark" }
+          {
+            "id": "gpt-5.4",
+            "name": "gpt-5.4 (codex-lb)",
+            "contextWindow": 1050000,
+            "contextTokens": 272000,
+            "maxTokens": 4096,
+            "input": ["text"],
+            "reasoning": false
+          },
+          {
+            "id": "gpt-5.4-mini",
+            "name": "gpt-5.4-mini (codex-lb)",
+            "contextWindow": 400000,
+            "contextTokens": 272000,
+            "maxTokens": 4096,
+            "input": ["text"],
+            "reasoning": false
+          },
+          {
+            "id": "gpt-5.3-codex",
+            "name": "gpt-5.3-codex (codex-lb)",
+            "contextWindow": 400000,
+            "contextTokens": 272000,
+            "maxTokens": 4096,
+            "input": ["text"],
+            "reasoning": false
+          }
         ]
       }
     }

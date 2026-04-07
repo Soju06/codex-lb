@@ -83,4 +83,26 @@ describe("AuthGate", () => {
     expect(screen.queryByText("Dashboard Login")).not.toBeInTheDocument();
     await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
   });
+
+  it("shows bootstrap setup screen for remote first-run access", async () => {
+    const refreshSession = vi.fn().mockResolvedValue(undefined);
+    setAuthState({
+      refreshSession,
+      passwordRequired: false,
+      authenticated: false,
+      bootstrapRequired: true,
+      bootstrapTokenConfigured: true,
+    });
+
+    render(
+      <AuthGate>
+        <div>Protected content</div>
+      </AuthGate>,
+    );
+
+    expect(screen.getByText("Complete Remote Setup")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set password" })).toBeInTheDocument();
+    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+  });
 });

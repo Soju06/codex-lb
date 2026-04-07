@@ -51,7 +51,12 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
 from app.core.exceptions import AppError, ProxyAuthError, ProxyRateLimitError
-from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_instance_mismatch_total
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    bridge_instance_mismatch_total,
+    bridge_prompt_cache_locality_miss_total,
+    bridge_soft_local_rebind_total,
+)
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
@@ -352,6 +357,7 @@ class ProxyService:
             ),
             max_sessions=max_sessions,
             previous_response_id=request_state.previous_response_id,
+            gateway_safe_mode=getattr(settings, "http_responses_session_bridge_gateway_safe_mode", False),
         )
         await self._submit_http_bridge_request(
             session,
@@ -1489,6 +1495,7 @@ class ProxyService:
         idle_ttl_seconds: float,
         max_sessions: int,
         previous_response_id: str | None = None,
+        gateway_safe_mode: bool = False,
     ) -> "_HTTPBridgeSession":
         settings = get_settings()
         api_key_id = api_key.id if api_key is not None else None
@@ -1579,35 +1586,59 @@ class ProxyService:
                         ),
                     )
 
-                owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
-                current_instance, ring = await _active_http_bridge_instance_ring(settings, self._ring_membership)
-                if (
-                    key.affinity_kind != "request"
-                    and owner_instance is not None
-                    and len(ring) > 1
-                    and owner_instance != current_instance
-                ):
-                    _log_http_bridge_event(
-                        "owner_mismatch_retry",
-                        key,
-                        account_id=None,
-                        model=request_model,
-                        detail=(
-                            f"expected_instance={owner_instance}, current_instance={current_instance}, outcome=retry"
-                        ),
-                        cache_key_family=key.affinity_kind,
-                        model_class=_extract_model_class(request_model) if request_model else None,
-                    )
-                    if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
-                        bridge_instance_mismatch_total.labels(outcome="retry").inc()
-                    raise ProxyResponseError(
-                        409,
-                        openai_error(
-                            "bridge_instance_mismatch",
-                            "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
-                            error_type="server_error",
-                        ),
-                    )
+                owner_check_required = _http_bridge_owner_check_required(
+                    key,
+                    gateway_safe_mode=gateway_safe_mode,
+                )
+                if owner_check_required or key.affinity_kind == "prompt_cache":
+                    owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
+                    current_instance, ring = await _active_http_bridge_instance_ring(settings, self._ring_membership)
+                    if owner_instance is not None and len(ring) > 1 and owner_instance != current_instance:
+                        if owner_check_required:
+                            _log_http_bridge_event(
+                                "owner_mismatch_retry",
+                                key,
+                                account_id=None,
+                                model=request_model,
+                                detail=(
+                                    "expected_instance="
+                                    f"{owner_instance}, current_instance={current_instance}, outcome=retry"
+                                ),
+                                cache_key_family=key.affinity_kind,
+                                model_class=_extract_model_class(request_model) if request_model else None,
+                                owner_check_applied=True,
+                            )
+                            if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
+                                bridge_instance_mismatch_total.labels(outcome="retry").inc()
+                            raise ProxyResponseError(
+                                409,
+                                openai_error(
+                                    "bridge_instance_mismatch",
+                                    (
+                                        "HTTP bridge session is owned by a different instance; "
+                                        "retry to reach the correct replica"
+                                    ),
+                                    error_type="server_error",
+                                ),
+                            )
+                        _log_http_bridge_event(
+                            "prompt_cache_locality_miss",
+                            key,
+                            account_id=None,
+                            model=request_model,
+                            detail=(
+                                "expected_instance="
+                                f"{owner_instance}, current_instance={current_instance}, outcome=local_rebind"
+                            ),
+                            cache_key_family=key.affinity_kind,
+                            model_class=_extract_model_class(request_model) if request_model else None,
+                            owner_check_applied=False,
+                        )
+                        if PROMETHEUS_AVAILABLE:
+                            if bridge_prompt_cache_locality_miss_total is not None:
+                                bridge_prompt_cache_locality_miss_total.inc()
+                            if bridge_soft_local_rebind_total is not None:
+                                bridge_soft_local_rebind_total.inc()
 
                 if existing is not None:
                     old_account_id = existing.account.id
@@ -4481,6 +4512,9 @@ class _HTTPBridgeSessionKey:
     api_key_id: str | None
 
 
+_HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset({"turn_state_header", "session_header"})
+
+
 @dataclass(slots=True)
 class _HTTPBridgeSession:
     key: _HTTPBridgeSessionKey
@@ -5344,6 +5378,26 @@ def _http_responses_session_bridge_enabled(settings: object) -> bool:
     return bool(getattr(get_settings(), "http_responses_session_bridge_enabled", True))
 
 
+def _http_bridge_owner_check_required(
+    key: _HTTPBridgeSessionKey,
+    *,
+    gateway_safe_mode: bool,
+) -> bool:
+    if key.affinity_kind == "request":
+        return False
+    if not gateway_safe_mode:
+        return True
+    return key.affinity_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS
+
+
+def _http_bridge_key_strength(key: _HTTPBridgeSessionKey) -> str:
+    if key.affinity_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS:
+        return "hard"
+    if key.affinity_kind == "request":
+        return "request"
+    return "soft"
+
+
 def _log_http_bridge_event(
     event: str,
     key: _HTTPBridgeSessionKey,
@@ -5354,6 +5408,7 @@ def _log_http_bridge_event(
     detail: str | None = None,
     cache_key_family: str | None = None,
     model_class: str | None = None,
+    owner_check_applied: bool | None = None,
 ) -> None:
     level = logging.INFO
     if event in {
@@ -5366,13 +5421,15 @@ def _log_http_bridge_event(
         "terminal_error",
         "capacity_exhausted_active_sessions",
         "owner_mismatch",
+        "prompt_cache_locality_miss",
         "reallocation_orphan",
     }:
         level = logging.WARNING
     logger.log(
         level,
         "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s"
-        " model=%s pending=%s detail=%s cache_key_family=%s model_class=%s",
+        " model=%s pending=%s detail=%s cache_key_family=%s model_class=%s"
+        " key_strength=%s owner_check_applied=%s",
         event,
         key.affinity_kind,
         _hash_identifier(key.affinity_key),
@@ -5382,6 +5439,8 @@ def _log_http_bridge_event(
         detail,
         cache_key_family,
         model_class,
+        _http_bridge_key_strength(key),
+        owner_check_applied,
     )
 
 

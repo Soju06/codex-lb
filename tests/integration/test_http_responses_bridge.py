@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import anyio
 import pytest
@@ -128,6 +129,7 @@ def _install_bridge_settings_with_limits(
     codex_idle_ttl_seconds: float = 900.0,
     prompt_cache_idle_ttl_seconds: float = 3600.0,
     codex_prewarm_enabled: bool = False,
+    gateway_safe_mode: bool = False,
     prefer_earlier_reset_accounts: bool = False,
     instance_id: str = "instance-a",
     instance_ring: list[str] | None = None,
@@ -154,6 +156,7 @@ def _install_bridge_settings_with_limits(
         http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
         http_responses_session_bridge_max_sessions=max_sessions,
         http_responses_session_bridge_queue_limit=queue_limit,
+        http_responses_session_bridge_gateway_safe_mode=gateway_safe_mode,
         http_responses_session_bridge_instance_id=instance_id,
         http_responses_session_bridge_instance_ring=list(instance_ring or []),
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
@@ -602,6 +605,7 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
         request_model=payload.model,
         idle_ttl_seconds=120.0,
         max_sessions=8,
+        gateway_safe_mode=True,
     )
 
     assert select_calls == [True]
@@ -773,12 +777,17 @@ async def test_v1_responses_http_bridge_non_owner_instance_falls_back_to_local_s
     _install_bridge_settings_with_limits(
         monkeypatch,
         enabled=True,
+        gateway_safe_mode=True,
         instance_id="instance-b",
         instance_ring=["instance-a", "instance-b"],
     )
     account_id = await _import_account(async_client, "acc_http_bridge_owner", "http-bridge-owner@example.com")
     account = await _get_account(account_id)
     service = get_proxy_service_for_app(app_instance)
+    service._ring_membership = cast(
+        proxy_module.RingMembershipService,
+        SimpleNamespace(list_active=AsyncMock(return_value=["instance-a", "instance-b"])),
+    )
 
     async def fake_select_account_with_budget(
         self,
@@ -872,9 +881,128 @@ async def test_v1_responses_http_bridge_non_owner_instance_falls_back_to_local_s
         request_model=payload.model,
         idle_ttl_seconds=120.0,
         max_sessions=8,
+        gateway_safe_mode=True,
     )
 
     assert session is not None
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_non_owner_prompt_cache_strict_mode_returns_409(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        gateway_safe_mode=False,
+        instance_id="instance-b",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_owner_strict",
+        "http-bridge-owner-strict@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    service._ring_membership = cast(
+        proxy_module.RingMembershipService,
+        SimpleNamespace(list_active=AsyncMock(return_value=["instance-a", "instance-b"])),
+    )
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(
+        proxy_module,
+        "connect_responses_websocket",
+        AsyncMock(return_value=_FakeBridgeUpstreamWebSocket()),
+    )
+
+    candidate_suffix = 0
+    while True:
+        payload = proxy_module.ResponsesRequest.model_validate(
+            {
+                "model": "gpt-5.4",
+                "instructions": "hi",
+                "input": [{"role": "user", "content": "hi"}],
+                "prompt_cache_key": f"owner-check-strict-{candidate_suffix}",
+            }
+        )
+        affinity = proxy_module._sticky_key_for_responses_request(
+            payload,
+            {},
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            openai_cache_affinity_max_age_seconds=300,
+            sticky_threads_enabled=False,
+            api_key=None,
+        )
+        key = proxy_module._make_http_bridge_session_key(
+            payload,
+            headers={},
+            affinity=affinity,
+            api_key=None,
+            request_id="req_owner_strict",
+        )
+        owner = await proxy_module._http_bridge_owner_instance(key, proxy_module.get_settings())
+        if owner != "instance-b":
+            break
+        candidate_suffix += 1
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            key,
+            headers={},
+            affinity=affinity,
+            api_key=None,
+            request_model=payload.model,
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+            gateway_safe_mode=False,
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 409
+    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
 
 
 @pytest.mark.asyncio

@@ -240,7 +240,7 @@ def _chat_stream_summary(stream: Any) -> dict[str, Any]:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
     try:
         model = _pick_model(client)

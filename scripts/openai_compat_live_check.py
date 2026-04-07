@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import struct
 import time
@@ -18,6 +19,8 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionUserMessageParam,
 )
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = os.environ.get("CODEX_BASE_URL", "http://localhost:2455/v1")
 API_KEY = os.environ.get("CODEX_API_KEY", "sk-local")
@@ -96,10 +99,10 @@ def _error_detail(exc: Exception) -> dict[str, Any]:
     if response is not None:
         try:
             detail["response_json"] = response.json()
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             try:
                 detail["response_text"] = response.text
-            except Exception:
+            except (AttributeError, TypeError):
                 pass
     return detail
 
@@ -237,24 +240,25 @@ def _chat_stream_summary(stream: Any) -> dict[str, Any]:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
     try:
         model = _pick_model(client)
-    except Exception as exc:
-        print("Failed to list models:", exc)
+    except (openai.APIError, RuntimeError) as exc:
+        logger.error("Failed to list models: %s", exc)
         return 2
 
     audio_b64 = AUDIO_B64 or _build_wav_base64()
 
-    print("Base URL:", BASE_URL)
-    print("Model:", model)
-    print("File URL:", FILE_URL)
-    print("File ID:", FILE_ID)
-    print("Vector Store ID:", VECTOR_STORE_ID or "(missing)")
-    print("Image URL:", IMAGE_URL)
-    print("Audio format:", AUDIO_FORMAT)
-    print("Chat file ID:", CHAT_FILE_ID)
-    print("Expected unsupported:", ", ".join(EXPECTED_UNSUPPORTED))
+    logger.info("Base URL: %s", BASE_URL)
+    logger.info("Model: %s", model)
+    logger.info("File URL: %s", FILE_URL)
+    logger.info("File ID: %s", FILE_ID)
+    logger.info("Vector Store ID: %s", VECTOR_STORE_ID or "(missing)")
+    logger.info("Image URL: %s", IMAGE_URL)
+    logger.info("Audio format: %s", AUDIO_FORMAT)
+    logger.info("Chat file ID: %s", CHAT_FILE_ID)
+    logger.info("Expected unsupported: %s", ", ".join(EXPECTED_UNSUPPORTED))
 
     results: list[CaseResult] = []
 
@@ -613,7 +617,7 @@ def main() -> int:
         results.append(result)
         status = result.status.upper()
         summary = result.detail.get("reason") or result.detail.get("message") or ""
-        print(f"- {name}: {status} {summary}".rstrip())
+        logger.info("- %s: %s%s", name, status, f" {summary}" if summary else "")
 
     output = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

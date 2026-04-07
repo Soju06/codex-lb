@@ -137,6 +137,8 @@ export function DashboardPage() {
               secondaryItems={view.secondaryUsageItems}
               primaryTotal={overview?.summary.primaryWindow.capacityCredits ?? 0}
               secondaryTotal={overview?.summary.secondaryWindow?.capacityCredits ?? 0}
+              primaryCenterValue={view.primaryTotal}
+              secondaryCenterValue={view.secondaryTotal}
               safeLinePrimary={view.safeLinePrimary}
               safeLineSecondary={view.safeLineSecondary}
             />

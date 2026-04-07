@@ -8,6 +8,8 @@ export type UsageDonutsProps = {
 	secondaryItems: RemainingItem[];
 	primaryTotal: number;
 	secondaryTotal: number;
+	primaryCenterValue?: number;
+	secondaryCenterValue?: number;
 	safeLinePrimary?: SafeLineView | null;
 	safeLineSecondary?: SafeLineView | null;
 };
@@ -17,6 +19,8 @@ export function UsageDonuts({
 	secondaryItems,
 	primaryTotal,
 	secondaryTotal,
+	primaryCenterValue,
+	secondaryCenterValue,
 	safeLinePrimary,
 	safeLineSecondary,
 }: UsageDonutsProps) {
@@ -51,12 +55,14 @@ export function UsageDonuts({
 				title="5h Remaining"
 				items={primaryChartItems}
 				total={primaryTotal}
+				centerValue={primaryCenterValue}
 				safeLine={safeLinePrimary}
 			/>
 			<DonutChart
 				title="Weekly Remaining"
 				items={secondaryChartItems}
 				total={secondaryTotal}
+				centerValue={secondaryCenterValue}
 				safeLine={safeLineSecondary}
 			/>
 		</div>

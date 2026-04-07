@@ -24,6 +24,8 @@ describe("DonutChart", () => {
     expect(screen.getByText("Account A")).toBeInTheDocument();
     expect(screen.getByText("Account B")).toBeInTheDocument();
     expect(screen.getByText("Remaining")).toBeInTheDocument();
+    expect(screen.getByTestId("donut-caption")).toHaveTextContent("Total 200 · 0% used");
+    expect(screen.getByTestId("donut-used-row")).toHaveTextContent("Used0");
 
     const svg = container.querySelector("svg");
     expect(svg).not.toBeNull();
@@ -41,6 +43,63 @@ describe("DonutChart", () => {
     const svg = container.querySelector("svg");
     expect(svg).not.toBeNull();
     expect(screen.getByText("A")).toBeInTheDocument();
+  });
+
+  it("does not render a consumed segment when total equals sum of items", () => {
+    const items = [
+      { label: "Account A", value: 120, color: "#7bb661" },
+      { label: "Account B", value: 80, color: "#d9a441" },
+    ];
+    const { container } = render(
+      <DonutChart title="No Consumed" total={200} items={items} />,
+    );
+
+    // When total = sum(items), there should be exactly 2 cells (no gray consumed cell)
+    const cells = container.querySelectorAll(".recharts-pie-sector");
+    expect(cells).toHaveLength(2);
+  });
+
+  it("renders consumed gray segment when total exceeds sum of items", () => {
+    const items = [
+      { label: "Account A", value: 120, color: "#7bb661" },
+      { label: "Account B", value: 80, color: "#d9a441" },
+    ];
+    const { container } = render(
+      <DonutChart title="With Consumed" total={500} items={items} />,
+    );
+
+    // When total > sum(items), there should be 3 cells (2 items + 1 consumed gray)
+    const cells = container.querySelectorAll(".recharts-pie-sector");
+    expect(cells).toHaveLength(3);
+    expect(screen.getByTestId("donut-caption")).toHaveTextContent("Total 500 · 60% used");
+    expect(screen.getByTestId("donut-used-value")).toHaveTextContent("300");
+  });
+
+  it("can show remaining in the center while consumed uses full capacity", () => {
+    render(
+      <DonutChart
+        title="Remaining vs Consumed"
+        total={500}
+        centerValue={200}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    expect(screen.getByText("200")).toBeInTheDocument();
+    expect(screen.getByTestId("donut-caption")).toHaveTextContent("Total 500 · 60% used");
+  });
+
+  it("renders a gray Used row beneath the account legend", () => {
+    render(
+      <DonutChart
+        title="Used Legend"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    expect(screen.getByText(/^Used$/)).toBeInTheDocument();
+    expect(screen.getByTestId("donut-used-value")).toHaveTextContent("300");
   });
 
   it("renders empty state when total is zero", () => {

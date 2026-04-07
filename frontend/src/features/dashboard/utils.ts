@@ -50,6 +50,10 @@ export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
   secondaryUsageItems: RemainingItem[];
+  /** Sum of visible primary remaining items shown in the donut center label. */
+  primaryTotal: number;
+  /** Sum of visible secondary remaining items shown in the donut center label. */
+  secondaryTotal: number;
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
@@ -165,6 +169,11 @@ function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));
 }
 
+/** Sum the `value` fields of remaining items (clamped to >= 0). */
+export function sumRemaining(items: RemainingItem[]): number {
+  return items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+}
+
 export function buildDashboardView(
   overview: DashboardOverview,
   requestLogs: RequestLog[],
@@ -217,12 +226,16 @@ export function buildDashboardView(
   const rawPrimaryItems = buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark);
   const secondaryUsageItems = buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark);
 
+  const primaryUsageItems = secondaryWindow
+    ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
+    : rawPrimaryItems;
+
   return {
     stats,
-    primaryUsageItems: secondaryWindow
-      ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
-      : rawPrimaryItems,
+    primaryUsageItems,
     secondaryUsageItems,
+    primaryTotal: sumRemaining(primaryUsageItems),
+    secondaryTotal: sumRemaining(secondaryUsageItems),
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),

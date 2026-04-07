@@ -82,4 +82,20 @@ describe("UsageDonuts", () => {
 
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
+
+  it("shows remaining totals in the center while donut totals can use capacity", () => {
+    const { container } = render(
+      <UsageDonuts
+        primaryItems={[item({ accountId: "acc-1", label: "primary@example.com", value: 120, remainingPercent: 60, color: "#7bb661" })]}
+        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
+        primaryTotal={225}
+        secondaryTotal={7560}
+        primaryCenterValue={120}
+        secondaryCenterValue={80}
+      />,
+    );
+
+    const centerValues = Array.from(container.querySelectorAll(".text-base.font-semibold.tabular-nums")).map((node) => node.textContent);
+    expect(centerValues).toEqual(["120", "80"]);
+  });
 });

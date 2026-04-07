@@ -104,6 +104,36 @@ def select_account(
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
 ) -> SelectionResult:
+    """Select an eligible account by applying availability checks and routing strategy.
+
+    This function filters out accounts that cannot currently serve traffic
+    (for example paused, deactivated, still rate-limited, or in active
+    cooldown), attempts controlled recovery from transient error backoff,
+    and then chooses a candidate using the configured balancing strategy.
+
+    Args:
+        states: Candidate account states to evaluate for the current request.
+        now: Unix timestamp in seconds used as the evaluation clock. If
+            ``None``, the current system time is used.
+        prefer_earlier_reset: Whether to bias selection toward accounts whose
+            secondary quota window resets sooner.
+        routing_strategy: Balancing strategy used to pick from the effective
+            pool (``"capacity_weighted"``, ``"round_robin"``, or
+            ``"usage_weighted"``).
+        allow_backoff_fallback: Whether to allow a fallback attempt with the
+            backoff account nearest to recovery when no fully available
+            account exists.
+        deterministic_probe: Whether capacity-weighted routing should use a
+            deterministic probe order instead of random weighted choice.
+
+    Returns:
+        A ``SelectionResult`` containing the selected ``AccountState`` and no
+        error message when routing can proceed, or ``None`` plus a
+        human-readable error message when no account is eligible.
+
+    Raises:
+        None.
+    """
     current = now or time.time()
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []

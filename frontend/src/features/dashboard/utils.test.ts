@@ -6,6 +6,7 @@ import {
   buildDashboardView,
   buildDepletionView,
   buildRemainingItems,
+  sumRemaining,
   type RemainingItem,
 } from "@/features/dashboard/utils";
 import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
@@ -261,8 +262,38 @@ describe("buildRemainingItems", () => {
   });
 });
 
+describe("sumRemaining", () => {
+  it("returns 0 for empty array", () => {
+    expect(sumRemaining([])).toBe(0);
+  });
+
+  it("sums positive values", () => {
+    const items = [
+      remainingItem({ accountId: "a", value: 120 }),
+      remainingItem({ accountId: "b", value: 80 }),
+    ];
+    expect(sumRemaining(items)).toBe(200);
+  });
+
+  it("clamps negative values to 0 before summing", () => {
+    const items = [
+      remainingItem({ accountId: "a", value: 100 }),
+      remainingItem({ accountId: "b", value: -30 }),
+    ];
+    expect(sumRemaining(items)).toBe(100);
+  });
+
+  it("returns 0 when all values are negative", () => {
+    const items = [
+      remainingItem({ accountId: "a", value: -10 }),
+      remainingItem({ accountId: "b", value: -20 }),
+    ];
+    expect(sumRemaining(items)).toBe(0);
+  });
+});
+
 describe("buildDashboardView", () => {
-  it("derives the primary donut total from the constrained displayed slices", () => {
+  it("keeps donut totals anchored to window capacity even when displayed slices are constrained", () => {
     const overview = createDashboardOverview({
       accounts: [
         account({
@@ -325,9 +356,9 @@ describe("buildDashboardView", () => {
     expect(view.primaryUsageItems).toHaveLength(2);
     expect(view.primaryUsageItems[0]?.value).toBeCloseTo(75.6);
     expect(view.primaryUsageItems[1]?.value).toBeCloseTo(135);
-    expect(view.primaryUsageTotal).toBeCloseTo(210.6);
-    expect(view.primaryUsageTotal).toBeCloseTo(view.primaryUsageItems.reduce((total, item) => total + item.value, 0));
-    expect(view.secondaryUsageTotal).toBe(5370);
+    expect(overview.summary.primaryWindow.capacityCredits).toBe(450);
+    expect(overview.summary.secondaryWindow?.capacityCredits).toBe(15120);
+    expect(view.primaryUsageItems.reduce((total, item) => total + item.value, 0)).toBeCloseTo(210.6);
   });
 
   it("keeps primary totals intact for accounts without secondary usage data", () => {
@@ -407,6 +438,6 @@ describe("buildDashboardView", () => {
     expect(view.primaryUsageItems).toHaveLength(1);
     expect(view.primaryUsageItems[0]?.value).toBeCloseTo(202.5);
     expect(view.primaryUsageItems[0]?.remainingPercent).toBe(90);
-    expect(view.primaryUsageTotal).toBeCloseTo(202.5);
+    expect(overview.summary.primaryWindow.capacityCredits).toBe(225);
   });
 });

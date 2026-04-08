@@ -279,6 +279,35 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "Daeroni",
+      "name": "Teemu Koskinen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1648961?v=4",
+      "profile": "https://github.com/Daeroni",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "Felix201209",
+      "name": "Yu Peng Zheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151984457?v=4",
+      "profile": "http://felixypz.me",
+      "contributions": [
+        "doc",
+        "code"
+      ]
+    },
+    {
+      "login": "embogomolov",
+      "name": "embogomolov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/185256086?v=4",
+      "profile": "https://github.com/embogomolov",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -303,6 +303,142 @@ async def test_select_account_reads_cached_usage_once_per_window() -> None:
 
 
 @pytest.mark.asyncio
+async def test_select_account_filters_to_assigned_account_ids() -> None:
+    preferred = _make_account("acc-preferred", "preferred@example.com")
+    assigned = _make_account("acc-assigned", "assigned@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        preferred.id: UsageHistory(
+            id=1,
+            account_id=preferred.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=1.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        assigned.id: UsageHistory(
+            id=2,
+            account_id=assigned.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=90.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        preferred.id: UsageHistory(
+            id=3,
+            account_id=preferred.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=1.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        assigned.id: UsageHistory(
+            id=4,
+            account_id=assigned.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=90.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([preferred, assigned])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(account_ids=[assigned.id])
+
+    assert selection.account is not None
+    assert selection.account.id == assigned.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_scope_does_not_prune_runtime_for_other_accounts() -> None:
+    retained = _make_account("acc-retained", "retained@example.com")
+    assigned = _make_account("acc-assigned", "assigned@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        retained.id: UsageHistory(
+            id=1,
+            account_id=retained.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        assigned.id: UsageHistory(
+            id=2,
+            account_id=assigned.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=20.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        retained.id: UsageHistory(
+            id=3,
+            account_id=retained.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        assigned.id: UsageHistory(
+            id=4,
+            account_id=assigned.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=20.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([retained, assigned])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[retained.id] = RuntimeState(cooldown_until=time.time() + 300.0, error_count=2)
+
+    selection = await balancer.select_account(account_ids=[assigned.id])
+
+    assert selection.account is not None
+    assert selection.account.id == assigned.id
+    assert retained.id in balancer._runtime
+    assert balancer._runtime[retained.id].cooldown_until is not None
+    assert balancer._runtime[retained.id].error_count == 2
+
+
+@pytest.mark.asyncio
+async def test_select_account_empty_explicit_scope_fails_closed() -> None:
+    preferred = _make_account("acc-preferred", "preferred@example.com")
+    fallback = _make_account("acc-fallback", "fallback@example.com")
+    accounts_repo = StubAccountsRepository([preferred, fallback])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(account_ids=[])
+
+    assert selection.account is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_uses_cached_usage_without_inline_refresh(monkeypatch) -> None:
     async def fail_refresh_accounts(
         self,
@@ -1029,8 +1165,13 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
 
     balancer = LoadBalancer(blocking_repo_factory)
 
-    async def fake_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
-        del model, additional_limit_name
+    async def fake_load_selection_inputs(
+        *,
+        model: str | None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+    ):
+        del model, additional_limit_name, account_ids
         return load_balancer_module._SelectionInputs(
             accounts=[account],
             latest_primary={account.id: primary_entry},
@@ -1272,10 +1413,19 @@ async def test_select_account_reloads_inputs_after_version_conflict(monkeypatch)
     original_load_selection_inputs = balancer._load_selection_inputs
     load_calls = 0
 
-    async def counted_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+    async def counted_load_selection_inputs(
+        *,
+        model: str | None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+    ):
         nonlocal load_calls
         load_calls += 1
-        return await original_load_selection_inputs(model=model, additional_limit_name=additional_limit_name)
+        return await original_load_selection_inputs(
+            model=model,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+        )
 
     original_select_account = load_balancer_module.select_account
     first_call = True
@@ -1403,10 +1553,19 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
     original_load_selection_inputs = balancer._load_selection_inputs
     load_calls = 0
 
-    async def counted_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+    async def counted_load_selection_inputs(
+        *,
+        model: str | None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+    ):
         nonlocal load_calls
         load_calls += 1
-        return await original_load_selection_inputs(model=model, additional_limit_name=additional_limit_name)
+        return await original_load_selection_inputs(
+            model=model,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+        )
 
     async def pinned_account_id(
         key: str,
@@ -1478,10 +1637,19 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
     original_load_selection_inputs = balancer._load_selection_inputs
     load_calls = 0
 
-    async def counted_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+    async def counted_load_selection_inputs(
+        *,
+        model: str | None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+    ):
         nonlocal load_calls
         load_calls += 1
-        return await original_load_selection_inputs(model=model, additional_limit_name=additional_limit_name)
+        return await original_load_selection_inputs(
+            model=model,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+        )
 
     async def pinned_account_id(
         key: str,

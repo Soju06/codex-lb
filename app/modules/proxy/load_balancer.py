@@ -85,6 +85,7 @@ class _SelectionInputs:
     accounts: list[Account]
     latest_primary: dict[str, UsageHistory]
     latest_secondary: dict[str, UsageHistory]
+    runtime_accounts: list[Account] | None = None
     error_message: str | None = None
     error_code: str | None = None
 
@@ -112,21 +113,25 @@ class LoadBalancer:
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
         budget_threshold_pct: float = 95.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
+        scoped_account_ids = None if account_ids is None else set(account_ids)
 
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 additional_limit_name=additional_limit_name,
+                account_ids=scoped_account_ids,
             )
             if excluded_ids and selection_inputs.accounts:
                 selection_inputs = _SelectionInputs(
                     accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
+                    runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
                 )
@@ -156,7 +161,7 @@ class LoadBalancer:
             attempt = 0
             while True:
                 attempt += 1
-                self._prune_runtime(selection_inputs.accounts)
+                self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
                 states, account_map = _build_states(
                     accounts=selection_inputs.accounts,
                     latest_primary=selection_inputs.latest_primary,
@@ -285,7 +290,7 @@ class LoadBalancer:
             attempt = 0
             while True:
                 attempt += 1
-                self._prune_runtime(selection_inputs.accounts)
+                self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
                 states, account_map = _build_states(
                     accounts=selection_inputs.accounts,
                     latest_primary=selection_inputs.latest_primary,
@@ -388,8 +393,13 @@ class LoadBalancer:
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
-        cache_key = (model, additional_limit_name)
+        cache_key = (
+            model,
+            additional_limit_name,
+            None if account_ids is None else tuple(sorted(set(account_ids))),
+        )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
             return _clone_selection_inputs(cached)
@@ -400,14 +410,30 @@ class LoadBalancer:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = all_accounts
+            if account_ids is not None:
+                allowed_account_ids = set(account_ids)
+                accounts = [account for account in accounts if account.id in allowed_account_ids]
+            pre_model_filter_accounts = accounts
             if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
-                accounts = _filter_accounts_for_model(accounts, model)
+                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model)
             if model and not accounts:
                 if not all_accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
+                    )
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
+                    return selection_inputs
+                if not pre_model_filter_accounts:
+                    selection_inputs = _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
                     await self._selection_inputs_cache.set(
                         _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -417,6 +443,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
@@ -437,6 +464,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=error_message,
                         error_code=error_code,
                     )
@@ -449,6 +477,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
                 await self._selection_inputs_cache.set(
                     _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -467,6 +496,7 @@ class LoadBalancer:
                 latest_secondary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
+                runtime_accounts=[_clone_account(account) for account in all_accounts],
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -1132,6 +1162,11 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         latest_secondary={
             account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
+        runtime_accounts=(
+            None
+            if selection_inputs.runtime_accounts is None
+            else [_clone_account(account) for account in selection_inputs.runtime_accounts]
+        ),
         error_message=selection_inputs.error_message,
         error_code=selection_inputs.error_code,
     )

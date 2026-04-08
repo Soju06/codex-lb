@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -555,13 +556,18 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
         support_verbosity=model.support_verbosity,
         default_verbosity=model.default_verbosity,
         supports_parallel_tool_calls=model.supports_parallel_tool_calls,
-        context_window=model.context_window,
+        context_window=_effective_context_window(model),
         input_modalities=list(model.input_modalities),
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
         visibility=_model_visibility(model),
         **extra,
     )
+
+
+def _effective_context_window(model: UpstreamModel) -> int:
+    overrides = get_settings().model_context_window_overrides
+    return overrides.get(model.slug, model.context_window)
 
 
 def _model_visibility(model: UpstreamModel) -> str:
@@ -573,7 +579,7 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
     return ModelMetadata(
         display_name=model.display_name,
         description=model.description,
-        context_window=model.context_window,
+        context_window=_effective_context_window(model),
         input_modalities=list(model.input_modalities),
         supported_reasoning_levels=[
             ReasoningLevelSchema(effort=rl.effort, description=rl.description)
@@ -1033,7 +1039,13 @@ async def _validate_proxy_websocket_request(
     if denial is not None:
         return None, denial
     try:
-        api_key = await validate_proxy_api_key_authorization(websocket.headers.get("authorization"))
+        if "request" in inspect.signature(validate_proxy_api_key_authorization).parameters:
+            api_key = await validate_proxy_api_key_authorization(
+                websocket.headers.get("authorization"),
+                request=websocket,
+            )
+        else:
+            api_key = await validate_proxy_api_key_authorization(websocket.headers.get("authorization"))
     except ProxyAuthError as exc:
         return None, JSONResponse(
             status_code=exc.status_code,

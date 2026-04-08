@@ -48,8 +48,10 @@ export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
   secondaryUsageItems: RemainingItem[];
-  primaryUsageTotal: number;
-  secondaryUsageTotal: number;
+  /** Sum of visible primary remaining items shown in the donut center label. */
+  primaryTotal: number;
+  /** Sum of visible secondary remaining items shown in the donut center label. */
+  secondaryTotal: number;
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
@@ -166,8 +168,9 @@ function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));
 }
 
-function sumRemainingItems(items: RemainingItem[]): number {
-  return items.reduce((total, item) => total + item.value, 0);
+/** Sum the `value` fields of remaining items (clamped to >= 0). */
+export function sumRemaining(items: RemainingItem[]): number {
+  return items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
 }
 
 export function buildDashboardView(
@@ -242,8 +245,8 @@ export function buildDashboardView(
     stats,
     primaryUsageItems,
     secondaryUsageItems,
-    primaryUsageTotal: sumRemainingItems(primaryUsageItems),
-    secondaryUsageTotal: overview.summary.secondaryWindow?.remainingCredits ?? 0,
+    primaryTotal: sumRemaining(primaryUsageItems),
+    secondaryTotal: sumRemaining(secondaryUsageItems),
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),

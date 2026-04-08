@@ -230,7 +230,12 @@ opencode
 {
   "agents": {
     "defaults": {
-      "model": { "primary": "codex-lb/gpt-5.3-codex" }
+      "model": { "primary": "codex-lb/gpt-5.4" },
+      "models": {
+        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } }
+        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } }
+        "codex-lb/gpt-5.3-codex": { "params": { "cacheRetention": "short" } }
+      }
     }
   },
   "models": {
@@ -239,10 +244,35 @@ opencode
       "codex-lb": {
         "baseUrl": "http://127.0.0.1:2455/v1",
         "apiKey": "${CODEX_LB_API_KEY}",   // or "dummy" if API key auth is disabled
-        "api": "openai-completions",
+        "api": "openai-responses",
         "models": [
-          { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex" },
-          { "id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark" }
+          {
+            "id": "gpt-5.4",
+            "name": "gpt-5.4 (codex-lb)",
+            "contextWindow": 1050000,
+            "contextTokens": 272000,
+            "maxTokens": 4096,
+            "input": ["text"],
+            "reasoning": false
+          },
+          {
+            "id": "gpt-5.4-mini",
+            "name": "gpt-5.4-mini (codex-lb)",
+            "contextWindow": 400000,
+            "contextTokens": 272000,
+            "maxTokens": 4096,
+            "input": ["text"],
+            "reasoning": false
+          },
+          {
+            "id": "gpt-5.3-codex",
+            "name": "gpt-5.3-codex (codex-lb)",
+            "contextWindow": 400000,
+            "contextTokens": 272000,
+            "maxTokens": 4096,
+            "input": ["text"],
+            "reasoning": false
+          }
         ]
       }
     }
@@ -368,6 +398,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/L1st3r"><img src="https://avatars.githubusercontent.com/u/336408?v=4?s=100" width="100px;" alt="Steve Santacroce"/><br /><sub><b>Steve Santacroce</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=L1st3r" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=L1st3r" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AL1st3r" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/mhughdo"><img src="https://avatars.githubusercontent.com/u/15611134?v=4?s=100" width="100px;" alt="Hugh Do"/><br /><sub><b>Hugh Do</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mhughdo" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mhughdo" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/salwinh"><img src="https://avatars.githubusercontent.com/u/6965142?v=4?s=100" width="100px;" alt="Hubert Salwin"/><br /><sub><b>Hubert Salwin</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=salwinh" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=salwinh" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Daeroni"><img src="https://avatars.githubusercontent.com/u/1648961?v=4?s=100" width="100px;" alt="Teemu Koskinen"/><br /><sub><b>Teemu Koskinen</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Daeroni" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://felixypz.me"><img src="https://avatars.githubusercontent.com/u/151984457?v=4?s=100" width="100px;" alt="Yu Peng Zheng"/><br /><sub><b>Yu Peng Zheng</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Felix201209" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Felix201209" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/embogomolov"><img src="https://avatars.githubusercontent.com/u/185256086?v=4?s=100" width="100px;" alt="embogomolov"/><br /><sub><b>embogomolov</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=embogomolov" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=embogomolov" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

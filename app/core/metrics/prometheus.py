@@ -82,6 +82,16 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    bridge_prompt_cache_locality_miss_total = Counter(
+        "codex_lb_bridge_prompt_cache_locality_miss_total",
+        "Total prompt-cache bridge locality misses tolerated via gateway-safe handling",
+        registry=REGISTRY,
+    )
+    bridge_soft_local_rebind_total = Counter(
+        "codex_lb_bridge_soft_local_rebind_total",
+        "Total soft-affinity bridge sessions rebound locally on a non-owner instance",
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> Any:
         if MULTIPROCESS_MODE:
@@ -110,6 +120,8 @@ else:
     circuit_breaker_state: Any = None
     accounts_total: Any = None
     bridge_instance_mismatch_total: Any = None
+    bridge_prompt_cache_locality_miss_total: Any = None
+    bridge_soft_local_rebind_total: Any = None
 
     def make_scrape_registry() -> Any:
         return None
@@ -125,6 +137,8 @@ __all__ = [
     "active_connections",
     "accounts_total",
     "bridge_instance_mismatch_total",
+    "bridge_prompt_cache_locality_miss_total",
+    "bridge_soft_local_rebind_total",
     "circuit_breaker_state",
     "make_scrape_registry",
     "mark_process_dead",

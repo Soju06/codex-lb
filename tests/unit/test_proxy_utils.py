@@ -511,6 +511,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
+        http_responses_session_bridge_gateway_safe_mode=False,
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,

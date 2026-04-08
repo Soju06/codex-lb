@@ -503,6 +503,13 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 )
             ).scalar_one()
             assert http_responses_ttl == 3600
+            assert "http_responses_session_bridge_gateway_safe_mode" in dashboard_columns
+            gateway_safe_mode = (
+                await session.execute(
+                    text("SELECT http_responses_session_bridge_gateway_safe_mode FROM dashboard_settings WHERE id=1")
+                )
+            ).scalar_one()
+            assert gateway_safe_mode in (False, 0)
             assert "sticky_reallocation_budget_threshold_pct" in dashboard_columns
             sticky_budget_threshold = (
                 await session.execute(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 from functools import lru_cache
 from ipaddress import ip_network
@@ -39,6 +40,21 @@ def _default_http_bridge_instance_id() -> str:
 DEFAULT_HOME_DIR = _default_home_dir()
 DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
+
+
+def _validate_context_window_entries(data: dict) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for k, v in data.items():
+        if isinstance(v, bool):
+            raise TypeError(f"model_context_window_overrides value for '{k}' must be a positive integer, got bool")
+        if not isinstance(v, int):
+            raise TypeError(
+                f"model_context_window_overrides value for '{k}' must be a positive integer, got {type(v).__name__}"
+            )
+        if v <= 0:
+            raise ValueError(f"model_context_window_overrides value for '{k}' must be a positive integer, got {v}")
+        result[str(k)] = v
+    return result
 
 
 class Settings(BaseSettings):
@@ -90,6 +106,7 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
+    http_responses_session_bridge_gateway_safe_mode: bool = False
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     sticky_session_cleanup_enabled: bool = True
@@ -108,6 +125,7 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     firewall_trust_proxy_headers: bool = False
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
@@ -145,6 +163,7 @@ class Settings(BaseSettings):
 
     bulkhead_proxy_limit: int = 200
     bulkhead_dashboard_limit: int = 50
+    dashboard_bootstrap_token: str | None = None
 
     memory_warning_threshold_mb: int = 0
     memory_reject_threshold_mb: int = 0
@@ -239,6 +258,23 @@ class Settings(BaseSettings):
                         normalized.append(instance_id)
             return normalized
         raise TypeError("http_responses_session_bridge_instance_ring must be a list or comma-separated string")
+
+    @field_validator("model_context_window_overrides", mode="before")
+    @classmethod
+    def _parse_model_context_window_overrides(cls, value: object) -> dict[str, int]:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return {}
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise TypeError("model_context_window_overrides must be a JSON object")
+            return _validate_context_window_entries(parsed)
+        if isinstance(value, dict):
+            return _validate_context_window_entries(value)
+        raise TypeError("model_context_window_overrides must be a JSON object string or dict")
 
     @field_validator("upstream_compact_timeout_seconds")
     @classmethod

@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     literal_column,
     text,
@@ -74,6 +75,12 @@ class Account(Base):
     )
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
+        "ApiKeyAccountAssignment",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
 
 
 class UsageHistory(Base):
@@ -229,6 +236,12 @@ class DashboardSettings(Base):
         server_default=text("3600"),
         nullable=False,
     )
+    http_responses_session_bridge_gateway_safe_mode: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     sticky_reallocation_budget_threshold_pct: Mapped[float] = mapped_column(
         Float,
         default=95.0,
@@ -262,6 +275,12 @@ class ApiKey(Base):
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    account_assignment_scope_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -273,6 +292,31 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    account_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
+        "ApiKeyAccountAssignment",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class ApiKeyAccountAssignment(Base):
+    __tablename__ = "api_key_accounts"
+
+    api_key_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="account_assignments")
+    account: Mapped["Account"] = relationship("Account", back_populates="api_key_assignments")
 
 
 class LimitType(str, Enum):
@@ -462,6 +506,7 @@ Index(
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)

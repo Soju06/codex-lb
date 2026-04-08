@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
+import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType, ServiceTierType } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
@@ -61,6 +62,15 @@ function limitsToCreateRules(apiKey: ApiKey): LimitRuleCreate[] {
   }));
 }
 
+function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
+  if (initialIds.length !== nextIds.length) {
+    return true;
+  }
+
+  const initialIdSet = new Set(initialIds);
+  return nextIds.some((accountId) => !initialIdSet.has(accountId));
+}
+
 function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -71,6 +81,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   });
 
   const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(apiKey.assignedAccountIds);
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
@@ -84,6 +95,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(limitRules);
+    const shouldSubmitAssignedAccountIds =
+      hasSelectionChange(apiKey.assignedAccountIds, selectedAccountIds) ||
+      (apiKey.accountAssignmentScopeEnabled && selectedAccountIds.length === 0);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
@@ -93,6 +107,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
+    if (shouldSubmitAssignedAccountIds) {
+      payload.assignedAccountIds = selectedAccountIds;
+    }
     if (hasLimitRuleChanges(initialLimitRules, limitRules)) {
       payload.limits = normalizedLimits;
     }
@@ -129,6 +146,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">Allowed models</div>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Assigned accounts</div>
+              <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
             </div>
 
             <div className="space-y-1">

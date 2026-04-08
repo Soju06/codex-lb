@@ -190,6 +190,19 @@ def test_http_bridge_owner_check_required_honors_gateway_safe_mode_for_prompt_ca
     assert proxy_service._http_bridge_owner_check_required(key, gateway_safe_mode=True) is False
 
 
+def test_headers_with_authorization_restores_missing_proxy_api_header() -> None:
+    headers = proxy_service._headers_with_authorization({"x-request-id": "req-1"}, "Bearer proxy-key")
+
+    assert headers["Authorization"] == "Bearer proxy-key"
+    assert headers["x-request-id"] == "req-1"
+
+
+def test_headers_with_authorization_does_not_override_existing_value() -> None:
+    headers = proxy_service._headers_with_authorization({"authorization": "Bearer existing"}, "Bearer proxy-key")
+
+    assert headers["authorization"] == "Bearer existing"
+
+
 @pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_returns_owner_forward_for_hard_mismatch(
     monkeypatch: pytest.MonkeyPatch,

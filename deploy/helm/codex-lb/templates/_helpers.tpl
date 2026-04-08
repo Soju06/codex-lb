@@ -32,7 +32,7 @@ Headless service name for per-pod bridge DNS.
 Stable workload resource name. Separate from fullname to allow controller-kind migration without same-name conflicts.
 */}}
 {{- define "codex-lb.workloadName" -}}
-{{- printf "%s-workload" (include "codex-lb.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- printf "%s-workload" (include "codex-lb.fullname" .) | trunc 52 | trimSuffix "-" }}
 {{- end }}
 
 {{/*

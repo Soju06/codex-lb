@@ -240,6 +240,7 @@ class ProxyService:
         forwarded_request: bool = False,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
+        proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
         filtered = filter_inbound_headers(headers)
         return self._stream_http_bridge_or_retry(
             payload,
@@ -252,6 +253,7 @@ class ProxyService:
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
+            proxy_api_authorization=proxy_api_authorization,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -267,6 +269,7 @@ class ProxyService:
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        proxy_api_authorization: str | None = None,
     ) -> AsyncIterator[str]:
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
@@ -301,6 +304,7 @@ class ProxyService:
             prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
+            proxy_api_authorization=proxy_api_authorization,
         ):
             yield line
 
@@ -322,6 +326,7 @@ class ProxyService:
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        proxy_api_authorization: str | None = None,
     ) -> AsyncIterator[str]:
         del propagate_http_errors, suppress_text_done_events
         request_id = ensure_request_id()
@@ -395,6 +400,7 @@ class ProxyService:
                 codex_session_affinity=codex_session_affinity,
                 downstream_turn_state=downstream_turn_state,
                 request_started_at=request_state.started_at,
+                proxy_api_authorization=proxy_api_authorization,
             ):
                 yield line
             return
@@ -436,6 +442,7 @@ class ProxyService:
         codex_session_affinity: bool,
         downstream_turn_state: str | None,
         request_started_at: float,
+        proxy_api_authorization: str | None,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(get_settings())
         forward_context = HTTPBridgeForwardContext(
@@ -445,6 +452,7 @@ class ProxyService:
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=downstream_turn_state,
         )
+        forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
         start = time.monotonic()
         _log_http_bridge_event(
             "owner_forward_start",
@@ -464,7 +472,7 @@ class ProxyService:
             async for event_block in self._http_bridge_owner_client.stream_responses(
                 owner_endpoint=owner_forward.owner_endpoint,
                 payload=payload,
-                headers=headers,
+                headers=forward_headers,
                 context=forward_context,
                 request_started_at=request_started_at,
             ):
@@ -5735,6 +5743,24 @@ def _http_bridge_owner_check_required(
     gateway_safe_mode: bool,
 ) -> bool:
     return key.strength == "hard" or (key.affinity_kind == "prompt_cache" and not gateway_safe_mode)
+
+
+def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:
+    target = name.lower()
+    for key, value in headers.items():
+        if key.lower() == target:
+            return value
+    return None
+
+
+def _headers_with_authorization(headers: Mapping[str, str], authorization: str | None) -> dict[str, str]:
+    merged = dict(headers)
+    if authorization is None:
+        return merged
+    if _header_value_case_insensitive(merged, "authorization") is not None:
+        return merged
+    merged["Authorization"] = authorization
+    return merged
 
 
 def _http_bridge_key_strength(key: _HTTPBridgeSessionKey) -> str:

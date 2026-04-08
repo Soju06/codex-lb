@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import errno
 import json
@@ -346,6 +347,8 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    wait_for_reachable = AsyncMock()
+    monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", wait_for_reachable)
     monkeypatch.setattr(main, "mark_process_dead", Mock())
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",
@@ -353,9 +356,10 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     )
 
     async with main.lifespan(main.app):
-        pass
+        await asyncio.sleep(0)
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
+    wait_for_reachable.assert_awaited_once_with(None, connect_timeout_seconds=settings.upstream_connect_timeout_seconds)
     ring_service.mark_stale.assert_awaited_once_with(
         "pod-a",
         stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,

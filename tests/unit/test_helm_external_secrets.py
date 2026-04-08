@@ -219,6 +219,20 @@ def test_manual_rollout_token_changes_deployment_template() -> None:
     assert 'rollout-token: "secret-rotation-2026-04-01"' in updated
 
 
+def test_statefulset_workload_name_leaves_room_for_pod_ordinal() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        f"fullnameOverride={'a' * 63}",
+    )
+
+    match = re.search(r"kind: StatefulSet.*?metadata:\n  name: ([^\n]+)", rendered, re.DOTALL)
+    assert match is not None
+    workload_name = match.group(1).strip()
+    assert len(workload_name) <= 52
+
+
 def test_external_database_existing_secret_is_used_for_database_url_env() -> None:
     rendered = _helm_template(
         "--set",

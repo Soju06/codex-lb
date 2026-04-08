@@ -257,6 +257,7 @@ async def internal_bridge_responses(
     if auth_error is not None:
         return auth_error
     skip_limit_enforcement = api_key is None or forwarded_request_context.context.reservation is not None
+    forwarded_headers = _strip_internal_bridge_headers(request.headers)
     return await _stream_responses(
         request,
         payload,
@@ -269,6 +270,7 @@ async def internal_bridge_responses(
         api_key_reservation_override=forwarded_request_context.context.reservation,
         include_rate_limit_headers=False,
         forwarded_request=True,
+        forwarded_headers=forwarded_headers,
     )
 
 
@@ -746,6 +748,7 @@ async def _stream_responses(
     api_key_reservation_override: ApiKeyUsageReservationData | None = None,
     include_rate_limit_headers: bool = True,
     forwarded_request: bool = False,
+    forwarded_headers: Mapping[str, str] | None = None,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -761,8 +764,9 @@ async def _stream_responses(
 
     rate_limit_headers = await context.service.rate_limit_headers() if include_rate_limit_headers else {}
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
+    effective_headers = forwarded_headers or request.headers
     downstream_turn_state = (
-        proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
+        proxy_service_module.ensure_http_downstream_turn_state(effective_headers) if bridge_active else None
     )
     turn_state_headers = (
         proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
@@ -773,7 +777,7 @@ async def _stream_responses(
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
             payload,
-            request.headers,
+            effective_headers,
             codex_session_affinity=codex_session_affinity,
             propagate_http_errors=True,
             openai_cache_affinity=openai_cache_affinity,
@@ -815,6 +819,10 @@ async def _stream_responses(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
     )
+
+
+def _strip_internal_bridge_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in headers.items() if not key.lower().startswith("x-codex-bridge-")}
 
 
 async def _collect_responses(

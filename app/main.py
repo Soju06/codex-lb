@@ -4,8 +4,10 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from importlib import import_module
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
@@ -62,6 +64,10 @@ class _MetricsServer(Protocol):
     should_exit: bool
 
     async def serve(self) -> None: ...
+
+
+class _RingMembershipReader(Protocol):
+    def list_active(self) -> Awaitable[list[str]]: ...
 
 
 def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
@@ -168,6 +174,7 @@ async def lifespan(app: FastAPI):
             try:
                 await svc.register(iid, endpoint_base_url=None)
                 startup_module.mark_bridge_registration_complete()
+                await _publish_bridge_endpoint(svc, iid)
                 startup_module._startup_complete = True
                 logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
                 break
@@ -175,8 +182,6 @@ async def lifespan(app: FastAPI):
                 delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
                 logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
                 await asyncio.sleep(delay)
-
-        await _publish_bridge_endpoint(svc, iid)
         while True:
             await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
             try:
@@ -201,6 +206,7 @@ async def lifespan(app: FastAPI):
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
         )
         await _validate_bridge_advertise_endpoint_for_multi_replica(
+            svc=svc,
             settings=settings,
             instance_id=iid,
             endpoint_base_url=bridge_endpoint_base_url,
@@ -233,6 +239,7 @@ async def lifespan(app: FastAPI):
             timeout=5.0,
         )
         startup_module.mark_bridge_registration_complete()
+        await _publish_bridge_endpoint(ring_service, instance_id)
         startup_module._startup_complete = True
         logger.info("Registered in bridge ring", extra={"instance_id": instance_id, "attempt": 1})
         heartbeat_task = asyncio.create_task(_heartbeat_only(ring_service, instance_id))
@@ -454,6 +461,7 @@ def _port_from_argv() -> int | None:
 
 
 async def _validate_bridge_advertise_endpoint_for_multi_replica(
+    svc: _RingMembershipReader,
     *,
     settings,
     instance_id: str,
@@ -464,6 +472,17 @@ async def _validate_bridge_advertise_endpoint_for_multi_replica(
     hostname = urlparse(endpoint_base_url).hostname
     if hostname is None:
         raise RuntimeError("http_responses_session_bridge_advertise_base_url must include a valid hostname")
+    try:
+        parsed_ip = ip_address(hostname)
+    except ValueError:
+        parsed_ip = None
+    if parsed_ip is not None and parsed_ip.is_loopback:
+        active_members = await svc.list_active()
+        if any(member != instance_id for member in active_members):
+            raise RuntimeError(
+                "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
+            )
+        return
     if not _bridge_advertise_hostname_is_replica_specific(hostname, instance_id=instance_id):
         raise RuntimeError(
             "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"

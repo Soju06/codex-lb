@@ -340,7 +340,7 @@ def _bridge_advertise_hostname_is_replica_specific(hostname: str, *, instance_id
     if pod_ip and hostname == pod_ip:
         return True
     try:
-        ip_address(hostname)
+        parsed_ip = ip_address(hostname)
     except ValueError:
         return instance_id in hostname.split(".")
-    return False
+    return parsed_ip.is_loopback

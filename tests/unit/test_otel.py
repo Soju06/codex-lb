@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import builtins
 import errno
 import json
@@ -366,7 +365,6 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
 
     async with main.lifespan(main.app):
         assert startup_module._startup_complete is True
-        await asyncio.sleep(0)
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
     wait_for_reachable.assert_not_awaited()
@@ -431,12 +429,29 @@ def test_local_api_port_falls_back_to_default_when_no_valid_port_source(monkeypa
 async def test_validate_bridge_advertise_endpoint_rejects_shared_hostname():
     import app.main as main
 
+    class _RingReader:
+        async def list_active(self) -> list[str]:
+            return ["instance-a"]
+
     settings = Settings(
         http_responses_session_bridge_instance_id="instance-a",
         http_responses_session_bridge_advertise_base_url="http://instance-a.internal.local:2455",
     )
 
     await main._validate_bridge_advertise_endpoint_for_multi_replica(
+        svc=_RingReader(),
+        settings=settings,
+        instance_id="instance-a",
+        endpoint_base_url=settings.http_responses_session_bridge_advertise_base_url,
+    )
+
+    settings = Settings(
+        http_responses_session_bridge_instance_id="instance-a",
+        http_responses_session_bridge_advertise_base_url="http://127.0.0.1:2455",
+    )
+
+    await main._validate_bridge_advertise_endpoint_for_multi_replica(
+        svc=_RingReader(),
         settings=settings,
         instance_id="instance-a",
         endpoint_base_url=settings.http_responses_session_bridge_advertise_base_url,

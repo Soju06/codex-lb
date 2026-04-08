@@ -98,12 +98,13 @@ def test_settings_allows_pod_ip_http_bridge_advertise_base_url(monkeypatch):
     assert settings.http_responses_session_bridge_advertise_base_url == "http://10.0.0.25:2455"
 
 
-def test_settings_rejects_loopback_http_bridge_advertise_base_url(monkeypatch):
+def test_settings_allows_loopback_http_bridge_advertise_base_url(monkeypatch):
     monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "instance-a")
     monkeypatch.setenv(
         "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL",
         "http://127.0.0.1:2455",
     )
 
-    with pytest.raises(ValidationError):
-        Settings()
+    settings = Settings()
+
+    assert settings.http_responses_session_bridge_advertise_base_url == "http://127.0.0.1:2455"

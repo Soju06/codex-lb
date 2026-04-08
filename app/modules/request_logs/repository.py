@@ -14,6 +14,7 @@ from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestLog
+from app.modules.upstream_identities.types import CHATGPT_WEB_PROVIDER_KIND
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +122,9 @@ class RequestLogsRepository:
     async def add_log(
         self,
         account_id: str | None,
+        *,
+        provider_kind: str | None = None,
+        routing_subject_id: str | None = None,
         request_id: str,
         model: str,
         input_tokens: int | None,
@@ -139,14 +143,26 @@ class RequestLogsRepository:
         actual_service_tier: str | None = None,
         transport: str | None = None,
         api_key_id: str | None = None,
+        route_class: str | None = None,
+        upstream_request_id: str | None = None,
+        rejection_reason: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
+        resolved_provider_kind = provider_kind
+        if resolved_provider_kind is None and account_id is not None:
+            resolved_provider_kind = CHATGPT_WEB_PROVIDER_KIND
+        resolved_routing_subject_id = routing_subject_id or account_id
         log = RequestLog(
             account_id=account_id,
+            provider_kind=resolved_provider_kind,
+            routing_subject_id=resolved_routing_subject_id,
             api_key_id=api_key_id,
             request_id=resolved_request_id,
             model=model,
             transport=transport,
+            route_class=route_class,
+            upstream_request_id=upstream_request_id,
+            rejection_reason=rejection_reason,
             service_tier=service_tier,
             requested_service_tier=requested_service_tier,
             actual_service_tier=actual_service_tier,
@@ -252,7 +268,8 @@ class RequestLogsRepository:
             error_codes_excluding=None,
         )
 
-        account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
+        subject_id = _request_log_subject_id_expr()
+        account_stmt = select(subject_id).distinct().order_by(subject_id.asc())
         model_stmt = (
             select(RequestLog.model, RequestLog.reasoning_effort)
             .distinct()
@@ -306,7 +323,7 @@ class RequestLogsRepository:
         if until is not None:
             conditions.append(RequestLog.requested_at <= until)
         if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
+            conditions.append(_request_log_subject_id_expr().in_(account_ids))
 
         if model_options:
             pair_conditions = []
@@ -348,6 +365,7 @@ class RequestLogsRepository:
             conditions.append(
                 or_(
                     RequestLog.account_id.ilike(search_pattern),
+                    RequestLog.routing_subject_id.ilike(search_pattern),
                     Account.email.ilike(search_pattern),
                     RequestLog.request_id.ilike(search_pattern),
                     RequestLog.model.ilike(search_pattern),
@@ -375,6 +393,10 @@ class RequestLogsRepository:
             ApiKey,
             ApiKey.id == RequestLog.api_key_id,
         )
+
+
+def _request_log_subject_id_expr():
+    return func.coalesce(RequestLog.account_id, RequestLog.routing_subject_id)
 
 
 async def _safe_rollback(session: AsyncSession) -> None:

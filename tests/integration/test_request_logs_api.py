@@ -94,3 +94,113 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None
     assert older["transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_filters_platform_rows_by_routing_subject(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_logs_platform", "logs-platform@example.com"))
+
+        now = utcnow()
+        await logs_repo.add_log(
+            account_id=None,
+            provider_kind="openai_platform",
+            routing_subject_id="plat_logs",
+            request_id="req_logs_platform",
+            model="gpt-5.1",
+            input_tokens=12,
+            output_tokens=8,
+            latency_ms=180,
+            status="error",
+            error_code="provider_feature_unsupported",
+            error_message="Unsupported route",
+            requested_at=now,
+            transport="http",
+            route_class="openai_public_http",
+            upstream_request_id="up_req_logs_platform",
+            rejection_reason="platform_only_route",
+        )
+
+    response = await async_client.get("/api/request-logs", params={"accountId": "plat_logs"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["hasMore"] is False
+    entry = body["requests"][0]
+    assert entry["accountId"] is None
+    assert entry["providerKind"] == "openai_platform"
+    assert entry["routingSubjectId"] == "plat_logs"
+    assert entry["upstreamRequestId"] == "up_req_logs_platform"
+    assert entry["rejectionReason"] == "platform_only_route"
+
+    options = await async_client.get("/api/request-logs/options")
+    assert options.status_code == 200
+    assert "plat_logs" in options.json()["accountIds"]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_separates_chatgpt_and_platform_subject_filters(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_logs_chatgpt", "logs-chatgpt@example.com"))
+
+        now = utcnow()
+        await logs_repo.add_log(
+            account_id="acc_logs_chatgpt",
+            provider_kind="chatgpt_web",
+            routing_subject_id="acc_logs_chatgpt",
+            request_id="req_logs_chatgpt",
+            model="gpt-5.1",
+            input_tokens=24,
+            output_tokens=6,
+            latency_ms=210,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(seconds=30),
+            transport="http",
+            route_class="openai_public_http",
+            upstream_request_id="up_req_logs_chatgpt",
+        )
+        await logs_repo.add_log(
+            account_id=None,
+            provider_kind="openai_platform",
+            routing_subject_id="plat_logs_filtered",
+            request_id="req_logs_platform_filtered",
+            model="gpt-5.1",
+            input_tokens=9,
+            output_tokens=3,
+            latency_ms=140,
+            status="error",
+            error_code="provider_feature_unsupported",
+            error_message="Unsupported route",
+            requested_at=now,
+            transport="http",
+            route_class="openai_public_http",
+            upstream_request_id="up_req_logs_platform_filtered",
+            rejection_reason="platform_only_route",
+        )
+
+    platform_response = await async_client.get(
+        "/api/request-logs",
+        params={"accountId": "plat_logs_filtered"},
+    )
+    assert platform_response.status_code == 200
+    platform_payload = platform_response.json()
+    assert platform_payload["total"] == 1
+    assert platform_payload["requests"][0]["requestId"] == "req_logs_platform_filtered"
+    assert platform_payload["requests"][0]["providerKind"] == "openai_platform"
+    assert platform_payload["requests"][0]["routingSubjectId"] == "plat_logs_filtered"
+
+    chatgpt_response = await async_client.get(
+        "/api/request-logs",
+        params={"accountId": "acc_logs_chatgpt"},
+    )
+    assert chatgpt_response.status_code == 200
+    chatgpt_payload = chatgpt_response.json()
+    assert chatgpt_payload["total"] == 1
+    assert chatgpt_payload["requests"][0]["requestId"] == "req_logs_chatgpt"
+    assert chatgpt_payload["requests"][0]["providerKind"] == "chatgpt_web"
+    assert chatgpt_payload["requests"][0]["routingSubjectId"] == "acc_logs_chatgpt"

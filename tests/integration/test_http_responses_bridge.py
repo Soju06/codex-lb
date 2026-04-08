@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+import app.modules.proxy.provider_adapters as provider_adapters_module
 import app.modules.proxy.service as proxy_module
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.db.models import Account, AccountStatus
@@ -491,7 +492,7 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -703,7 +704,7 @@ async def test_v1_responses_http_bridge_codex_session_prewarms_first_request(asy
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     response = await async_client.post(
         "/v1/responses",
@@ -780,7 +781,7 @@ async def test_v1_responses_http_bridge_codex_session_does_not_prewarm_by_defaul
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     response = await async_client.post(
         "/v1/responses",
@@ -871,7 +872,7 @@ async def test_v1_responses_http_bridge_non_owner_instance_falls_back_to_local_s
         del headers, access_token, account_id_header, base_url, session
         return _FakeBridgeUpstreamWebSocket()
 
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     candidate_suffix = 0
     while True:
@@ -983,7 +984,7 @@ async def test_v1_responses_http_bridge_non_owner_prompt_cache_strict_mode_retur
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(
-        proxy_module,
+        provider_adapters_module,
         "connect_responses_websocket",
         AsyncMock(return_value=_FakeBridgeUpstreamWebSocket()),
     )
@@ -1150,7 +1151,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     candidate_suffix = 0
     while True:
@@ -1427,7 +1428,7 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest(
         model="gpt-5.1",
@@ -1611,7 +1612,7 @@ async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest(
         model="gpt-5.1",
@@ -1733,7 +1734,7 @@ async def test_v1_responses_http_bridge_close_waits_for_turn_state_index_lock(
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
     affinity = proxy_module._AffinityPolicy(key="turn-close-lock", kind=proxy_module.StickySessionKind.CODEX_SESSION)
@@ -1836,7 +1837,7 @@ async def test_v1_responses_http_bridge_allows_unstable_request_key_even_on_non_
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -1944,7 +1945,7 @@ async def test_v1_responses_http_bridge_reconnect_uses_last_upstream_turn_state(
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -2065,7 +2066,7 @@ async def test_v1_responses_http_bridge_session_id_reconnect_keeps_upstream_turn
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -2190,7 +2191,7 @@ async def test_v1_responses_http_bridge_reconnect_uses_refreshed_api_key_assignm
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     stale_api_key = _make_api_key_data(key_id="key_http_bridge_assignments", assigned_account_ids=["acc-stale"])
     refreshed_api_key = _make_api_key_data(
@@ -2322,7 +2323,7 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -2460,7 +2461,7 @@ async def test_v1_responses_http_bridge_prefers_evicting_prompt_cache_session_be
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -2753,8 +2754,8 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fail_legacy_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -2850,8 +2851,8 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fail_legacy_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -2944,7 +2945,7 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     headers = {"session_id": "backend-http-session-1"}
     first_events = await _collect_sse_events(
@@ -3048,7 +3049,7 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first_events, first_headers = await _collect_sse_events_with_headers(
         async_client,
@@ -3151,7 +3152,7 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first = await async_client.post(
         "/v1/responses",
@@ -3249,7 +3250,7 @@ async def test_v1_responses_http_bridge_requires_live_session_for_previous_respo
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first = await async_client.post(
         "/v1/responses",
@@ -3354,7 +3355,7 @@ async def test_v1_responses_http_emits_turn_state_header_and_reuses_when_replaye
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first = await async_client.post(
         "/v1/responses",
@@ -3450,8 +3451,8 @@ async def test_v1_responses_http_bridge_streaming_path_uses_persistent_upstream_
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fail_legacy_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -3496,8 +3497,8 @@ async def test_v1_responses_http_bridge_kill_switch_falls_back_to_legacy_path(as
     async def fail_connect(*args, **kwargs):
         raise AssertionError("bridge websocket path must not be used when the kill switch disables it")
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_legacy_stream)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fail_connect)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_legacy_stream)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fail_connect)
 
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": "hi"})
     assert response.status_code == 200
@@ -3533,8 +3534,8 @@ async def test_backend_responses_http_bridge_kill_switch_falls_back_to_legacy_pa
     async def fail_connect(*args, **kwargs):
         raise AssertionError("bridge websocket path must not be used when the kill switch disables it")
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_legacy_stream)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fail_connect)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_legacy_stream)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fail_connect)
 
     events, response_headers = await _collect_sse_events_with_headers(
         async_client,
@@ -3866,7 +3867,7 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_submit_http_bridge_request", fake_submit_http_bridge_request)
 
     payload = proxy_module.ResponsesRequest(
@@ -3963,8 +3964,8 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fail_legacy_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -4048,7 +4049,7 @@ async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first = await async_client.post(
         "/v1/responses",
@@ -4155,8 +4156,8 @@ async def test_v1_responses_http_bridge_reuses_derived_prompt_cache_key_when_cli
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fail_legacy_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -4237,7 +4238,7 @@ async def test_v1_responses_http_bridge_prefers_session_header_for_isolation(asy
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = {
         "model": "gpt-5.1",
@@ -4317,7 +4318,7 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     response = await async_client.post(
         "/v1/responses",
@@ -4396,7 +4397,7 @@ async def test_v1_responses_http_bridge_does_not_evict_active_session_when_pool_
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
     first_payload = proxy_module.ResponsesRequest(
         model="gpt-5.1",
         instructions="Return exactly OK.",
@@ -4547,7 +4548,7 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first_payload = proxy_module.ResponsesRequest(
         model="gpt-5.1",
@@ -4711,7 +4712,7 @@ async def test_v1_responses_http_bridge_enforces_queue_limit_atomically_for_same
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest(
         model="gpt-5.1",
@@ -5624,7 +5625,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     async with async_client.stream(
         "POST",
@@ -5704,7 +5705,7 @@ async def test_v1_responses_http_bridge_cancellation_releases_queued_slot(async_
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest(
         model="gpt-5.1",
@@ -5863,7 +5864,7 @@ async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client,
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     response = await async_client.post(
         "/v1/responses",
@@ -6067,7 +6068,7 @@ async def test_v1_responses_http_bridge_send_failure_returns_previous_response_n
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first = await async_client.post(
         "/v1/responses",
@@ -6185,7 +6186,7 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_r
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     first = await async_client.post(
         "/v1/responses",
@@ -6344,7 +6345,7 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = {
         "model": "gpt-5.1",
@@ -6436,7 +6437,7 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(provider_adapters_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     payload = proxy_module.ResponsesRequest(
         model="gpt-5.1",

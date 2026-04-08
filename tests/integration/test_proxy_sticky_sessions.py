@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
+import app.modules.proxy.provider_adapters as provider_adapters_module
 import app.modules.proxy.service as proxy_module
 from app.core.crypto import TokenEncryptor
 from app.core.openai.models import OpenAIResponsePayload
@@ -61,6 +62,7 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
 
 async def _set_routing_settings(
     async_client,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     sticky_threads_enabled: bool,
     prefer_earlier_reset_accounts: bool = False,
@@ -75,6 +77,12 @@ async def _set_routing_settings(
         },
     )
     assert response.status_code == 200
+    _install_proxy_settings_cache(
+        monkeypatch,
+        sticky_threads_enabled=sticky_threads_enabled,
+        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+        routing_strategy=routing_strategy,
+    )
 
 
 def _install_proxy_settings_cache(
@@ -82,6 +90,7 @@ def _install_proxy_settings_cache(
     *,
     sticky_threads_enabled: bool,
     prefer_earlier_reset_accounts: bool = False,
+    routing_strategy: str = "usage_weighted",
     openai_cache_affinity_max_age_seconds: int = 300,
     sticky_reallocation_budget_threshold_pct: float = 95.0,
     openai_prompt_cache_key_derivation_enabled: bool = True,
@@ -92,7 +101,7 @@ def _install_proxy_settings_cache(
         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
         sticky_reallocation_budget_threshold_pct=sticky_reallocation_budget_threshold_pct,
         openai_prompt_cache_key_derivation_enabled=openai_prompt_cache_key_derivation_enabled,
-        routing_strategy="usage_weighted",
+        routing_strategy=routing_strategy,
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
@@ -113,7 +122,7 @@ def _install_proxy_settings_cache(
 
 @pytest.mark.asyncio
 async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=True)
     acc_a_id = await _import_account(async_client, "acc_a", "a@example.com")
     acc_b_id = await _import_account(async_client, "acc_b", "b@example.com")
 
@@ -123,7 +132,7 @@ async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_
         seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -181,7 +190,7 @@ async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_
 
 @pytest.mark.asyncio
 async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=True)
     encryptor = TokenEncryptor()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -243,7 +252,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
             return
         yield 'data: {"type":"response.completed","response":{"id":"resp_ok"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -261,7 +270,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
 @pytest.mark.asyncio
 async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=True)
     acc_c1_id = await _import_account(async_client, "acc_c1", "c1@example.com")
     acc_c2_id = await _import_account(async_client, "acc_c2", "c2@example.com")
 
@@ -297,8 +306,8 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_compact_responses", fake_compact)
 
     thread_key = "thread_compact_1"
     stream_payload = {
@@ -346,7 +355,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
 
 @pytest.mark.asyncio
 async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_threads(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=False)
     acc_a_id = await _import_account(async_client, "acc_sid_a", "sid_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_sid_b", "sid_b@example.com")
 
@@ -382,8 +391,8 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_compact_responses", fake_compact)
 
     headers = {"session_id": "codex-thread-123"}
     stream_payload = {
@@ -436,7 +445,7 @@ async def test_proxy_codex_session_id_compact_first_pins_followup_stream_without
     async_client,
     monkeypatch,
 ):
-    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=False)
     acc_a_id = await _import_account(async_client, "acc_sid_compact_a", "sid_compact_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_sid_compact_b", "sid_compact_b@example.com")
 
@@ -472,8 +481,8 @@ async def test_proxy_codex_session_id_compact_first_pins_followup_stream_without
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_compact_first"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     headers = {"session_id": "codex-compact-first-123"}
     compact_payload = {
@@ -519,7 +528,7 @@ async def test_proxy_codex_session_id_compact_first_pins_followup_stream_without
 
 @pytest.mark.asyncio
 async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=False)
     acc_a_id = await _import_account(async_client, "acc_sid_retry_a", "sid_retry_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_sid_retry_b", "sid_retry_b@example.com")
     upstream_acc_a = "acc_sid_retry_a"
@@ -558,7 +567,7 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
             return
         yield 'data: {"type":"response.completed","response":{"id":"resp_session_retry"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     headers = {"session_id": "codex-session-retry-123"}
     stream_payload = {
@@ -582,7 +591,7 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
 
 @pytest.mark.asyncio
 async def test_v1_session_id_does_not_create_durable_codex_session_affinity(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=False)
     acc_a_id = await _import_account(async_client, "acc_v1_sid_a", "v1_sid_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_v1_sid_b", "v1_sid_b@example.com")
 
@@ -618,8 +627,8 @@ async def test_v1_session_id_does_not_create_durable_codex_session_affinity(asyn
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_compact_responses", fake_compact)
 
     headers = {"session_id": "v1-thread-123"}
     stream_payload = {
@@ -671,7 +680,7 @@ async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_s
     async_client,
     monkeypatch,
 ):
-    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=False)
     _install_proxy_settings_cache(
         monkeypatch,
         sticky_threads_enabled=False,
@@ -712,8 +721,8 @@ async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_s
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_compact_responses", fake_compact)
 
     thread_key = "v1-cache-thread-123"
     stream_payload = {
@@ -794,7 +803,7 @@ async def test_v1_responses_derives_prompt_cache_key_when_absent(async_client, m
         seen_keys.append(getattr(payload, "prompt_cache_key", None))
         yield 'data: {"type":"response.completed","response":{"id":"resp_v1_derived"}}\\n\\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "input": "hello", "stream": True}
     response = await async_client.post("/v1/responses", json=payload)
@@ -827,7 +836,7 @@ async def test_backend_codex_session_affinity_also_forwards_prompt_cache_key_whe
         seen_keys.append(getattr(payload, "prompt_cache_key", None))
         yield 'data: {"type":"response.completed","response":{"id":"resp_backend_codex"}}\\n\\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     response = await async_client.post(
         "/backend-api/codex/responses",
@@ -878,7 +887,7 @@ async def test_backend_responses_http_forwards_previous_response_id(async_client
         seen_prev_ids.append(getattr(payload, "previous_response_id", None))
         yield 'data: {"type":"response.completed","response":{"id":"resp_prev_http"}}\\n\\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     response = await async_client.post(
         "/backend-api/codex/responses",
@@ -919,7 +928,7 @@ async def test_v1_responses_http_forwards_previous_response_id(async_client, mon
         seen_prev_ids.append(getattr(payload, "previous_response_id", None))
         yield 'data: {"type":"response.completed","response":{"id":"resp_v1_prev_http"}}\\n\\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     response = await async_client.post(
         "/v1/responses",
@@ -936,7 +945,7 @@ async def test_v1_responses_http_forwards_previous_response_id(async_client, mon
 
 @pytest.mark.asyncio
 async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=False)
     _install_proxy_settings_cache(
         monkeypatch,
         sticky_threads_enabled=False,
@@ -971,7 +980,7 @@ async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_clien
         stream_seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_v1_cache_expire"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     thread_key = "v1-cache-expire-thread-123"
     stream_payload = {
@@ -1020,7 +1029,7 @@ async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_clien
 
 @pytest.mark.asyncio
 async def test_codex_endpoint_uses_prompt_cache_sticky_kind(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=True)
     acc_id = await _import_account(async_client, "acc_kind_a", "kind_a@example.com")
 
     now = utcnow()
@@ -1041,7 +1050,7 @@ async def test_codex_endpoint_uses_prompt_cache_sticky_kind(async_client, monkey
         seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_k"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True, "prompt_cache_key": "pck_abc"}
     await async_client.post("/backend-api/codex/responses", json=payload)
@@ -1084,7 +1093,7 @@ async def test_v1_auto_derived_key_separates_parallel_sessions(async_client, mon
         seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_p"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     session_a = {"model": "gpt-5.1", "input": "build a server", "stream": True}
     session_b = {"model": "gpt-5.1", "input": "write tests", "stream": True}
@@ -1127,7 +1136,7 @@ async def test_v1_auto_derived_key_stable_across_turns(async_client, monkeypatch
         seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_t"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     turn1 = {
         "model": "gpt-5.1",
@@ -1171,7 +1180,7 @@ async def test_v1_auto_derived_key_stable_across_turns(async_client, monkeypatch
 
 @pytest.mark.asyncio
 async def test_reallocate_sticky_respects_existing_session_then_falls_back(async_client, monkeypatch):
-    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    await _set_routing_settings(async_client, monkeypatch, sticky_threads_enabled=True)
     acc_a_id = await _import_account(async_client, "acc_realloc_a", "realloc_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_realloc_b", "realloc_b@example.com")
 
@@ -1200,7 +1209,7 @@ async def test_reallocate_sticky_respects_existing_session_then_falls_back(async
         seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_r"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True, "prompt_cache_key": "realloc_key"}
     await async_client.post("/backend-api/codex/responses", json=payload)

@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 
 import app.core.clients.proxy as proxy_client_module
+import app.modules.proxy.provider_adapters as proxy_transport_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
@@ -160,7 +161,7 @@ async def test_proxy_compact_success(async_client, monkeypatch):
         seen["account_id"] = account_id
         return OpenAIResponsePayload.model_validate({"output": []})
 
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_transport_module, "core_compact_responses", fake_compact)
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -243,7 +244,7 @@ async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
     async def fake_compact(payload, headers, access_token, account_id):
         return OpenAIResponsePayload.model_validate({"output": []})
 
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_transport_module, "core_compact_responses", fake_compact)
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -299,7 +300,7 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
             },
         )
 
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_transport_module, "core_compact_responses", fake_compact)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
@@ -338,7 +339,7 @@ async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monke
             account.chatgpt_account_id = "acc_compact_retry_new"
         return account
 
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_transport_module, "core_compact_responses", fake_compact)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
@@ -381,8 +382,8 @@ async def test_proxy_compact_retryable_transport_failure_retries_same_contract_o
         if False:
             yield ""
 
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
@@ -420,12 +421,12 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     async def fake_compact(payload, headers, access_token, account_id):
         return CompactResponsePayload.model_validate(compact_window)
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         seen_inputs.append(payload.input)
         yield 'data: {"type":"response.completed","response":{"id":"resp_round_trip"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     compact_payload = {"model": "gpt-5.1", "instructions": "compact", "input": []}
     compact_response = await async_client.post("/backend-api/codex/responses/compact", json=compact_payload)

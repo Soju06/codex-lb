@@ -1,8 +1,9 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, patch, post } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
   AccountImportResponseSchema,
+  AccountSummarySchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -12,6 +13,8 @@ import {
   OauthStartRequestSchema,
   OauthStartResponseSchema,
   OauthStatusResponseSchema,
+  PlatformIdentityCreateRequestSchema,
+  PlatformIdentityUpdateRequestSchema,
   RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
 
@@ -28,6 +31,24 @@ export function importAccount(file: File) {
   return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
     body: formData,
   });
+}
+
+export function createPlatformIdentity(payload: unknown) {
+  const validated = PlatformIdentityCreateRequestSchema.parse(payload);
+  return post(`${ACCOUNTS_BASE_PATH}/platform`, AccountImportResponseSchema, {
+    body: validated,
+  });
+}
+
+export function updatePlatformIdentity(accountId: string, payload: unknown) {
+  const validated = PlatformIdentityUpdateRequestSchema.parse(payload);
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/platform/${encodeURIComponent(accountId)}`,
+    AccountSummarySchema,
+    {
+      body: validated,
+    },
+  );
 }
 
 export function pauseAccount(accountId: string) {

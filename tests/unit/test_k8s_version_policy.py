@@ -16,13 +16,10 @@ def test_chart_readme_documents_modern_support_policy() -> None:
     assert "Validation baseline in CI and smoke installs: `1.35`" in readme
 
 
-def test_ci_uses_1_32_minimum_and_1_35_baseline() -> None:
+def test_ci_excludes_helm_and_k8s_validation_jobs() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "kubeconform (K8s 1.32.0)" in workflow
-    assert "kubeconform (K8s 1.35.0)" in workflow
-    assert "-kubernetes-version 1.32.0" in workflow
-    assert "-kubernetes-version 1.35.0" in workflow
-    assert "kind create cluster --name codex-lb-smoke --image kindest/node:v1.35.0 --wait 120s" in workflow
-    assert "kubeconform (K8s 1.25.0)" not in workflow
-    assert "kubeconform (K8s 1.28.0)" not in workflow
-    assert "kubeconform (K8s 1.31.0)" not in workflow
+    assert "kubeconform (K8s 1.32.0)" not in workflow
+    assert "kubeconform (K8s 1.35.0)" not in workflow
+    assert "-kubernetes-version 1.32.0" not in workflow
+    assert "-kubernetes-version 1.35.0" not in workflow
+    assert "kind create cluster --name codex-lb-smoke --image kindest/node:v1.35.0 --wait 120s" not in workflow

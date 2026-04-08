@@ -20,6 +20,7 @@ describe("StickySessionsSection", () => {
     const user = userEvent.setup();
     const setAccountQuery = vi.fn();
     const setKeyQuery = vi.fn();
+    const setProviderKind = vi.fn();
     const setSort = vi.fn();
     const deleteMutation = {
       mutateAsync: vi.fn().mockResolvedValue({ deletedCount: 2, deleted: [], failed: [] }),
@@ -40,6 +41,7 @@ describe("StickySessionsSection", () => {
     useStickySessionsMock.mockReturnValue({
       params: {
         staleOnly: false,
+        providerKind: null,
         accountQuery: "",
         keyQuery: "",
         sortBy: "updated_at",
@@ -49,6 +51,7 @@ describe("StickySessionsSection", () => {
       },
       setAccountQuery,
       setKeyQuery,
+      setProviderKind,
       setSort,
       setOffset: vi.fn(),
       setLimit: vi.fn(),
@@ -59,6 +62,9 @@ describe("StickySessionsSection", () => {
               key: "session-1",
               displayName: "sticky-a@example.com",
               kind: "prompt_cache",
+              providerKind: "chatgpt_web",
+              routingSubjectId: "acc_sticky_a",
+              affinityScope: "provider_prompt_cache",
               createdAt: "2026-03-10T12:00:00Z",
               updatedAt: "2026-03-10T12:05:00Z",
               expiresAt: "2026-03-10T12:10:00Z",
@@ -68,6 +74,9 @@ describe("StickySessionsSection", () => {
               key: "session-2",
               displayName: "sticky-b@example.com",
               kind: "codex_session",
+              providerKind: "chatgpt_web",
+              routingSubjectId: "acc_sticky_b",
+              affinityScope: "chatgpt_continuity",
               createdAt: "2026-03-10T12:00:00Z",
               updatedAt: "2026-03-10T12:05:00Z",
               expiresAt: null,
@@ -92,6 +101,10 @@ describe("StickySessionsSection", () => {
     expect(screen.getByText("Codex session")).toBeInTheDocument();
     expect(screen.getByText("sticky-a@example.com")).toBeInTheDocument();
     expect(screen.getByText("sticky-b@example.com")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "ChatGPT Web" })).toBeInTheDocument();
+    expect(screen.getByText("acc_sticky_a")).toBeInTheDocument();
+    expect(screen.getByText("Prompt-cache affinity")).toBeInTheDocument();
+    expect(screen.getByText("ChatGPT continuity")).toBeInTheDocument();
     expect(screen.getByText("Stale")).toBeInTheDocument();
     expect(screen.getByText("Durable")).toBeInTheDocument();
     expect(screen.getByText("Visible rows")).toBeInTheDocument();
@@ -108,8 +121,13 @@ describe("StickySessionsSection", () => {
     expect(screen.getByRole("button", { name: "Key" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Account" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Updated ↓" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All providers" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "ChatGPT Web" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "OpenAI Platform" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Key" }));
     expect(setSort).toHaveBeenLastCalledWith("key", "asc");
+    await user.click(screen.getByRole("button", { name: "OpenAI Platform" }));
+    expect(setProviderKind).toHaveBeenLastCalledWith("openai_platform");
 
     expect(screen.getByRole("button", { name: "Delete Filtered" })).toBeDisabled();
 
@@ -125,10 +143,12 @@ describe("StickySessionsSection", () => {
         {
           key: "session-1",
           kind: "prompt_cache",
+          providerKind: "chatgpt_web",
         },
         {
           key: "session-2",
           kind: "codex_session",
+          providerKind: "chatgpt_web",
         },
       ]);
     });
@@ -148,6 +168,7 @@ describe("StickySessionsSection", () => {
         {
           key: "session-1",
           kind: "prompt_cache",
+          providerKind: "chatgpt_web",
         },
       ]);
     });
@@ -159,6 +180,7 @@ describe("StickySessionsSection", () => {
     useStickySessionsMock.mockReturnValue({
       params: {
         staleOnly: false,
+        providerKind: null,
         accountQuery: "",
         keyQuery: "",
         sortBy: "updated_at",
@@ -168,6 +190,7 @@ describe("StickySessionsSection", () => {
       },
       setAccountQuery: vi.fn(),
       setKeyQuery: vi.fn(),
+      setProviderKind: vi.fn(),
       setSort: vi.fn(),
       setOffset,
       setLimit: vi.fn(),
@@ -209,6 +232,7 @@ describe("StickySessionsSection", () => {
     useStickySessionsMock.mockReturnValue({
       params: {
         staleOnly: false,
+        providerKind: null,
         accountQuery: "",
         keyQuery: "",
         sortBy: "updated_at",
@@ -218,6 +242,7 @@ describe("StickySessionsSection", () => {
       },
       setAccountQuery: vi.fn(),
       setKeyQuery: vi.fn(),
+      setProviderKind: vi.fn(),
       setSort: vi.fn(),
       setOffset,
       setLimit,
@@ -228,6 +253,9 @@ describe("StickySessionsSection", () => {
               key: "session-2",
               displayName: "sticky-b@example.com",
               kind: "codex_session",
+              providerKind: "chatgpt_web",
+              routingSubjectId: "acc_sticky_b",
+              affinityScope: "chatgpt_continuity",
               createdAt: "2026-03-10T12:00:00Z",
               updatedAt: "2026-03-10T12:05:00Z",
               expiresAt: null,
@@ -270,6 +298,7 @@ describe("StickySessionsSection", () => {
     useStickySessionsMock.mockReturnValue({
       params: {
         staleOnly: false,
+        providerKind: null,
         accountQuery: "sticky-a",
         keyQuery: "",
         sortBy: "updated_at",
@@ -279,6 +308,7 @@ describe("StickySessionsSection", () => {
       },
       setAccountQuery: vi.fn(),
       setKeyQuery: vi.fn(),
+      setProviderKind: vi.fn(),
       setSort: vi.fn(),
       setOffset: vi.fn(),
       setLimit: vi.fn(),
@@ -289,6 +319,9 @@ describe("StickySessionsSection", () => {
               key: "session-1",
               displayName: "sticky-a@example.com",
               kind: "prompt_cache",
+              providerKind: "chatgpt_web",
+              routingSubjectId: "acc_sticky_a",
+              affinityScope: "provider_prompt_cache",
               createdAt: "2026-03-10T12:00:00Z",
               updatedAt: "2026-03-10T12:05:00Z",
               expiresAt: "2026-03-10T12:10:00Z",
@@ -324,13 +357,11 @@ describe("StickySessionsSection", () => {
     expect(screen.getByRole("button", { name: "Delete Filtered" })).toBeEnabled();
   });
 
-  it("shows pagination controls and advances pagination", async () => {
-    const user = userEvent.setup();
-    const setOffset = vi.fn();
-
+  it("shows delete-filtered when a provider filter is active", () => {
     useStickySessionsMock.mockReturnValue({
       params: {
         staleOnly: false,
+        providerKind: "openai_platform",
         accountQuery: "",
         keyQuery: "",
         sortBy: "updated_at",
@@ -340,6 +371,60 @@ describe("StickySessionsSection", () => {
       },
       setAccountQuery: vi.fn(),
       setKeyQuery: vi.fn(),
+      setProviderKind: vi.fn(),
+      setSort: vi.fn(),
+      setOffset: vi.fn(),
+      setLimit: vi.fn(),
+      stickySessionsQuery: {
+        data: {
+          entries: [],
+          stalePromptCacheCount: 0,
+          total: 2,
+          hasMore: false,
+        },
+        isLoading: false,
+        error: null,
+      },
+      deleteMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
+      deleteFilteredMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
+      purgeMutation: {
+        mutateAsync: vi.fn(),
+        isPending: false,
+        error: null,
+      },
+    } as never);
+
+    render(<StickySessionsSection />);
+
+    expect(screen.getByRole("button", { name: "Delete Filtered" })).toBeEnabled();
+  });
+
+  it("shows pagination controls and advances pagination", async () => {
+    const user = userEvent.setup();
+    const setOffset = vi.fn();
+
+    useStickySessionsMock.mockReturnValue({
+      params: {
+        staleOnly: false,
+        providerKind: null,
+        accountQuery: "",
+        keyQuery: "",
+        sortBy: "updated_at",
+        sortDir: "desc",
+        offset: 0,
+        limit: 10,
+      },
+      setAccountQuery: vi.fn(),
+      setKeyQuery: vi.fn(),
+      setProviderKind: vi.fn(),
       setSort: vi.fn(),
       setOffset,
       setLimit: vi.fn(),
@@ -350,6 +435,9 @@ describe("StickySessionsSection", () => {
               key: "session-2",
               displayName: "sticky-b@example.com",
               kind: "codex_session",
+              providerKind: "chatgpt_web",
+              routingSubjectId: "acc_sticky_b",
+              affinityScope: "chatgpt_continuity",
               createdAt: "2026-03-10T12:00:00Z",
               updatedAt: "2026-03-10T12:05:00Z",
               expiresAt: null,

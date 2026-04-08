@@ -520,22 +520,76 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             sticky_columns_rows = (await session.execute(text("PRAGMA table_info(sticky_sessions)"))).fetchall()
             sticky_columns = {str(row[1]) for row in sticky_columns_rows if len(row) > 1}
             assert "kind" in sticky_columns
+            assert "provider_kind" in sticky_columns
+            assert "routing_subject_id" in sticky_columns
             sticky_kind = (
-                await session.execute(text("SELECT kind FROM sticky_sessions WHERE key='sticky_1'"))
+                await session.execute(
+                    text("SELECT kind FROM sticky_sessions WHERE provider_kind='chatgpt_web' AND key='sticky_1'")
+                )
             ).scalar_one()
             assert sticky_kind == "sticky_thread"
+            sticky_scope = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT provider_kind, routing_subject_id, account_id
+                        FROM sticky_sessions
+                        WHERE provider_kind='chatgpt_web' AND kind='sticky_thread' AND key='sticky_1'
+                        """
+                    )
+                )
+            ).one()
+            assert sticky_scope == ("chatgpt_web", "acc_legacy", "acc_legacy")
             await session.execute(
                 text(
                     """
-                    INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
-                    VALUES ('sticky_1', 'acc_legacy', 'prompt_cache', '2026-01-01 00:00:00', '2026-01-01 00:00:00')
+                    INSERT INTO sticky_sessions (
+                        provider_kind, key, account_id, routing_subject_id, kind, created_at, updated_at
+                    )
+                    VALUES (
+                        'chatgpt_web', 'sticky_1', 'acc_legacy', 'acc_legacy',
+                        'prompt_cache', '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+                    )
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (
+                        provider_kind, key, account_id, routing_subject_id, kind, created_at, updated_at
+                    )
+                    VALUES (
+                        'openai_platform', 'sticky_1', NULL, 'plat_legacy',
+                        'prompt_cache', '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+                    )
                     """
                 )
             )
             sticky_same_key_count = (
-                await session.execute(text("SELECT COUNT(*) FROM sticky_sessions WHERE key='sticky_1'"))
+                await session.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM sticky_sessions
+                        WHERE key='sticky_1' AND kind='prompt_cache'
+                        """
+                    )
+                )
             ).scalar_one()
             assert sticky_same_key_count == 2
+            request_log_scope = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT provider_kind, routing_subject_id
+                        FROM request_logs
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert request_log_scope == ("chatgpt_web", "acc_legacy")
             index_rows = (await session.execute(text("PRAGMA index_list(accounts)"))).fetchall()
             has_email_non_unique_index = False
             for row in index_rows:
@@ -594,5 +648,91 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert usage_count == 1
             assert logs_count == 1
             assert sticky_count == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_run_startup_migrations_aborts_on_invalid_provider_rekey_rows(tmp_path):
+    db_path = tmp_path / "invalid-sticky-rekey.db"
+    db_url = f"sqlite+aiosqlite:///{db_path}"
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    try:
+        async with session_factory() as session:
+            await session.execute(text("PRAGMA foreign_keys=ON"))
+            await session.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO alembic_version (version_num)
+                    VALUES ('20260407_020000_add_openai_platform_identities')
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    """
+                    CREATE TABLE accounts (
+                        id VARCHAR NOT NULL PRIMARY KEY,
+                        email VARCHAR NOT NULL UNIQUE,
+                        plan_type VARCHAR NOT NULL,
+                        access_token_encrypted BLOB NOT NULL,
+                        refresh_token_encrypted BLOB NOT NULL,
+                        id_token_encrypted BLOB NOT NULL,
+                        last_refresh DATETIME NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        status VARCHAR(32) NOT NULL,
+                        deactivation_reason TEXT,
+                        reset_at INTEGER
+                    )
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO accounts (
+                        id, email, plan_type, access_token_encrypted, refresh_token_encrypted,
+                        id_token_encrypted, last_refresh, created_at, status, deactivation_reason, reset_at
+                    ) VALUES (
+                        'acc_invalid', 'invalid@example.com', 'plus', x'01', x'02',
+                        x'03', '2026-01-01 00:00:00', '2026-01-01 00:00:00', 'active', NULL, NULL
+                    )
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    """
+                    CREATE TABLE sticky_sessions (
+                        key VARCHAR NOT NULL PRIMARY KEY,
+                        account_id VARCHAR REFERENCES accounts(id),
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        provider_kind VARCHAR,
+                        routing_subject_id VARCHAR,
+                        kind VARCHAR
+                    )
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (
+                        key, account_id, created_at, updated_at, provider_kind, routing_subject_id, kind
+                    ) VALUES (
+                        'invalid-platform-row', NULL, '2026-01-01 00:00:00', '2026-01-01 00:00:00',
+                        'chatgpt_web', 'acc_invalid', 'sticky_thread'
+                    )
+                    """
+                )
+            )
+            await session.commit()
+
+        with pytest.raises(RuntimeError, match="Refusing to rekey sticky_sessions"):
+            await run_startup_migrations(db_url)
     finally:
         await engine.dispose()

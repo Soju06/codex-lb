@@ -65,20 +65,26 @@ async def _insert_sticky_session(
     account_id: str,
     kind: StickySessionKind,
     updated_at_offset_seconds: int,
+    provider_kind: str = "chatgpt_web",
+    routing_subject_id: str | None = None,
 ) -> None:
     timestamp = utcnow() - timedelta(seconds=updated_at_offset_seconds)
     async with SessionLocal() as session:
         await session.execute(
             text(
                 """
-                INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
-                VALUES (:key, :account_id, :kind, :timestamp, :timestamp)
+                INSERT INTO sticky_sessions (
+                    key, kind, provider_kind, routing_subject_id, account_id, created_at, updated_at
+                )
+                VALUES (:key, :kind, :provider_kind, :routing_subject_id, :account_id, :timestamp, :timestamp)
                 """
             ),
             {
                 "key": key,
-                "account_id": account_id,
                 "kind": kind.value,
+                "provider_kind": provider_kind,
+                "routing_subject_id": routing_subject_id or account_id,
+                "account_id": account_id if provider_kind == "chatgpt_web" else None,
                 "timestamp": timestamp,
             },
         )
@@ -117,12 +123,19 @@ async def test_sticky_sessions_api_lists_metadata_and_purges_stale(async_client)
 
     assert entries["prompt-cache-stale"]["kind"] == "prompt_cache"
     assert entries["prompt-cache-stale"]["displayName"] == "sticky-a@example.com"
+    assert entries["prompt-cache-stale"]["providerKind"] == "chatgpt_web"
+    assert entries["prompt-cache-stale"]["routingSubjectId"] == accounts[0].id
+    assert entries["prompt-cache-stale"]["affinityScope"] == "provider_prompt_cache"
     assert entries["prompt-cache-stale"]["isStale"] is True
     assert entries["prompt-cache-stale"]["expiresAt"] is not None
     assert entries["prompt-cache-fresh"]["displayName"] == "sticky-a@example.com"
+    assert entries["prompt-cache-fresh"]["providerKind"] == "chatgpt_web"
     assert entries["prompt-cache-fresh"]["isStale"] is False
     assert entries["codex-session-old"]["kind"] == "codex_session"
     assert entries["codex-session-old"]["displayName"] == "sticky-b@example.com"
+    assert entries["codex-session-old"]["providerKind"] == "chatgpt_web"
+    assert entries["codex-session-old"]["routingSubjectId"] == accounts[1].id
+    assert entries["codex-session-old"]["affinityScope"] == "chatgpt_continuity"
     assert entries["codex-session-old"]["isStale"] is False
     assert entries["codex-session-old"]["expiresAt"] is None
 
@@ -191,6 +204,39 @@ async def test_sticky_sessions_api_filters_by_account_and_key(async_client):
         ("beta-cache", "sticky-a@example.com")
     ]
     assert response.json()["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sticky_sessions_api_filters_by_provider_kind(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+    await _insert_sticky_session(
+        key="chatgpt-cache",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=15,
+    )
+    await _insert_sticky_session(
+        key="platform-cache",
+        account_id="unused-platform-account",
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=20,
+        provider_kind="openai_platform",
+        routing_subject_id="plat-sticky-1",
+    )
+
+    response = await async_client.get("/api/sticky-sessions", params={"providerKind": "openai_platform"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert [entry["key"] for entry in payload["entries"]] == ["platform-cache"]
+    assert payload["entries"][0]["providerKind"] == "openai_platform"
+    assert payload["entries"][0]["routingSubjectId"] == "plat-sticky-1"
+    assert payload["entries"][0]["affinityScope"] == "provider_prompt_cache"
+
+    response = await async_client.get("/api/sticky-sessions", params={"providerKind": "chatgpt_web"})
+    assert response.status_code == 200
+    assert {entry["key"] for entry in response.json()["entries"]} == {"chatgpt-cache"}
 
 
 @pytest.mark.asyncio
@@ -268,6 +314,41 @@ async def test_sticky_sessions_api_deletes_filtered_rows(async_client):
     assert {(entry["key"], entry["displayName"]) for entry in response.json()["entries"]} == {
         ("cleanup-beta", "sticky-b@example.com")
     }
+
+
+@pytest.mark.asyncio
+async def test_sticky_sessions_api_delete_filtered_scopes_by_provider_kind(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+    await _insert_sticky_session(
+        key="shared-platform-key",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=20,
+    )
+    await _insert_sticky_session(
+        key="shared-platform-key",
+        account_id="unused-platform-account",
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=25,
+        provider_kind="openai_platform",
+        routing_subject_id="plat-sticky-delete",
+    )
+
+    response = await async_client.post(
+        "/api/sticky-sessions/delete-filtered",
+        json={
+            "providerKind": "openai_platform",
+            "keyQuery": "shared-platform-key",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"deletedCount": 1}
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    remaining = {(entry["key"], entry["providerKind"]) for entry in response.json()["entries"]}
+    assert remaining == {("shared-platform-key", "chatgpt_web")}
 
 
 @pytest.mark.asyncio
@@ -413,8 +494,8 @@ async def test_sticky_sessions_api_deletes_selected_identifiers(async_client):
     assert response.status_code == 200
     assert response.json()["deletedCount"] == 2
     assert response.json()["deleted"] == [
-        {"key": "shared-key", "kind": "prompt_cache"},
-        {"key": "folder/session", "kind": "sticky_thread"},
+        {"key": "shared-key", "kind": "prompt_cache", "providerKind": "chatgpt_web"},
+        {"key": "folder/session", "kind": "sticky_thread", "providerKind": "chatgpt_web"},
     ]
     assert response.json()["failed"] == []
 
@@ -449,10 +530,15 @@ async def test_sticky_sessions_api_reports_partial_failures_for_bulk_delete(asyn
     assert response.json() == {
         "deletedCount": 1,
         "deleted": [
-            {"key": "shared-key", "kind": "prompt_cache"},
+            {"key": "shared-key", "kind": "prompt_cache", "providerKind": "chatgpt_web"},
         ],
         "failed": [
-            {"key": "missing-key", "kind": "sticky_thread", "reason": "not_found"},
+            {
+                "key": "missing-key",
+                "kind": "sticky_thread",
+                "providerKind": "chatgpt_web",
+                "reason": "not_found",
+            },
         ],
     }
 
@@ -499,6 +585,31 @@ async def test_sticky_sessions_api_deletes_slash_containing_keys(async_client):
     assert response.status_code == 200
 
     response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    assert all(entry["key"] != sticky_key for entry in response.json()["entries"])
+
+
+@pytest.mark.asyncio
+async def test_sticky_sessions_api_deletes_platform_row_with_provider_query(async_client):
+    await _set_affinity_ttl(60)
+    sticky_key = "platform/session"
+
+    await _insert_sticky_session(
+        key=sticky_key,
+        account_id="unused-platform-account",
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=10,
+        provider_kind="openai_platform",
+        routing_subject_id="plat-sticky-single-delete",
+    )
+
+    response = await async_client.delete(
+        f"/api/sticky-sessions/prompt_cache/{quote(sticky_key, safe='')}",
+        params={"providerKind": "openai_platform"},
+    )
+    assert response.status_code == 200
+
+    response = await async_client.get("/api/sticky-sessions", params={"providerKind": "openai_platform"})
     assert response.status_code == 200
     assert all(entry["key"] != sticky_key for entry in response.json()["entries"])
 

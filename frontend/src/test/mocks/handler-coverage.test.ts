@@ -29,6 +29,8 @@ const EXPECTED_ENDPOINTS = [
 	// accounts
 	"GET /api/accounts",
 	"POST /api/accounts/import",
+	"POST /api/accounts/platform",
+	"PATCH /api/accounts/platform/:accountId",
 	"POST /api/accounts/:accountId/pause",
 	"POST /api/accounts/:accountId/reactivate",
 	"GET /api/accounts/:accountId/trends",
@@ -52,6 +54,7 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/settings",
 	"PUT /api/settings",
 	"GET /api/sticky-sessions",
+	"DELETE /api/sticky-sessions/:kind/:key",
 	"POST /api/sticky-sessions/delete",
 	"POST /api/sticky-sessions/delete-filtered",
 	"POST /api/sticky-sessions/purge",

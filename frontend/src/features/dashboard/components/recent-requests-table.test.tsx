@@ -51,6 +51,7 @@ describe("RecentRequestsTable", () => {
              displayName: "Primary Account",
              planType: "plus",
              status: "active",
+             eligibleRouteFamilies: [],
              additionalQuotas: [],
            },
          ]}
@@ -60,6 +61,11 @@ describe("RecentRequestsTable", () => {
             accountId: "acc-primary",
             apiKeyName: "Key Alpha",
             requestId: "req-1",
+            providerKind: "openai_platform",
+            routingSubjectId: "platform-subject-1",
+            routeClass: "openai_public_http",
+            upstreamRequestId: "upstream-req-1",
+            rejectionReason: "provider_transport_unsupported",
             model: "gpt-5.1",
             serviceTier: "default",
             requestedServiceTier: "priority",
@@ -79,8 +85,11 @@ describe("RecentRequestsTable", () => {
     );
 
     expect(screen.getByText("Primary Account")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI Platform | platform-subject-1")).toBeInTheDocument();
     expect(screen.getByText("Key Alpha")).toBeInTheDocument();
+    expect(screen.getByText("Upstream upstream-req-1")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.1 (high, default)")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI public HTTP")).toBeInTheDocument();
     expect(screen.getByText("Requested priority")).toBeInTheDocument();
     expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
@@ -92,6 +101,9 @@ describe("RecentRequestsTable", () => {
     expect(dialog).toBeInTheDocument();
     expect(screen.getByText("Request Details")).toBeInTheDocument();
     expect(screen.getByText("req-1")).toBeInTheDocument();
+    expect(screen.getAllByText("upstream-req-1")[0]).toBeInTheDocument();
+    expect(screen.getByText("platform-subject-1")).toBeInTheDocument();
+    expect(screen.getAllByText("provider_transport_unsupported")[0]).toBeInTheDocument();
     expect(screen.getAllByText("rate_limit_exceeded")[0]).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
 
@@ -103,6 +115,13 @@ describe("RecentRequestsTable", () => {
     expect(writeText).toHaveBeenCalledWith("req-1");
     expect(toastSuccess).toHaveBeenCalledWith("Copied to clipboard");
     expect(screen.getByRole("button", { name: "Copy Request ID Copied" })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy Upstream Request ID" }));
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith("upstream-req-1");
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy Error" }));
@@ -128,6 +147,11 @@ describe("RecentRequestsTable", () => {
             accountId: "acc-legacy",
             apiKeyName: null,
             requestId: "req-legacy",
+            providerKind: null,
+            routingSubjectId: null,
+            routeClass: null,
+            upstreamRequestId: null,
+            rejectionReason: null,
             model: "gpt-5.1",
             serviceTier: null,
             requestedServiceTier: null,
@@ -160,6 +184,11 @@ describe("RecentRequestsTable", () => {
             accountId: "acc-legacy",
             apiKeyName: null,
             requestId: "req-error-code",
+            providerKind: null,
+            routingSubjectId: null,
+            routeClass: null,
+            upstreamRequestId: null,
+            rejectionReason: null,
             model: "gpt-5.1",
             serviceTier: null,
             requestedServiceTier: null,

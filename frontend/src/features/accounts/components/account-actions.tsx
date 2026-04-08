@@ -1,4 +1,4 @@
-import { Pause, Play, RefreshCw, Trash2 } from "lucide-react";
+import { Pause, Pencil, Play, RefreshCw, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { AccountSummary } from "@/features/accounts/schemas";
@@ -6,6 +6,7 @@ import type { AccountSummary } from "@/features/accounts/schemas";
 export type AccountActionsProps = {
   account: AccountSummary;
   busy: boolean;
+  onEditPlatform: (account: AccountSummary) => void;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
@@ -15,13 +16,31 @@ export type AccountActionsProps = {
 export function AccountActions({
   account,
   busy,
+  onEditPlatform,
   onPause,
   onResume,
   onDelete,
   onReauth,
 }: AccountActionsProps) {
+  const supportsReauth = account.providerKind !== "openai_platform";
+  const supportsPlatformEdit = account.providerKind === "openai_platform";
+
   return (
     <div className="flex flex-wrap gap-2 border-t pt-4">
+      {supportsPlatformEdit ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => onEditPlatform(account)}
+          disabled={busy}
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Edit
+        </Button>
+      ) : null}
+
       {account.status === "paused" ? (
         <Button
           type="button"
@@ -47,7 +66,7 @@ export function AccountActions({
         </Button>
       )}
 
-      {account.status === "deactivated" ? (
+      {supportsReauth && account.status === "deactivated" ? (
         <Button
           type="button"
           size="sm"

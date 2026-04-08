@@ -13,9 +13,17 @@ from app.modules.accounts.schemas import (
     AccountPauseResponse,
     AccountReactivateResponse,
     AccountsResponse,
+    AccountSummary,
     AccountTrendsResponse,
+    PlatformIdentityCreateRequest,
+    PlatformIdentityUpdateRequest,
 )
-from app.modules.accounts.service import InvalidAuthJsonError
+from app.modules.accounts.service import (
+    InvalidAuthJsonError,
+    PlatformIdentityConflictError,
+    PlatformIdentityNotFoundError,
+    PlatformIdentityPrerequisiteError,
+)
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -62,6 +70,51 @@ async def import_account(
         raise DashboardBadRequestError("Invalid auth.json payload", code="invalid_auth_json") from exc
     except AccountIdentityConflictError as exc:
         raise DashboardConflictError(str(exc), code="duplicate_identity_conflict") from exc
+
+
+@router.post("/platform", response_model=AccountImportResponse)
+async def create_platform_identity(
+    request: Request,
+    payload: PlatformIdentityCreateRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountImportResponse:
+    try:
+        response = await context.service.create_platform_identity(payload)
+    except PlatformIdentityConflictError as exc:
+        raise DashboardConflictError(str(exc), code="platform_identity_conflict") from exc
+    except PlatformIdentityPrerequisiteError as exc:
+        raise DashboardBadRequestError(str(exc), code="platform_identity_prerequisite_failed") from exc
+    except ValueError as exc:
+        raise DashboardBadRequestError(str(exc), code="platform_identity_validation_failed") from exc
+    AuditService.log_async(
+        "platform_identity_created",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": response.account_id},
+    )
+    return response
+
+
+@router.patch("/platform/{account_id}", response_model=AccountSummary)
+async def update_platform_identity(
+    request: Request,
+    account_id: str,
+    payload: PlatformIdentityUpdateRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountSummary:
+    try:
+        response = await context.service.update_platform_identity(account_id, payload)
+    except PlatformIdentityConflictError as exc:
+        raise DashboardConflictError(str(exc), code="platform_identity_conflict") from exc
+    except PlatformIdentityNotFoundError as exc:
+        raise DashboardNotFoundError(str(exc), code="account_not_found") from exc
+    except ValueError as exc:
+        raise DashboardBadRequestError(str(exc), code="platform_identity_validation_failed") from exc
+    AuditService.log_async(
+        "platform_identity_updated",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id},
+    )
+    return response
 
 
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)

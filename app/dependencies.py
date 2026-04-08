@@ -34,6 +34,8 @@ from app.modules.request_logs.service import RequestLogsService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
+from app.modules.upstream_identities.repository import OpenAIPlatformIdentitiesRepository
+from app.modules.upstream_identities.service import OpenAIPlatformIdentitiesService
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
 
@@ -42,6 +44,7 @@ from app.modules.usage.service import UsageService
 class AccountsContext:
     session: AsyncSession
     repository: AccountsRepository
+    platform_repository: OpenAIPlatformIdentitiesRepository
     service: AccountsService
 
 
@@ -123,12 +126,20 @@ def get_accounts_context(
     session: AsyncSession = Depends(get_session),
 ) -> AccountsContext:
     repository = AccountsRepository(session)
+    platform_repository = OpenAIPlatformIdentitiesRepository(session)
+    sticky_repository = StickySessionsRepository(session)
     usage_repository = UsageRepository(session)
     additional_usage_repository = AdditionalUsageRepository(session)
-    service = AccountsService(repository, usage_repository, additional_usage_repository)
+    service = AccountsService(
+        repository,
+        usage_repository,
+        additional_usage_repository,
+        platform_service=OpenAIPlatformIdentitiesService(platform_repository, sticky_repository=sticky_repository),
+    )
     return AccountsContext(
         session=session,
         repository=repository,
+        platform_repository=platform_repository,
         service=service,
     )
 
@@ -170,6 +181,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
     async with get_background_session() as session:
         yield ProxyRepositories(
             accounts=AccountsRepository(session),
+            platform_identities=OpenAIPlatformIdentitiesRepository(session),
             usage=UsageRepository(session),
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),

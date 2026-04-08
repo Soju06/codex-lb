@@ -4,6 +4,8 @@ import {
   AccountSummarySchema,
   ImportStateSchema,
   OAuthStateSchema,
+  PlatformIdentityCreateRequestSchema,
+  PlatformIdentityUpdateRequestSchema,
 } from "@/features/accounts/schemas";
 
 const ISO = "2026-01-01T00:00:00+00:00";
@@ -48,6 +50,63 @@ describe("AccountSummarySchema", () => {
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
     expect(parsed.windowMinutesSecondary).toBe(10080);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
+  });
+
+  it("parses provider-aware platform identity payload", () => {
+    const parsed = AccountSummarySchema.parse({
+      accountId: "platform-1",
+      email: "Platform Key",
+      displayName: "Platform Key",
+      planType: "openai_platform",
+      status: "active",
+      providerKind: "openai_platform",
+      routingSubjectId: "platform-1",
+      label: "Platform Key",
+      eligibleRouteFamilies: ["public_models_http", "public_responses_http"],
+      lastValidatedAt: ISO,
+      lastAuthFailureReason: null,
+      organization: "org_test",
+      project: "proj_test",
+    });
+
+    expect(parsed.providerKind).toBe("openai_platform");
+    expect(parsed.eligibleRouteFamilies).toEqual([
+      "public_models_http",
+      "public_responses_http",
+    ]);
+    expect(parsed.organization).toBe("org_test");
+  });
+});
+
+describe("PlatformIdentityCreateRequestSchema", () => {
+  it("normalizes optional fields and allows zero enabled route families", () => {
+    const parsed = PlatformIdentityCreateRequestSchema.parse({
+      label: "Platform Key",
+      apiKey: "sk-platform-test",
+      organization: "  ",
+      project: "proj_test",
+      eligibleRouteFamilies: [],
+    });
+
+    expect(parsed.organization).toBeUndefined();
+    expect(parsed.project).toBe("proj_test");
+    expect(parsed.eligibleRouteFamilies).toEqual([]);
+  });
+});
+
+describe("PlatformIdentityUpdateRequestSchema", () => {
+  it("preserves explicit clears for optional fields", () => {
+    const parsed = PlatformIdentityUpdateRequestSchema.parse({
+      label: "Platform Key",
+      organization: "  ",
+      project: null,
+      eligibleRouteFamilies: ["public_models_http"],
+    });
+
+    expect(parsed.label).toBe("Platform Key");
+    expect(parsed.organization).toBeNull();
+    expect(parsed.project).toBeNull();
+    expect(parsed.eligibleRouteFamilies).toEqual(["public_models_http"]);
   });
 });
 

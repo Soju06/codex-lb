@@ -18,7 +18,9 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     email: overrides.email,
     displayName: overrides.displayName ?? overrides.email,
     planType: overrides.planType ?? "plus",
+    providerKind: overrides.providerKind ?? "chatgpt_web",
     status: overrides.status ?? "active",
+    eligibleRouteFamilies: overrides.eligibleRouteFamilies ?? [],
     usage: overrides.usage ?? null,
     resetAtPrimary: overrides.resetAtPrimary ?? null,
     resetAtSecondary: overrides.resetAtSecondary ?? null,
@@ -259,6 +261,27 @@ describe("buildRemainingItems", () => {
     expect(items[2].label).toBe("unique@example.com");
     expect(items[2].labelSuffix).toBe("");
     expect(items[2].isEmail).toBe(true);
+  });
+
+  it("excludes platform fallback identities from quota donut items", () => {
+    const items = buildRemainingItems(
+      [
+        account({ accountId: "acc-1", email: "one@example.com", providerKind: "chatgpt_web" }),
+        account({
+          accountId: "plat-1",
+          email: "Platform Key",
+          displayName: "Platform Key",
+          planType: "openai_platform",
+          providerKind: "openai_platform",
+          usage: null,
+        }),
+      ],
+      null,
+      "primary",
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]?.accountId).toBe("acc-1");
   });
 });
 

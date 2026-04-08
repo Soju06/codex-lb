@@ -128,7 +128,7 @@ describe("RequestLogsResponseSchema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("parses request rows including apiKeyName", () => {
+  it("parses request rows including provider-aware fields", () => {
     const parsed = RequestLogsResponseSchema.parse({
       requests: [
         {
@@ -136,6 +136,11 @@ describe("RequestLogsResponseSchema", () => {
           accountId: "acc-1",
           apiKeyName: "Key A",
           requestId: "req-1",
+          providerKind: "openai_platform",
+          routingSubjectId: "platform-1",
+          routeClass: "openai_public_http",
+          upstreamRequestId: "upstream-req-1",
+          rejectionReason: null,
           model: "gpt-5.1",
           transport: "websocket",
           status: "ok",
@@ -153,6 +158,9 @@ describe("RequestLogsResponseSchema", () => {
     });
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
+    expect(parsed.requests[0]?.providerKind).toBe("openai_platform");
+    expect(parsed.requests[0]?.routingSubjectId).toBe("platform-1");
+    expect(parsed.requests[0]?.upstreamRequestId).toBe("upstream-req-1");
     expect(parsed.requests[0]?.transport).toBe("websocket");
   });
 });

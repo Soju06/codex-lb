@@ -35,6 +35,7 @@ from app.modules.proxy.load_balancer import (
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.upstream_identities.repository import OpenAIPlatformIdentitiesRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
@@ -156,7 +157,13 @@ class StubStickySessionsRepository(StickySessionsRepository):
 
     @staticmethod
     def _build_row(key: str, account_id: str, kind: StickySessionKind) -> StickySession:
-        return StickySession(key=key, account_id=account_id, kind=kind)
+        return StickySession(
+            key=key,
+            kind=kind,
+            provider_kind="chatgpt_web",
+            routing_subject_id=account_id,
+            account_id=account_id,
+        )
 
 
 class StubRequestLogsRepository(RequestLogsRepository):
@@ -165,6 +172,11 @@ class StubRequestLogsRepository(RequestLogsRepository):
 
 
 class StubApiKeysRepository(ApiKeysRepository):
+    def __init__(self) -> None:
+        pass
+
+
+class StubPlatformIdentitiesRepository(OpenAIPlatformIdentitiesRepository):
     def __init__(self) -> None:
         pass
 
@@ -257,6 +269,7 @@ async def _repo_factory(
 ) -> AsyncIterator[ProxyRepositories]:
     yield ProxyRepositories(
         accounts=accounts_repo,
+        platform_identities=StubPlatformIdentitiesRepository(),
         usage=usage_repo,
         request_logs=StubRequestLogsRepository(),
         sticky_sessions=sticky_repo,
@@ -1096,6 +1109,7 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
     async def repo_factory() -> AsyncIterator[ProxyRepositories]:
         yield ProxyRepositories(
             accounts=accounts_repo,
+            platform_identities=StubPlatformIdentitiesRepository(),
             usage=usage_repo,
             additional_usage=StubAdditionalUsageRepository(),
             request_logs=object(),  # type: ignore[arg-type]
@@ -1156,6 +1170,7 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
         await release_repo.wait()
         yield ProxyRepositories(
             accounts=accounts_repo,
+            platform_identities=StubPlatformIdentitiesRepository(),
             usage=usage_repo,
             additional_usage=StubAdditionalUsageRepository(),
             request_logs=StubRequestLogsRepository(),

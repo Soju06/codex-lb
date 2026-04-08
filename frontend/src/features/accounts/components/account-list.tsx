@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Plus, Search, Upload } from "lucide-react";
+import { ChevronDown, ChevronUp, KeyRound, Plus, Search, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -21,17 +21,23 @@ const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota
 export type AccountListProps = {
   accounts: AccountSummary[];
   selectedAccountId: string | null;
+  platformIdentityRegistered: boolean;
+  platformPrerequisiteSatisfied: boolean;
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
   onOpenOauth: () => void;
+  onOpenPlatform: () => void;
 };
 
 export function AccountList({
   accounts,
   selectedAccountId,
+  platformIdentityRegistered,
+  platformPrerequisiteSatisfied,
   onSelect,
   onOpenImport,
   onOpenOauth,
+  onOpenPlatform,
 }: AccountListProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -48,8 +54,14 @@ export function AccountList({
       }
       return (
         account.email.toLowerCase().includes(needle) ||
+        (account.label ?? "").toLowerCase().includes(needle) ||
         account.accountId.toLowerCase().includes(needle) ||
-        account.planType.toLowerCase().includes(needle)
+        account.planType.toLowerCase().includes(needle) ||
+        (account.providerKind ?? "").toLowerCase().includes(needle) ||
+        (account.routingSubjectId ?? "").toLowerCase().includes(needle) ||
+        (account.organization ?? "").toLowerCase().includes(needle) ||
+        (account.project ?? "").toLowerCase().includes(needle) ||
+        (account.eligibleRouteFamilies ?? []).some((family) => family.toLowerCase().includes(needle))
       );
     });
   }, [accounts, search, statusFilter]);
@@ -82,16 +94,36 @@ export function AccountList({
         </Select>
       </div>
 
-      <div className="flex gap-2">
-        <Button type="button" size="sm" variant="outline" onClick={onOpenImport} className="h-8 flex-1 gap-1.5 text-xs">
+      <div className="grid grid-cols-3 gap-2">
+        <Button type="button" size="sm" variant="outline" onClick={onOpenImport} className="h-8 gap-1.5 px-2 text-xs">
           <Upload className="h-3.5 w-3.5" />
           Import
         </Button>
-        <Button type="button" size="sm" onClick={onOpenOauth} className="h-8 flex-1 gap-1.5 text-xs">
+        <Button type="button" size="sm" onClick={onOpenOauth} className="h-8 gap-1.5 px-2 text-xs">
           <Plus className="h-3.5 w-3.5" />
           Add Account
         </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          onClick={onOpenPlatform}
+          disabled={platformIdentityRegistered || !platformPrerequisiteSatisfied}
+          className="h-8 gap-1.5 px-2 text-xs"
+        >
+          <KeyRound className="h-3.5 w-3.5" />
+          Add API Key
+        </Button>
       </div>
+      {platformIdentityRegistered ? (
+        <p className="text-xs text-muted-foreground">
+          A Platform fallback key is already registered. Phase 1 allows only one.
+        </p>
+      ) : !platformPrerequisiteSatisfied ? (
+        <p className="text-xs text-muted-foreground">
+          Add or reactivate a ChatGPT account before registering a Platform fallback key.
+        </p>
+      ) : null}
 
       <div>
         <Button

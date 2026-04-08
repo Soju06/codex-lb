@@ -23,12 +23,13 @@ import type {
   StickySessionEntry,
   StickySessionIdentifier,
   StickySessionKind,
+  StickySessionProviderKind,
   StickySessionSortBy,
   StickySessionSortDir,
 } from "@/features/sticky-sessions/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
-import { formatTimeLong } from "@/utils/formatters";
+import { formatProviderLabel, formatTimeLong } from "@/utils/formatters";
 
 function kindLabel(kind: StickySessionKind): string {
   switch (kind) {
@@ -41,8 +42,19 @@ function kindLabel(kind: StickySessionKind): string {
   }
 }
 
+function affinityScopeLabel(value: StickySessionEntry["affinityScope"]): string {
+  switch (value) {
+    case "chatgpt_continuity":
+      return "ChatGPT continuity";
+    case "provider_prompt_cache":
+      return "Prompt-cache affinity";
+    case "provider_scoped":
+      return "Provider scoped";
+  }
+}
+
 function stickySessionRowId(entry: StickySessionIdentifier): string {
-  return `${entry.kind}:${entry.key}`;
+  return `${entry.providerKind}:${entry.kind}:${entry.key}`;
 }
 
 const EMPTY_STICKY_SESSION_ENTRIES: StickySessionEntry[] = [];
@@ -66,6 +78,7 @@ export function StickySessionsSection() {
     params,
     setAccountQuery,
     setKeyQuery,
+    setProviderKind,
     setSort,
     setLimit,
     setOffset,
@@ -96,14 +109,15 @@ export function StickySessionsSection() {
   const busy = deleteMutation.isPending || deleteFilteredMutation.isPending || purgeMutation.isPending;
   const hasEntries = entries.length > 0;
   const hasAnyRows = total > 0;
-  const hasActiveTextFilter = params.accountQuery.trim().length > 0 || params.keyQuery.trim().length > 0;
+  const hasActiveFilter =
+    params.providerKind !== null || params.accountQuery.trim().length > 0 || params.keyQuery.trim().length > 0;
   const visibleRowIdSet = useMemo(() => new Set(entries.map((entry) => stickySessionRowId(entry))), [entries]);
   const selectedRowIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
   const selectedEntries = useMemo(
     () =>
       entries
         .filter((entry) => selectedRowIdSet.has(stickySessionRowId(entry)))
-        .map(({ key, kind }) => ({ key, kind })),
+        .map(({ key, kind, providerKind }) => ({ key, kind, providerKind })),
     [entries, selectedRowIdSet],
   );
   const selectedCount = selectedEntries.length;
@@ -111,6 +125,12 @@ export function StickySessionsSection() {
   const someVisibleSelected = selectedCount > 0 && !allVisibleSelected;
   const selectedDeleteTargets = deleteSelectedDialog.data ?? [];
   const selectedDeleteCount = selectedDeleteTargets.length;
+
+  const providerFilters: Array<{ label: string; value: StickySessionProviderKind | null }> = [
+    { label: "All providers", value: null },
+    { label: "ChatGPT Web", value: "chatgpt_web" },
+    { label: "OpenAI Platform", value: "openai_platform" },
+  ];
 
   useEffect(() => {
     if (!stickySessionsQuery.isLoading && total > 0 && entries.length === 0 && params.offset > 0) {
@@ -169,6 +189,24 @@ export function StickySessionsSection() {
         />
       </div>
 
+      <div className="flex flex-wrap gap-2">
+        {providerFilters.map((filter) => {
+          const active = params.providerKind === filter.value;
+          return (
+            <Button
+              key={filter.label}
+              type="button"
+              size="sm"
+              variant={active ? "default" : "outline"}
+              className="h-8 text-xs"
+              onClick={() => setProviderKind(filter.value)}
+            >
+              {filter.label}
+            </Button>
+          );
+        })}
+      </div>
+
       <div className="flex flex-col gap-3 rounded-lg border px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5">
@@ -192,7 +230,7 @@ export function StickySessionsSection() {
             size="sm"
             variant="outline"
             className="h-8 text-xs"
-            disabled={busy || !hasActiveTextFilter || total === 0}
+            disabled={busy || !hasActiveFilter || total === 0}
             onClick={() => deleteFilteredDialog.show(total)}
           >
             Delete Filtered
@@ -291,7 +329,10 @@ export function StickySessionsSection() {
                     const expires = entry.expiresAt ? formatTimeLong(entry.expiresAt) : null;
                     const selected = selectedRowIdSet.has(stickySessionRowId(entry));
                     return (
-                      <TableRow key={`${entry.kind}:${entry.key}`} data-state={selected ? "selected" : undefined}>
+                      <TableRow
+                        key={`${entry.providerKind}:${entry.kind}:${entry.key}`}
+                        data-state={selected ? "selected" : undefined}
+                      >
                         <TableCell className="pl-4">
                           <Checkbox
                             aria-label={`Select sticky session ${entry.key}`}
@@ -306,9 +347,17 @@ export function StickySessionsSection() {
                         <TableCell>
                           <Badge variant="outline">{kindLabel(entry.kind)}</Badge>
                         </TableCell>
-                        <TableCell className="truncate text-xs">{entry.displayName}</TableCell>
+                        <TableCell className="truncate text-xs">
+                          <div className="truncate font-medium">{entry.displayName}</div>
+                          <div className="truncate text-[11px] text-muted-foreground">
+                            <span>{formatProviderLabel(entry.providerKind)}</span>
+                            <span aria-hidden="true"> · </span>
+                            <span>{entry.routingSubjectId}</span>
+                          </div>
+                        </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
-                          {updated.date} {updated.time}
+                          <div>{updated.date} {updated.time}</div>
+                          <div className="text-[11px]">{affinityScopeLabel(entry.affinityScope)}</div>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {entry.isStale ? (
@@ -326,7 +375,9 @@ export function StickySessionsSection() {
                             variant="ghost"
                             className="text-destructive hover:text-destructive"
                             disabled={busy}
-                            onClick={() => deleteDialog.show({ key: entry.key, kind: entry.kind })}
+                            onClick={() =>
+                              deleteDialog.show({ key: entry.key, kind: entry.kind, providerKind: entry.providerKind })
+                            }
                           >
                             Remove
                           </Button>
@@ -362,7 +413,7 @@ export function StickySessionsSection() {
         title="Remove sticky session"
         description={
           deleteDialog.data
-            ? `${kindLabel(deleteDialog.data.kind)} mapping ${deleteDialog.data.key} will stop pinning future requests.`
+            ? `${kindLabel(deleteDialog.data.kind)} mapping ${deleteDialog.data.key} for ${formatProviderLabel(deleteDialog.data.providerKind)} will stop pinning future requests.`
             : ""
         }
         confirmLabel="Delete"
@@ -402,7 +453,7 @@ export function StickySessionsSection() {
       <ConfirmDialog
         open={deleteFilteredDialog.open}
         title="Delete filtered sticky sessions"
-        description={`Delete all ${deleteFilteredDialog.data ?? 0} sticky sessions that match the current filters?`}
+        description={`Delete all ${deleteFilteredDialog.data ?? 0} sticky sessions that match the current filters${params.providerKind ? ` for ${formatProviderLabel(params.providerKind)}` : ""}?`}
         confirmLabel="Delete Filtered"
         onOpenChange={deleteFilteredDialog.onOpenChange}
         onConfirm={() => {

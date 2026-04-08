@@ -2,13 +2,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
+  createPlatformIdentity,
   deleteAccount,
   getAccountTrends,
   importAccount,
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updatePlatformIdentity,
 } from "@/features/accounts/api";
+import type { PlatformIdentityUpdateRequest } from "@/features/accounts/schemas";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
@@ -31,6 +34,34 @@ export function useAccountMutations() {
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
+    },
+  });
+
+  const createPlatformMutation = useMutation({
+    mutationFn: createPlatformIdentity,
+    onSuccess: () => {
+      toast.success("OpenAI Platform identity added");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to add OpenAI Platform identity");
+    },
+  });
+
+  const updatePlatformMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      payload,
+    }: {
+      accountId: string;
+      payload: PlatformIdentityUpdateRequest;
+    }) => updatePlatformIdentity(accountId, payload),
+    onSuccess: () => {
+      toast.success("OpenAI Platform identity updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to update OpenAI Platform identity");
     },
   });
 
@@ -67,7 +98,14 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  return {
+    importMutation,
+    createPlatformMutation,
+    updatePlatformMutation,
+    pauseMutation,
+    resumeMutation,
+    deleteMutation,
+  };
 }
 
 export function useAccountTrends(accountId: string | null) {

@@ -18,6 +18,7 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            eligibleRouteFamilies: [],
             additionalQuotas: [],
           },
           {
@@ -26,13 +27,17 @@ describe("AccountList", () => {
             displayName: "Secondary",
             planType: "pro",
             status: "paused",
+            eligibleRouteFamilies: [],
             additionalQuotas: [],
           },
         ]}
         selectedAccountId="acc-1"
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
         onSelect={onSelect}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
       />,
     );
 
@@ -59,13 +64,17 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            eligibleRouteFamilies: [],
             additionalQuotas: [],
           },
         ]}
         selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
       />,
     );
 
@@ -83,6 +92,7 @@ describe("AccountList", () => {
             displayName: "Duplicate A",
             planType: "plus",
             status: "active",
+            eligibleRouteFamilies: [],
             additionalQuotas: [],
           },
           {
@@ -91,6 +101,7 @@ describe("AccountList", () => {
             displayName: "Duplicate B",
             planType: "plus",
             status: "active",
+            eligibleRouteFamilies: [],
             additionalQuotas: [],
           },
           {
@@ -99,13 +110,17 @@ describe("AccountList", () => {
             displayName: "Unique",
             planType: "pro",
             status: "active",
+            eligibleRouteFamilies: [],
             additionalQuotas: [],
           },
         ]}
         selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
       />,
     );
 
@@ -113,5 +128,109 @@ describe("AccountList", () => {
     expect(screen.getByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com \| ID 7f9de2ad\.\.\.a95cee/))).toBeInTheDocument();
     expect(screen.getByText("unique@example.com")).toBeInTheDocument();
     expect(screen.queryByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/unique@example\.com \| ID/))).not.toBeInTheDocument();
+  });
+
+  it("opens the platform dialog from the list toolbar", async () => {
+    const user = userEvent.setup();
+    const onOpenPlatform = vi.fn();
+
+    render(
+      <AccountList
+        accounts={[]}
+        selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        onOpenPlatform={onOpenPlatform}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Add API Key" }));
+    expect(onOpenPlatform).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables Add API Key when a platform identity is already registered", () => {
+    render(
+      <AccountList
+        accounts={[]}
+        selectedAccountId={null}
+        platformIdentityRegistered
+        platformPrerequisiteSatisfied
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Add API Key" })).toBeDisabled();
+    expect(
+      screen.getByText("A Platform fallback key is already registered. Phase 1 allows only one."),
+    ).toBeInTheDocument();
+  });
+
+  it("matches platform identities by routing subject search", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "platform-1",
+            email: "Platform Key",
+            displayName: "Platform Key",
+            planType: "openai_platform",
+            status: "active",
+            providerKind: "openai_platform",
+            routingSubjectId: "subject-platform-1",
+            eligibleRouteFamilies: [],
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-2",
+            email: "secondary@example.com",
+            displayName: "Secondary",
+            planType: "pro",
+            status: "active",
+            eligibleRouteFamilies: [],
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "subject-platform-1");
+
+    expect(screen.getByText(/Subject subject-platform-1/)).toBeInTheDocument();
+    expect(screen.queryByText("secondary@example.com")).not.toBeInTheDocument();
+  });
+
+  it("disables Add API Key until an active ChatGPT account exists", () => {
+    render(
+      <AccountList
+        accounts={[]}
+        selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied={false}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Add API Key" })).toBeDisabled();
+    expect(
+      screen.getByText("Add or reactivate a ChatGPT account before registering a Platform fallback key."),
+    ).toBeInTheDocument();
   });
 });

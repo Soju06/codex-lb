@@ -21,6 +21,7 @@ from app.modules.sticky_sessions.schemas import (
     StickySessionsPurgeRequest,
     StickySessionsPurgeResponse,
 )
+from app.modules.upstream_identities.types import CHATGPT_WEB_PROVIDER_KIND, ProviderKind
 
 router = APIRouter(
     prefix="/api/sticky-sessions",
@@ -33,6 +34,7 @@ router = APIRouter(
 async def list_sticky_sessions(
     kind: StickySessionKind | None = Query(default=None),
     stale_only: bool = Query(default=False, alias="staleOnly"),
+    provider_kind: ProviderKind | None = Query(default=None, alias="providerKind"),
     account_query: str | None = Query(default=None, alias="accountQuery"),
     key_query: str | None = Query(default=None, alias="keyQuery"),
     sort_by: StickySessionSortBy = Query(default="updated_at", alias="sortBy"),
@@ -44,6 +46,7 @@ async def list_sticky_sessions(
     result = await context.service.list_entries(
         kind=kind,
         stale_only=stale_only,
+        provider_kind=provider_kind,
         account_query=account_query,
         key_query=key_query,
         sort_by=sort_by,
@@ -57,6 +60,9 @@ async def list_sticky_sessions(
                 key=entry.key,
                 display_name=entry.display_name,
                 kind=entry.kind,
+                provider_kind=entry.provider_kind,
+                routing_subject_id=entry.routing_subject_id,
+                affinity_scope=entry.affinity_scope,
                 created_at=entry.created_at,
                 updated_at=entry.updated_at,
                 expires_at=entry.expires_at,
@@ -84,12 +90,23 @@ async def delete_sticky_sessions(
     payload: StickySessionsDeleteRequest,
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionsDeleteResponse:
-    result = await context.service.delete_entries([(entry.key, entry.kind) for entry in payload.sessions])
+    result = await context.service.delete_entries(
+        [(entry.key, entry.kind, entry.provider_kind) for entry in payload.sessions]
+    )
     return StickySessionsDeleteResponse(
         deleted_count=result.deleted_count,
-        deleted=[StickySessionIdentifier(key=key, kind=kind) for key, kind in result.deleted],
+        deleted=[
+            StickySessionIdentifier(key=key, kind=kind, provider_kind=provider_kind)
+            for key, kind, provider_kind in result.deleted
+        ],
         failed=[
-            StickySessionDeleteFailure(key=entry.key, kind=entry.kind, reason=entry.reason) for entry in result.failed
+            StickySessionDeleteFailure(
+                key=entry.key,
+                kind=entry.kind,
+                provider_kind=entry.provider_kind,
+                reason=entry.reason,
+            )
+            for entry in result.failed
         ],
     )
 
@@ -101,6 +118,7 @@ async def delete_filtered_sticky_sessions(
 ) -> StickySessionsDeleteFilteredResponse:
     deleted_count = await context.service.delete_filtered_entries(
         stale_only=payload.stale_only,
+        provider_kind=payload.provider_kind,
         account_query=payload.account_query,
         key_query=payload.key_query,
     )
@@ -111,9 +129,10 @@ async def delete_filtered_sticky_sessions(
 async def delete_sticky_session(
     kind: StickySessionKind,
     key: str,
+    provider_kind: ProviderKind = Query(default=CHATGPT_WEB_PROVIDER_KIND, alias="providerKind"),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionDeleteResponse:
-    deleted = await context.service.delete_entry(key, kind=kind)
+    deleted = await context.service.delete_entry(key, kind=kind, provider_kind=provider_kind)
     if not deleted:
         raise DashboardNotFoundError("Sticky session not found", code="sticky_session_not_found")
     return StickySessionDeleteResponse(status="deleted")

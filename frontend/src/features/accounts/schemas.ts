@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+export const ProviderKindSchema = z.enum(["chatgpt_web", "openai_platform"]);
+export const PlatformRouteFamilySchema = z.enum([
+  "public_models_http",
+  "public_responses_http",
+]);
+
+const OptionalTrimmedStringSchema = z
+  .string()
+  .trim()
+  .optional()
+  .transform((value) => (value && value.length > 0 ? value : undefined));
+
 export const UsageTrendPointSchema = z.object({
   t: z.string().datetime({ offset: true }),
   v: z.number(),
@@ -54,6 +66,14 @@ export const AccountSummarySchema = z.object({
   displayName: z.string(),
   planType: z.string(),
   status: z.string(),
+  providerKind: ProviderKindSchema.nullable().optional(),
+  routingSubjectId: z.string().nullable().optional(),
+  label: z.string().nullable().optional(),
+  eligibleRouteFamilies: z.array(PlatformRouteFamilySchema).default([]),
+  lastValidatedAt: z.string().datetime({ offset: true }).nullable().optional(),
+  lastAuthFailureReason: z.string().nullable().optional(),
+  organization: z.string().nullable().optional(),
+  project: z.string().nullable().optional(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
@@ -79,6 +99,36 @@ export const AccountImportResponseSchema = z.object({
   email: z.string(),
   planType: z.string(),
   status: z.string(),
+});
+
+export const PlatformIdentityCreateRequestSchema = z.object({
+  label: z.string().trim().min(1, "Label is required"),
+  apiKey: z.string().trim().min(1, "API key is required"),
+  organization: OptionalTrimmedStringSchema,
+  project: OptionalTrimmedStringSchema,
+  eligibleRouteFamilies: z.array(PlatformRouteFamilySchema).default([]),
+});
+
+const OptionalNullableTrimmedStringSchema = z
+  .union([z.string(), z.null()])
+  .optional()
+  .transform((value) => {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (value === null) {
+      return null;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  });
+
+export const PlatformIdentityUpdateRequestSchema = z.object({
+  label: z.string().trim().min(1, "Label is required").optional(),
+  apiKey: z.string().trim().min(1, "API key is required").optional(),
+  organization: OptionalNullableTrimmedStringSchema,
+  project: OptionalNullableTrimmedStringSchema,
+  eligibleRouteFamilies: z.array(PlatformRouteFamilySchema).optional(),
 });
 
 export const AccountActionResponseSchema = z.object({
@@ -151,6 +201,10 @@ export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
+export type ProviderKind = z.infer<typeof ProviderKindSchema>;
+export type PlatformRouteFamily = z.infer<typeof PlatformRouteFamilySchema>;
+export type PlatformIdentityCreateRequest = z.input<typeof PlatformIdentityCreateRequestSchema>;
+export type PlatformIdentityUpdateRequest = z.input<typeof PlatformIdentityUpdateRequestSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;

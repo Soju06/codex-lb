@@ -544,16 +544,25 @@ def _maybe_log_upstream_request_start(
     request_id = get_request_id()
     target = _summarize_upstream_target(url)
     account_id = headers.get("chatgpt-account-id")
+    route_class = _route_class_for_upstream_target(url)
     header_keys = _interesting_upstream_header_keys(headers)
 
     if settings.log_upstream_request_summary:
         logger.info(
-            "upstream_request_start request_id=%s kind=%s method=%s target=%s account_id=%s headers=%s payload=%s",
+            (
+                "upstream_request_start request_id=%s kind=%s method=%s target=%s "
+                "provider_kind=%s route_class=%s routing_subject_id=%s account_id=%s "
+                "upstream_request_id=%s headers=%s payload=%s"
+            ),
             request_id,
             kind,
             method,
             target,
+            "chatgpt_web",
+            route_class,
             account_id,
+            account_id,
+            None,
             header_keys,
             payload_summary,
         )
@@ -582,6 +591,7 @@ def _maybe_log_upstream_request_complete(
     failure_detail: str | None = None,
     failure_exception_type: str | None = None,
     retryable_same_contract: bool | None = None,
+    upstream_request_id: str | None = None,
 ) -> None:
     settings = get_settings()
     if not settings.log_upstream_request_summary:
@@ -597,14 +607,18 @@ def _maybe_log_upstream_request_complete(
         level,
         (
             "upstream_request_complete request_id=%s kind=%s method=%s target=%s "
-            "account_id=%s status=%s duration_ms=%s error_code=%s error_message=%s "
+            "provider_kind=%s route_class=%s routing_subject_id=%s account_id=%s "
+            "status=%s duration_ms=%s error_code=%s error_message=%s "
             "failure_phase=%s payload_object=%s failure_detail=%s failure_exception_type=%s "
-            "retryable_same_contract=%s"
+            "retryable_same_contract=%s upstream_request_id=%s"
         ),
         get_request_id(),
         kind,
         method,
         _summarize_upstream_target(url),
+        "chatgpt_web",
+        _route_class_for_upstream_target(url),
+        headers.get("chatgpt-account-id"),
         headers.get("chatgpt-account-id"),
         status_code,
         int((time.monotonic() - started_at) * 1000),
@@ -615,7 +629,14 @@ def _maybe_log_upstream_request_complete(
         failure_detail,
         failure_exception_type,
         retryable_same_contract,
+        upstream_request_id,
     )
+
+
+def _route_class_for_upstream_target(url: str) -> str:
+    if "/v1/" in url:
+        return "openai_public_http"
+    return "chatgpt_private"
 
 
 def _normalize_error_code(code: str | None, error_type: str | None) -> str:

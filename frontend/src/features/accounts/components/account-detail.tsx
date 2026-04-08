@@ -5,14 +5,17 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
+import { PlatformIdentityPanel } from "@/features/accounts/components/platform-identity-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
+import { formatProviderLabel, formatSlug } from "@/utils/formatters";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
   showAccountId?: boolean;
   busy: boolean;
+  onEditPlatform: (account: AccountSummary) => void;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
@@ -23,12 +26,14 @@ export function AccountDetail({
   account,
   showAccountId = false,
   busy,
+  onEditPlatform,
   onPause,
   onResume,
   onDelete,
   onReauth,
 }: AccountDetailProps) {
-  const { data: trends } = useAccountTrends(account?.accountId ?? null);
+  const isPlatformIdentity = account?.providerKind === "openai_platform";
+  const { data: trends } = useAccountTrends(isPlatformIdentity ? null : (account?.accountId ?? null));
   const blurred = usePrivacyStore((s) => s.blurred);
 
   if (!account) {
@@ -50,6 +55,9 @@ export function AccountDetail({
     ? account.email
     : null;
   const idSuffix = showAccountId ? ` (${compactId})` : "";
+  const providerLabel = isPlatformIdentity
+    ? `${formatProviderLabel(account.providerKind)} API key`
+    : formatSlug(account.planType);
 
   return (
     <div key={account.accountId} className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5">
@@ -63,13 +71,21 @@ export function AccountDetail({
             <span className={blurred ? "privacy-blur" : ""}>{emailSubtitle}</span>{showAccountId ? ` | ID ${compactId}` : ""}
           </p>
         ) : null}
+        <p className="mt-1 text-xs text-muted-foreground">{providerLabel}</p>
       </div>
 
-      <AccountUsagePanel account={account} trends={trends} />
-      <AccountTokenInfo account={account} />
+      {isPlatformIdentity ? (
+        <PlatformIdentityPanel account={account} />
+      ) : (
+        <>
+          <AccountUsagePanel account={account} trends={trends} />
+          <AccountTokenInfo account={account} />
+        </>
+      )}
       <AccountActions
         account={account}
         busy={busy}
+        onEditPlatform={onEditPlatform}
         onPause={onPause}
         onResume={onResume}
         onDelete={onDelete}

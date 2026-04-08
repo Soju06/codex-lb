@@ -7,7 +7,9 @@ from pydantic import Field, model_validator
 
 from app.db.models import StickySessionKind
 from app.modules.shared.schemas import DashboardModel
+from app.modules.upstream_identities.types import CHATGPT_WEB_PROVIDER_KIND, ProviderKind
 
+StickySessionAffinityScope = Literal["chatgpt_continuity", "provider_prompt_cache", "provider_scoped"]
 StickySessionSortBy = Literal["updated_at", "created_at", "account", "key"]
 StickySessionSortDir = Literal["asc", "desc"]
 
@@ -16,6 +18,9 @@ class StickySessionEntryResponse(DashboardModel):
     key: str
     display_name: str
     kind: StickySessionKind
+    provider_kind: ProviderKind
+    routing_subject_id: str
+    affinity_scope: StickySessionAffinityScope
     created_at: datetime
     updated_at: datetime
     expires_at: datetime | None = None
@@ -32,6 +37,7 @@ class StickySessionsListResponse(DashboardModel):
 class StickySessionIdentifier(DashboardModel):
     key: str = Field(min_length=1)
     kind: StickySessionKind
+    provider_kind: ProviderKind = CHATGPT_WEB_PROVIDER_KIND
 
 
 class StickySessionDeleteResponse(DashboardModel):
@@ -43,9 +49,9 @@ class StickySessionsDeleteRequest(DashboardModel):
 
     @model_validator(mode="after")
     def validate_unique_sessions(self) -> "StickySessionsDeleteRequest":
-        seen: set[tuple[str, StickySessionKind]] = set()
+        seen: set[tuple[str, StickySessionKind, ProviderKind]] = set()
         for session in self.sessions:
-            target = (session.key, session.kind)
+            target = (session.key, session.kind, session.provider_kind)
             if target in seen:
                 raise ValueError("duplicate sticky session targets are not allowed")
             seen.add(target)
@@ -55,6 +61,7 @@ class StickySessionsDeleteRequest(DashboardModel):
 class StickySessionDeleteFailure(DashboardModel):
     key: str
     kind: StickySessionKind
+    provider_kind: ProviderKind
     reason: str
 
 
@@ -66,6 +73,7 @@ class StickySessionsDeleteResponse(DashboardModel):
 
 class StickySessionsDeleteFilteredRequest(DashboardModel):
     stale_only: bool = False
+    provider_kind: ProviderKind | None = None
     account_query: str = ""
     key_query: str = ""
 

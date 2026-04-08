@@ -19,6 +19,7 @@ from app.modules.accounts.schemas import (
     AccountUsageTrend,
     UsageTrendPoint,
 )
+from app.modules.upstream_identities.types import CHATGPT_WEB_PROVIDER_KIND
 
 
 def build_account_summaries(
@@ -100,6 +101,9 @@ def _account_to_summary(
         display_name=account.email,
         plan_type=plan_type,
         status=account.status.value,
+        provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+        routing_subject_id=account.id,
+        label=account.email,
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,

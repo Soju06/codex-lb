@@ -6,7 +6,7 @@ from datetime import timezone
 
 import pytest
 
-import app.modules.proxy.service as proxy_module
+import app.modules.proxy.provider_adapters as proxy_transport_module
 from app.core.utils.time import utcnow
 from app.db.session import SessionLocal
 from app.modules.usage.repository import UsageRepository
@@ -184,7 +184,7 @@ async def test_prompt_cache_reallocates_when_usage_exceeds_configured_budget_thr
         seen.append(account_id)
         yield 'data: {"type":"response.completed","response":{"id":"resp_budget"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.1",

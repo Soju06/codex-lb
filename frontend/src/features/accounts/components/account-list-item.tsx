@@ -5,7 +5,7 @@ import { StatusBadge } from "@/components/status-badge";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { formatSlug } from "@/utils/formatters";
+import { formatProviderLabel, formatSlug } from "@/utils/formatters";
 
 export type AccountListItemProps = {
   account: AccountSummary;
@@ -13,6 +13,13 @@ export type AccountListItemProps = {
   showAccountId?: boolean;
   onSelect: (accountId: string) => void;
 };
+
+function formatAccountListSubtitle(account: AccountSummary): string {
+  if (account.providerKind === "openai_platform") {
+    return `${formatProviderLabel(account.providerKind)} API key`;
+  }
+  return formatSlug(account.planType);
+}
 
 function MiniQuotaBar({ percent }: { percent: number | null }) {
   if (percent === null) {
@@ -38,9 +45,15 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : null;
-  const baseSubtitle = emailSubtitle ?? formatSlug(account.planType);
+  const baseSubtitle = formatAccountListSubtitle(account);
+  const providerMetadata = account.providerKind === "openai_platform" && account.routingSubjectId
+    ? `${baseSubtitle} | Subject ${account.routingSubjectId}`
+    : baseSubtitle;
+  const shouldAppendProviderMetadata = account.providerKind === "openai_platform";
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
-  const secondary = account.usage?.secondaryRemainingPercent ?? null;
+  const secondary = account.providerKind === "openai_platform"
+    ? null
+    : account.usage?.secondaryRemainingPercent ?? null;
 
   return (
     <button
@@ -59,7 +72,15 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             {titleIsEmail && blurred ? <span className="privacy-blur">{title}</span> : title}
           </p>
           <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
+            {emailSubtitle ? (
+              <>
+                <span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>
+                {idSuffix}
+                {shouldAppendProviderMetadata ? ` | ${providerMetadata}` : ""}
+              </>
+            ) : (
+              <>{providerMetadata}{idSuffix}</>
+            )}
           </p>
         </div>
         <StatusBadge status={status} />

@@ -46,29 +46,36 @@ class AccountsRepository:
         self,
         account_ids: list[str] | None = None,
     ) -> dict[str, AccountRequestUsageSummary]:
+        return await self.list_request_usage_summary_by_subject(account_ids)
+
+    async def list_request_usage_summary_by_subject(
+        self,
+        routing_subject_ids: list[str] | None = None,
+    ) -> dict[str, AccountRequestUsageSummary]:
         summaries: dict[str, AccountRequestUsageSummary] = {}
+        subject_id = func.coalesce(RequestLog.routing_subject_id, RequestLog.account_id)
         output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
         stmt = select(
-            RequestLog.account_id,
+            subject_id.label("routing_subject_id"),
             func.count(RequestLog.id).label("request_count"),
             func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
             func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-        ).group_by(RequestLog.account_id)
-        if account_ids:
-            stmt = stmt.where(RequestLog.account_id.in_(account_ids))
+        ).group_by(subject_id)
+        if routing_subject_ids:
+            stmt = stmt.where(subject_id.in_(routing_subject_ids))
 
         result = await self._session.execute(stmt)
         for (
-            account_id,
+            routing_subject_id,
             request_count,
             input_tokens,
             output_tokens,
             cached_input_tokens,
             total_cost_usd,
         ) in result.all():
-            if not account_id:
+            if not routing_subject_id:
                 continue
             input_sum = int(input_tokens or 0)
             output_sum = int(output_tokens or 0)
@@ -80,7 +87,7 @@ class AccountsRepository:
                 cached_input_tokens=cached_sum,
                 total_cost_usd=round(float(total_cost_usd or 0.0), 6),
             )
-            summaries[account_id] = return_row
+            summaries[routing_subject_id] = return_row
 
         return summaries
 

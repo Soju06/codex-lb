@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-import app.modules.proxy.service as proxy_module
+import app.modules.proxy.provider_adapters as provider_adapters_module
 
 pytestmark = pytest.mark.integration
 
@@ -41,11 +41,11 @@ async def test_v1_chat_completions_stream(async_client, monkeypatch):
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": True}
     async with async_client.stream("POST", "/v1/chat/completions", json=payload) as resp:
@@ -66,12 +66,12 @@ async def test_v1_chat_completions_non_stream_forces_stream(async_client, monkey
 
     observed_stream: dict[str, bool | None] = {"value": None}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         observed_stream["value"] = payload.stream
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}]}
     resp = await async_client.post("/v1/chat/completions", json=payload)
@@ -91,7 +91,7 @@ async def test_v1_chat_completions_non_stream_deduplicates_tool_call_snapshots(a
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
             '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
@@ -106,7 +106,7 @@ async def test_v1_chat_completions_non_stream_deduplicates_tool_call_snapshots(a
         )
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.2",
@@ -139,7 +139,7 @@ async def test_v1_chat_completions_stream_deduplicates_tool_call_snapshots(async
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
             '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
@@ -154,7 +154,7 @@ async def test_v1_chat_completions_stream_deduplicates_tool_call_snapshots(async
         )
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.2",
@@ -205,7 +205,7 @@ async def test_v1_chat_completions_stream_skips_incompatible_snapshot_rewrites(
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
             '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
@@ -216,7 +216,7 @@ async def test_v1_chat_completions_stream_skips_incompatible_snapshot_rewrites(
         )
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.2",
@@ -264,7 +264,7 @@ async def test_v1_chat_completions_stream_preserves_tool_call_delta_before_failu
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.output_tool_call.delta","call_id":"call_1",'
             '"name":"get_weather","arguments":"{\\"city\\":\\"Zur"}\n\n'
@@ -274,7 +274,7 @@ async def test_v1_chat_completions_stream_preserves_tool_call_delta_before_failu
             '{"message":"bad","type":"server_error","code":"no_accounts"}}}\n\n'
         )
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.2",
@@ -323,14 +323,14 @@ async def test_v1_chat_completions_stream_include_usage(async_client, monkeypatc
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_1","usage":'
             '{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}\n\n'
         )
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.2",

@@ -127,11 +127,12 @@ export function buildRemainingItems(
   windowKey: "primary" | "secondary",
   isDark = false,
 ): RemainingItem[] {
+  const usageAccounts = accounts.filter((account) => account.providerKind !== "openai_platform");
   const usageIndex = buildWindowIndex(window);
-  const palette = buildDonutPalette(accounts.length, isDark);
-  const duplicateAccountIds = buildDuplicateAccountIdSet(accounts);
+  const palette = buildDonutPalette(usageAccounts.length, isDark);
+  const duplicateAccountIds = buildDuplicateAccountIdSet(usageAccounts);
 
-  return accounts
+  return usageAccounts
     .map((account, index) => {
       if (windowKey === "primary" && isWeeklyOnlyAccount(account)) {
         return null;

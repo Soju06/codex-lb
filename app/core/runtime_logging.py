@@ -149,12 +149,20 @@ def log_error_response(
     message: str | None,
     *,
     category: str,
+    provider_kind: str | None = None,
+    routing_subject_id: str | None = None,
+    route_class: str | None = None,
+    rejection_reason: str | None = None,
+    upstream_request_id: str | None = None,
     exc_info: bool = False,
 ) -> None:
     level = logging.ERROR if status_code >= 500 else logging.WARNING
     logger.log(
         level,
-        "%s request_id=%s method=%s path=%s status=%s code=%s message=%s",
+        (
+            "%s request_id=%s method=%s path=%s status=%s code=%s message=%s "
+            "provider_kind=%s routing_subject_id=%s route_class=%s rejection_reason=%s upstream_request_id=%s"
+        ),
         category,
         get_request_id(),
         request.method,
@@ -162,6 +170,11 @@ def log_error_response(
         status_code,
         code,
         _collapse_log_value(message),
+        provider_kind,
+        routing_subject_id,
+        route_class,
+        rejection_reason,
+        upstream_request_id,
         exc_info=exc_info,
     )
 

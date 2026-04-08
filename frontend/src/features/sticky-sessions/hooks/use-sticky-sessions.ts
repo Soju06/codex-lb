@@ -10,6 +10,7 @@ import {
 } from "@/features/sticky-sessions/api";
 import type {
   StickySessionIdentifier,
+  StickySessionProviderKind,
   StickySessionSortBy,
   StickySessionSortDir,
   StickySessionsDeleteFilteredResponse,
@@ -23,6 +24,7 @@ export function useStickySessions() {
   const queryClient = useQueryClient();
   const [params, setParams] = useState<StickySessionsListParams>({
     staleOnly: false,
+    providerKind: null,
     accountQuery: "",
     keyQuery: "",
     sortBy: "updated_at",
@@ -70,6 +72,10 @@ export function useStickySessions() {
     setParams((current) => ({ ...current, keyQuery, offset: 0 }));
   };
 
+  const setProviderKind = (providerKind: StickySessionProviderKind | null) => {
+    setParams((current) => ({ ...current, providerKind, offset: 0 }));
+  };
+
   const setSort = (sortBy: StickySessionSortBy, sortDir: StickySessionSortDir) => {
     setParams((current) => ({ ...current, sortBy, sortDir, offset: 0 }));
   };
@@ -97,6 +103,7 @@ export function useStickySessions() {
     mutationFn: () =>
       deleteFilteredStickySessions({
         staleOnly: queryParams.staleOnly,
+        providerKind: queryParams.providerKind,
         accountQuery: queryParams.accountQuery,
         keyQuery: queryParams.keyQuery,
       }),
@@ -130,6 +137,7 @@ export function useStickySessions() {
     params,
     setAccountQuery,
     setKeyQuery,
+    setProviderKind,
     setSort,
     setOffset,
     setLimit,

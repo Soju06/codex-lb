@@ -27,6 +27,9 @@ export function listStickySessions(params: unknown) {
   if (validated.keyQuery) {
     searchParams.set("keyQuery", validated.keyQuery);
   }
+  if (validated.providerKind) {
+    searchParams.set("providerKind", validated.providerKind);
+  }
   searchParams.set("sortBy", validated.sortBy);
   searchParams.set("sortDir", validated.sortDir);
   return get(`${STICKY_SESSIONS_PATH}?${searchParams.toString()}`, StickySessionsListResponseSchema);
@@ -34,7 +37,10 @@ export function listStickySessions(params: unknown) {
 
 export function deleteStickySession(payload: unknown) {
   const validated = StickySessionIdentifierSchema.parse(payload);
-  return del(`${STICKY_SESSIONS_PATH}/${validated.kind}/${encodeURIComponent(validated.key)}`);
+  const searchParams = new URLSearchParams({
+    providerKind: validated.providerKind,
+  });
+  return del(`${STICKY_SESSIONS_PATH}/${validated.kind}/${encodeURIComponent(validated.key)}?${searchParams.toString()}`);
 }
 
 export function deleteStickySessions(payload: unknown) {

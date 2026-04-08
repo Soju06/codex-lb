@@ -11,7 +11,12 @@ import {
   quotaBarColor,
   quotaBarTrack,
 } from "@/utils/account-status";
-import { formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import {
+  formatPercentNullable,
+  formatProviderLabel,
+  formatQuotaResetLabel,
+  formatSlug,
+} from "@/utils/formatters";
 
 type AccountAction = "details" | "resume" | "reauth";
 
@@ -68,16 +73,17 @@ function QuotaBar({
 export function AccountCard({ account, showAccountId = false, onAction }: AccountCardProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
   const status = normalizeStatus(account.status);
-  const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
-  const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
-  const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+  const isPlatformIdentity = account.providerKind === "openai_platform";
+  const primaryRemaining = isPlatformIdentity ? null : account.usage?.primaryRemainingPercent ?? null;
+  const secondaryRemaining = isPlatformIdentity ? null : account.usage?.secondaryRemainingPercent ?? null;
+  const weeklyOnly = !isPlatformIdentity && account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
 
   const primaryReset = formatQuotaResetLabel(account.resetAtPrimary ?? null);
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
 
   const title = account.displayName || account.email;
   const compactId = formatCompactAccountId(account.accountId);
-  const planLabel = formatSlug(account.planType);
+  const planLabel = isPlatformIdentity ? formatProviderLabel(account.providerKind) : formatSlug(account.planType);
   const emailSubtitle =
     account.displayName && account.displayName !== account.email
       ? account.email
@@ -107,11 +113,16 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
         <StatusBadge status={status} />
       </div>
 
-      {/* Quota bars */}
-      <div className={cn("mt-3.5 grid gap-3", weeklyOnly ? "grid-cols-1" : "grid-cols-2")}>
-        {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
-        <QuotaBar label="Weekly" percent={secondaryRemaining} resetLabel={secondaryReset} />
-      </div>
+      {isPlatformIdentity ? (
+        <div className="mt-3.5 rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          Fallback only for `/v1/models` and stateless HTTP `/v1/responses`.
+        </div>
+      ) : (
+        <div className={cn("mt-3.5 grid gap-3", weeklyOnly ? "grid-cols-1" : "grid-cols-2")}>
+          {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
+          <QuotaBar label="Weekly" percent={secondaryRemaining} resetLabel={secondaryReset} />
+        </div>
+      )}
 
       {/* Actions */}
       <div className="mt-3 flex items-center gap-1.5 border-t pt-3">
@@ -137,7 +148,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             Resume
           </Button>
         )}
-        {status === "deactivated" && (
+        {status === "deactivated" && !isPlatformIdentity && (
           <Button
             type="button"
             size="sm"

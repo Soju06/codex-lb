@@ -33,6 +33,9 @@ describe("useStickySessions", () => {
         key: "thread_123",
         displayName: "sticky-a@example.com",
         kind: "prompt_cache",
+        providerKind: "chatgpt_web",
+        routingSubjectId: "acc_sticky_a",
+        affinityScope: "provider_prompt_cache",
         createdAt: "2026-03-10T12:00:00Z",
         updatedAt: "2026-03-10T12:05:00Z",
         expiresAt: "2026-03-10T12:10:00Z",
@@ -58,10 +61,15 @@ describe("useStickySessions", () => {
         deletePayload = await request.json();
         const sessions =
           deletePayload && typeof deletePayload === "object" && "sessions" in deletePayload
-            ? ((deletePayload as { sessions?: Array<{ key: string; kind: string }> }).sessions ?? [])
+            ? ((deletePayload as { sessions?: Array<{ key: string; kind: string; providerKind?: string }> }).sessions ?? [])
             : [];
         for (const session of sessions) {
-          const index = entries.findIndex((entry) => entry.key === session.key && entry.kind === session.kind);
+          const index = entries.findIndex(
+            (entry) =>
+              entry.key === session.key &&
+              entry.kind === session.kind &&
+              entry.providerKind === (session.providerKind ?? "chatgpt_web"),
+          );
           if (index >= 0) {
             entries.splice(index, 1);
           }
@@ -77,6 +85,7 @@ describe("useStickySessions", () => {
 
     await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
     expect(result.current.stickySessionsQuery.data?.entries).toHaveLength(1);
+    expect(result.current.params.providerKind).toBeNull();
     expect(result.current.params.accountQuery).toBe("");
     expect(result.current.params.keyQuery).toBe("");
     expect(result.current.params.sortBy).toBe("updated_at");
@@ -84,8 +93,12 @@ describe("useStickySessions", () => {
     expect(seenUrl).toContain("offset=0");
     expect(seenUrl).toContain("limit=10");
 
-    await result.current.deleteMutation.mutateAsync([{ key: "thread_123", kind: "prompt_cache" }]);
-    expect(deletePayload).toEqual({ sessions: [{ key: "thread_123", kind: "prompt_cache" }] });
+    await result.current.deleteMutation.mutateAsync([
+      { key: "thread_123", kind: "prompt_cache", providerKind: "chatgpt_web" },
+    ]);
+    expect(deletePayload).toEqual({
+      sessions: [{ key: "thread_123", kind: "prompt_cache", providerKind: "chatgpt_web" }],
+    });
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["sticky-sessions", "list"] });
     });
@@ -108,6 +121,18 @@ describe("useStickySessions", () => {
     await waitFor(() => {
       expect(result.current.params.limit).toBe(25);
       expect(result.current.params.offset).toBe(0);
+    });
+
+    act(() => {
+      result.current.setProviderKind("openai_platform");
+    });
+    await waitFor(() => {
+      expect(result.current.params.providerKind).toBe("openai_platform");
+      expect(result.current.params.offset).toBe(0);
+    });
+
+    await waitFor(() => {
+      expect(seenUrl).toContain("providerKind=openai_platform");
     });
 
     act(() => {
@@ -151,8 +176,15 @@ describe("useStickySessions", () => {
     const warningSpy = vi.spyOn(toast, "warning").mockImplementation(() => "");
     const deleteSpy = vi.spyOn(stickySessionsApi, "deleteStickySessions").mockResolvedValueOnce({
       deletedCount: 1,
-      deleted: [{ key: "thread_123", kind: "prompt_cache" }],
-      failed: [{ key: "thread_999", kind: "codex_session", reason: "not_found" }],
+      deleted: [{ key: "thread_123", kind: "prompt_cache", providerKind: "chatgpt_web" }],
+      failed: [
+        {
+          key: "thread_999",
+          kind: "codex_session",
+          providerKind: "chatgpt_web",
+          reason: "not_found",
+        },
+      ],
     });
 
     const { result } = renderHook(() => useStickySessions(), {
@@ -161,8 +193,8 @@ describe("useStickySessions", () => {
 
     await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
     await result.current.deleteMutation.mutateAsync([
-      { key: "thread_123", kind: "prompt_cache" },
-      { key: "thread_999", kind: "codex_session" },
+      { key: "thread_123", kind: "prompt_cache", providerKind: "chatgpt_web" },
+      { key: "thread_999", kind: "codex_session", providerKind: "chatgpt_web" },
     ]);
 
     expect(warningSpy).toHaveBeenCalledWith("Deleted 1 sessions. 1 could not be deleted.");
@@ -185,6 +217,7 @@ describe("useStickySessions", () => {
     await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
 
     act(() => {
+      result.current.setProviderKind("openai_platform");
       result.current.setAccountQuery("sticky-a");
       result.current.setKeyQuery("thread");
     });
@@ -193,6 +226,7 @@ describe("useStickySessions", () => {
 
     expect(filteredDeleteSpy).toHaveBeenCalledWith({
       staleOnly: false,
+      providerKind: "openai_platform",
       accountQuery: "sticky-a",
       keyQuery: "thread",
     });
@@ -222,7 +256,9 @@ describe("useStickySessions", () => {
 
     await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
     await expect(
-      result.current.deleteMutation.mutateAsync([{ key: "thread_123", kind: "prompt_cache" }]),
+      result.current.deleteMutation.mutateAsync([
+        { key: "thread_123", kind: "prompt_cache", providerKind: "chatgpt_web" },
+      ]),
     ).rejects.toThrow();
     await expect(result.current.deleteFilteredMutation.mutateAsync()).rejects.toThrow();
     await expect(result.current.purgeMutation.mutateAsync(true)).rejects.toThrow();

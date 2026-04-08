@@ -16,7 +16,7 @@ from app.core.balancer import (
 )
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.proxy.load_balancer import RuntimeState, _state_from_account
+from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, SelectionInputs, _state_from_account
 
 pytestmark = pytest.mark.unit
 
@@ -419,6 +419,7 @@ def _make_test_usage(
     used_percent: float = 10.0,
     reset_at: int | None = None,
     recorded_at: datetime | None = None,
+    window_minutes: int | None = None,
 ) -> UsageHistory:
     return UsageHistory(
         id=1,
@@ -427,8 +428,86 @@ def _make_test_usage(
         window=window,
         used_percent=used_percent,
         reset_at=reset_at,
-        window_minutes=10080,
+        window_minutes=window_minutes if window_minutes is not None else (300 if window == "primary" else 10080),
     )
+
+
+@pytest.mark.asyncio
+async def test_should_fallback_to_platform_for_usage_drain_returns_false_when_one_chatgpt_account_is_healthy():
+    balancer = LoadBalancer(lambda: None)
+    accounts = [_make_test_account("a"), _make_test_account("b")]
+    selection_inputs = SelectionInputs(
+        accounts=accounts,
+        latest_primary={
+            "a": _make_test_usage("a", window="primary", used_percent=90.0),
+            "b": _make_test_usage("b", window="primary", used_percent=30.0),
+        },
+        latest_secondary={
+            "a": _make_test_usage("a", window="secondary", used_percent=20.0),
+            "b": _make_test_usage("b", window="secondary", used_percent=20.0),
+        },
+    )
+
+    async def fake_load_selection_inputs(*, model=None, additional_limit_name=None, account_ids=None):
+        del model, additional_limit_name, account_ids
+        return selection_inputs
+
+    balancer._load_selection_inputs = fake_load_selection_inputs  # type: ignore[method-assign]
+
+    should_fallback = await balancer.should_fallback_to_platform_for_usage_drain(model="gpt-5.1")
+
+    assert should_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_should_fallback_to_platform_for_usage_drain_returns_true_when_all_candidates_are_drained():
+    balancer = LoadBalancer(lambda: None)
+    accounts = [_make_test_account("a"), _make_test_account("b")]
+    selection_inputs = SelectionInputs(
+        accounts=accounts,
+        latest_primary={
+            "a": _make_test_usage("a", window="primary", used_percent=90.0),
+            "b": _make_test_usage("b", window="primary", used_percent=30.0),
+        },
+        latest_secondary={
+            "a": _make_test_usage("a", window="secondary", used_percent=20.0),
+            "b": _make_test_usage("b", window="secondary", used_percent=95.0),
+        },
+    )
+
+    async def fake_load_selection_inputs(*, model=None, additional_limit_name=None, account_ids=None):
+        del model, additional_limit_name, account_ids
+        return selection_inputs
+
+    balancer._load_selection_inputs = fake_load_selection_inputs  # type: ignore[method-assign]
+
+    should_fallback = await balancer.should_fallback_to_platform_for_usage_drain(model="gpt-5.1")
+
+    assert should_fallback is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED])
+async def test_should_fallback_to_platform_for_usage_drain_ignores_non_active_status_when_usage_is_healthy(
+    status: AccountStatus,
+):
+    balancer = LoadBalancer(lambda: None)
+    accounts = [_make_test_account("a", status=status)]
+    selection_inputs = SelectionInputs(
+        accounts=accounts,
+        latest_primary={"a": _make_test_usage("a", window="primary", used_percent=10.0)},
+        latest_secondary={"a": _make_test_usage("a", window="secondary", used_percent=10.0)},
+    )
+
+    async def fake_load_selection_inputs(*, model=None, additional_limit_name=None, account_ids=None):
+        del model, additional_limit_name, account_ids
+        return selection_inputs
+
+    balancer._load_selection_inputs = fake_load_selection_inputs  # type: ignore[method-assign]
+
+    should_fallback = await balancer.should_fallback_to_platform_for_usage_drain(model="gpt-5.1")
+
+    assert should_fallback is False
 
 
 def _epoch_to_naive_utc(epoch: float) -> datetime:

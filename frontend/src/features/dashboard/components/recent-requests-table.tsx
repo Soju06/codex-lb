@@ -30,6 +30,8 @@ import {
   formatCompactNumber,
   formatCurrency,
   formatModelLabel,
+  formatProviderLabel,
+  formatSlug,
   formatTimeLong,
 } from "@/utils/formatters";
 
@@ -49,6 +51,19 @@ const TRANSPORT_CLASS_MAP: Record<string, string> = {
   http: "bg-slate-500/10 text-slate-700 border-slate-500/20 hover:bg-slate-500/15 dark:text-slate-300",
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
 };
+
+function formatRouteClassLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "chatgpt_private":
+      return "ChatGPT private";
+    case "openai_public_http":
+      return "OpenAI public HTTP";
+    case "openai_public_ws":
+      return "OpenAI public WS";
+    default:
+      return value ? formatSlug(value) : "—";
+  }
+}
 
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
@@ -125,10 +140,15 @@ export function RecentRequestsTable({
           <TableBody>
             {requests.map((request) => {
               const time = formatTimeLong(request.requestedAt);
-              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
-              const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
-              const errorPreview = request.errorMessage || request.errorCode || "-";
-              const hasError = !!(request.errorCode || request.errorMessage);
+              const subjectId = request.accountId ?? request.routingSubjectId;
+              const accountLabel = subjectId ? (accountLabelMap.get(subjectId) ?? subjectId) : "—";
+              const isEmailLabel = !!(subjectId && emailLabelIds.has(subjectId));
+              const providerMetadata = [
+                request.providerKind ? formatProviderLabel(request.providerKind) : null,
+                request.routingSubjectId,
+              ].filter(Boolean).join(" | ");
+              const errorPreview = request.errorMessage || request.rejectionReason || request.errorCode || "-";
+              const hasError = !!(request.errorCode || request.errorMessage || request.rejectionReason);
               const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
               const showRequestedTier =
                 !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
@@ -142,20 +162,39 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell>
                   <TableCell className="truncate align-top text-sm">
-                    {isEmailLabel && blurred ? (
-                      <span className="privacy-blur">{accountLabel}</span>
-                    ) : (
-                      accountLabel
-                    )}
+                    <div className="leading-tight">
+                      <div>
+                        {isEmailLabel && blurred ? (
+                          <span className="privacy-blur">{accountLabel}</span>
+                        ) : (
+                          accountLabel
+                        )}
+                      </div>
+                      {providerMetadata ? (
+                        <div className="truncate text-[11px] text-muted-foreground">
+                          {providerMetadata}
+                        </div>
+                      ) : null}
+                    </div>
                   </TableCell>
                   <TableCell className="truncate align-top text-xs text-muted-foreground">
-                    {request.apiKeyName || "--"}
+                    <div className="leading-tight">
+                      <div>{request.apiKeyName || "--"}</div>
+                      {request.upstreamRequestId ? (
+                        <div className="truncate text-[11px]">Upstream {request.upstreamRequestId}</div>
+                      ) : null}
+                    </div>
                   </TableCell>
                   <TableCell className="truncate align-top">
                     <div className="leading-tight">
                       <span className="font-mono text-xs">
                         {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
                       </span>
+                      {request.routeClass ? (
+                        <div className="text-[11px] text-muted-foreground">
+                          {formatRouteClassLabel(request.routeClass)}
+                        </div>
+                      ) : null}
                       {showRequestedTier ? (
                         <div className="text-[11px] text-muted-foreground">
                           Requested {request.requestedServiceTier}
@@ -261,9 +300,20 @@ export function RecentRequestsTable({
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Status" value={selectedRequest ? (REQUEST_STATUS_LABELS[selectedRequest.status] ?? selectedRequest.status) : "—"} />
                 <RequestDetailField label="Model" value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
+                <RequestDetailField label="Provider" value={selectedRequest?.providerKind ? formatProviderLabel(selectedRequest.providerKind) : "—"} />
+                <RequestDetailField label="Routing Subject" value={selectedRequest?.routingSubjectId ?? "—"} mono />
+                <RequestDetailField label="Route Class" value={formatRouteClassLabel(selectedRequest?.routeClass)} />
                 <RequestDetailField label="Transport" value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
                 <RequestDetailField label="Time" value={selectedRequest ? `${formatTimeLong(selectedRequest.requestedAt).time} ${formatTimeLong(selectedRequest.requestedAt).date}` : "—"} />
                 <RequestDetailField label="Error Code" value={selectedRequest?.errorCode ?? "—"} mono />
+                <RequestDetailField
+                  label="Upstream Request ID"
+                  value={selectedRequest?.upstreamRequestId ?? "—"}
+                  mono
+                  copyValue={selectedRequest?.upstreamRequestId ?? undefined}
+                  copyLabel="Copy Upstream Request ID"
+                />
+                <RequestDetailField label="Rejection Reason" value={selectedRequest?.rejectionReason ?? "—"} mono />
               </div>
             </div>
 
@@ -276,7 +326,7 @@ export function RecentRequestsTable({
               </div>
               <div className="max-h-[36vh] overflow-y-auto rounded-md bg-muted/50 p-3">
                 <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-                  {selectedRequest?.errorMessage ?? selectedRequest?.errorCode ?? "No error detail recorded."}
+                  {selectedRequest?.errorMessage ?? selectedRequest?.rejectionReason ?? selectedRequest?.errorCode ?? "No error detail recorded."}
                 </p>
               </div>
             </div>

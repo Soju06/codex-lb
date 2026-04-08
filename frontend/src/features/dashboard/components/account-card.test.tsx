@@ -53,4 +53,31 @@ describe("AccountCard", () => {
     expect(screen.getByText("AWS Account MSP")).toBeInTheDocument();
     expect(container.querySelector(".privacy-blur")).not.toBeNull();
   });
+
+  it("shows provider labeling and hides reauth for platform identities", () => {
+    const account = createAccountSummary({
+      accountId: "platform_1",
+      email: "Platform Key",
+      displayName: "Platform Key",
+      planType: "openai_platform",
+      providerKind: "openai_platform",
+      status: "deactivated",
+      usage: null,
+      resetAtPrimary: null,
+      resetAtSecondary: null,
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      auth: null,
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("OpenAI Platform")).toBeInTheDocument();
+    expect(
+      screen.getByText("Fallback only for `/v1/models` and stateless HTTP `/v1/responses`."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("5h")).not.toBeInTheDocument();
+    expect(screen.queryByText("Weekly")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Re-auth" })).not.toBeInTheDocument();
+  });
 });

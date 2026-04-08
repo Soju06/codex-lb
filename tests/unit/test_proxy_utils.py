@@ -1109,6 +1109,9 @@ def test_log_upstream_request_trace(monkeypatch, caplog):
     assert "upstream_request_payload request_id=req_upstream_1" in caplog.text
     assert "upstream_request_complete request_id=req_upstream_1" in caplog.text
     assert "target=https://chatgpt.com/backend-api/codex/responses" in caplog.text
+    assert "provider_kind=chatgpt_web" in caplog.text
+    assert "route_class=chatgpt_private" in caplog.text
+    assert "routing_subject_id=acc_upstream_1" in caplog.text
     assert "error_message=backend exploded" in caplog.text
 
 
@@ -3230,6 +3233,8 @@ def test_logged_error_json_response_emits_proxy_error_log(caplog):
             request,
             502,
             {"error": {"code": "upstream_error", "message": "provider failed"}},
+            route_class="openai_public_http",
+            rejection_reason="provider_feature_unsupported",
         )
     finally:
         reset_request_id(token)
@@ -3238,6 +3243,8 @@ def test_logged_error_json_response_emits_proxy_error_log(caplog):
     assert "proxy_error_response request_id=req_proxy_error_1" in caplog.text
     assert "code=upstream_error" in caplog.text
     assert "message=provider failed" in caplog.text
+    assert "route_class=openai_public_http" in caplog.text
+    assert "rejection_reason=provider_feature_unsupported" in caplog.text
 
 
 @pytest.mark.asyncio

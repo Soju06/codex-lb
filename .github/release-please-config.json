@@ -15,16 +15,6 @@
           "type": "json",
           "path": "frontend/package.json",
           "jsonpath": "$.version"
-        },
-        {
-          "type": "yaml",
-          "path": "deploy/helm/codex-lb/Chart.yaml",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "yaml",
-          "path": "deploy/helm/codex-lb/Chart.yaml",
-          "jsonpath": "$.appVersion"
         }
       ]
     }

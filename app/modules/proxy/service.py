@@ -27,6 +27,12 @@ from app.core.auth.refresh import (
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.clients.openai_platform import (
+    OpenAIPlatformError,
+    PlatformModelsResponse,
+    PlatformResponseResult,
+    PlatformStreamResponse,
+)
 from app.core.clients.proxy import (
     ProxyResponseError,
     filter_inbound_headers,
@@ -37,13 +43,9 @@ from app.core.clients.proxy import (
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
-from app.core.clients.proxy import compact_responses as core_compact_responses
-from app.core.clients.proxy import stream_responses as core_stream_responses
-from app.core.clients.proxy import transcribe_audio as core_transcribe_audio
 from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
     UpstreamWebSocketMessage,
-    connect_responses_websocket,
     filter_inbound_websocket_headers,
 )
 from app.core.config.settings import get_settings
@@ -69,7 +71,6 @@ from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind, UsageHistory
 from app.db.session import SessionLocal
-from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
@@ -81,7 +82,6 @@ from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _credits_headers,
     _credits_snapshot,
-    _header_account_id,
     _normalize_error_code,
     _parse_openai_error,
     _plan_type_for_accounts,
@@ -93,7 +93,28 @@ from app.modules.proxy.helpers import (
     _window_snapshot,
     classify_upstream_failure,
 )
-from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
+from app.modules.proxy.load_balancer import (
+    AccountSelection,
+    LoadBalancer,
+    _filter_accounts_for_model,
+)
+from app.modules.proxy.provider_adapters import (
+    ChatGPTWebProviderAdapter,
+    OpenAIPlatformProviderAdapter,
+    ProviderAdapter,
+    ProviderCapabilityDecision,
+    ProviderSubject,
+    RequestCapabilities,
+)
+from app.modules.proxy.provider_adapters import (
+    core_compact_responses as _adapter_core_compact_responses,
+)
+from app.modules.proxy.provider_adapters import (
+    core_stream_responses as _adapter_core_stream_responses,
+)
+from app.modules.proxy.provider_adapters import (
+    core_transcribe_audio as _adapter_core_transcribe_audio,
+)
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
@@ -110,10 +131,22 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.upstream_identities.types import (
+    CHATGPT_WEB_PROVIDER_KIND,
+    OPENAI_PLATFORM_PROVIDER_KIND,
+    OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+    PUBLIC_MODELS_HTTP_ROUTE_FAMILY,
+    PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
+)
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
-from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
+
+# Compatibility seam for tests and legacy patch points. Provider adapters consult
+# these callables when they retain their default transport bindings.
+core_compact_responses = _adapter_core_compact_responses
+core_stream_responses = _adapter_core_stream_responses
+core_transcribe_audio = _adapter_core_transcribe_audio
 
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 
@@ -163,6 +196,57 @@ class _AffinityPolicy:
     max_age_seconds: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _SelectedPlatformIdentity:
+    id: str
+    api_key_encrypted: bytes
+    organization_id: str | None
+    project_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedChatGPTSubject:
+    provider_kind: str
+    route_class: str
+    routing_subject_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedPlatformSubject:
+    provider_kind: str
+    route_class: str
+    routing_subject_id: str
+    identity: _SelectedPlatformIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSelectionFailure:
+    http_status: int
+    error_code: str
+    error_message: str
+    rejection_reason: str
+    route_class: str
+    error_param: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSelectionResult:
+    selected: SelectedChatGPTSubject | SelectedPlatformSubject | None = None
+    failure: ProviderSelectionFailure | None = None
+
+    @property
+    def provider_kind(self) -> str | None:
+        return self.selected.provider_kind if self.selected is not None else None
+
+    @property
+    def is_platform(self) -> bool:
+        return isinstance(self.selected, SelectedPlatformSubject)
+
+    @property
+    def is_chatgpt(self) -> bool:
+        return isinstance(self.selected, SelectedChatGPTSubject)
+
+
 def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | None:
     if upstream_stream_transport == "default":
         return None
@@ -174,11 +258,398 @@ class ProxyService:
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
+        self._provider_adapters: dict[str, ProviderAdapter] = {
+            CHATGPT_WEB_PROVIDER_KIND: ChatGPTWebProviderAdapter(repo_factory),
+            OPENAI_PLATFORM_PROVIDER_KIND: OpenAIPlatformProviderAdapter(),
+        }
         self._ring_membership = RingMembershipService(SessionLocal)
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_lock = anyio.Lock()
+
+    def _provider_adapter(self, provider_kind: str) -> ProviderAdapter:
+        return self._provider_adapters[provider_kind]
+
+    @staticmethod
+    def _platform_provider_subject(identity: _SelectedPlatformIdentity) -> ProviderSubject:
+        return ProviderSubject(
+            provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+            routing_subject_id=identity.id,
+            api_key_encrypted=identity.api_key_encrypted,
+            organization_id=identity.organization_id,
+            project_id=identity.project_id,
+        )
+
+    @staticmethod
+    def _chatgpt_provider_subject(account: Account) -> ProviderSubject:
+        return ProviderSubject(
+            provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+            routing_subject_id=account.id,
+            account=account,
+        )
+
+    @staticmethod
+    def _provider_selection_failure(
+        decision: ProviderCapabilityDecision,
+        capabilities: RequestCapabilities,
+    ) -> ProviderSelectionResult:
+        if decision.allowed:
+            raise ValueError("Provider selection failure requested for an allowed capability decision")
+        if decision.error_code is None or decision.error_message is None or decision.rejection_reason is None:
+            raise ValueError("Provider capability decision is missing failure metadata")
+        return ProviderSelectionResult(
+            failure=ProviderSelectionFailure(
+                http_status=400,
+                error_code=decision.error_code,
+                error_message=decision.error_message,
+                rejection_reason=decision.rejection_reason,
+                route_class=capabilities.route_class,
+                error_param=decision.error_param,
+            )
+        )
+
+    async def has_chatgpt_candidates(
+        self,
+        model: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> bool:
+        async with self._repo_factory() as repos:
+            accounts = await repos.accounts.list_accounts()
+            allowed_account_ids = None if account_ids is None else set(account_ids)
+            active_accounts = [
+                account
+                for account in accounts
+                if account.status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
+                and (allowed_account_ids is None or account.id in allowed_account_ids)
+            ]
+            if model is None:
+                return bool(active_accounts)
+            return bool(_filter_accounts_for_model(active_accounts, model))
+
+    async def should_fallback_to_platform_for_usage_drain(
+        self,
+        *,
+        model: str | None,
+        account_ids: Collection[str] | None = None,
+    ) -> bool:
+        return await self._load_balancer.should_fallback_to_platform_for_usage_drain(
+            model=model,
+            account_ids=account_ids,
+        )
+
+    async def select_routing_subject(
+        self,
+        *,
+        capabilities: RequestCapabilities,
+        api_key: ApiKeyData | None = None,
+    ) -> ProviderSelectionResult:
+        scoped_account_ids = (
+            api_key.assigned_account_ids if api_key is not None and api_key.account_assignment_scope_enabled else None
+        )
+        has_chatgpt = await self.has_chatgpt_candidates(capabilities.model, account_ids=scoped_account_ids)
+        platform_adapter = cast(
+            OpenAIPlatformProviderAdapter,
+            self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND),
+        )
+
+        if capabilities.route_family == PUBLIC_MODELS_HTTP_ROUTE_FAMILY:
+            identity = await self.select_platform_identity(PUBLIC_MODELS_HTTP_ROUTE_FAMILY)
+            if has_chatgpt:
+                should_fallback = await self.should_fallback_to_platform_for_usage_drain(
+                    model=None,
+                    account_ids=scoped_account_ids,
+                )
+                if should_fallback:
+                    if identity is not None:
+                        decision = platform_adapter.check_capabilities(
+                            self._platform_provider_subject(identity),
+                            capabilities,
+                        )
+                        if decision.allowed:
+                            return ProviderSelectionResult(
+                                selected=SelectedPlatformSubject(
+                                    provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                                    route_class=capabilities.route_class,
+                                    routing_subject_id=identity.id,
+                                    identity=identity,
+                                )
+                            )
+                return ProviderSelectionResult(
+                    selected=SelectedChatGPTSubject(
+                        provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+                        route_class=capabilities.route_class,
+                        routing_subject_id="chatgpt_web_pool",
+                    )
+                )
+            if identity is not None:
+                return ProviderSelectionResult(
+                    failure=ProviderSelectionFailure(
+                        http_status=400,
+                        error_code="provider_fallback_requires_chatgpt",
+                        error_message="OpenAI Platform fallback requires at least one active ChatGPT-web account.",
+                        rejection_reason="platform_fallback_requires_chatgpt",
+                        route_class=capabilities.route_class,
+                    )
+                )
+            return ProviderSelectionResult()
+
+        if capabilities.transport == _REQUEST_TRANSPORT_WEBSOCKET:
+            if has_chatgpt:
+                return ProviderSelectionResult(
+                    selected=SelectedChatGPTSubject(
+                        provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+                        route_class=capabilities.route_class,
+                        routing_subject_id="chatgpt_web_pool",
+                    )
+                )
+            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+            if identity is None:
+                return ProviderSelectionResult()
+            decision = platform_adapter.check_capabilities(
+                self._platform_provider_subject(identity),
+                capabilities,
+            )
+            return self._provider_selection_failure(decision, capabilities)
+
+        if capabilities.continuity_param is not None:
+            if has_chatgpt:
+                return ProviderSelectionResult(
+                    selected=SelectedChatGPTSubject(
+                        provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+                        route_class=capabilities.route_class,
+                        routing_subject_id="chatgpt_web_pool",
+                    )
+                )
+            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+            if identity is None:
+                return ProviderSelectionResult()
+            decision = platform_adapter.check_capabilities(
+                self._platform_provider_subject(identity),
+                capabilities,
+            )
+            return self._provider_selection_failure(decision, capabilities)
+
+        identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+        if has_chatgpt:
+            should_fallback = await self.should_fallback_to_platform_for_usage_drain(
+                model=capabilities.model,
+                account_ids=scoped_account_ids,
+            )
+            if should_fallback:
+                if identity is not None:
+                    decision = platform_adapter.check_capabilities(
+                        self._platform_provider_subject(identity),
+                        capabilities,
+                    )
+                    if decision.allowed:
+                        return ProviderSelectionResult(
+                            selected=SelectedPlatformSubject(
+                                provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                                route_class=capabilities.route_class,
+                                routing_subject_id=identity.id,
+                                identity=identity,
+                            )
+                        )
+            return ProviderSelectionResult(
+                selected=SelectedChatGPTSubject(
+                    provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+                    route_class=capabilities.route_class,
+                    routing_subject_id="chatgpt_web_pool",
+                )
+            )
+        if identity is not None:
+            return ProviderSelectionResult(
+                failure=ProviderSelectionFailure(
+                    http_status=400,
+                    error_code="provider_fallback_requires_chatgpt",
+                    error_message="OpenAI Platform fallback requires at least one active ChatGPT-web account.",
+                    rejection_reason="platform_fallback_requires_chatgpt",
+                    route_class=capabilities.route_class,
+                )
+            )
+        return ProviderSelectionResult()
+
+    async def select_platform_identity(
+        self,
+        route_family: str,
+        *,
+        sticky_key: str | None = None,
+        sticky_kind: StickySessionKind | None = None,
+        reallocate_sticky: bool = False,
+        sticky_max_age_seconds: int | None = None,
+    ) -> _SelectedPlatformIdentity | None:
+        selection = await self._load_balancer.select_routing_subject(
+            provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+            route_family=route_family,  # type: ignore[arg-type]
+            sticky_key=sticky_key,
+            sticky_kind=sticky_kind,
+            reallocate_sticky=reallocate_sticky,
+            sticky_max_age_seconds=sticky_max_age_seconds,
+        )
+        if selection.routing_subject_id is None:
+            return None
+        async with self._repo_factory() as repos:
+            platform_identities = repos.platform_identities
+            if platform_identities is None:
+                return None
+            identity = await platform_identities.get_by_id(selection.routing_subject_id)
+            if identity is None:
+                return None
+            return _SelectedPlatformIdentity(
+                id=identity.id,
+                api_key_encrypted=identity.api_key_encrypted,
+                organization_id=identity.organization_id,
+                project_id=identity.project_id,
+            )
+
+    async def fetch_platform_models(
+        self,
+        api_key: ApiKeyData | None,
+        *,
+        identity: _SelectedPlatformIdentity | None = None,
+    ) -> PlatformModelsResponse | None:
+        if identity is None:
+            identity = await self.select_platform_identity(PUBLIC_MODELS_HTTP_ROUTE_FAMILY)
+        if identity is None:
+            return None
+        adapter = cast(OpenAIPlatformProviderAdapter, self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND))
+        subject = self._platform_provider_subject(identity)
+        request_id = ensure_request_id()
+        start = time.monotonic()
+        try:
+            result = await adapter.fetch_models(subject)
+        except OpenAIPlatformError as exc:
+            await self._record_platform_auth_failure(identity.id, exc)
+            await self._write_request_log(
+                account_id=None,
+                provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                routing_subject_id=identity.id,
+                api_key=api_key,
+                request_id=request_id,
+                model="",
+                latency_ms=int((time.monotonic() - start) * 1000),
+                status="error",
+                error_code=_platform_error_code(exc.payload),
+                error_message=_platform_error_message(exc.payload),
+                route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+                rejection_reason="platform_models_request_failed",
+                transport=_REQUEST_TRANSPORT_HTTP,
+            )
+            raise
+        await self._write_request_log(
+            account_id=None,
+            provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+            routing_subject_id=identity.id,
+            api_key=api_key,
+            request_id=request_id,
+            model="",
+            latency_ms=int((time.monotonic() - start) * 1000),
+            status="success",
+            route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+            upstream_request_id=result.upstream_request_id,
+            transport=_REQUEST_TRANSPORT_HTTP,
+        )
+        return PlatformModelsResponse(
+            payload=result.payload,
+            upstream_request_id=result.upstream_request_id,
+        )
+
+    async def stream_platform_response_events(
+        self,
+        *,
+        payload: ResponsesRequest,
+        api_key: ApiKeyData | None,
+        identity: _SelectedPlatformIdentity | None = None,
+    ) -> tuple[_SelectedPlatformIdentity | None, PlatformStreamResponse | None]:
+        if identity is None:
+            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+        if identity is None:
+            return None, None
+        adapter = cast(OpenAIPlatformProviderAdapter, self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND))
+        subject = self._platform_provider_subject(identity)
+        try:
+            result = await adapter.stream_responses(
+                subject,
+                payload.model_dump(mode="json", exclude_none=True),
+            )
+        except OpenAIPlatformError as exc:
+            await self._record_platform_auth_failure(identity.id, exc)
+            raise
+        return identity, PlatformStreamResponse(
+            event_stream=result.event_stream,
+            upstream_request_id=result.upstream_request_id,
+        )
+
+    async def create_platform_response(
+        self,
+        *,
+        payload: ResponsesRequest,
+        api_key: ApiKeyData | None,
+        identity: _SelectedPlatformIdentity | None = None,
+    ) -> tuple[_SelectedPlatformIdentity | None, PlatformResponseResult | None]:
+        if identity is None:
+            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+        if identity is None:
+            return None, None
+        adapter = cast(OpenAIPlatformProviderAdapter, self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND))
+        subject = self._platform_provider_subject(identity)
+        try:
+            result = await adapter.create_response(
+                subject,
+                payload.model_dump(mode="json", exclude_none=True),
+            )
+        except OpenAIPlatformError as exc:
+            await self._record_platform_auth_failure(identity.id, exc)
+            raise
+        return identity, PlatformResponseResult(
+            payload=result.payload,
+            upstream_request_id=result.upstream_request_id,
+        )
+
+    async def write_provider_rejection_log(
+        self,
+        *,
+        api_key: ApiKeyData | None,
+        request_id: str,
+        model: str | None,
+        error_code: str,
+        error_message: str,
+        route_class: str,
+        rejection_reason: str,
+        transport: str = _REQUEST_TRANSPORT_HTTP,
+    ) -> None:
+        await self._write_request_log(
+            account_id=None,
+            provider_kind=None,
+            routing_subject_id=None,
+            api_key=api_key,
+            request_id=request_id,
+            model=model,
+            latency_ms=0,
+            status="error",
+            error_code=error_code,
+            error_message=error_message,
+            route_class=route_class,
+            rejection_reason=rejection_reason,
+            transport=transport,
+        )
+
+    async def _record_platform_auth_failure(self, identity_id: str, exc: OpenAIPlatformError) -> None:
+        if exc.status_code not in (401, 403):
+            return
+        reason = _platform_error_message(exc.payload) or _platform_error_code(exc.payload) or f"http_{exc.status_code}"
+        async with self._repo_factory() as repos:
+            platform_identities = repos.platform_identities
+            if platform_identities is None:
+                return
+            await platform_identities.update_validation_state(
+                identity_id,
+                last_validated_at=None,
+                last_auth_failure_reason=reason,
+                status=AccountStatus.DEACTIVATED,
+            )
 
     def stream_responses(
         self,
@@ -439,8 +910,7 @@ class ProxyService:
         try:
 
             async def _call_compact(target: Account) -> CompactResponsePayload:
-                access_token = self._encryptor.decrypt(target.access_token_encrypted)
-                account_id = _header_account_id(target.chatgpt_account_id)
+                adapter = cast(ChatGPTWebProviderAdapter, self._provider_adapter(CHATGPT_WEB_PROVIDER_KIND))
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -459,7 +929,11 @@ class ProxyService:
                         total_timeout_seconds=remaining_budget,
                     )
                 try:
-                    return await core_compact_responses(payload, filtered, access_token, account_id)
+                    return await adapter.compact_response(
+                        self._chatgpt_provider_subject(target),
+                        payload,
+                        filtered,
+                    )
                 finally:
                     pop_compact_timeout_overrides(timeout_tokens)
 
@@ -753,8 +1227,7 @@ class ProxyService:
             account_id_value = account.id
 
             async def _call_transcribe(target: Account) -> dict[str, JsonValue]:
-                access_token = self._encryptor.decrypt(target.access_token_encrypted)
-                account_id = _header_account_id(target.chatgpt_account_id)
+                adapter = cast(ChatGPTWebProviderAdapter, self._provider_adapter(CHATGPT_WEB_PROVIDER_KIND))
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -768,14 +1241,13 @@ class ProxyService:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
-                    return await core_transcribe_audio(
-                        audio_bytes,
+                    return await adapter.transcribe_audio(
+                        self._chatgpt_provider_subject(target),
+                        audio_bytes=audio_bytes,
                         filename=filename,
                         content_type=content_type,
                         prompt=prompt,
                         headers=filtered,
-                        access_token=access_token,
-                        account_id=account_id,
                     )
                 finally:
                     pop_transcribe_timeout_overrides(timeout_tokens)
@@ -1479,9 +1951,11 @@ class ProxyService:
         account: Account,
         headers: dict[str, str],
     ) -> UpstreamResponsesWebSocket:
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
-        account_id = _header_account_id(account.chatgpt_account_id)
-        return await connect_responses_websocket(headers, access_token, account_id)
+        adapter = cast(ChatGPTWebProviderAdapter, self._provider_adapter(CHATGPT_WEB_PROVIDER_KIND))
+        return await adapter.open_responses_websocket(
+            self._chatgpt_provider_subject(account),
+            headers,
+        )
 
     async def _http_bridge_pending_count(self, session: "_HTTPBridgeSession") -> int:
         async with session.pending_lock:
@@ -3906,8 +4380,7 @@ class ProxyService:
         request_transport: str,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
-        account_id = _header_account_id(account.chatgpt_account_id)
+        adapter = cast(ChatGPTWebProviderAdapter, self._provider_adapter(CHATGPT_WEB_PROVIDER_KIND))
         model = payload.model
         requested_service_tier = payload.service_tier
         service_tier = requested_service_tier
@@ -3923,20 +4396,18 @@ class ProxyService:
 
         try:
             if upstream_stream_transport is not None:
-                stream = core_stream_responses(
+                stream = await adapter.stream_response_events(
+                    self._chatgpt_provider_subject(account),
                     payload,
                     headers,
-                    access_token,
-                    account_id,
                     raise_for_status=True,
-                    upstream_stream_transport_override=upstream_stream_transport,
+                    upstream_stream_transport=upstream_stream_transport,
                 )
             else:
-                stream = core_stream_responses(
+                stream = await adapter.stream_response_events(
+                    self._chatgpt_provider_subject(account),
                     payload,
                     headers,
-                    access_token,
-                    account_id,
                     raise_for_status=True,
                 )
             iterator = stream.__aiter__()
@@ -4101,6 +4572,8 @@ class ProxyService:
         self,
         *,
         account_id: str | None,
+        provider_kind: str | None = None,
+        routing_subject_id: str | None = None,
         api_key: ApiKeyData | None,
         request_id: str,
         model: str | None,
@@ -4118,12 +4591,21 @@ class ProxyService:
         service_tier: str | None = None,
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
+        route_class: str | None = None,
+        upstream_request_id: str | None = None,
+        rejection_reason: str | None = None,
     ) -> None:
+        resolved_provider_kind = provider_kind
+        if resolved_provider_kind is None and account_id is not None:
+            resolved_provider_kind = CHATGPT_WEB_PROVIDER_KIND
+        resolved_routing_subject_id = routing_subject_id or account_id
         with anyio.CancelScope(shield=True):
             try:
                 async with self._repo_factory() as repos:
                     await repos.request_logs.add_log(
                         account_id=account_id,
+                        provider_kind=resolved_provider_kind,
+                        routing_subject_id=resolved_routing_subject_id,
                         api_key_id=api_key.id if api_key else None,
                         request_id=request_id,
                         model=model or "",
@@ -4141,6 +4623,9 @@ class ProxyService:
                         status=status,
                         error_code=error_code,
                         error_message=error_message,
+                        route_class=route_class,
+                        upstream_request_id=upstream_request_id,
+                        rejection_reason=rejection_reason,
                     )
             except Exception:
                 logger.warning(
@@ -4180,9 +4665,11 @@ class ProxyService:
         )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
-        latest_usage = await repos.usage.latest_by_account(window="primary")
-        updater = UsageUpdater(repos.usage, repos.accounts, repos.additional_usage)
-        await updater.refresh_accounts(accounts, latest_usage)
+        adapter = cast(ChatGPTWebProviderAdapter, self._provider_adapter(CHATGPT_WEB_PROVIDER_KIND))
+        await adapter.refresh_usage(
+            repos,
+            [self._chatgpt_provider_subject(account) for account in accounts],
+        )
 
     async def _latest_usage_rows(
         self,
@@ -4348,13 +4835,17 @@ class ProxyService:
         force: bool = False,
         timeout_seconds: float | None = None,
     ) -> Account:
-        async with self._repo_factory() as repos:
-            auth_manager = AuthManager(repos.accounts)
-            token = push_token_refresh_timeout_override(timeout_seconds)
-            try:
-                return await auth_manager.ensure_fresh(account, force=force)
-            finally:
-                pop_token_refresh_timeout_override(token)
+        adapter = cast(ChatGPTWebProviderAdapter, self._provider_adapter(CHATGPT_WEB_PROVIDER_KIND))
+        token = push_token_refresh_timeout_override(timeout_seconds)
+        try:
+            subject = await adapter.ensure_ready(
+                self._chatgpt_provider_subject(account),
+                force=force,
+                timeout_seconds=timeout_seconds,
+            )
+            return subject.require_account()
+        finally:
+            pop_token_refresh_timeout_override(token)
 
     async def _ensure_fresh_with_budget(
         self,
@@ -5140,6 +5631,22 @@ def ensure_downstream_turn_state(headers: Mapping[str, str]) -> str:
     if existing is not None:
         return existing
     return f"turn_{uuid4().hex}"
+
+
+def _platform_error_code(payload: Mapping[str, JsonValue]) -> str | None:
+    error = payload.get("error")
+    if not is_json_mapping(error):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+def _platform_error_message(payload: Mapping[str, JsonValue]) -> str | None:
+    error = payload.get("error")
+    if not is_json_mapping(error):
+        return None
+    message = error.get("message")
+    return message if isinstance(message, str) else None
 
 
 def ensure_http_downstream_turn_state(headers: Mapping[str, str]) -> str:

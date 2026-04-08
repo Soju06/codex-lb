@@ -3,6 +3,10 @@ import { z } from "zod";
 
 import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
 import {
+	PlatformIdentityCreateRequestSchema,
+	PlatformIdentityUpdateRequestSchema,
+} from "@/features/accounts/schemas";
+import {
 	type AccountSummary,
 	type ApiKey,
 	createAccountSummary,
@@ -112,6 +116,9 @@ type MockState = {
 		key: string;
 		displayName: string;
 		kind: "codex_session" | "sticky_thread" | "prompt_cache";
+		providerKind: string;
+		routingSubjectId: string;
+		affinityScope: "chatgpt_continuity" | "provider_prompt_cache" | "provider_scoped";
 		createdAt: string;
 		updatedAt: string;
 		expiresAt: string | null;
@@ -210,6 +217,11 @@ function filterRequestLogs(
 				entry.accountId,
 				entry.apiKeyName,
 				entry.requestId,
+				entry.providerKind,
+				entry.routingSubjectId,
+				entry.routeClass,
+				entry.upstreamRequestId,
+				entry.rejectionReason,
 				entry.model,
 				entry.reasoningEffort,
 				entry.errorCode,
@@ -330,6 +342,119 @@ export const handlers = [
 			planType: created.planType,
 			status: created.status,
 		});
+	}),
+
+	http.post("/api/accounts/platform", async ({ request }) => {
+		const payload = await parseJsonBody(request, PlatformIdentityCreateRequestSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "invalid_request", message: "Invalid platform identity payload" } },
+				{ status: 400 },
+			);
+		}
+		const hasChatgptPrimary = state.accounts.some(
+			(account) =>
+				account.providerKind !== "openai_platform" &&
+				account.status !== "paused" &&
+				account.status !== "deactivated",
+		);
+		if (!hasChatgptPrimary) {
+			return HttpResponse.json(
+				{
+					error: {
+						code: "platform_identity_prerequisite_failed",
+						message: "OpenAI Platform fallback requires at least one active ChatGPT-web account.",
+					},
+				},
+				{ status: 400 },
+			);
+		}
+		if (state.accounts.some((account) => account.providerKind === "openai_platform")) {
+			return HttpResponse.json(
+				{
+					error: {
+						code: "platform_identity_conflict",
+						message: "Only one OpenAI Platform fallback key can be registered.",
+					},
+				},
+				{ status: 409 },
+			);
+		}
+		const sequence = state.accounts.length + 1;
+		const created = createAccountSummary({
+			accountId: `platform_${sequence}`,
+			email: payload.label,
+			displayName: payload.label,
+			label: payload.label,
+			planType: "openai_platform",
+			providerKind: "openai_platform",
+			routingSubjectId: `platform_${sequence}`,
+			status: "active",
+			organization: payload.organization ?? null,
+			project: payload.project ?? null,
+			eligibleRouteFamilies: payload.eligibleRouteFamilies,
+			lastValidatedAt: new Date().toISOString(),
+			lastAuthFailureReason: null,
+			usage: null,
+			resetAtPrimary: null,
+			resetAtSecondary: null,
+			windowMinutesPrimary: null,
+			windowMinutesSecondary: null,
+			auth: null,
+		});
+		state.accounts = [...state.accounts, created];
+		return HttpResponse.json({
+			accountId: created.accountId,
+			email: created.email,
+			planType: created.planType,
+			status: created.status,
+		});
+	}),
+
+	http.patch("/api/accounts/platform/:accountId", async ({ params, request }) => {
+		const payload = await parseJsonBody(request, PlatformIdentityUpdateRequestSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "invalid_request", message: "Invalid platform identity payload" } },
+				{ status: 400 },
+			);
+		}
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account || account.providerKind !== "openai_platform") {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+
+		if (payload.label !== undefined) {
+			account.label = payload.label;
+			account.email = payload.label;
+			account.displayName = payload.label;
+		}
+		if ("organization" in payload) {
+			account.organization = payload.organization ?? null;
+		}
+		if ("project" in payload) {
+			account.project = payload.project ?? null;
+		}
+		if (payload.eligibleRouteFamilies !== undefined) {
+			account.eligibleRouteFamilies = payload.eligibleRouteFamilies;
+		}
+		if (
+			payload.apiKey !== undefined ||
+			"organization" in payload ||
+			"project" in payload
+		) {
+			account.lastValidatedAt = new Date().toISOString();
+			account.lastAuthFailureReason = null;
+			if (account.status === "deactivated") {
+				account.status = "active";
+			}
+		}
+
+		return HttpResponse.json(account);
 	}),
 
 	http.post("/api/accounts/:accountId/pause", ({ params }) => {
@@ -478,6 +603,7 @@ export const handlers = [
 	http.get("/api/sticky-sessions", ({ request }) => {
 		const url = new URL(request.url);
 		const staleOnly = url.searchParams.get("staleOnly") === "true";
+		const providerKind = (url.searchParams.get("providerKind") ?? "").trim().toLowerCase();
 		const accountQuery = (url.searchParams.get("accountQuery") ?? "").trim().toLowerCase();
 		const keyQuery = (url.searchParams.get("keyQuery") ?? "").trim().toLowerCase();
 		const sortBy = url.searchParams.get("sortBy") ?? "updated_at";
@@ -486,6 +612,9 @@ export const handlers = [
 		const limit = Number(url.searchParams.get("limit") ?? "10");
 		const filteredEntries = state.stickySessions.filter((entry) => {
 			if (staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
+				return false;
+			}
+			if (providerKind && entry.providerKind.toLowerCase() !== providerKind) {
 				return false;
 			}
 			if (accountQuery && !entry.displayName.toLowerCase().includes(accountQuery)) {
@@ -531,36 +660,73 @@ export const handlers = [
 						z.object({
 							key: z.string().min(1),
 							kind: z.enum(["codex_session", "sticky_thread", "prompt_cache"]),
+							providerKind: z.enum(["chatgpt_web", "openai_platform"]).default("chatgpt_web"),
 						}),
 					)
 					.min(1)
 					.max(500)
 					.refine(
 						(sessions) =>
-							new Set(sessions.map((session) => `${session.kind}:${session.key}`)).size === sessions.length,
+							new Set(
+								sessions.map((session) => `${session.providerKind}:${session.kind}:${session.key}`),
+							).size === sessions.length,
 						"Duplicate sticky session targets are not allowed",
 					),
 			}),
 		)) ?? { sessions: [] };
-		const targets = new Set(payload.sessions.map((session) => `${session.kind}:${session.key}`));
+		const targets = new Set(
+			payload.sessions.map((session) => `${session.providerKind}:${session.kind}:${session.key}`),
+		);
 		const deleted = state.stickySessions
-			.filter((entry) => targets.has(`${entry.kind}:${entry.key}`))
-			.map((entry) => ({ key: entry.key, kind: entry.kind }));
-		const deletedTargets = new Set(deleted.map((entry) => `${entry.kind}:${entry.key}`));
+			.filter((entry) => targets.has(`${entry.providerKind}:${entry.kind}:${entry.key}`))
+			.map((entry) => ({ key: entry.key, kind: entry.kind, providerKind: entry.providerKind }));
+		const deletedTargets = new Set(
+			deleted.map((entry) => `${entry.providerKind}:${entry.kind}:${entry.key}`),
+		);
 		state.stickySessions = state.stickySessions.filter(
-			(entry) => !targets.has(`${entry.kind}:${entry.key}`),
+			(entry) => !targets.has(`${entry.providerKind}:${entry.kind}:${entry.key}`),
 		);
 		return HttpResponse.json({
 			deletedCount: deleted.length,
 			deleted,
 			failed: payload.sessions
-				.filter((session) => !deletedTargets.has(`${session.kind}:${session.key}`))
+				.filter(
+					(session) =>
+						!deletedTargets.has(`${session.providerKind}:${session.kind}:${session.key}`),
+				)
 				.map((session) => ({
 					key: session.key,
 					kind: session.kind,
+					providerKind: session.providerKind,
 					reason: "not_found",
 				})),
 		});
+	}),
+
+	http.delete("/api/sticky-sessions/:kind/:key", ({ params, request }) => {
+		const kind = String(params.kind);
+		const key = String(params.key);
+		const providerKind = (
+			new URL(request.url).searchParams.get("providerKind") ?? "chatgpt_web"
+		)
+			.trim()
+			.toLowerCase();
+		const initialLength = state.stickySessions.length;
+		state.stickySessions = state.stickySessions.filter(
+			(entry) =>
+				!(
+					entry.kind === kind &&
+					entry.key === key &&
+					entry.providerKind.toLowerCase() === providerKind
+				),
+		);
+		if (state.stickySessions.length === initialLength) {
+			return HttpResponse.json(
+				{ error: { code: "not_found", message: "Sticky session not found" } },
+				{ status: 404 },
+			);
+		}
+		return new HttpResponse(null, { status: 204 });
 	}),
 
 	http.post("/api/sticky-sessions/delete-filtered", async ({ request }) => {
@@ -568,18 +734,24 @@ export const handlers = [
 			request,
 			z.object({
 				staleOnly: z.boolean().default(false),
+				providerKind: z.enum(["chatgpt_web", "openai_platform"]).nullable().optional(),
 				accountQuery: z.string().default(""),
 				keyQuery: z.string().default(""),
 			}),
 		)) ?? {
 			staleOnly: false,
+			providerKind: null,
 			accountQuery: "",
 			keyQuery: "",
 		};
+		const providerKind = (payload.providerKind ?? "").trim().toLowerCase();
 		const accountQuery = payload.accountQuery.trim().toLowerCase();
 		const keyQuery = payload.keyQuery.trim().toLowerCase();
 		const matched = state.stickySessions.filter((entry) => {
 			if (payload.staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
+				return false;
+			}
+			if (providerKind && entry.providerKind.toLowerCase() !== providerKind) {
 				return false;
 			}
 			if (accountQuery && !entry.displayName.toLowerCase().includes(accountQuery)) {
@@ -590,8 +762,12 @@ export const handlers = [
 			}
 			return true;
 		});
-		const targets = new Set(matched.map((entry) => `${entry.kind}:${entry.key}`));
-		state.stickySessions = state.stickySessions.filter((entry) => !targets.has(`${entry.kind}:${entry.key}`));
+		const targets = new Set(
+			matched.map((entry) => `${entry.providerKind}:${entry.kind}:${entry.key}`),
+		);
+		state.stickySessions = state.stickySessions.filter(
+			(entry) => !targets.has(`${entry.providerKind}:${entry.kind}:${entry.key}`),
+		);
 		return HttpResponse.json({ deletedCount: matched.length });
 	}),
 

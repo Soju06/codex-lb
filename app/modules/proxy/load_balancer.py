@@ -6,7 +6,7 @@ import time
 from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, cast
 
 from app.core import usage as usage_core
 from app.core.balancer import (
@@ -35,6 +35,13 @@ from app.db.models import Account, AccountStatus, AdditionalUsageHistory, Sticky
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.sticky_repository import StickyRoutingTarget
+from app.modules.upstream_identities.types import (
+    CHATGPT_WEB_PROVIDER_KIND,
+    OPENAI_PLATFORM_PROVIDER_KIND,
+    PlatformRouteFamily,
+    ProviderKind,
+)
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
 if TYPE_CHECKING:
@@ -78,6 +85,29 @@ class AccountSelection:
     account: Account | None
     error_message: str | None
     error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingSubjectSelection:
+    target: StickyRoutingTarget | None
+    account: Account | None = None
+    error_message: str | None = None
+    error_code: str | None = None
+
+    @property
+    def provider_kind(self) -> ProviderKind | None:
+        return cast(ProviderKind | None, self.target.provider_kind if self.target is not None else None)
+
+    @property
+    def routing_subject_id(self) -> str | None:
+        return self.target.routing_subject_id if self.target is not None else None
+
+    def as_account_selection(self) -> AccountSelection:
+        return AccountSelection(
+            account=self.account,
+            error_message=self.error_message,
+            error_code=self.error_code,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +417,175 @@ class LoadBalancer:
             model,
         )
         return AccountSelection(account=selected_snapshot, error_message=None, error_code=None)
+
+    async def select_routing_subject(
+        self,
+        *,
+        provider_kind: ProviderKind,
+        route_family: PlatformRouteFamily | None = None,
+        sticky_key: str | None = None,
+        sticky_kind: StickySessionKind | None = None,
+        reallocate_sticky: bool = False,
+        sticky_max_age_seconds: int | None = None,
+        prefer_earlier_reset_accounts: bool = False,
+        routing_strategy: RoutingStrategy = "capacity_weighted",
+        model: str | None = None,
+        additional_limit_name: str | None = None,
+        routing_subject_ids: Collection[str] | None = None,
+        exclude_routing_subject_ids: Collection[str] | None = None,
+        budget_threshold_pct: float = 95.0,
+    ) -> RoutingSubjectSelection:
+        if provider_kind == CHATGPT_WEB_PROVIDER_KIND:
+            selection = await self.select_account(
+                sticky_key=sticky_key,
+                sticky_kind=sticky_kind,
+                reallocate_sticky=reallocate_sticky,
+                sticky_max_age_seconds=sticky_max_age_seconds,
+                prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                routing_strategy=routing_strategy,
+                model=model,
+                additional_limit_name=additional_limit_name,
+                account_ids=routing_subject_ids,
+                exclude_account_ids=exclude_routing_subject_ids,
+                budget_threshold_pct=budget_threshold_pct,
+            )
+            if selection.account is None:
+                return RoutingSubjectSelection(
+                    target=None,
+                    account=None,
+                    error_message=selection.error_message,
+                    error_code=selection.error_code,
+                )
+            return RoutingSubjectSelection(
+                target=StickyRoutingTarget(
+                    provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+                    routing_subject_id=selection.account.id,
+                    account_id=selection.account.id,
+                ),
+                account=selection.account,
+            )
+
+        if provider_kind != OPENAI_PLATFORM_PROVIDER_KIND:
+            raise ValueError(f"Unsupported provider_kind: {provider_kind!r}")
+        if route_family is None:
+            raise ValueError("route_family is required for openai_platform routing selection")
+
+        allowed_ids = None if routing_subject_ids is None else set(routing_subject_ids)
+        excluded_ids = set(exclude_routing_subject_ids or ())
+        async with self._repo_factory() as repos:
+            platform_identities = repos.platform_identities
+            if platform_identities is None:
+                return RoutingSubjectSelection(
+                    target=None,
+                    error_message="OpenAI Platform identities repository is unavailable",
+                    error_code="no_provider_subjects",
+                )
+            identities = await platform_identities.list_eligible_identities(route_family)
+            if allowed_ids is not None:
+                identities = [identity for identity in identities if identity.id in allowed_ids]
+            if excluded_ids:
+                identities = [identity for identity in identities if identity.id not in excluded_ids]
+
+            if sticky_key and sticky_kind == StickySessionKind.PROMPT_CACHE:
+                sticky_target = await repos.sticky_sessions.get_target(
+                    sticky_key,
+                    kind=sticky_kind,
+                    provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                    max_age_seconds=sticky_max_age_seconds,
+                )
+                if sticky_target is not None:
+                    sticky_identity = next(
+                        (identity for identity in identities if identity.id == sticky_target.routing_subject_id),
+                        None,
+                    )
+                    if sticky_identity is not None:
+                        if sticky_max_age_seconds is not None:
+                            await repos.sticky_sessions.upsert_target(
+                                sticky_key,
+                                kind=sticky_kind,
+                                provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                                routing_subject_id=sticky_identity.id,
+                            )
+                        return RoutingSubjectSelection(
+                            target=StickyRoutingTarget(
+                                provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                                routing_subject_id=sticky_identity.id,
+                                account_id=None,
+                            ),
+                        )
+                    await repos.sticky_sessions.delete_scoped(
+                        sticky_key,
+                        kind=sticky_kind,
+                        provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                    )
+
+            if not identities:
+                return RoutingSubjectSelection(
+                    target=None,
+                    error_message="No eligible OpenAI Platform identities available",
+                    error_code="no_provider_subjects",
+                )
+
+            selected = identities[0]
+            if sticky_key and sticky_kind == StickySessionKind.PROMPT_CACHE:
+                await repos.sticky_sessions.upsert_target(
+                    sticky_key,
+                    kind=sticky_kind,
+                    provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                    routing_subject_id=selected.id,
+                )
+            return RoutingSubjectSelection(
+                target=StickyRoutingTarget(
+                    provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                    routing_subject_id=selected.id,
+                    account_id=None,
+                ),
+            )
+
+    async def should_fallback_to_platform_for_usage_drain(
+        self,
+        *,
+        model: str | None = None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+    ) -> bool:
+        selection_inputs = await self._load_selection_inputs(
+            model=model,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+        )
+        if not selection_inputs.accounts:
+            return False
+
+        self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+        states, _account_map = _build_states(
+            accounts=selection_inputs.accounts,
+            latest_primary=selection_inputs.latest_primary,
+            latest_secondary=selection_inputs.latest_secondary,
+            runtime=self._runtime,
+        )
+
+        settings = get_settings()
+        primary_threshold = float(getattr(settings, "drain_primary_threshold_pct", 85.0))
+        secondary_threshold = float(getattr(settings, "drain_secondary_threshold_pct", 90.0))
+
+        considered_states = [
+            state for state in states if state.status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
+        ]
+        if not considered_states:
+            return False
+
+        if any(
+            _is_chatgpt_state_healthy_for_platform_fallback(
+                state,
+                primary_threshold=primary_threshold,
+                secondary_threshold=secondary_threshold,
+            )
+            for state in considered_states
+        ):
+            return False
+
+        return True
 
     async def _load_selection_inputs(
         self,
@@ -994,6 +1193,19 @@ def _build_states(
         states.append(state)
         account_map[account.id] = account
     return states, account_map
+
+
+def _is_chatgpt_state_healthy_for_platform_fallback(
+    state: AccountState,
+    *,
+    primary_threshold: float,
+    secondary_threshold: float,
+) -> bool:
+    primary_healthy = state.used_percent is None or float(state.used_percent) < primary_threshold
+    secondary_healthy = (
+        state.secondary_used_percent is None or float(state.secondary_used_percent) < secondary_threshold
+    )
+    return primary_healthy and secondary_healthy
 
 
 def _state_from_account(

@@ -48,6 +48,28 @@ export function formatSlug(value: string): string {
   return words.join(" ");
 }
 
+export function formatProviderLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "chatgpt_web":
+      return "ChatGPT Web";
+    case "openai_platform":
+      return "OpenAI Platform";
+    default:
+      return value ? formatSlug(value) : "";
+  }
+}
+
+export function formatRouteFamilyLabel(value: string): string {
+  switch (value) {
+    case "public_models_http":
+      return "Fallback HTTP /v1/models";
+    case "public_responses_http":
+      return "Fallback stateless HTTP /v1/responses";
+    default:
+      return formatSlug(value);
+  }
+}
+
 export function toNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;

@@ -9,8 +9,10 @@ import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
+import { PlatformIdentityDialog } from "@/features/accounts/components/platform-identity-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import type { AccountSummary } from "@/features/accounts/schemas";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -23,6 +25,8 @@ export function AccountsPage() {
   const {
     accountsQuery,
     importMutation,
+    createPlatformMutation,
+    updatePlatformMutation,
     pauseMutation,
     resumeMutation,
     deleteMutation,
@@ -30,10 +34,26 @@ export function AccountsPage() {
   const oauth = useOauth();
 
   const importDialog = useDialogState();
+  const platformDialog = useDialogState();
+  const platformEditDialog = useDialogState<AccountSummary>();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
+  const platformIdentityRegistered = useMemo(
+    () => accounts.some((account) => account.providerKind === "openai_platform"),
+    [accounts],
+  );
+  const platformPrerequisiteSatisfied = useMemo(
+    () =>
+      accounts.some(
+        (account) =>
+          account.providerKind !== "openai_platform" &&
+          account.status !== "paused" &&
+          account.status !== "deactivated",
+      ),
+    [accounts],
+  );
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
   const selectedAccountId = searchParams.get("selected");
 
@@ -63,15 +83,21 @@ export function AccountsPage() {
 
   const mutationBusy =
     importMutation.isPending ||
+    createPlatformMutation.isPending ||
+    updatePlatformMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     deleteMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
+    getErrorMessageOrNull(createPlatformMutation.error) ||
+    getErrorMessageOrNull(updatePlatformMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error);
+  const editingPlatformAccount =
+    platformEditDialog.data?.providerKind === "openai_platform" ? platformEditDialog.data : null;
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -79,7 +105,7 @@ export function AccountsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Accounts</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Manage imported accounts and authentication flows.
+          Manage imported accounts, ChatGPT authentication, and OpenAI Platform API keys.
         </p>
       </div>
 
@@ -93,9 +119,12 @@ export function AccountsPage() {
             <AccountList
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
+              platformIdentityRegistered={platformIdentityRegistered}
+              platformPrerequisiteSatisfied={platformPrerequisiteSatisfied}
               onSelect={handleSelectAccount}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
+              onOpenPlatform={() => platformDialog.show()}
             />
           </div>
 
@@ -103,6 +132,7 @@ export function AccountsPage() {
             account={selectedAccount}
             showAccountId={selectedAccount ? duplicateAccountIds.has(selectedAccount.accountId) : false}
             busy={mutationBusy}
+            onEditPlatform={(account) => platformEditDialog.show(account)}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}
@@ -118,6 +148,36 @@ export function AccountsPage() {
         onOpenChange={importDialog.onOpenChange}
         onImport={async (file) => {
           await importMutation.mutateAsync(file);
+        }}
+      />
+
+      <PlatformIdentityDialog
+        open={platformDialog.open}
+        busy={createPlatformMutation.isPending}
+        error={getErrorMessageOrNull(createPlatformMutation.error)}
+        mode="create"
+        prerequisiteSatisfied={platformPrerequisiteSatisfied}
+        onOpenChange={platformDialog.onOpenChange}
+        onSubmit={async (payload) => {
+          await createPlatformMutation.mutateAsync(payload);
+        }}
+      />
+
+      <PlatformIdentityDialog
+        open={platformEditDialog.open}
+        busy={updatePlatformMutation.isPending}
+        error={getErrorMessageOrNull(updatePlatformMutation.error)}
+        mode="edit"
+        account={editingPlatformAccount}
+        onOpenChange={platformEditDialog.onOpenChange}
+        onSubmit={async (payload) => {
+          if (!editingPlatformAccount) {
+            return;
+          }
+          await updatePlatformMutation.mutateAsync({
+            accountId: editingPlatformAccount.accountId,
+            payload,
+          });
         }}
       />
 

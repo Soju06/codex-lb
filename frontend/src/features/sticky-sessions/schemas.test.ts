@@ -14,6 +14,9 @@ describe("StickySessionEntrySchema", () => {
       key: "thread_123",
       displayName: "sticky-a@example.com",
       kind: "prompt_cache",
+      providerKind: "chatgpt_web",
+      routingSubjectId: "acc_sticky_a",
+      affinityScope: "provider_prompt_cache",
       createdAt: "2026-03-10T12:00:00Z",
       updatedAt: "2026-03-10T12:05:00Z",
       expiresAt: "2026-03-10T12:10:00Z",
@@ -22,6 +25,8 @@ describe("StickySessionEntrySchema", () => {
 
     expect(parsed.kind).toBe("prompt_cache");
     expect(parsed.displayName).toBe("sticky-a@example.com");
+    expect(parsed.providerKind).toBe("chatgpt_web");
+    expect(parsed.routingSubjectId).toBe("acc_sticky_a");
     expect(parsed.expiresAt).toBe("2026-03-10T12:10:00Z");
   });
 });
@@ -41,6 +46,7 @@ describe("StickySessionsListParamsSchema", () => {
     const parsed = StickySessionsListParamsSchema.parse({});
     expect(parsed).toEqual({
       staleOnly: false,
+      providerKind: null,
       accountQuery: "",
       keyQuery: "",
       sortBy: "updated_at",
@@ -52,7 +58,7 @@ describe("StickySessionsListParamsSchema", () => {
 });
 
 describe("StickySessionIdentifierSchema", () => {
-  it("parses composite sticky-session identities", () => {
+  it("defaults provider kind for composite sticky-session identities", () => {
     const parsed = StickySessionIdentifierSchema.parse({
       key: "thread_123",
       kind: "prompt_cache",
@@ -61,6 +67,7 @@ describe("StickySessionIdentifierSchema", () => {
     expect(parsed).toEqual({
       key: "thread_123",
       kind: "prompt_cache",
+      providerKind: "chatgpt_web",
     });
   });
 });

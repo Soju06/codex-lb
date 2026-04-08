@@ -7,6 +7,7 @@ from enum import Enum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -46,6 +47,11 @@ class StickySessionKind(str, Enum):
     CODEX_SESSION = "codex_session"
     STICKY_THREAD = "sticky_thread"
     PROMPT_CACHE = "prompt_cache"
+
+
+class UpstreamProviderKind(str, Enum):
+    CHATGPT_WEB = "chatgpt_web"
+    OPENAI_PLATFORM = "openai_platform"
 
 
 class Account(Base):
@@ -120,11 +126,16 @@ class RequestLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
+    provider_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    routing_subject_id: Mapped[str | None] = mapped_column(String, nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
+    route_class: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -163,6 +174,17 @@ class SchedulerLeader(Base):
 
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
+    __table_args__ = (
+        CheckConstraint("routing_subject_id <> ''", name="ck_sticky_sessions_routing_subject_non_empty"),
+        CheckConstraint(
+            "account_id IS NULL OR provider_kind = 'chatgpt_web'",
+            name="ck_sticky_sessions_account_scope",
+        ),
+        CheckConstraint(
+            "NOT (provider_kind = 'openai_platform' AND kind = 'codex_session')",
+            name="ck_sticky_sessions_platform_codex_session",
+        ),
+    )
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
     kind: Mapped[StickySessionKind] = mapped_column(
@@ -177,7 +199,49 @@ class StickySession(Base):
         server_default=text("'sticky_thread'"),
         nullable=False,
     )
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    provider_kind: Mapped[str] = mapped_column(
+        String,
+        primary_key=True,
+        default=UpstreamProviderKind.CHATGPT_WEB.value,
+        server_default=text("'chatgpt_web'"),
+        nullable=False,
+    )
+    account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
+    routing_subject_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class OpenAIPlatformIdentity(Base):
+    __tablename__ = "openai_platform_identities"
+    __table_args__ = (Index("uq_openai_platform_identities_singleton", "singleton_key", unique=True),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    singleton_key: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
+    label: Mapped[str] = mapped_column(String, nullable=False)
+    api_key_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    organization_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    eligible_route_families: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    status: Mapped[AccountStatus] = mapped_column(
+        SqlEnum(
+            AccountStatus,
+            name="account_status",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        default=AccountStatus.ACTIVE,
+        server_default=text("'active'"),
+        nullable=False,
+    )
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_auth_failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -479,8 +543,12 @@ Index(
     UsageHistory.id.desc(),
 )
 Index("idx_accounts_email", Account.email)
+Index("idx_openai_platform_identities_status", OpenAIPlatformIdentity.status)
+Index("idx_openai_platform_identities_label", OpenAIPlatformIdentity.label)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
+Index("idx_logs_provider_time", RequestLog.provider_kind, RequestLog.requested_at)
+Index("idx_logs_routing_subject_time", RequestLog.routing_subject_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
@@ -504,6 +572,12 @@ Index(
     RequestLog.id.desc(),
 )
 Index("idx_sticky_account", StickySession.account_id)
+Index(
+    "idx_sticky_provider_routing_kind",
+    StickySession.provider_kind,
+    StickySession.routing_subject_id,
+    StickySession.kind,
+)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)

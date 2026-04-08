@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-import { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema } from "@/features/accounts/schemas";
+import {
+  AccountAdditionalQuotaSchema,
+  AccountSummarySchema,
+  AccountUsageSchema,
+  ProviderKindSchema,
+} from "@/features/accounts/schemas";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
 export { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema };
@@ -104,6 +109,11 @@ export const RequestLogSchema = z.object({
   accountId: z.string().nullable(),
   apiKeyName: z.string().nullable(),
   requestId: z.string(),
+  providerKind: ProviderKindSchema.nullable().optional().default(null),
+  routingSubjectId: z.string().nullable().optional().default(null),
+  routeClass: z.string().nullable().optional().default(null),
+  upstreamRequestId: z.string().nullable().optional().default(null),
+  rejectionReason: z.string().nullable().optional().default(null),
   model: z.string(),
   transport: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),

@@ -6,6 +6,7 @@ import json
 import pytest
 from sqlalchemy import update
 
+import app.modules.proxy.provider_adapters as proxy_transport_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
 from app.core.errors import openai_error
@@ -93,7 +94,7 @@ async def test_backend_transcribe_forwards_file_and_prompt(async_client, monkeyp
         captured["account_id"] = account_id
         return {"text": "hello from backend"}
 
-    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(proxy_transport_module, "core_transcribe_audio", fake_transcribe)
 
     response = await async_client.post(
         "/backend-api/transcribe",
@@ -146,7 +147,7 @@ async def test_v1_audio_transcriptions_forwards_prompt(async_client, monkeypatch
         captured["account_id"] = account_id
         return {"text": "hello from v1"}
 
-    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(proxy_transport_module, "core_transcribe_audio", fake_transcribe)
 
     response = await async_client.post(
         "/v1/audio/transcriptions",
@@ -190,7 +191,7 @@ async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, 
             account.chatgpt_account_id = "acc_transcribe_retry_new"
         return account
 
-    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(proxy_transport_module, "core_transcribe_audio", fake_transcribe)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
 
     response = await async_client.post(
@@ -232,7 +233,7 @@ async def test_backend_transcribe_initial_refresh_failure_returns_handled_error(
             )
         return account
 
-    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(proxy_transport_module, "core_transcribe_audio", fake_transcribe)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
 
     response = await async_client.post(
@@ -373,7 +374,7 @@ async def test_transcription_routing_ignores_model_registry_filter(async_client,
     ):
         return {"text": "registry bypass works"}
 
-    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(proxy_transport_module, "core_transcribe_audio", fake_transcribe)
 
     response = await async_client.post(
         "/v1/audio/transcriptions",

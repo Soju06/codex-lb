@@ -31,4 +31,21 @@ describe("AccountListItem", () => {
 
     expect(screen.getByTestId("mini-quota-fill")).toHaveStyle({ width: "73%" });
   });
+
+  it("shows routing subject metadata for platform identities", () => {
+    const account = createAccountSummary({
+      accountId: "platform_1",
+      email: "Platform Key",
+      displayName: "Platform Key",
+      planType: "openai_platform",
+      providerKind: "openai_platform",
+      routingSubjectId: "subject-platform-1",
+      usage: null,
+      eligibleRouteFamilies: [],
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText(/OpenAI Platform API key \| Subject subject-platform-1/)).toBeInTheDocument();
+  });
 });

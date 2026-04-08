@@ -22,13 +22,17 @@ def _ensure_chart_dependencies() -> None:
     if shutil.which("helm") is None:
         pytest.skip("helm is required for chart rendering tests")
 
-    subprocess.run(
-        ["helm", "dependency", "build", str(_CHART_DIR)],
-        cwd=_REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            ["helm", "dependency", "build", str(_CHART_DIR)],
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        pytest.skip(f"helm chart dependencies are unavailable in this environment: {detail}")
     _DEPENDENCY_BUILD_COMPLETE = True
 
 

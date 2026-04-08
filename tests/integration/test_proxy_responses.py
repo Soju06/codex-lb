@@ -8,6 +8,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+import app.modules.proxy.provider_adapters as proxy_transport_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.db.models import RequestLog
@@ -244,7 +245,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
             '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
         )
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     request_id = "req_stream_123"
@@ -290,7 +291,7 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
         seen_headers.update(headers)
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
     native_headers = {
@@ -336,7 +337,7 @@ async def test_v1_responses_stream_preserves_done_text_events(async_client, monk
         )
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.2", "input": "hi", "stream": True}
     async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
@@ -375,7 +376,7 @@ async def test_v1_responses_stream_keeps_non_text_content_part_done_events(async
         )
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.2", "input": "hi", "stream": True}
     async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
@@ -416,7 +417,7 @@ async def test_backend_responses_stream_preserves_done_text_events(async_client,
         )
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.2", "instructions": "hi", "input": [], "stream": True}
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
@@ -456,7 +457,7 @@ async def test_v1_responses_sanitizes_interleaved_reasoning_fields(async_client,
         seen_input["input"] = payload.input
         yield 'data: {"type":"response.completed","response":{"id":"resp_reasoning_sanitize"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -507,7 +508,7 @@ async def test_proxy_responses_forces_stream(async_client, monkeypatch):
         observed_stream["value"] = payload.stream
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": False}
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
@@ -535,7 +536,7 @@ async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, 
         seen["payload"] = payload
         yield 'data: {"type":"response.completed","response":{"id":"resp_tools"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -573,7 +574,7 @@ async def test_v1_responses_streams_event_sequence(async_client, monkeypatch):
         yield 'data: {"type":"response.refusal.delta","delta":"no"}\n\n'
         yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
@@ -599,7 +600,7 @@ async def test_proxy_responses_stream_large_event_line(async_client, monkeypatch
         yield f'data: {{"type":"response.output_text.delta","delta":"{delta}"}}\n\n'
         yield 'data: {"type":"response.completed","response":{"id":"resp_large"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     request_id = "req_stream_large_123"
@@ -635,7 +636,7 @@ async def test_v1_responses_non_streaming_returns_response(async_client, monkeyp
             '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
         )
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}], "stream": False}
     resp = await async_client.post("/v1/responses", json=payload)
@@ -668,7 +669,7 @@ async def test_v1_responses_non_streaming_reconstructs_reasoning_output(async_cl
             '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
         )
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}], "stream": False}
     resp = await async_client.post("/v1/responses", json=payload)
@@ -701,7 +702,7 @@ async def test_v1_responses_non_streaming_preserves_sse_error_payload(async_clie
             '"type":"server_error","code":"no_accounts"}}\n\n'
         )
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "input": "hi", "stream": False}
     resp = await async_client.post("/v1/responses", json=payload)
@@ -728,7 +729,7 @@ async def test_v1_responses_non_streaming_failed_without_status_returns_error(as
             '"type":"server_error","code":"no_accounts"}}}\n\n'
         )
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "input": "hi", "stream": False}
     resp = await async_client.post("/v1/responses", json=payload)
@@ -817,7 +818,7 @@ async def test_v1_responses_normalizes_assistant_input_text(async_client, monkey
         seen_input["input"] = payload.input
         yield 'data: {"type":"response.completed","response":{"id":"resp_assistant_normalize"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.1",
@@ -854,7 +855,7 @@ async def test_v1_responses_normalizes_tool_messages(async_client, monkeypatch):
         seen_input["input"] = payload.input
         yield 'data: {"type":"response.completed","response":{"id":"resp_tool_normalize"}}\n\n'
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_transport_module, "core_stream_responses", fake_stream)
 
     payload = {
         "model": "gpt-5.1",

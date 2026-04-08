@@ -10,10 +10,15 @@ from app.modules.shared.schemas import DashboardModel
 class RequestLogEntry(DashboardModel):
     requested_at: datetime
     account_id: str | None = None
+    provider_kind: str | None = None
+    routing_subject_id: str | None = None
     api_key_name: str | None = None
     request_id: str
     model: str
     transport: str | None = None
+    route_class: str | None = None
+    upstream_request_id: str | None = None
+    rejection_reason: str | None = None
     service_tier: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None

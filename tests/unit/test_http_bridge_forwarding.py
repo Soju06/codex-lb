@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
+import aiohttp
 import pytest
 
 from app.core.config.settings import get_settings
@@ -17,6 +19,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_SIGNATURE_HEADER,
     HTTP_BRIDGE_TARGET_INSTANCE_HEADER,
     HTTPBridgeForwardContext,
+    HTTPBridgeOwnerClient,
     _owner_forward_receive_timeout,
     _owner_forward_timeout,
     build_owner_forward_headers,
@@ -196,3 +199,74 @@ def test_owner_forward_receive_timeout_clamps_to_remaining_budget(monkeypatch: p
 
     assert timeout.timeout_seconds == pytest.approx(5.0)
     assert timeout.error_code == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
+async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> "FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def text(self) -> str:
+            return ""
+
+        @property
+        def content(self) -> SimpleNamespace:
+            async def _iter_chunked(_: int) -> AsyncIterator[bytes]:
+                if False:
+                    yield b""
+                return
+
+            return SimpleNamespace(iter_chunked=_iter_chunked)
+
+    class FakeSession:
+        def __init__(self, *, timeout: aiohttp.ClientTimeout, trust_env: bool) -> None:
+            captured["timeout"] = timeout
+            captured["trust_env"] = trust_env
+
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, **kwargs: object) -> FakeResponse:
+            captured["url"] = url
+            captured["headers"] = kwargs.get("headers")
+            return FakeResponse()
+
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
+    monkeypatch.setenv("CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS", "7")
+    monkeypatch.setenv("CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS", "11")
+    get_settings.cache_clear()
+
+    client = HTTPBridgeOwnerClient()
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+
+    events = [
+        event
+        async for event in client.stream_responses(
+            owner_endpoint="http://instance-b:2455",
+            payload=payload,
+            headers={"Authorization": "Bearer proxy-key"},
+            context=context,
+            request_started_at=10.0,
+        )
+    ]
+
+    assert events == []
+    assert captured["trust_env"] is False

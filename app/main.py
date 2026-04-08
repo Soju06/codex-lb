@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.core.clients.http import close_http_client, get_http_client, init_http_client
+from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
@@ -374,9 +374,10 @@ async def _wait_for_bridge_advertise_endpoint(
     while True:
         attempt += 1
         try:
-            async with get_http_client().session.get(probe_url, timeout=timeout) as response:
-                if response.status == 200:
-                    return
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                async with session.get(probe_url) as response:
+                    if response.status == 200:
+                        return
         except Exception:
             logger.debug(
                 "Bridge advertise endpoint not yet reachable",

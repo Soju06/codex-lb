@@ -233,6 +233,15 @@ def test_statefulset_workload_name_leaves_room_for_pod_ordinal() -> None:
     assert len(workload_name) <= 52
 
 
+def test_headless_service_publishes_not_ready_addresses_for_bridge_dns() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/service-headless.yaml",
+    )
+
+    assert "publishNotReadyAddresses: true" in rendered
+
+
 def test_external_database_existing_secret_is_used_for_database_url_env() -> None:
     rendered = _helm_template(
         "--set",

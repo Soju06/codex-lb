@@ -243,7 +243,6 @@ async def internal_bridge_responses(
     request: Request,
     payload: ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     forwarded_request_context, internal_error = parse_forwarded_request(
         request.headers,
@@ -253,6 +252,9 @@ async def internal_bridge_responses(
     if internal_error is not None or forwarded_request_context is None:
         assert internal_error is not None
         return _logged_error_json_response(request, internal_error.status_code, internal_error.payload)
+    api_key, auth_error = await _validate_internal_bridge_api_key(request)
+    if auth_error is not None:
+        return auth_error
     skip_limit_enforcement = api_key is None or forwarded_request_context.context.reservation is not None
     return await _stream_responses(
         request,
@@ -1104,6 +1106,19 @@ async def _validate_proxy_websocket_request(
             )
         else:
             api_key = await validate_proxy_api_key_authorization(websocket.headers.get("authorization"))
+    except ProxyAuthError as exc:
+        return None, JSONResponse(
+            status_code=exc.status_code,
+            content=openai_error(exc.code, exc.message, error_type=exc.error_type),
+        )
+    return api_key, None
+
+
+async def _validate_internal_bridge_api_key(
+    request: Request,
+) -> tuple[ApiKeyData | None, JSONResponse | None]:
+    try:
+        api_key = await validate_proxy_api_key_authorization(request.headers.get("authorization"))
     except ProxyAuthError as exc:
         return None, JSONResponse(
             status_code=exc.status_code,

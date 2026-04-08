@@ -7,7 +7,7 @@ metadata:
     {{- include "codex-lb.labels" . | nindent 4 }}
 spec:
   clusterIP: None
-  publishNotReadyAddresses: false
+  publishNotReadyAddresses: true
   selector:
     {{- include "codex-lb.selectorLabels" . | nindent 4 }}
   ports:

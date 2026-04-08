@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 from fastapi import WebSocket
 from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
 import app.modules.proxy.api as proxy_api_module
 from app.core.errors import openai_error
@@ -96,3 +97,26 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
 
     assert response is None
     assert resolved_api_key == api_key
+
+
+@pytest.mark.asyncio
+async def test_validate_internal_bridge_api_key_allows_auth_disabled_remote_request(monkeypatch):
+    async def pass_auth(authorization: str | None):
+        assert authorization is None
+        return None
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", pass_auth)
+
+    api_key, response = await proxy_api_module._validate_internal_bridge_api_key(request)
+
+    assert api_key is None
+    assert response is None

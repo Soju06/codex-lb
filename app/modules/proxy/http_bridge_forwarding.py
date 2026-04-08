@@ -11,7 +11,6 @@ from typing import cast
 
 import aiohttp
 
-from app.core.clients.http import get_http_client
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
@@ -72,38 +71,39 @@ class HTTPBridgeOwnerClient:
         request_started_at: float,
     ) -> AsyncIterator[str]:
         settings = get_settings()
-        async with get_http_client().session.post(
-            f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
-            json=payload.model_dump(mode="json", exclude_none=True),
-            headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
-            timeout=_owner_forward_timeout(
-                connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-                idle_timeout_seconds=settings.stream_idle_timeout_seconds,
-            ),
-        ) as response:
-            if response.status != 200:
-                payload_text = await response.text()
-                raise ProxyResponseError(
-                    response.status,
-                    _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
-                )
-            try:
-                async for event_block in _iter_sse_event_blocks(
-                    response,
-                    request_started_at=request_started_at,
-                    proxy_request_budget_seconds=settings.proxy_request_budget_seconds,
-                    stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
-                ):
-                    yield event_block
-            except _OwnerForwardStreamTimeoutError as exc:
-                yield format_sse_event(
-                    response_failed_event(
-                        exc.error_code,
-                        exc.error_message,
-                        response_id=get_request_id(),
+        timeout = _owner_forward_timeout(
+            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+            idle_timeout_seconds=settings.stream_idle_timeout_seconds,
+        )
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+            async with session.post(
+                f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
+                json=payload.model_dump(mode="json", exclude_none=True),
+                headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+            ) as response:
+                if response.status != 200:
+                    payload_text = await response.text()
+                    raise ProxyResponseError(
+                        response.status,
+                        _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
                     )
-                )
-                return
+                try:
+                    async for event_block in _iter_sse_event_blocks(
+                        response,
+                        request_started_at=request_started_at,
+                        proxy_request_budget_seconds=settings.proxy_request_budget_seconds,
+                        stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
+                    ):
+                        yield event_block
+                except _OwnerForwardStreamTimeoutError as exc:
+                    yield format_sse_event(
+                        response_failed_event(
+                            exc.error_code,
+                            exc.error_message,
+                            response_id=get_request_id(),
+                        )
+                    )
+                    return
 
 
 def build_owner_forward_headers(

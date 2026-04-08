@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+
 from pydantic import Field
 
 from app.modules.shared.schemas import DashboardModel

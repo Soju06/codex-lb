@@ -23,6 +23,8 @@ describe("PasswordSettings", () => {
       passwordRequired: false,
       bootstrapRequired: false,
       bootstrapTokenConfigured: false,
+      authMode: "standard",
+      passwordManagementEnabled: true,
       refreshSession: vi.fn().mockResolvedValue(undefined),
     });
   });
@@ -119,5 +121,25 @@ describe("PasswordSettings", () => {
     await user.click(screen.getAllByRole("button", { name: "Set password" }).find((btn) => btn.getAttribute("type") === "submit")!);
 
     expect(await screen.findByText("setup failed")).toBeInTheDocument();
+  });
+
+  it("describes password as fallback in trusted header mode", () => {
+    useAuthStore.setState({ authMode: "trusted_header", passwordRequired: false });
+
+    render(<PasswordSettings />);
+
+    expect(screen.getByText("No fallback password set.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set password" })).toBeInTheDocument();
+  });
+
+  it("hides password actions when password management is disabled", () => {
+    useAuthStore.setState({ authMode: "disabled", passwordManagementEnabled: false });
+
+    render(<PasswordSettings />);
+
+    expect(screen.getByText("Password login is disabled by the current dashboard auth mode.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Change" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
   });
 });

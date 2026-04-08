@@ -16,6 +16,7 @@ export function AuthGate({ children }: PropsWithChildren) {
   const authenticated = useAuthStore((state) => state.authenticated);
   const bootstrapRequired = useAuthStore((state) => state.bootstrapRequired);
   const totpRequiredOnLogin = useAuthStore((state) => state.totpRequiredOnLogin);
+  const authMode = useAuthStore((state) => state.authMode);
 
   useEffect(() => {
     void refreshSessionStable();
@@ -58,6 +59,20 @@ export function AuthGate({ children }: PropsWithChildren) {
             </div>
           </div>
           <LoginForm />
+        </div>
+      </div>
+    );
+  }
+
+  if (authMode === "trusted_header" && !authenticated) {
+    return (
+      <div className="relative flex min-h-screen items-center justify-center p-4">
+        <div className="w-full max-w-lg rounded-2xl border bg-card p-6 shadow-sm">
+          <h1 className="text-lg font-semibold tracking-tight">Reverse proxy authentication required</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This dashboard expects a trusted auth header from your reverse proxy. Open it through Authelia
+            or configure a fallback dashboard password first.
+          </p>
         </div>
       </div>
     );

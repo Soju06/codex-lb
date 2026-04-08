@@ -18,6 +18,8 @@ describe("auth flow integration", () => {
           passwordRequired: true,
           totpRequiredOnLogin: false,
           totpConfigured: true,
+          authMode: "standard",
+          passwordManagementEnabled: true,
         }),
       ),
       http.post("/api/dashboard-auth/password/login", () =>
@@ -26,6 +28,8 @@ describe("auth flow integration", () => {
           passwordRequired: true,
           totpRequiredOnLogin: true,
           totpConfigured: true,
+          authMode: "standard",
+          passwordManagementEnabled: true,
         }),
       ),
       http.post("/api/dashboard-auth/totp/verify", () =>
@@ -34,6 +38,8 @@ describe("auth flow integration", () => {
           passwordRequired: true,
           totpRequiredOnLogin: false,
           totpConfigured: true,
+          authMode: "standard",
+          passwordManagementEnabled: true,
         }),
       ),
     );

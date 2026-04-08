@@ -35,6 +35,8 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
   const passwordRequired = useAuthStore((s) => s.passwordRequired);
   const bootstrapRequired = useAuthStore((s) => s.bootstrapRequired);
   const bootstrapTokenConfigured = useAuthStore((s) => s.bootstrapTokenConfigured);
+  const authMode = useAuthStore((s) => s.authMode);
+  const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
   const refreshSession = useAuthStore((s) => s.refreshSession);
 
   const [activeDialog, setActiveDialog] = useState<PasswordDialog>(null);
@@ -59,7 +61,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
     setupForm.formState.isSubmitting ||
     changeForm.formState.isSubmitting ||
     removeForm.formState.isSubmitting;
-  const lock = busy || disabled;
+  const lock = busy || disabled || !passwordManagementEnabled;
 
   const closeDialog = () => {
     setActiveDialog(null);
@@ -118,13 +120,21 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
           <div>
             <h3 className="text-sm font-semibold">Password</h3>
             <p className="text-xs text-muted-foreground">
-              {passwordRequired ? "Password is configured." : "No password set."}
+              {!passwordManagementEnabled
+                ? "Password login is disabled by the current dashboard auth mode."
+                : authMode === "trusted_header"
+                  ? passwordRequired
+                    ? "Password is configured as an optional fallback."
+                    : "No fallback password set."
+                  : passwordRequired
+                    ? "Password is configured."
+                    : "No password set."}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          {passwordRequired ? (
+          {!passwordManagementEnabled ? null : passwordRequired ? (
             <>
               <Button
                 type="button"

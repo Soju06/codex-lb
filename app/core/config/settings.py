@@ -10,6 +10,8 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
+
 BASE_DIR = Path(__file__).resolve().parents[3]
 
 DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
@@ -130,6 +132,8 @@ class Settings(BaseSettings):
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
+    dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
+    dashboard_auth_proxy_header: str = "Remote-User"
 
     # --- Multi-replica & production settings ---
     # Prometheus metrics
@@ -241,6 +245,13 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
         return cidrs
 
+    @field_validator("dashboard_auth_proxy_header", mode="before")
+    @classmethod
+    def _normalize_dashboard_auth_proxy_header(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("dashboard_auth_proxy_header must be a string")
+        return normalize_dashboard_auth_proxy_header(value)
+
     @field_validator("http_responses_session_bridge_instance_ring", mode="before")
     @classmethod
     def _normalize_http_bridge_instance_ring(cls, value: object) -> list[str]:
@@ -299,6 +310,16 @@ class Settings(BaseSettings):
     def _validate_metrics_port(self) -> "Settings":
         if self.metrics_port == 2455:
             raise ValueError("metrics_port must not be 2455 (main application port)")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dashboard_auth_mode(self) -> "Settings":
+        if self.dashboard_auth_mode != DashboardAuthMode.TRUSTED_HEADER:
+            return self
+        if not self.firewall_trust_proxy_headers:
+            raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
+        if not self.firewall_trusted_proxy_cidrs:
+            raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
         return self
 
 

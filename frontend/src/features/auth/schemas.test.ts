@@ -9,6 +9,8 @@ describe("AuthSessionSchema", () => {
       passwordRequired: true,
       totpRequiredOnLogin: false,
       totpConfigured: true,
+      authMode: "trusted_header",
+      passwordManagementEnabled: true,
     });
 
     expect(parsed).toEqual({
@@ -18,6 +20,8 @@ describe("AuthSessionSchema", () => {
       totpConfigured: true,
       bootstrapRequired: false,
       bootstrapTokenConfigured: false,
+      authMode: "trusted_header",
+      passwordManagementEnabled: true,
     });
   });
 
@@ -29,6 +33,20 @@ describe("AuthSessionSchema", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it("defaults optional auth mode fields for older responses", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: false,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+    });
+
+    expect(parsed.bootstrapRequired).toBe(false);
+    expect(parsed.bootstrapTokenConfigured).toBe(false);
+    expect(parsed.authMode).toBe("standard");
+    expect(parsed.passwordManagementEnabled).toBe(true);
   });
 });
 

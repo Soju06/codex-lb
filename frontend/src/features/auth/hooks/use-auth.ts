@@ -7,7 +7,7 @@ import {
   logout as logoutRequest,
   verifyTotp as verifyTotpRequest,
 } from "@/features/auth/api";
-import type { AuthSession } from "@/features/auth/schemas";
+import type { AuthSession, DashboardAuthMode } from "@/features/auth/schemas";
 
 type AuthState = {
   passwordRequired: boolean;
@@ -16,6 +16,8 @@ type AuthState = {
   totpConfigured: boolean;
   bootstrapRequired: boolean;
   bootstrapTokenConfigured: boolean;
+  authMode: DashboardAuthMode;
+  passwordManagementEnabled: boolean;
   loading: boolean;
   initialized: boolean;
   error: string | null;
@@ -34,6 +36,8 @@ function applySession(set: (next: Partial<AuthState>) => void, session: AuthSess
     totpConfigured: session.totpConfigured,
     bootstrapRequired: session.bootstrapRequired ?? false,
     bootstrapTokenConfigured: session.bootstrapTokenConfigured ?? false,
+    authMode: session.authMode,
+    passwordManagementEnabled: session.passwordManagementEnabled,
     initialized: true,
     error: null,
   });
@@ -47,6 +51,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   totpConfigured: false,
   bootstrapRequired: false,
   bootstrapTokenConfigured: false,
+  authMode: "standard",
+  passwordManagementEnabled: true,
   loading: false,
   initialized: false,
   error: null,
@@ -87,6 +93,8 @@ export const useAuthStore = create<AuthState>((set) => ({
         totpRequiredOnLogin: false,
         bootstrapRequired: false,
         bootstrapTokenConfigured: false,
+        authMode: "standard",
+        passwordManagementEnabled: true,
       });
       await useAuthStore.getState().refreshSession();
     } finally {
@@ -117,6 +125,10 @@ setUnauthorizedHandler(() => {
     ...state,
     authenticated: false,
     initialized: true,
+    bootstrapRequired: false,
+    bootstrapTokenConfigured: false,
+    authMode: "standard",
+    passwordManagementEnabled: true,
     error: null,
   }));
 });

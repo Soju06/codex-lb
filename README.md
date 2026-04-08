@@ -362,8 +362,52 @@ The protected proxy routes covered by this setting are:
 ## Configuration
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
-Dashboard auth is configured in Settings.
 SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
+
+### Dashboard authentication modes
+
+`codex-lb` supports three dashboard auth modes via environment variables:
+
+- `CODEX_LB_DASHBOARD_AUTH_MODE=standard` — built-in dashboard password with optional TOTP from the Settings page.
+- `CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header` — trust a reverse-proxy auth header such as Authelia's `Remote-User`, but only from `CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS`. Built-in password/TOTP remain available as an optional fallback, and password/TOTP management still requires a fallback password session.
+- `CODEX_LB_DASHBOARD_AUTH_MODE=disabled` — fully bypass dashboard auth. Use only behind network restrictions or external auth. Built-in password/TOTP management is disabled in this mode.
+
+`trusted_header` mode also requires:
+
+```bash
+CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true
+CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16
+CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User
+```
+
+If the trusted header is missing and no fallback password is configured, the dashboard fails closed and shows a reverse-proxy-required message instead of loading the UI.
+
+### Docker examples
+
+**Authelia / trusted header**
+
+```bash
+docker run -d --name codex-lb \
+  -p 2455:2455 -p 1455:1455 \
+  -e CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header \
+  -e CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User \
+  -e CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true \
+  -e CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16 \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
+**Hard override / no app-level dashboard auth**
+
+```bash
+docker run -d --name codex-lb \
+  -p 2455:2455 -p 1455:1455 \
+  -e CODEX_LB_DASHBOARD_AUTH_MODE=disabled \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
+For Helm, pass the same values through `extraEnv`.
 
 ## Data
 

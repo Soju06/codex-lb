@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const DashboardAuthModeSchema = z.enum(["standard", "trusted_header", "disabled"]);
+
 export const AuthSessionSchema = z.object({
   authenticated: z.boolean(),
   passwordRequired: z.boolean(),
@@ -7,6 +9,8 @@ export const AuthSessionSchema = z.object({
   totpConfigured: z.boolean(),
   bootstrapRequired: z.boolean().optional().default(false),
   bootstrapTokenConfigured: z.boolean().optional().default(false),
+  authMode: DashboardAuthModeSchema.default("standard"),
+  passwordManagementEnabled: z.boolean().default(true),
 });
 
 export const LoginRequestSchema = z.object({
@@ -47,6 +51,7 @@ export const StatusResponseSchema = z.object({
 });
 
 export type AuthSession = z.infer<typeof AuthSessionSchema>;
+export type DashboardAuthMode = z.infer<typeof DashboardAuthModeSchema>;
 export type LoginRequest = z.infer<typeof LoginRequestSchema>;
 export type PasswordSetupRequest = z.infer<typeof PasswordSetupRequestSchema>;
 export type PasswordChangeRequest = z.infer<typeof PasswordChangeRequestSchema>;

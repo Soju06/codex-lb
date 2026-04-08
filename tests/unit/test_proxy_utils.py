@@ -314,6 +314,24 @@ def test_has_native_codex_transport_headers_still_accepts_explicit_native_stream
     assert proxy_module._has_native_codex_transport_headers({"x-codex-beta-features": "repl"}) is True
 
 
+def test_infer_websocket_handshake_error_code_detects_account_deactivated_message():
+    code = proxy_module._infer_websocket_handshake_error_code(
+        401,
+        "Your OpenAI account has been deactivated, please check your email for more information.",
+    )
+
+    assert code == "account_deactivated"
+
+
+def test_infer_websocket_handshake_error_code_keeps_generic_401_when_no_deactivation_hint():
+    code = proxy_module._infer_websocket_handshake_error_code(
+        401,
+        "Unauthorized",
+    )
+
+    assert code == "invalid_api_key"
+
+
 def test_parse_sse_event_reads_json_payload():
     payload = {"type": "response.completed", "response": {"id": "resp_1"}}
     line = f"data: {json.dumps(payload)}\n"

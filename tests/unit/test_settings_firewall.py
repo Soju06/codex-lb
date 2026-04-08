@@ -85,6 +85,19 @@ def test_settings_allows_replica_specific_http_bridge_advertise_base_url(monkeyp
     assert settings.http_responses_session_bridge_advertise_base_url.endswith(":2455")
 
 
+def test_settings_allows_pod_ip_http_bridge_advertise_base_url(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "instance-a")
+    monkeypatch.setenv("POD_IP", "10.0.0.25")
+    monkeypatch.setenv(
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL",
+        "http://10.0.0.25:2455",
+    )
+
+    settings = Settings()
+
+    assert settings.http_responses_session_bridge_advertise_base_url == "http://10.0.0.25:2455"
+
+
 def test_settings_rejects_loopback_http_bridge_advertise_base_url(monkeypatch):
     monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "instance-a")
     monkeypatch.setenv(

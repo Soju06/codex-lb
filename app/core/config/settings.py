@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
@@ -335,8 +336,11 @@ def get_settings() -> Settings:
 
 
 def _bridge_advertise_hostname_is_replica_specific(hostname: str, *, instance_id: str) -> bool:
+    pod_ip = os.getenv("POD_IP")
+    if pod_ip and hostname == pod_ip:
+        return True
     try:
         ip_address(hostname)
     except ValueError:
-        return instance_id in hostname
+        return instance_id in hostname.split(".")
     return False

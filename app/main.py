@@ -177,12 +177,21 @@ async def lifespan(app: FastAPI):
             try:
                 await svc.register(iid, endpoint_base_url=bridge_endpoint_base_url)
                 startup_module.mark_bridge_registration_complete()
+                startup_module._startup_complete = True
                 logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
                 break
             except Exception:
                 delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
                 logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
                 await asyncio.sleep(delay)
+        while True:
+            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
+            except Exception:
+                logger.warning("Ring heartbeat failed", exc_info=True)
+
+    async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
         while True:
             await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
             try:
@@ -205,14 +214,28 @@ async def lifespan(app: FastAPI):
     set_cache_invalidation_poller(cache_poller)
     await cache_poller.start()
 
-    startup_module._startup_complete = True
-
     ring_service: RingMembershipService | None = None
     instance_id: str | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     ring_service = RingMembershipService(SessionLocal)
     instance_id = settings.http_responses_session_bridge_instance_id
-    heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
+    try:
+        await _validate_bridge_advertise_endpoint_for_multi_replica(
+            settings=settings,
+            instance_id=instance_id,
+            endpoint_base_url=bridge_endpoint_base_url,
+        )
+        await asyncio.wait_for(
+            ring_service.register(instance_id, endpoint_base_url=bridge_endpoint_base_url),
+            timeout=5.0,
+        )
+        startup_module.mark_bridge_registration_complete()
+        startup_module._startup_complete = True
+        logger.info("Registered in bridge ring", extra={"instance_id": instance_id, "attempt": 1})
+        heartbeat_task = asyncio.create_task(_heartbeat_only(ring_service, instance_id))
+    except Exception:
+        logger.warning("Initial ring registration failed, retrying in background", exc_info=True)
+        heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
 
     try:
         yield

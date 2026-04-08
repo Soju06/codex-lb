@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import builtins
 import errno
 import json
@@ -250,6 +249,12 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     usage_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
+    ring_service = SimpleNamespace(
+        register=AsyncMock(),
+        mark_stale=AsyncMock(),
+        unregister=AsyncMock(),
+        heartbeat=AsyncMock(),
+    )
     call_order: list[str] = []
 
     async def _init_db() -> None:
@@ -277,6 +282,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
 
     async with main.lifespan(main.app):
         assert startup_module._startup_complete is True
@@ -319,7 +325,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     register = AsyncMock()
 
     async def _register(instance_id: str, *, endpoint_base_url: str | None = None) -> None:
-        assert startup_module._startup_complete is True
+        assert startup_module._startup_complete is False
         await register(instance_id, endpoint_base_url=endpoint_base_url)
 
     ring_service = SimpleNamespace(
@@ -347,8 +353,6 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
-    wait_for_reachable = AsyncMock()
-    monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", wait_for_reachable)
     monkeypatch.setattr(main, "mark_process_dead", Mock())
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",
@@ -356,10 +360,9 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     )
 
     async with main.lifespan(main.app):
-        await asyncio.sleep(0)
+        assert startup_module._startup_complete is True
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
-    wait_for_reachable.assert_awaited_once_with(None, connect_timeout_seconds=settings.upstream_connect_timeout_seconds)
     ring_service.mark_stale.assert_awaited_once_with(
         "pod-a",
         stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,

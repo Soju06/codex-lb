@@ -1,0 +1,29 @@
+{{- if .Release.IsUpgrade }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codex-lb.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    codex-lb.soju.dev/legacy-workload-shutdown: "true"
+spec:
+  replicas: 0
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      {{- include "codex-lb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "codex-lb.selectorLabels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: legacy-shutdown
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sleep"]
+          args: ["1"]
+{{- end }}

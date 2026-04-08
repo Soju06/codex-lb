@@ -97,7 +97,11 @@ from app.modules.proxy.helpers import (
     _window_snapshot,
     classify_upstream_failure,
 )
-from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, HTTPBridgeOwnerClient
+from app.modules.proxy.http_bridge_forwarding import (
+    HTTPBridgeForwardContext,
+    HTTPBridgeOwnerClient,
+    OwnerForwardRelayFailure,
+)
 from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -398,7 +402,6 @@ class ProxyService:
                 headers=headers,
                 api_key_reservation=api_key_reservation,
                 codex_session_affinity=codex_session_affinity,
-                downstream_turn_state=downstream_turn_state,
                 request_started_at=request_state.started_at,
                 proxy_api_authorization=proxy_api_authorization,
             ):
@@ -440,17 +443,17 @@ class ProxyService:
         headers: Mapping[str, str],
         api_key_reservation: ApiKeyUsageReservationData | None,
         codex_session_affinity: bool,
-        downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(get_settings())
+        forwarded_turn_state = _header_value_case_insensitive(headers, "x-codex-turn-state")
         forward_context = HTTPBridgeForwardContext(
             origin_instance=current_instance,
             target_instance=owner_forward.owner_instance,
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
-            downstream_turn_state=downstream_turn_state,
+            downstream_turn_state=forwarded_turn_state,
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
         start = time.monotonic()
@@ -477,6 +480,24 @@ class ProxyService:
                 request_started_at=request_started_at,
             ):
                 yield event_block
+        except OwnerForwardRelayFailure as exc:
+            if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
+                bridge_owner_forward_total.labels(outcome="fail").inc()
+            _log_http_bridge_event(
+                "owner_forward_fail",
+                owner_forward.key,
+                account_id=None,
+                model=payload.model,
+                detail=(
+                    f"owner_instance={owner_forward.owner_instance}, current_instance={current_instance}, "
+                    "error=relay_failure"
+                ),
+                cache_key_family=owner_forward.key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
+            yield exc.event_block
+            return
         except ProxyResponseError:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()
@@ -5742,7 +5763,8 @@ def _http_bridge_owner_check_required(
     *,
     gateway_safe_mode: bool,
 ) -> bool:
-    return key.strength == "hard" or (key.affinity_kind == "prompt_cache" and not gateway_safe_mode)
+    del gateway_safe_mode
+    return key.strength == "hard"
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

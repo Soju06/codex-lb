@@ -972,7 +972,7 @@ async def test_v1_responses_http_bridge_non_owner_instance_falls_back_to_local_s
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_non_owner_prompt_cache_requires_owner_when_gateway_safe_mode_disabled(
+async def test_v1_responses_http_bridge_non_owner_prompt_cache_rebinds_locally_when_gateway_safe_mode_disabled(
     async_client,
     app_instance,
     monkeypatch,
@@ -1074,20 +1074,19 @@ async def test_v1_responses_http_bridge_non_owner_prompt_cache_requires_owner_wh
             break
         candidate_suffix += 1
 
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await service._get_or_create_http_bridge_session(
-            key,
-            headers={},
-            affinity=affinity,
-            api_key=None,
-            request_model=payload.model,
-            idle_ttl_seconds=120.0,
-            max_sessions=8,
-            gateway_safe_mode=False,
-        )
+    session = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=affinity,
+        api_key=None,
+        request_model=payload.model,
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        gateway_safe_mode=False,
+    )
 
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.payload["error"].get("code") == "bridge_instance_mismatch"
+    assert session.account.id == account.id
+    assert session.key == key
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,11 @@ class _OwnerForwardStreamTimeoutError(Exception):
         self.error_message = error_message
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerForwardRelayFailure(Exception):
+    event_block: str
+
+
 class HTTPBridgeOwnerClient:
     async def stream_responses(
         self,
@@ -96,14 +101,15 @@ class HTTPBridgeOwnerClient:
                     ):
                         yield event_block
                 except _OwnerForwardStreamTimeoutError as exc:
-                    yield format_sse_event(
-                        response_failed_event(
-                            exc.error_code,
-                            exc.error_message,
-                            response_id=get_request_id(),
+                    raise OwnerForwardRelayFailure(
+                        format_sse_event(
+                            response_failed_event(
+                                exc.error_code,
+                                exc.error_message,
+                                response_id=get_request_id(),
+                            )
                         )
                     )
-                    return
 
 
 def build_owner_forward_headers(

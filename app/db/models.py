@@ -75,6 +75,7 @@ class Account(Base):
     )
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",

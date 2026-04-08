@@ -308,17 +308,21 @@ class StubAccountsRepository:
         status: AccountStatus,
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
+        blocked_at: int | None = None,
     ) -> bool:
         account = self.accounts_by_id.get(account_id)
         if account is not None:
             account.status = status
             account.deactivation_reason = deactivation_reason
             account.reset_at = reset_at
+            account.blocked_at = blocked_at
         self.status_updates.append(
             {
                 "account_id": account_id,
                 "status": status,
                 "deactivation_reason": deactivation_reason,
+                "reset_at": reset_at,
+                "blocked_at": blocked_at,
             }
         )
         return True

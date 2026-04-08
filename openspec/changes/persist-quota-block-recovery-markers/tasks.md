@@ -1,0 +1,4 @@
+- [ ] Persist a block marker on `accounts` so quota recovery survives process restart.
+- [ ] Update balancer recovery logic to trust fresh post-block usage for `quota_exceeded` using the persisted marker.
+- [ ] Clear the persisted block marker when the account returns to `active`.
+- [ ] Add regression tests for restart-safe early-reset recovery and stale-data protection.

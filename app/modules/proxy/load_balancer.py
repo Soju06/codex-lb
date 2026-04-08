@@ -13,6 +13,7 @@ from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
+    QUOTA_EXCEEDED_COOLDOWN_SECONDS,
     AccountState,
     RoutingStrategy,
     SelectionResult,
@@ -783,7 +784,6 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_rate_limit(state, error)
             self._sync_runtime_state(account, state)
-            self._runtime[account.id].blocked_at = time.time()
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
@@ -794,7 +794,6 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_quota_exceeded(state, error)
             self._sync_runtime_state(account, state)
-            self._runtime[account.id].blocked_at = time.time()
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
@@ -849,6 +848,7 @@ class LoadBalancer:
             status=account.status,
             used_percent=None,
             reset_at=runtime.reset_at,
+            blocked_at=float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at,
             cooldown_until=runtime.cooldown_until,
             secondary_used_percent=None,
             secondary_reset_at=None,
@@ -881,6 +881,9 @@ class LoadBalancer:
             dirty = True
         if runtime.cooldown_until != state.cooldown_until:
             runtime.cooldown_until = state.cooldown_until
+            dirty = True
+        if runtime.blocked_at != state.blocked_at:
+            runtime.blocked_at = state.blocked_at
             dirty = True
         if runtime.last_error_at != state.last_error_at:
             runtime.last_error_at = state.last_error_at
@@ -921,20 +924,24 @@ class LoadBalancer:
         state: AccountState,
     ) -> None:
         reset_at_int = int(state.reset_at) if state.reset_at else None
+        blocked_at_int = int(state.blocked_at) if state.blocked_at else None
         status_changed = account.status != state.status
         reason_changed = account.deactivation_reason != state.deactivation_reason
         reset_changed = account.reset_at != reset_at_int
+        blocked_changed = account.blocked_at != blocked_at_int
 
-        if status_changed or reason_changed or reset_changed:
+        if status_changed or reason_changed or reset_changed or blocked_changed:
             await accounts_repo.update_status(
                 account.id,
                 state.status,
                 state.deactivation_reason,
                 reset_at_int,
+                blocked_at=blocked_at_int,
             )
             account.status = state.status
             account.deactivation_reason = state.deactivation_reason
             account.reset_at = reset_at_int
+            account.blocked_at = blocked_at_int
 
     async def _persist_state_if_current(
         self,
@@ -943,24 +950,29 @@ class LoadBalancer:
         state: AccountState,
     ) -> bool:
         reset_at_int = int(state.reset_at) if state.reset_at else None
+        blocked_at_int = int(state.blocked_at) if state.blocked_at else None
         status_changed = account.status != state.status
         reason_changed = account.deactivation_reason != state.deactivation_reason
         reset_changed = account.reset_at != reset_at_int
+        blocked_changed = account.blocked_at != blocked_at_int
 
-        if status_changed or reason_changed or reset_changed:
+        if status_changed or reason_changed or reset_changed or blocked_changed:
             updated = await accounts_repo.update_status_if_current(
                 account.id,
                 state.status,
                 state.deactivation_reason,
                 reset_at_int,
+                blocked_at=blocked_at_int,
                 expected_status=account.status,
                 expected_deactivation_reason=account.deactivation_reason,
                 expected_reset_at=account.reset_at,
+                expected_blocked_at=account.blocked_at,
             )
             if updated:
                 account.status = state.status
                 account.deactivation_reason = state.deactivation_reason
                 account.reset_at = reset_at_int
+                account.blocked_at = blocked_at_int
             return updated
         return True
 
@@ -1022,16 +1034,37 @@ def _state_from_account(
     # and to survive process restarts.
     db_reset_at = float(account.reset_at) if account.reset_at else None
     effective_runtime_reset = db_reset_at or runtime.reset_at
+    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
-    # Clear the runtime reset guard only when ALL conditions hold:
-    #   1. The quota/rate-limit cooldown has expired (debounce period over).
-    #   2. The block event was tracked in this process (blocked_at set).
-    #   3. The governing usage row was refreshed AFTER the block event.
-    # The freshness check must use the row that governs each status:
-    #   QUOTA_EXCEEDED → secondary window, RATE_LIMITED → primary window.
-    # On restart both blocked_at and cooldown_until are None, so the
-    # guard stays — accounts remain blocked until persisted reset_at expires.
-    if runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None:
+    if (
+        account.status == AccountStatus.QUOTA_EXCEEDED
+        and effective_runtime_reset is not None
+        and effective_runtime_reset > time.time()
+        and effective_blocked_at is None
+        and effective_secondary_entry is not None
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
+        and effective_secondary_entry.used_percent is not None
+        and float(effective_secondary_entry.used_percent) < 100.0
+    ):
+        effective_runtime_reset = None
+
+    # Clear the runtime reset guard only when a post-block refresh has been
+    # observed and the debounce period is over.
+    #
+    # QUOTA_EXCEEDED uses a persisted blocked_at marker so recovery survives
+    # process restarts. RATE_LIMITED keeps the narrower runtime-only behavior,
+    # because its cooldown duration is not persisted today.
+    cooldown_ready = False
+    if account.status == AccountStatus.QUOTA_EXCEEDED:
+        cooldown_ready = (
+            effective_blocked_at is not None and time.time() >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
+        )
+    elif (
+        runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None
+    ):
+        cooldown_ready = True
+
+    if cooldown_ready and effective_blocked_at is not None:
         if account.status == AccountStatus.QUOTA_EXCEEDED:
             freshness_entry = effective_secondary_entry
         elif account.status == AccountStatus.RATE_LIMITED:
@@ -1040,7 +1073,7 @@ def _state_from_account(
             freshness_entry = None
         if freshness_entry and freshness_entry.recorded_at is not None:
             recorded_epoch = freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
-            if recorded_epoch > runtime.blocked_at:
+            if recorded_epoch > effective_blocked_at:
                 effective_runtime_reset = None
 
     status, used_percent, reset_at = apply_usage_quota(
@@ -1051,6 +1084,10 @@ def _state_from_account(
         runtime_reset=effective_runtime_reset,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
+    )
+
+    next_blocked_at = (
+        effective_blocked_at if status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED) else None
     )
 
     settings = get_settings()
@@ -1093,6 +1130,7 @@ def _state_from_account(
         status=status,
         used_percent=used_percent,
         reset_at=reset_at,
+        blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
         secondary_used_percent=secondary_used,
         secondary_reset_at=secondary_reset,
@@ -1104,6 +1142,17 @@ def _state_from_account(
         capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
         health_tier=new_tier,
     )
+
+
+def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
+    if recorded_at is None:
+        return False
+    current_time = utcnow()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
+    recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_time >= current_time - timedelta(seconds=interval_seconds)
 
 
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:

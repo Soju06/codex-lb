@@ -24,6 +24,8 @@ class _DummyRepo:
         account_id: str,
         status: AccountStatus,
         deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        blocked_at: int | None = None,
     ) -> bool:
         return True
 

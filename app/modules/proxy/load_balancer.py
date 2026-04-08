@@ -1045,6 +1045,8 @@ def _state_from_account(
         and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
+        and effective_secondary_entry.reset_at is not None
+        and float(effective_secondary_entry.reset_at) > effective_runtime_reset
     ):
         effective_runtime_reset = None
 

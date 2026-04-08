@@ -446,11 +446,12 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
-def test_state_from_account_recovers_quota_exceeded_on_restart_with_fresh_usage_even_without_blocked_at(
+def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(
     monkeypatch,
 ):
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
+    next_reset = int(now + 7200)
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
@@ -458,7 +459,7 @@ def test_state_from_account_recovers_quota_exceeded_on_restart_with_fresh_usage_
     account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
     secondary = _make_test_usage(
         used_percent=10.0,
-        reset_at=future_reset,
+        reset_at=next_reset,
         recorded_at=_epoch_to_naive_utc(now - 30),
     )
 
@@ -485,6 +486,31 @@ def test_state_from_account_keeps_quota_exceeded_on_restart_when_fresh_usage_is_
         used_percent=10.0,
         reset_at=future_reset,
         recorded_at=_epoch_to_naive_utc(now - 600),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+
+
+def test_state_from_account_keeps_quota_exceeded_without_blocked_at_when_usage_stays_on_same_reset_window(
+    monkeypatch,
+):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    secondary = _make_test_usage(
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
     )
 
     state = _state_from_account(

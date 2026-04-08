@@ -34,6 +34,7 @@ data:
   CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS: {{ .Values.config.circuitBreakerRecoveryTimeoutSeconds | toString | quote }}
   # Backpressure
   CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS: {{ .Values.config.backpressureMaxConcurrentRequests | toString | quote }}
+  CODEX_LB_DISABLE_BOOTSTRAP_TOKEN: {{ .Values.config.disableBootstrapToken | toString | quote }}
   # Shutdown
   CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: {{ .Values.config.shutdownDrainTimeoutSeconds | toString | quote }}
   # HTTP connector

@@ -163,6 +163,7 @@ class Settings(BaseSettings):
 
     bulkhead_proxy_limit: int = 200
     bulkhead_dashboard_limit: int = 50
+    disable_bootstrap_token: bool = False
     dashboard_bootstrap_token: str | None = None
 
     memory_warning_threshold_mb: int = 0

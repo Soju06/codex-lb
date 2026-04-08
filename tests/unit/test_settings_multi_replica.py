@@ -19,6 +19,7 @@ def test_settings_multi_replica_defaults():
     assert settings.circuit_breaker_failure_threshold == 5
     assert settings.circuit_breaker_recovery_timeout_seconds == 60
     assert settings.backpressure_max_concurrent_requests == 0
+    assert settings.disable_bootstrap_token is False
     assert settings.otel_enabled is False
     assert settings.otel_exporter_endpoint == ""
     assert settings.shutdown_drain_timeout_seconds == 30
@@ -85,6 +86,12 @@ def test_settings_backpressure_max_concurrent_requests_from_env(monkeypatch):
     monkeypatch.setenv("CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS", "50")
     settings = Settings()
     assert settings.backpressure_max_concurrent_requests == 50
+
+
+def test_settings_disable_bootstrap_token_from_env(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DISABLE_BOOTSTRAP_TOKEN", "true")
+    settings = Settings()
+    assert settings.disable_bootstrap_token is True
 
 
 def test_settings_otel_enabled_from_env(monkeypatch):

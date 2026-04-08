@@ -159,6 +159,34 @@ async def test_remote_first_run_requires_bootstrap_token(app_instance, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_remote_first_run_can_skip_bootstrap_token_when_disabled(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DISABLE_BOOTSTRAP_TOKEN", "true")
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    from app.core.config.settings import get_settings
+    from app.core.config.settings_cache import get_settings_cache
+
+    get_settings.cache_clear()
+    await get_settings_cache().invalidate()
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("203.0.113.12", 50002))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as remote_client:
+            session = await remote_client.get("/api/dashboard-auth/session")
+            assert session.status_code == 200
+            assert session.json()["authenticated"] is True
+            assert session.json()["bootstrapRequired"] is False
+
+            protected_settings = await remote_client.get("/api/settings")
+            assert protected_settings.status_code == 200
+
+            allowed = await remote_client.post(
+                "/api/dashboard-auth/password/setup",
+                json={"password": "password123"},
+            )
+            assert allowed.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_totp_only_mode_requires_session_even_when_password_hash_is_null(async_client, caplog):
     await _set_migration_inconsistent_totp_only_mode()
 

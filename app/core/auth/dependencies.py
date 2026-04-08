@@ -9,6 +9,7 @@ from starlette.requests import HTTPConnection
 
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.clients.usage import UsageFetchError, fetch_usage
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
 from app.core.request_locality import is_local_request
@@ -111,10 +112,13 @@ async def validate_usage_api_key(
 
 
 async def validate_dashboard_session(request: Request) -> None:
-    settings = await get_settings_cache().get()
-    password_required = bool(settings.password_hash)
-    requires_auth = password_required or settings.totp_required_on_login
+    dashboard_settings = await get_settings_cache().get()
+    app_settings = get_settings()
+    password_required = bool(dashboard_settings.password_hash)
+    requires_auth = password_required or dashboard_settings.totp_required_on_login
     if not requires_auth:
+        if app_settings.disable_bootstrap_token:
+            return
         if not is_local_request(request):
             raise DashboardAuthError(
                 "Remote bootstrap is required before dashboard access is allowed",
@@ -122,7 +126,7 @@ async def validate_dashboard_session(request: Request) -> None:
             )
         return
 
-    if not password_required and settings.totp_required_on_login:
+    if not password_required and dashboard_settings.totp_required_on_login:
         logger.warning(
             "dashboard_auth_migration_inconsistency password_hash is NULL"
             " while totp_required_on_login=true metric=dashboard_auth_migration_inconsistency"
@@ -134,7 +138,7 @@ async def validate_dashboard_session(request: Request) -> None:
         raise DashboardAuthError("Authentication is required")
     if password_required and not state.password_verified:
         raise DashboardAuthError("Authentication is required")
-    if settings.totp_required_on_login and not state.totp_verified:
+    if dashboard_settings.totp_required_on_login and not state.totp_verified:
         raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
 
 

@@ -80,9 +80,10 @@ async def get_dashboard_auth_session(
 ) -> DashboardAuthSessionResponse:
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     response = await context.service.get_session_state(session_id)
-    if response.password_required or is_local_request(request):
+    settings = get_settings()
+    if response.password_required or is_local_request(request) or settings.disable_bootstrap_token:
         return response
-    bootstrap_token_configured = bool((get_settings().dashboard_bootstrap_token or "").strip())
+    bootstrap_token_configured = bool((settings.dashboard_bootstrap_token or "").strip())
     return response.model_copy(
         update={
             "authenticated": False,
@@ -100,15 +101,17 @@ async def setup_password(
 ) -> DashboardAuthSessionResponse | JSONResponse:
     current_settings = await context.repository.get_settings()
     if current_settings.password_hash is None and not is_local_request(request):
-        configured_bootstrap_token = (get_settings().dashboard_bootstrap_token or "").strip()
-        if not configured_bootstrap_token:
-            raise DashboardAuthError(
-                "Remote bootstrap is disabled until CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN is configured.",
-                code="bootstrap_unavailable",
-            )
-        submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
-        if submitted_bootstrap_token != configured_bootstrap_token:
-            raise DashboardAuthError("Invalid dashboard bootstrap token.", code="invalid_bootstrap_token")
+        app_settings = get_settings()
+        if not app_settings.disable_bootstrap_token:
+            configured_bootstrap_token = (app_settings.dashboard_bootstrap_token or "").strip()
+            if not configured_bootstrap_token:
+                raise DashboardAuthError(
+                    "Remote bootstrap is disabled until CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN is configured.",
+                    code="bootstrap_unavailable",
+                )
+            submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
+            if submitted_bootstrap_token != configured_bootstrap_token:
+                raise DashboardAuthError("Invalid dashboard bootstrap token.", code="invalid_bootstrap_token")
     password = payload.password.strip()
     if len(password) < 8:
         raise DashboardValidationError("Password must be at least 8 characters")

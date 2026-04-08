@@ -136,6 +136,8 @@ config:
   circuitBreakerRecoveryTimeoutSeconds: 60
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
   backpressureMaxConcurrentRequests: 200
+  # @param config.disableBootstrapToken Disable remote bootstrap-token enforcement
+  disableBootstrapToken: false
   # @param config.shutdownDrainTimeoutSeconds Graceful shutdown drain timeout
   shutdownDrainTimeoutSeconds: 30
   # @param config.httpConnectorLimit Global HTTP connection pool limit

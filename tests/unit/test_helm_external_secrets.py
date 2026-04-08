@@ -267,4 +267,10 @@ def test_network_policy_does_not_allow_http_ingress_from_all_namespaces_by_defau
         "templates/networkpolicy.yaml",
     )
 
-    assert "port: 2455" not in rendered
+    assert (
+        "namespaceSelector: {}"
+        not in rendered.split("# Allow internal bridge handoff", 1)[1].split(
+            "# Allow metrics scraping from Prometheus",
+            1,
+        )[0]
+    )

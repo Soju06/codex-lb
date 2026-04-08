@@ -5,7 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 from importlib import import_module
 from pathlib import Path
-from typing import Callable, Protocol, cast
+from typing import Callable, Protocol, TypeAlias, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -52,7 +52,7 @@ from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
 logger = logging.getLogger(__name__)
-type MiddlewareFactory = Callable[..., ASGIApp]
+MiddlewareFactory: TypeAlias = Callable[..., ASGIApp]
 
 
 class _MetricsServer(Protocol):

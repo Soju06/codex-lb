@@ -392,5 +392,24 @@ def test_local_api_port_falls_back_for_invalid_env(monkeypatch: pytest.MonkeyPat
     import app.main as main
 
     monkeypatch.setenv("PORT", "not-a-port")
+    monkeypatch.setattr(main.sys, "argv", ["uvicorn", "app.main:app", "--port", "4123"])
+
+    assert main._local_api_port() == 4123
+
+
+def test_local_api_port_supports_equals_style_argv(monkeypatch: pytest.MonkeyPatch):
+    import app.main as main
+
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setattr(main.sys, "argv", ["uvicorn", "app.main:app", "--port=4124"])
+
+    assert main._local_api_port() == 4124
+
+
+def test_local_api_port_falls_back_to_default_when_no_valid_port_source(monkeypatch: pytest.MonkeyPatch):
+    import app.main as main
+
+    monkeypatch.setenv("PORT", "not-a-port")
+    monkeypatch.setattr(main.sys, "argv", ["uvicorn", "app.main:app", "--port", "bad"])
 
     assert main._local_api_port() == 2455

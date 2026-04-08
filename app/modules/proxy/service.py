@@ -277,6 +277,22 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
+        if runtime_config.enabled:
+            import app.core.startup as startup_module
+
+            if startup_module._startup_complete and not startup_module._bridge_registration_complete:
+                registered = await startup_module.wait_for_bridge_registration(
+                    timeout_seconds=get_settings().upstream_connect_timeout_seconds,
+                )
+                if not registered:
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(
+                            "bridge_owner_unreachable",
+                            "HTTP bridge registration is not ready",
+                            error_type="server_error",
+                        ),
+                    )
         if not runtime_config.enabled:
             async for line in self._stream_with_retry(
                 payload,

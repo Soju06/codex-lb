@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from importlib import import_module
 from pathlib import Path
@@ -105,6 +106,7 @@ async def lifespan(app: FastAPI):
     instance_id = None
 
     startup_module._startup_complete = False
+    startup_module.reset_bridge_registration()
     shutdown_state.reset()
     await get_settings_cache().invalidate()
     await get_rate_limit_headers_cache().invalidate()
@@ -168,6 +170,7 @@ async def lifespan(app: FastAPI):
             attempt += 1
             try:
                 await svc.register(iid, endpoint_base_url=bridge_endpoint_base_url)
+                startup_module.mark_bridge_registration_complete()
                 logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
                 break
             except Exception:
@@ -389,14 +392,33 @@ async def _wait_for_bridge_advertise_endpoint(
 
 
 def _local_api_port() -> int:
-    raw = os.getenv("PORT", "2455").strip()
+    raw = os.getenv("PORT")
+    port = _parse_port_value(raw.strip()) if raw is not None else None
+    if port is None:
+        port = _port_from_argv()
+    if port is None:
+        return 2455
+    return port
+
+
+def _parse_port_value(raw: str) -> int | None:
     try:
         port = int(raw)
     except ValueError:
-        return 2455
+        return None
     if port <= 0:
-        return 2455
+        return None
     return port
+
+
+def _port_from_argv() -> int | None:
+    args = tuple(sys.argv[1:])
+    for index, value in enumerate(args):
+        if value == "--port" and index + 1 < len(args):
+            return _parse_port_value(args[index + 1])
+        if value.startswith("--port="):
+            return _parse_port_value(value.split("=", 1)[1])
+    return None
 
 
 app = create_app()

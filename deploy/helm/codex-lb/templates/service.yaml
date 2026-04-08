@@ -19,7 +19,19 @@ spec:
     {{- toYaml .Values.service.loadBalancerSourceRanges | nindent 4 }}
   {{- end }}
   selector:
-    {{- include "codex-lb.selectorLabels" . | nindent 4 }}
+    {{- $selectorMode := .Values.migration.serviceSelectorMode | default "auto" }}
+    {{- if eq $selectorMode "legacy" }}
+    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
+    {{- else if eq $selectorMode "workload" }}
+    {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
+    {{- else }}
+    {{- $legacyDeployment := lookup "apps/v1" "Deployment" .Release.Namespace (include "codex-lb.fullname" .) }}
+    {{- if $legacyDeployment }}
+    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
+    {{- else }}
+    {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
+    {{- end }}
+    {{- end }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

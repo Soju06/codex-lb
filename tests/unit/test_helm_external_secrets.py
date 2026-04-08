@@ -93,13 +93,49 @@ def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migratio
     assert "kind: Job" in rendered
     assert '"helm.sh/hook": post-upgrade' in rendered
     assert "LEGACY_DEPLOYMENT_NAME" in rendered
+    assert "PUBLIC_SERVICE_NAME" in rendered
     assert "STATEFULSET_NAME" in rendered
     assert "STATEFULSET_MIN_REPLICAS" in rendered
     assert "AUTOSCALING_ENABLED" in rendered
     assert "STATEFULSET_MAX_REPLICAS" in rendered
     assert 'desired = int(spec.get("replicas") or int(os.environ.get("STATEFULSET_MIN_REPLICAS", "1")))' in rendered
     assert "desired = max(desired, min(legacy_ready, max_replicas))" in rendered
+    assert 'codex-lb.soju.dev/traffic": "workload"' in rendered
     assert "if ready >= desired:" in rendered
+
+
+def test_upgrade_renders_legacy_deployment_prepare_hook() -> None:
+    rendered = _helm_template(
+        "--is-upgrade",
+        "--show-only",
+        "templates/legacy-deployment-prepare-hook.yaml",
+    )
+
+    assert "kind: Job" in rendered
+    assert '"helm.sh/hook": pre-upgrade' in rendered
+    assert 'codex-lb.soju.dev/traffic": "legacy"' in rendered
+
+
+def test_public_service_can_render_legacy_selector_for_cutover() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/service.yaml",
+        "--set",
+        "migration.serviceSelectorMode=legacy",
+    )
+
+    assert "codex-lb.soju.dev/traffic: legacy" in rendered
+
+
+def test_public_service_can_render_workload_selector_after_cutover() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/service.yaml",
+        "--set",
+        "migration.serviceSelectorMode=workload",
+    )
+
+    assert "codex-lb.soju.dev/traffic: workload" in rendered
 
 
 def test_legacy_cleanup_hook_includes_image_pull_secrets() -> None:

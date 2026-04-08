@@ -27,6 +27,9 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -96,6 +99,9 @@ spec:
               namespace = os.environ["POD_NAMESPACE"]
               statefulset = os.environ["STATEFULSET_NAME"]
               deployment = os.environ["LEGACY_DEPLOYMENT_NAME"]
+              service_name = os.environ["PUBLIC_SERVICE_NAME"]
+              service_app_name = os.environ["PUBLIC_SERVICE_APP_NAME"]
+              service_instance = os.environ["PUBLIC_SERVICE_INSTANCE"]
               token = open("/var/run/secrets/kubernetes.io/serviceaccount/token", "r", encoding="utf-8").read().strip()
               ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
               api = "https://kubernetes.default.svc"
@@ -112,6 +118,7 @@ spec:
 
               sts_url = f"{api}/apis/apps/v1/namespaces/{namespace}/statefulsets/{statefulset}"
               dep_url = f"{api}/apis/apps/v1/namespaces/{namespace}/deployments/{deployment}"
+              svc_url = f"{api}/api/v1/namespaces/{namespace}/services/{service_name}"
               deadline = time.time() + 600
               while time.time() < deadline:
                   legacy_ready = 0
@@ -148,6 +155,26 @@ spec:
               else:
                   raise SystemExit("StatefulSet did not reach desired ready replicas before legacy Deployment cleanup")
 
+              patch_headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/json",
+                  "Content-Type": "application/merge-patch+json",
+              }
+              service_patch = json.dumps(
+                  {
+                      "spec": {
+                          "selector": {
+                              "app.kubernetes.io/name": service_app_name,
+                              "app.kubernetes.io/instance": service_instance,
+                              "codex-lb.soju.dev/traffic": "workload",
+                          }
+                      }
+                  }
+              ).encode("utf-8")
+              req = request.Request(svc_url, headers=patch_headers, data=service_patch, method="PATCH")
+              with request.urlopen(req, context=ctx, timeout=10):
+                  pass
+
               req = request.Request(dep_url, headers=headers, method="DELETE")
               try:
                   with request.urlopen(req, context=ctx, timeout=10):
@@ -170,4 +197,10 @@ spec:
               value: {{ .Values.autoscaling.maxReplicas | toString | quote }}
             - name: LEGACY_DEPLOYMENT_NAME
               value: {{ include "codex-lb.fullname" . | quote }}
+            - name: PUBLIC_SERVICE_NAME
+              value: {{ include "codex-lb.fullname" . | quote }}
+            - name: PUBLIC_SERVICE_APP_NAME
+              value: {{ include "codex-lb.name" . | quote }}
+            - name: PUBLIC_SERVICE_INSTANCE
+              value: {{ .Release.Name | quote }}
 {{- end }}

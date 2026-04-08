@@ -66,6 +66,22 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+StatefulSet workload selector labels. These are distinct from the legacy Deployment traffic lane.
+*/}}
+{{- define "codex-lb.workloadSelectorLabels" -}}
+{{- include "codex-lb.selectorLabels" . }}
+codex-lb.soju.dev/traffic: workload
+{{- end }}
+
+{{/*
+Legacy Deployment traffic selector labels used during controller migration cutover.
+*/}}
+{{- define "codex-lb.legacySelectorLabels" -}}
+{{- include "codex-lb.selectorLabels" . }}
+codex-lb.soju.dev/traffic: legacy
+{{- end }}
+
+{{/*
 ServiceAccount name resolution
 */}}
 {{- define "codex-lb.serviceAccountName" -}}

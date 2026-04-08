@@ -423,6 +423,8 @@ dbInit:
 migration:
   # @param migration.enabled Run database migration Job on install/upgrade
   enabled: true
+  # @param migration.serviceSelectorMode Public Service selector mode during controller migration (auto|legacy|workload)
+  serviceSelectorMode: auto
   # @param migration.backoffLimit Maximum retries before marking Job failed
   backoffLimit: 3
   # @param migration.activeDeadlineSeconds Maximum Job duration in seconds

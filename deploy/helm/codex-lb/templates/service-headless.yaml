@@ -9,7 +9,7 @@ spec:
   clusterIP: None
   publishNotReadyAddresses: true
   selector:
-    {{- include "codex-lb.selectorLabels" . | nindent 4 }}
+    {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

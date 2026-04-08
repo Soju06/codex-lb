@@ -18,7 +18,7 @@ spec:
   revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   selector:
     matchLabels:
-      {{- include "codex-lb.selectorLabels" . | nindent 6 }}
+      {{- include "codex-lb.workloadSelectorLabels" . | nindent 6 }}
   updateStrategy:
     type: {{ .Values.updateStrategy.type }}
     {{- if eq .Values.updateStrategy.type "RollingUpdate" }}
@@ -28,7 +28,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "codex-lb.selectorLabels" . | nindent 8 }}
+        {{- include "codex-lb.workloadSelectorLabels" . | nindent 8 }}
         {{- with .Values.commonLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

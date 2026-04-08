@@ -71,6 +71,13 @@ spec:
       restartPolicy: Never
       serviceAccountName: {{ $cleanupName }}
       enableServiceLinks: false
+      {{- $pullSecrets := concat (.Values.global.imagePullSecrets | default list) (.Values.image.pullSecrets | default list) }}
+      {{- if $pullSecrets }}
+      imagePullSecrets:
+        {{- range $pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       containers:
         - name: cleanup
           image: {{ include "codex-lb.image" . }}

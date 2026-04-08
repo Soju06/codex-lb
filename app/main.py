@@ -173,8 +173,8 @@ async def lifespan(app: FastAPI):
             attempt += 1
             try:
                 await svc.register(iid, endpoint_base_url=None)
-                startup_module.mark_bridge_registration_complete()
                 await _publish_bridge_endpoint(svc, iid)
+                startup_module.mark_bridge_registration_complete()
                 startup_module._startup_complete = True
                 logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
                 break
@@ -238,8 +238,8 @@ async def lifespan(app: FastAPI):
             ring_service.register(instance_id, endpoint_base_url=None),
             timeout=5.0,
         )
-        startup_module.mark_bridge_registration_complete()
         await _publish_bridge_endpoint(ring_service, instance_id)
+        startup_module.mark_bridge_registration_complete()
         startup_module._startup_complete = True
         logger.info("Registered in bridge ring", extra={"instance_id": instance_id, "attempt": 1})
         heartbeat_task = asyncio.create_task(_heartbeat_only(ring_service, instance_id))

@@ -102,6 +102,19 @@ def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migratio
     assert "if ready >= desired:" in rendered
 
 
+def test_legacy_cleanup_hook_includes_image_pull_secrets() -> None:
+    rendered = _helm_template(
+        "--is-upgrade",
+        "--show-only",
+        "templates/legacy-deployment-cleanup-hook.yaml",
+        "--set",
+        "image.pullSecrets[0]=private-registry",
+    )
+
+    assert "imagePullSecrets:" in rendered
+    assert "name: private-registry" in rendered
+
+
 def test_chart_managed_secret_keeps_pre_install_hook_path() -> None:
     rendered = _helm_template(
         "--set",

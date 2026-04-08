@@ -125,10 +125,6 @@ setUnauthorizedHandler(() => {
     ...state,
     authenticated: false,
     initialized: true,
-    bootstrapRequired: false,
-    bootstrapTokenConfigured: false,
-    authMode: "standard",
-    passwordManagementEnabled: true,
     error: null,
   }));
 });

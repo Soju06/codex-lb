@@ -384,6 +384,7 @@ class ProxyService:
             affinity=affinity,
             api_key=api_key,
             request_id=request_id,
+            allow_forwarded_affinity_headers=forwarded_request,
         )
         request_state, text_data = self._prepare_http_bridge_request(
             payload,
@@ -1726,6 +1727,7 @@ class ProxyService:
         api_key_id = api_key.id if api_key is not None else None
         effective_idle_ttl_seconds = idle_ttl_seconds
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
+        forwarded_affinity_key = _forwarded_http_bridge_session_key(headers, api_key) if forwarded_request else None
         old_account_id: str | None = None
         while True:
             sessions_to_close: list[_HTTPBridgeSession] = []
@@ -1738,7 +1740,7 @@ class ProxyService:
             missing_turn_state_alias = False
 
             async with self._http_bridge_lock:
-                if incoming_turn_state is not None:
+                if incoming_turn_state is not None and forwarded_affinity_key is None:
                     alias_index_key = _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
                     alias_key = self._http_bridge_turn_state_index.get(alias_index_key)
                     if alias_key is not None:
@@ -5626,8 +5628,9 @@ def _make_http_bridge_session_key(
     affinity: _AffinityPolicy,
     api_key: ApiKeyData | None,
     request_id: str,
+    allow_forwarded_affinity_headers: bool = False,
 ) -> _HTTPBridgeSessionKey:
-    forwarded_key = _forwarded_http_bridge_session_key(headers, api_key)
+    forwarded_key = _forwarded_http_bridge_session_key(headers, api_key) if allow_forwarded_affinity_headers else None
     if forwarded_key is not None:
         return forwarded_key
     turn_state_key = _sticky_key_from_turn_state_header(headers)

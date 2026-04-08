@@ -216,11 +216,32 @@ def test_make_http_bridge_session_key_prefers_signed_forwarded_affinity_over_gen
         affinity=proxy_service._AffinityPolicy(key="sid-123"),
         api_key=None,
         request_id="req-1",
+        allow_forwarded_affinity_headers=True,
     )
 
     assert key.affinity_kind == "session_header"
     assert key.affinity_key == "sid-123"
     assert key.strength == "hard"
+
+
+def test_make_http_bridge_session_key_ignores_forwarded_affinity_headers_on_public_requests() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+
+    key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers={
+            "x-codex-bridge-affinity-kind": "session_header",
+            "x-codex-bridge-affinity-key": "sid-123",
+        },
+        affinity=proxy_service._AffinityPolicy(key="cache-123", kind=proxy_service.StickySessionKind.PROMPT_CACHE),
+        api_key=None,
+        request_id="req-1",
+        allow_forwarded_affinity_headers=False,
+    )
+
+    assert key.affinity_kind == "prompt_cache"
+    assert key.affinity_key == "cache-123"
+    assert key.strength == "soft"
 
 
 @pytest.mark.asyncio

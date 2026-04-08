@@ -49,8 +49,8 @@ def upgrade() -> None:
             sa.text(
                 """
                 UPDATE dashboard_settings
-                SET import_without_overwrite = 1
-                WHERE import_without_overwrite = 0
+                SET import_without_overwrite = TRUE
+                WHERE import_without_overwrite = FALSE
                   AND updated_at = created_at
                 """
             )

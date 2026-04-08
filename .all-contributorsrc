@@ -279,6 +279,15 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "Daeroni",
+      "name": "Teemu Koskinen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1648961?v=4",
+      "profile": "https://github.com/Daeroni",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

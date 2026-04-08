@@ -168,6 +168,10 @@ sqlite3 ~/.codex/state_5.sqlite \
 
 > **Important**: Use the built-in `openai` provider with `baseURL` override — not a custom provider with `@ai-sdk/openai-compatible`. Custom providers use the Chat Completions API which **drops reasoning/thinking content**. The built-in `openai` provider uses the Responses API, which properly preserves `encrypted_content` and multi-turn reasoning state.
 
+Before starting, please ensure that all existing OpenAI credentials is cleared in `~/.local/share/opencode/auth.json`
+You can clean the config by using this one-liner
+`jq 'del(.openai)' ~/.local/share/opencode/auth.json > auth.json.tmp && mv auth.json.tmp ~/.local/share/opencode/auth.json`
+
 `~/.config/opencode/opencode.json`:
 
 ```jsonc

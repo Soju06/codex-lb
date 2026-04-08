@@ -271,6 +271,8 @@ async def internal_bridge_responses(
         include_rate_limit_headers=False,
         forwarded_request=True,
         forwarded_headers=forwarded_headers,
+        forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
+        forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
     )
 
 
@@ -749,6 +751,8 @@ async def _stream_responses(
     include_rate_limit_headers: bool = True,
     forwarded_request: bool = False,
     forwarded_headers: Mapping[str, str] | None = None,
+    forwarded_affinity_kind: str | None = None,
+    forwarded_affinity_key: str | None = None,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -786,6 +790,8 @@ async def _stream_responses(
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
         )
     else:
         stream = context.service.stream_responses(

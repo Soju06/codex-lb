@@ -244,6 +244,8 @@ class ProxyService:
         suppress_text_done_events: bool = False,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        forwarded_affinity_kind: str | None = None,
+        forwarded_affinity_key: str | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -260,6 +262,8 @@ class ProxyService:
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
             proxy_api_authorization=proxy_api_authorization,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -276,6 +280,8 @@ class ProxyService:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
         proxy_api_authorization: str | None = None,
+        forwarded_affinity_kind: str | None = None,
+        forwarded_affinity_key: str | None = None,
     ) -> AsyncIterator[str]:
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
@@ -311,6 +317,8 @@ class ProxyService:
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
             proxy_api_authorization=proxy_api_authorization,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
         ):
             yield line
 
@@ -333,6 +341,8 @@ class ProxyService:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
         proxy_api_authorization: str | None = None,
+        forwarded_affinity_kind: str | None = None,
+        forwarded_affinity_key: str | None = None,
     ) -> AsyncIterator[str]:
         del propagate_http_errors, suppress_text_done_events
         request_id = ensure_request_id()
@@ -371,6 +381,8 @@ class ProxyService:
             api_key=api_key,
             request_id=request_id,
             allow_forwarded_affinity_headers=forwarded_request,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
         )
         request_state, text_data = self._prepare_http_bridge_request(
             payload,
@@ -5630,8 +5642,19 @@ def _make_http_bridge_session_key(
     api_key: ApiKeyData | None,
     request_id: str,
     allow_forwarded_affinity_headers: bool = False,
+    forwarded_affinity_kind: str | None = None,
+    forwarded_affinity_key: str | None = None,
 ) -> _HTTPBridgeSessionKey:
-    forwarded_key = _forwarded_http_bridge_session_key(headers, api_key) if allow_forwarded_affinity_headers else None
+    forwarded_key = (
+        _forwarded_http_bridge_session_key(
+            headers,
+            api_key,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
+        )
+        if allow_forwarded_affinity_headers
+        else None
+    )
     if forwarded_key is not None:
         return forwarded_key
     turn_state_key = _sticky_key_from_turn_state_header(headers)
@@ -5684,9 +5707,12 @@ async def _http_bridge_should_wait_for_registration(
 def _forwarded_http_bridge_session_key(
     headers: Mapping[str, str],
     api_key: ApiKeyData | None,
+    *,
+    forwarded_affinity_kind: str | None = None,
+    forwarded_affinity_key: str | None = None,
 ) -> _HTTPBridgeSessionKey | None:
-    affinity_kind = _header_value_case_insensitive(headers, "x-codex-bridge-affinity-kind")
-    affinity_key = _header_value_case_insensitive(headers, "x-codex-bridge-affinity-key")
+    affinity_kind = forwarded_affinity_kind or _header_value_case_insensitive(headers, "x-codex-bridge-affinity-kind")
+    affinity_key = forwarded_affinity_key or _header_value_case_insensitive(headers, "x-codex-bridge-affinity-key")
     if affinity_kind is None or affinity_key is None:
         return None
     strength: Literal["hard", "soft"]

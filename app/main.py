@@ -201,10 +201,6 @@ async def lifespan(app: FastAPI):
     async def _publish_bridge_endpoint(svc: RingMembershipService, iid: str) -> None:
         if bridge_endpoint_base_url is None:
             return
-        await _wait_for_bridge_advertise_endpoint(
-            bridge_endpoint_base_url,
-            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-        )
         await _validate_bridge_advertise_endpoint_for_multi_replica(
             svc=svc,
             settings=settings,

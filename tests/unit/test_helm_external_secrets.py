@@ -95,7 +95,10 @@ def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migratio
     assert "LEGACY_DEPLOYMENT_NAME" in rendered
     assert "STATEFULSET_NAME" in rendered
     assert "STATEFULSET_MIN_REPLICAS" in rendered
+    assert "AUTOSCALING_ENABLED" in rendered
+    assert "STATEFULSET_MAX_REPLICAS" in rendered
     assert 'desired = int(spec.get("replicas") or int(os.environ.get("STATEFULSET_MIN_REPLICAS", "1")))' in rendered
+    assert "desired = max(desired, min(legacy_ready, max_replicas))" in rendered
     assert "if ready >= desired:" in rendered
 
 

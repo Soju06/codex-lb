@@ -162,6 +162,40 @@ async def lifespan(app: FastAPI):
         logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await svc.register(iid, endpoint_base_url=None)
+                startup_module.mark_bridge_registration_complete()
+                startup_module._startup_complete = True
+                logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
+                break
+            except Exception:
+                delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
+                logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
+                await asyncio.sleep(delay)
+
+        await _publish_bridge_endpoint(svc, iid)
+        while True:
+            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
+            except Exception:
+                logger.warning("Ring heartbeat failed", exc_info=True)
+
+    async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
+        await _publish_bridge_endpoint(svc, iid)
+        while True:
+            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
+            except Exception:
+                logger.warning("Ring heartbeat failed", exc_info=True)
+
+    async def _publish_bridge_endpoint(svc: RingMembershipService, iid: str) -> None:
+        if bridge_endpoint_base_url is None:
+            return
         await _wait_for_bridge_advertise_endpoint(
             bridge_endpoint_base_url,
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
@@ -171,33 +205,7 @@ async def lifespan(app: FastAPI):
             instance_id=iid,
             endpoint_base_url=bridge_endpoint_base_url,
         )
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                await svc.register(iid, endpoint_base_url=bridge_endpoint_base_url)
-                startup_module.mark_bridge_registration_complete()
-                startup_module._startup_complete = True
-                logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
-                break
-            except Exception:
-                delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
-                logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
-                await asyncio.sleep(delay)
-        while True:
-            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
-            try:
-                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
-            except Exception:
-                logger.warning("Ring heartbeat failed", exc_info=True)
-
-    async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
-        while True:
-            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
-            try:
-                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
-            except Exception:
-                logger.warning("Ring heartbeat failed", exc_info=True)
+        await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
 
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
@@ -220,13 +228,8 @@ async def lifespan(app: FastAPI):
     ring_service = RingMembershipService(SessionLocal)
     instance_id = settings.http_responses_session_bridge_instance_id
     try:
-        await _validate_bridge_advertise_endpoint_for_multi_replica(
-            settings=settings,
-            instance_id=instance_id,
-            endpoint_base_url=bridge_endpoint_base_url,
-        )
         await asyncio.wait_for(
-            ring_service.register(instance_id, endpoint_base_url=bridge_endpoint_base_url),
+            ring_service.register(instance_id, endpoint_base_url=None),
             timeout=5.0,
         )
         startup_module.mark_bridge_registration_complete()

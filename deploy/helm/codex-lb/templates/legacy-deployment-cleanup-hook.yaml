@@ -131,6 +131,9 @@ spec:
                   spec = payload.get("spec") or {}
                   status = payload.get("status") or {}
                   desired = int(spec.get("replicas") or int(os.environ.get("STATEFULSET_MIN_REPLICAS", "1")))
+                  if os.environ.get("AUTOSCALING_ENABLED", "").lower() == "true":
+                      max_replicas = int(os.environ.get("STATEFULSET_MAX_REPLICAS", str(desired)))
+                      desired = max(desired, min(legacy_ready, max_replicas))
                   ready = int(status.get("readyReplicas") or 0)
                   if ready >= desired:
                       break
@@ -154,6 +157,10 @@ spec:
               value: {{ include "codex-lb.workloadName" . | quote }}
             - name: STATEFULSET_MIN_REPLICAS
               value: {{ ternary (.Values.autoscaling.minReplicas | toString) (.Values.replicaCount | toString) .Values.autoscaling.enabled | quote }}
+            - name: AUTOSCALING_ENABLED
+              value: {{ .Values.autoscaling.enabled | quote }}
+            - name: STATEFULSET_MAX_REPLICAS
+              value: {{ .Values.autoscaling.maxReplicas | toString | quote }}
             - name: LEGACY_DEPLOYMENT_NAME
               value: {{ include "codex-lb.fullname" . | quote }}
 {{- end }}

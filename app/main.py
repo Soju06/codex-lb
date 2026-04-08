@@ -5,7 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 from importlib import import_module
 from pathlib import Path
-from typing import Any, cast
+from typing import Callable, Protocol, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -52,6 +52,13 @@ from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
 logger = logging.getLogger(__name__)
+type MiddlewareFactory = Callable[..., ASGIApp]
+
+
+class _MetricsServer(Protocol):
+    should_exit: bool
+
+    async def serve(self) -> None: ...
 
 
 def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
@@ -126,7 +133,7 @@ async def lifespan(app: FastAPI):
         config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
         metrics_server = uvicorn.Server(config)
 
-        async def _serve_metrics(srv: Any) -> None:
+        async def _serve_metrics(srv: _MetricsServer) -> None:
             try:
                 await srv.serve()
             except SystemExit as exc:
@@ -288,18 +295,18 @@ def create_app() -> FastAPI:
         swagger_ui_parameters={"persistAuthorization": True},
     )
 
-    app.add_middleware(cast(Any, InFlightMiddleware))
+    app.add_middleware(cast(MiddlewareFactory, InFlightMiddleware))
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)
-    app.add_middleware(cast(Any, MetricsMiddleware), enabled=settings.metrics_enabled)
+    app.add_middleware(cast(MiddlewareFactory, MetricsMiddleware), enabled=settings.metrics_enabled)
     if settings.backpressure_max_concurrent_requests > 0:
         app.add_middleware(
-            cast(Any, BackpressureMiddleware),
+            cast(MiddlewareFactory, BackpressureMiddleware),
             max_concurrent=settings.backpressure_max_concurrent_requests,
         )
     app.add_middleware(
-        cast(Any, BulkheadMiddleware),
+        cast(MiddlewareFactory, BulkheadMiddleware),
         bulkhead=get_bulkhead(
             proxy_limit=settings.bulkhead_proxy_limit,
             dashboard_limit=settings.bulkhead_dashboard_limit,

@@ -14,7 +14,7 @@ from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.models import UsagePayload
+from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -503,7 +503,7 @@ def _prefer_merged_additional_window(
 
 
 def _merge_additional_rate_limits(
-    additional_rate_limits: Collection[object],
+    additional_rate_limits: Collection[AdditionalRateLimitPayload],
     *,
     account_id: str,
     now_epoch: int,

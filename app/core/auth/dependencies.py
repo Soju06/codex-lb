@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from typing import cast
 
 from fastapi import Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -69,7 +70,7 @@ async def _validate_api_key_token(token: str) -> ApiKeyData:
 
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     cache = get_api_key_cache()
-    cached = await cache.get(token_hash)
+    cached = cast(ApiKeyData | None, await cache.get(token_hash))
     if cached is not None:
         if cached.expires_at is not None and cached.expires_at <= utcnow():
             await cache.invalidate(token_hash)

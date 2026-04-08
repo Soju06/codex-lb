@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -10,7 +9,8 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
-from app.db.models import RequestLog
+from app.core.config.settings import Settings
+from app.db.models import DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -47,14 +47,8 @@ def _extract_first_event(lines: list[str]) -> dict:
 
 @pytest.fixture(autouse=True)
 def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = SimpleNamespace(
+    app_settings = Settings(
         http_responses_session_bridge_enabled=False,
-        prefer_earlier_reset_accounts=False,
-        sticky_reallocation_budget_threshold_pct=95.0,
-        sticky_threads_enabled=False,
-        openai_cache_affinity_max_age_seconds=300,
-        openai_prompt_cache_key_derivation_enabled=True,
-        routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
@@ -66,13 +60,27 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
     )
+    dashboard_settings = DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="auto",
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
+    )
 
     class _SettingsCache:
-        async def get(self):
-            return settings
+        async def get(self) -> DashboardSettings:
+            return dashboard_settings
 
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
 
 
 @pytest.mark.asyncio

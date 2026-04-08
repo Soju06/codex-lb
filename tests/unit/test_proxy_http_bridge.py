@@ -13,10 +13,15 @@ import pytest
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.config.settings import Settings
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 
 pytestmark = pytest.mark.unit
+
+
+def _make_app_settings(*, bridge_enabled: bool = True) -> Settings:
+    return Settings(http_responses_session_bridge_enabled=bridge_enabled)
 
 
 def _make_api_key(
@@ -74,7 +79,7 @@ async def test_get_or_create_http_bridge_session_reuses_live_local_session_witho
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+        lambda: _make_app_settings(),
     )
 
     async def _unexpected_owner_lookup(*args: object, **kwargs: object) -> str:
@@ -144,7 +149,7 @@ async def test_get_or_create_http_bridge_session_replaces_live_session_when_acco
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+        lambda: _make_app_settings(),
     )
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
     monkeypatch.setattr(
@@ -188,7 +193,7 @@ async def test_get_or_create_http_bridge_session_returns_owner_forward_for_hard_
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+        lambda: _make_app_settings(),
     )
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
     monkeypatch.setattr(
@@ -241,7 +246,7 @@ async def test_get_or_create_http_bridge_session_soft_mismatch_rebinds_locally(
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+        lambda: _make_app_settings(),
     )
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
     monkeypatch.setattr(
@@ -274,7 +279,7 @@ async def test_get_or_create_http_bridge_session_prevents_forward_loops(
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+        lambda: _make_app_settings(),
     )
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
     monkeypatch.setattr(
@@ -346,7 +351,7 @@ async def test_get_or_create_http_bridge_session_replaces_live_session_when_scop
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+        lambda: _make_app_settings(),
     )
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
     monkeypatch.setattr(

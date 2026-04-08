@@ -17,6 +17,7 @@ from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
+from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.models import OpenAIResponsePayload
@@ -152,7 +153,7 @@ class _RingMembershipStub:
 
 @pytest.mark.anyio
 async def test_owner_instance_uses_rendezvous_hash() -> None:
-    settings = SimpleNamespace(
+    settings = Settings(
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_instance_ring=["pod-a", "pod-b", "pod-c", "pod-d", "pod-e"],
     )
@@ -184,9 +185,9 @@ async def test_owner_instance_uses_rendezvous_hash() -> None:
 
 @pytest.mark.anyio
 async def test_ring_raises_on_db_error() -> None:
-    settings = SimpleNamespace(
+    settings = Settings(
         http_responses_session_bridge_instance_id="pod-a",
-        http_responses_session_bridge_instance_ring=["pod-b", "pod-c"],
+        http_responses_session_bridge_instance_ring=["pod-a", "pod-b", "pod-c"],
     )
     ring_membership = AsyncMock()
     ring_membership.list_active.side_effect = RuntimeError("db unavailable")

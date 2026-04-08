@@ -2,7 +2,29 @@ from __future__ import annotations
 
 import os
 from importlib import import_module
-from typing import Any
+from typing import Protocol
+
+
+class CollectorRegistryLike(Protocol):
+    pass
+
+
+class CounterLike(Protocol):
+    def inc(self, amount: float = 1) -> None: ...
+    def labels(self, *args: str, **kwargs: str) -> "CounterLike": ...
+
+
+class GaugeLike(Protocol):
+    def inc(self, amount: float = 1) -> None: ...
+    def dec(self, amount: float = 1) -> None: ...
+    def set(self, value: float) -> None: ...
+    def labels(self, *args: str, **kwargs: str) -> "GaugeLike": ...
+
+
+class HistogramLike(Protocol):
+    def observe(self, amount: float) -> None: ...
+    def labels(self, *args: str, **kwargs: str) -> "HistogramLike": ...
+
 
 try:
     prometheus_client = import_module("prometheus_client")
@@ -46,7 +68,7 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
     )
 
-    _gauge_kwargs: dict[str, Any] = {}
+    _gauge_kwargs: dict[str, str] = {}
     if MULTIPROCESS_MODE:
         _gauge_kwargs["multiprocess_mode"] = "livesum"
 
@@ -116,7 +138,7 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
     )
 
-    def make_scrape_registry() -> Any:
+    def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
             _multiprocess = import_module("prometheus_client.multiprocess")
             registry = CollectorRegistry()
@@ -133,24 +155,24 @@ if PROMETHEUS_AVAILABLE:
                 pass
 
 else:
-    REGISTRY: Any = None
-    requests_total: Any = None
-    request_duration_seconds: Any = None
-    upstream_requests_total: Any = None
-    upstream_request_duration_seconds: Any = None
-    active_connections: Any = None
-    rate_limit_hits_total: Any = None
-    circuit_breaker_state: Any = None
-    accounts_total: Any = None
-    bridge_instance_mismatch_total: Any = None
-    bridge_prompt_cache_locality_miss_total: Any = None
-    bridge_soft_local_rebind_total: Any = None
-    bridge_owner_forward_total: Any = None
-    bridge_owner_mismatch_total: Any = None
-    bridge_local_rebind_total: Any = None
-    bridge_forward_latency_seconds: Any = None
+    REGISTRY: CollectorRegistryLike | None = None
+    requests_total: CounterLike | None = None
+    request_duration_seconds: HistogramLike | None = None
+    upstream_requests_total: CounterLike | None = None
+    upstream_request_duration_seconds: HistogramLike | None = None
+    active_connections: GaugeLike | None = None
+    rate_limit_hits_total: CounterLike | None = None
+    circuit_breaker_state: GaugeLike | None = None
+    accounts_total: GaugeLike | None = None
+    bridge_instance_mismatch_total: CounterLike | None = None
+    bridge_prompt_cache_locality_miss_total: CounterLike | None = None
+    bridge_soft_local_rebind_total: CounterLike | None = None
+    bridge_owner_forward_total: CounterLike | None = None
+    bridge_owner_mismatch_total: CounterLike | None = None
+    bridge_local_rebind_total: CounterLike | None = None
+    bridge_forward_latency_seconds: HistogramLike | None = None
 
-    def make_scrape_registry() -> Any:
+    def make_scrape_registry() -> None:
         return None
 
     def mark_process_dead() -> None:

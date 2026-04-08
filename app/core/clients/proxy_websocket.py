@@ -160,7 +160,6 @@ async def connect_responses_websocket(
     account_id: str | None,
     *,
     base_url: str | None = None,
-    session: object | None = None,
 ) -> UpstreamResponsesWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -168,8 +167,6 @@ async def connect_responses_websocket(
     upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
-    _ = session
-
     try:
         response = await websocket_connect(
             url,

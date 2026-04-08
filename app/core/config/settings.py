@@ -40,6 +40,9 @@ def _default_http_bridge_instance_id() -> str:
 DEFAULT_HOME_DIR = _default_home_dir()
 DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
+type StringListInput = str | list[str] | None
+type OptionalStringInput = str | None
+type ModelContextWindowOverridesInput = str | dict[str, int] | None
 
 
 def _validate_context_window_entries(data: dict) -> dict[str, int]:
@@ -201,7 +204,7 @@ class Settings(BaseSettings):
 
     @field_validator("image_inline_allowed_hosts", mode="before")
     @classmethod
-    def _normalize_image_inline_allowed_hosts(cls, value: object) -> list[str]:
+    def _normalize_image_inline_allowed_hosts(cls, value: StringListInput) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -219,7 +222,7 @@ class Settings(BaseSettings):
 
     @field_validator("firewall_trusted_proxy_cidrs", mode="before")
     @classmethod
-    def _normalize_firewall_trusted_proxy_cidrs(cls, value: object) -> list[str]:
+    def _normalize_firewall_trusted_proxy_cidrs(cls, value: StringListInput) -> list[str]:
         if value is None:
             return []
         cidrs: list[str] = []
@@ -244,7 +247,7 @@ class Settings(BaseSettings):
 
     @field_validator("http_responses_session_bridge_instance_ring", mode="before")
     @classmethod
-    def _normalize_http_bridge_instance_ring(cls, value: object) -> list[str]:
+    def _normalize_http_bridge_instance_ring(cls, value: StringListInput) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -262,7 +265,7 @@ class Settings(BaseSettings):
 
     @field_validator("http_responses_session_bridge_advertise_base_url", mode="before")
     @classmethod
-    def _normalize_http_bridge_advertise_base_url(cls, value: object) -> str | None:
+    def _normalize_http_bridge_advertise_base_url(cls, value: OptionalStringInput) -> str | None:
         if value is None:
             return None
         if isinstance(value, str):
@@ -272,7 +275,7 @@ class Settings(BaseSettings):
 
     @field_validator("model_context_window_overrides", mode="before")
     @classmethod
-    def _parse_model_context_window_overrides(cls, value: object) -> dict[str, int]:
+    def _parse_model_context_window_overrides(cls, value: ModelContextWindowOverridesInput) -> dict[str, int]:
         if value is None:
             return {}
         if isinstance(value, str):

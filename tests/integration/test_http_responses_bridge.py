@@ -18,8 +18,9 @@ import pytest_asyncio
 from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
+from app.core.config.settings import Settings
 from app.core.utils.request_id import reset_request_id, set_request_id
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy.load_balancer import AccountSelection
@@ -110,11 +111,76 @@ async def _get_account(account_id: str) -> Account:
 
 
 class _SettingsCache:
-    def __init__(self, settings: object) -> None:
+    def __init__(self, settings: DashboardSettings) -> None:
         self._settings = settings
 
-    async def get(self) -> object:
+    async def get(self) -> DashboardSettings:
         return self._settings
+
+
+def _make_app_settings(
+    *,
+    enabled: bool,
+    max_sessions: int = 128,
+    queue_limit: int = 8,
+    codex_idle_ttl_seconds: float = 900.0,
+    codex_prewarm_enabled: bool = False,
+    instance_id: str = "instance-a",
+    instance_ring: list[str] | None = None,
+) -> Settings:
+    return Settings(
+        http_responses_session_bridge_enabled=enabled,
+        http_responses_session_bridge_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+        http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
+        http_responses_session_bridge_max_sessions=max_sessions,
+        http_responses_session_bridge_queue_limit=queue_limit,
+        http_responses_session_bridge_instance_id=instance_id,
+        http_responses_session_bridge_instance_ring=list(instance_ring or []),
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        upstream_compact_timeout_seconds=None,
+        upstream_stream_transport="auto",
+        log_proxy_request_payload=False,
+        log_proxy_request_shape=False,
+        log_proxy_request_shape_raw_cache_key=False,
+        log_proxy_service_tier_trace=False,
+        stream_idle_timeout_seconds=300.0,
+        openai_prompt_cache_key_derivation_enabled=True,
+    )
+
+
+def _make_dashboard_settings(
+    *,
+    prefer_earlier_reset_accounts: bool = False,
+    gateway_safe_mode: bool = False,
+    prompt_cache_idle_ttl_seconds: int | float = 3600,
+) -> DashboardSettings:
+    return DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="auto",
+        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=int(prompt_cache_idle_ttl_seconds),
+        http_responses_session_bridge_gateway_safe_mode=gateway_safe_mode,
+        sticky_reallocation_budget_threshold_pct=95.0,
+    )
+
+
+def _install_proxy_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    app_settings: Settings,
+    dashboard_settings: DashboardSettings,
+) -> None:
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
 
 
 def _install_bridge_settings(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> None:
@@ -135,36 +201,23 @@ def _install_bridge_settings_with_limits(
     instance_id: str = "instance-a",
     instance_ring: list[str] | None = None,
 ) -> None:
-    settings = SimpleNamespace(
-        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-        sticky_threads_enabled=False,
-        openai_cache_affinity_max_age_seconds=300,
-        openai_prompt_cache_key_derivation_enabled=True,
-        routing_strategy="usage_weighted",
-        proxy_request_budget_seconds=75.0,
-        compact_request_budget_seconds=75.0,
-        transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
-        stream_idle_timeout_seconds=300.0,
-        http_responses_session_bridge_enabled=enabled,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=codex_idle_ttl_seconds,
-        http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
-        http_responses_session_bridge_max_sessions=max_sessions,
-        http_responses_session_bridge_queue_limit=queue_limit,
-        http_responses_session_bridge_gateway_safe_mode=gateway_safe_mode,
-        http_responses_session_bridge_instance_id=instance_id,
-        http_responses_session_bridge_instance_ring=list(instance_ring or []),
-        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
-        sticky_reallocation_budget_threshold_pct=95.0,
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=enabled,
+            max_sessions=max_sessions,
+            queue_limit=queue_limit,
+            codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+            codex_prewarm_enabled=codex_prewarm_enabled,
+            instance_id=instance_id,
+            instance_ring=instance_ring,
+        ),
+        dashboard_settings=_make_dashboard_settings(
+            prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+            gateway_safe_mode=gateway_safe_mode,
+            prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+        ),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
 
 
 class _FakeUpstreamMessage:
@@ -2610,12 +2663,16 @@ async def test_get_or_create_http_bridge_session_honors_passed_prompt_cache_idle
         request_id="req_prompt_ttl",
     )
     cached_settings = await proxy_module.get_settings_cache().get()
-    overridden_settings = dict(cached_settings.__dict__)
-    overridden_settings["http_responses_session_bridge_prompt_cache_idle_ttl_seconds"] = 3600.0
     monkeypatch.setattr(
         proxy_module,
-        "get_settings",
-        lambda: SimpleNamespace(**overridden_settings),
+        "get_settings_cache",
+        lambda: _SettingsCache(
+            _make_dashboard_settings(
+                prefer_earlier_reset_accounts=cached_settings.prefer_earlier_reset_accounts,
+                gateway_safe_mode=cached_settings.http_responses_session_bridge_gateway_safe_mode,
+                prompt_cache_idle_ttl_seconds=3600,
+            )
+        ),
     )
 
     async def fake_select_account_with_budget(
@@ -4774,15 +4831,17 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_started: list[str] = []
 
@@ -4852,15 +4911,17 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_started: list[str] = []
 
@@ -4929,15 +4990,17 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=1,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=1,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     first_create_started = asyncio.Event()
     release_first_create = asyncio.Event()
@@ -5012,15 +5075,17 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_started = asyncio.Event()
     release_create = asyncio.Event()
@@ -5096,15 +5161,17 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_started = asyncio.Event()
     release_create = asyncio.Event()
@@ -5189,15 +5256,17 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_started: list[str] = []
 
@@ -5264,15 +5333,17 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     first_create_started = asyncio.Event()
     create_attempts = 0
@@ -5342,15 +5413,17 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_finished = asyncio.Event()
     allow_return = asyncio.Event()
@@ -5422,15 +5495,17 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_started = asyncio.Event()
     release_create = asyncio.Event()
@@ -5508,15 +5583,17 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
-    settings = SimpleNamespace(
-        http_responses_session_bridge_enabled=True,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_max_sessions=8,
-        http_responses_session_bridge_instance_id="instance-a",
-        http_responses_session_bridge_instance_ring=[],
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
     )
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
 
     create_started: list[str] = []
 

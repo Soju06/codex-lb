@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import app.core.tracing.otel as otel
+from app.core.config.settings import Settings
 from app.core.runtime_logging import JsonFormatter
 from app.modules.proxy.ring_membership import RING_STALE_GRACE_SECONDS, RING_STALE_THRESHOLD_SECONDS
 
@@ -237,7 +238,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     import app.core.startup as startup_module
     import app.main as main
 
-    settings = SimpleNamespace(
+    settings = Settings(
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
@@ -299,7 +300,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
 async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: pytest.MonkeyPatch):
     import app.main as main
 
-    settings = SimpleNamespace(
+    settings = Settings(
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
@@ -347,7 +348,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     async with main.lifespan(main.app):
         pass
 
-    ring_service.register.assert_awaited_once_with("pod-a")
+    ring_service.register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
     ring_service.mark_stale.assert_awaited_once_with(
         "pod-a",
         stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,

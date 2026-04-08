@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.openai.contracts import OpenAIMessage
 from app.core.openai.message_coercion import coerce_messages
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -32,7 +34,7 @@ def _part_type(part: Mapping[str, JsonValue]) -> str | None:
     return "text" if isinstance(text_value, str) else None
 
 
-def _json_mapping(value: object) -> Mapping[str, JsonValue] | None:
+def _json_mapping(value: JsonValue | OpenAIMessage) -> Mapping[str, JsonValue] | None:
     if not is_json_mapping(value):
         return None
     return value
@@ -42,7 +44,7 @@ class ChatCompletionsRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str = Field(min_length=1)
-    messages: list[dict[str, JsonValue]]
+    messages: list[OpenAIMessage]
     tools: list[JsonValue] = Field(default_factory=list)
     tool_choice: str | dict[str, JsonValue] | None = None
     parallel_tool_calls: bool | None = None
@@ -70,7 +72,7 @@ class ChatCompletionsRequest(BaseModel):
 
     @field_validator("messages")
     @classmethod
-    def _reject_file_id(cls, value: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
+    def _reject_file_id(cls, value: list[OpenAIMessage]) -> list[OpenAIMessage]:
         for message in value:
             message_mapping = _json_mapping(message)
             if message_mapping is None:
@@ -137,7 +139,7 @@ class ChatCompletionsRequest(BaseModel):
             include_obfuscation = stream_options.get("include_obfuscation")
             if include_obfuscation is not None:
                 data["stream_options"] = {"include_obfuscation": include_obfuscation}
-        instructions, input_items = coerce_messages("", messages)
+        instructions, input_items = coerce_messages("", cast(list[JsonValue], messages))
         data["instructions"] = instructions
         data["input"] = input_items
         data["tools"] = tools
@@ -373,8 +375,8 @@ def _validate_assistant_tool_calls(message: Mapping[str, JsonValue]) -> None:
             raise ValueError(f"assistant tool_calls[{index}].function must include a non-empty 'name'.")
 
 
-def _sanitize_user_messages(messages: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
-    sanitized: list[dict[str, JsonValue]] = []
+def _sanitize_user_messages(messages: list[OpenAIMessage]) -> list[OpenAIMessage]:
+    sanitized: list[OpenAIMessage] = []
     for message in messages:
         role = message.get("role")
         if role != "user":
@@ -385,7 +387,7 @@ def _sanitize_user_messages(messages: list[dict[str, JsonValue]]) -> list[dict[s
         new_message = dict(message)
         if sanitized_content is not None:
             new_message["content"] = sanitized_content
-        sanitized.append(new_message)
+        sanitized.append(cast(OpenAIMessage, new_message))
     return sanitized
 
 

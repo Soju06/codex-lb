@@ -14,7 +14,6 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import (
-    Any,
     AsyncContextManager,
     AsyncIterator,
     Awaitable,
@@ -29,12 +28,12 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import hdrs
-from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT
+from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
 from app.core.clients.http import get_http_client
-from app.core.config.settings import get_settings
+from app.core.config.settings import Settings, get_settings
 from app.core.errors import (
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
@@ -51,6 +50,7 @@ from app.core.openai.parsing import (
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.resilience.circuit_breaker import (
+    CircuitBreaker,
     CircuitBreakerOpenError,
     _is_server_error,
     get_circuit_breaker_for_account,
@@ -183,7 +183,7 @@ R = TypeVar("R")
 async def _call_with_service_circuit_breaker(
     request: Awaitable[R],
     *,
-    settings: object | None = None,
+    settings: Settings | None = None,
     account_id: str | None = None,
 ) -> R:
     if not account_id:
@@ -199,7 +199,7 @@ async def _call_with_service_circuit_breaker(
 async def _service_circuit_breaker_context(
     cm: AsyncContextManager[aiohttp.ClientResponse],
     *,
-    settings: object | None = None,
+    settings: Settings | None = None,
     account_id: str | None = None,
 ) -> AsyncIterator[aiohttp.ClientResponse]:
     """Wrap an async context manager with circuit breaker protection."""
@@ -247,7 +247,10 @@ _HELD_HALF_OPEN_PROBE_FLAG = "_codex_lb_half_open_probe_held"
 _HELD_HALF_OPEN_PROBE_BREAKER = "_codex_lb_half_open_probe_breaker"
 
 
-def _bind_half_open_probe(websocket: aiohttp.ClientWebSocketResponse, circuit_breaker: object) -> None:
+def _bind_half_open_probe(
+    websocket: aiohttp.ClientWebSocketResponse,
+    circuit_breaker: "CircuitBreaker",
+) -> None:
     setattr(websocket, _HELD_HALF_OPEN_PROBE_FLAG, True)
     setattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, circuit_breaker)
 
@@ -255,11 +258,11 @@ def _bind_half_open_probe(websocket: aiohttp.ClientWebSocketResponse, circuit_br
 async def _release_bound_half_open_probe(websocket: aiohttp.ClientWebSocketResponse | None) -> None:
     if websocket is None or not getattr(websocket, _HELD_HALF_OPEN_PROBE_FLAG, False):
         return
-    circuit_breaker = getattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, None)
+    circuit_breaker = cast("CircuitBreaker | None", getattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, None))
     setattr(websocket, _HELD_HALF_OPEN_PROBE_FLAG, False)
     setattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, None)
     if circuit_breaker is not None:
-        await cast(Any, circuit_breaker).release_half_open_probe()
+        await circuit_breaker.release_half_open_probe()
 
 
 class StreamIdleTimeoutError(Exception):
@@ -828,7 +831,7 @@ def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
     return detail
 
 
-def _extract_upstream_message(data: Mapping[str, object]) -> str | None:
+def _extract_upstream_message(data: Mapping[str, JsonValue]) -> str | None:
     for key in ("message", "detail", "error"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
@@ -931,8 +934,8 @@ def _has_native_codex_transport_headers(headers: Mapping[str, str]) -> bool:
     return any(key in normalized for key in _NATIVE_CODEX_STREAM_HEADER_KEYS)
 
 
-def _is_native_codex_originator(originator: object) -> bool:
-    if not isinstance(originator, str):
+def _is_native_codex_originator(originator: str | None) -> bool:
+    if originator is None:
         return False
     stripped = originator.strip()
     if not stripped:
@@ -1026,10 +1029,9 @@ async def _open_upstream_websocket(
     request_headers[hdrs.SEC_WEBSOCKET_KEY] = sec_key
 
     timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
-    request_fn = cast(Any, request)
     try:
         try:
-            resp = await request_fn(
+            resp = await request(
                 hdrs.METH_GET,
                 url,
                 headers=request_headers,
@@ -1087,8 +1089,7 @@ async def _open_upstream_websocket(
 
             transport = conn.transport
             assert transport is not None
-            web_socket_data_queue = cast(Callable[..., Any], getattr(aiohttp.client_ws, "WebSocketDataQueue"))
-            reader = web_socket_data_queue(conn_proto, 2**16, loop=session._loop)
+            reader = WebSocketDataQueue(conn_proto, 2**16, loop=session._loop)
             conn_proto.set_parser(WebSocketReader(reader, max_msg_size), reader)
             writer = WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
         except BaseException as exc:
@@ -1241,7 +1242,7 @@ async def _stream_responses_via_websocket(
         )
         if callable(send_json):
             await asyncio.wait_for(
-                cast(Any, send_json)(request_payload),
+                cast(Callable[[JsonObject], Awaitable[None]], send_json)(request_payload),
                 timeout=remaining_total_timeout,
             )
         else:

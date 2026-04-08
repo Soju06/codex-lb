@@ -9,6 +9,7 @@ from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhas
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
+from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow, UsageWindowSummary
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.types import (
@@ -271,11 +272,11 @@ def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
         )
 
 
-def _coerce_str(value: object) -> str | None:
+def _coerce_str(value: JsonValue) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _coerce_number(value: object) -> int | float | None:
+def _coerce_number(value: JsonValue) -> int | float | None:
     if isinstance(value, (int, float)):
         return value
     if isinstance(value, str):

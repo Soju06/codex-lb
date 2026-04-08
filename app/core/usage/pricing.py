@@ -41,7 +41,7 @@ class CostItem:
     service_tier: str | None = None
 
 
-def _as_number(value: object) -> float | None:
+def _as_number(value: int | float | None) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None

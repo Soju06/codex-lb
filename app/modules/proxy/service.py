@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import AsyncIterator, Literal, Mapping, NoReturn, cast, overload
+from typing import AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
 from uuid import uuid4
 
 import aiohttp
@@ -46,7 +46,7 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket,
     filter_inbound_websocket_headers,
 )
-from app.core.config.settings import get_settings
+from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
@@ -121,10 +121,11 @@ from app.modules.usage.updater import UsageUpdater
 logger = logging.getLogger(__name__)
 
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
+_TaskResultT = TypeVar("_TaskResultT")
 
 
 async def _await_cancelled_task(
-    task: asyncio.Task[object] | asyncio.Task[None],
+    task: asyncio.Task[_TaskResultT],
     *,
     timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
     label: str,
@@ -166,6 +167,17 @@ class _AffinityPolicy:
     kind: StickySessionKind | None = None
     reallocate_sticky: bool = False
     max_age_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRuntimeConfig:
+    enabled: bool
+    idle_ttl_seconds: float
+    codex_idle_ttl_seconds: float
+    max_sessions: int
+    queue_limit: int
+    prompt_cache_idle_ttl_seconds: float
+    gateway_safe_mode: bool
 
 
 def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | None:
@@ -256,8 +268,9 @@ class ProxyService:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
     ) -> AsyncIterator[str]:
-        settings = await get_settings_cache().get()
-        if not _http_responses_session_bridge_enabled(settings):
+        dashboard_settings = await get_settings_cache().get()
+        runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
+        if not runtime_config.enabled:
             async for line in self._stream_with_retry(
                 payload,
                 headers,
@@ -281,11 +294,11 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
-            idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_idle_ttl_seconds", 120.0),
-            codex_idle_ttl_seconds=getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0),
-            max_sessions=getattr(settings, "http_responses_session_bridge_max_sessions", 256),
-            queue_limit=getattr(settings, "http_responses_session_bridge_queue_limit", 8),
-            prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
+            idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+            codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+            max_sessions=runtime_config.max_sessions,
+            queue_limit=runtime_config.queue_limit,
+            prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
         ):
@@ -312,15 +325,16 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         del propagate_http_errors, suppress_text_done_events
         request_id = ensure_request_id()
-        settings = await get_settings_cache().get()
+        dashboard_settings = await get_settings_cache().get()
+        runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
             openai_cache_affinity=openai_cache_affinity,
-            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
-            sticky_threads_enabled=settings.sticky_threads_enabled,
+            openai_cache_affinity_max_age_seconds=dashboard_settings.openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=dashboard_settings.sticky_threads_enabled,
             api_key=api_key,
         )
         sticky_key_source = "none"
@@ -368,7 +382,7 @@ class ProxyService:
             ),
             max_sessions=max_sessions,
             previous_response_id=request_state.previous_response_id,
-            gateway_safe_mode=getattr(settings, "http_responses_session_bridge_gateway_safe_mode", False),
+            gateway_safe_mode=runtime_config.gateway_safe_mode,
             allow_forward_to_owner=True,
             forwarded_request=forwarded_request,
         )
@@ -421,8 +435,7 @@ class ProxyService:
         codex_session_affinity: bool,
         downstream_turn_state: str | None,
     ) -> AsyncIterator[str]:
-        settings = await get_settings_cache().get()
-        current_instance, _ = _normalized_http_bridge_instance_ring(settings)
+        current_instance, _ = _normalized_http_bridge_instance_ring(get_settings())
         forward_context = HTTPBridgeForwardContext(
             origin_instance=current_instance,
             target_instance=owner_forward.owner_instance,
@@ -2157,7 +2170,7 @@ class ProxyService:
         session: "_HTTPBridgeSession",
         *,
         turn_state: str,
-        settings: object,
+        settings: Settings,
     ) -> None:
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
@@ -2165,7 +2178,7 @@ class ProxyService:
         session.downstream_turn_state_aliases.add(turn_state)
         session.idle_ttl_seconds = max(
             session.idle_ttl_seconds,
-            float(getattr(settings, "http_responses_session_bridge_codex_idle_ttl_seconds", 900.0)),
+            float(settings.http_responses_session_bridge_codex_idle_ttl_seconds),
         )
         session.headers = _headers_with_turn_state(session.headers, turn_state)
 
@@ -5610,26 +5623,22 @@ def _mark_request_state_previous_response_not_found(
     request_state.error_param_override = error.get("param")
 
 
-def _normalized_http_bridge_instance_ring(settings: object) -> tuple[str, tuple[str, ...]]:
-    instance_id_value = getattr(settings, "http_responses_session_bridge_instance_id", None)
-    instance_id = instance_id_value.strip() if isinstance(instance_id_value, str) else ""
+def _normalized_http_bridge_instance_ring(settings: Settings) -> tuple[str, tuple[str, ...]]:
+    instance_id = settings.http_responses_session_bridge_instance_id.strip()
     if not instance_id:
         instance_id = "codex-lb"
-    ring_value = getattr(settings, "http_responses_session_bridge_instance_ring", None)
     ring_entries: list[str] = []
-    if isinstance(ring_value, list):
-        for entry in ring_value:
-            if isinstance(entry, str):
-                stripped = entry.strip()
-                if stripped:
-                    ring_entries.append(stripped)
+    for entry in settings.http_responses_session_bridge_instance_ring:
+        stripped = entry.strip()
+        if stripped:
+            ring_entries.append(stripped)
     if not ring_entries:
         ring_entries.append(instance_id)
     return instance_id, tuple(sorted(set(ring_entries)))
 
 
 async def _active_http_bridge_instance_ring(
-    settings: object,
+    settings: Settings,
     ring_membership: RingMembershipService | None,
 ) -> tuple[str, tuple[str, ...]]:
     instance_id, static_ring = _normalized_http_bridge_instance_ring(settings)
@@ -5652,7 +5661,7 @@ async def _active_http_bridge_instance_ring(
 
 async def _http_bridge_owner_instance(
     key: _HTTPBridgeSessionKey,
-    settings: object,
+    settings: Settings,
     ring_membership: RingMembershipService | None = None,
 ) -> str | None:
     instance_id, ring = await _active_http_bridge_instance_ring(settings, ring_membership)
@@ -5662,11 +5671,21 @@ async def _http_bridge_owner_instance(
     return select_node(hash_input, ring)
 
 
-def _http_responses_session_bridge_enabled(settings: object) -> bool:
-    value = getattr(settings, "http_responses_session_bridge_enabled", None)
-    if isinstance(value, bool):
-        return value
-    return bool(getattr(get_settings(), "http_responses_session_bridge_enabled", True))
+def _http_bridge_runtime_config(
+    dashboard_settings: DashboardSettings,
+    app_settings: Settings,
+) -> _HTTPBridgeRuntimeConfig:
+    return _HTTPBridgeRuntimeConfig(
+        enabled=app_settings.http_responses_session_bridge_enabled,
+        idle_ttl_seconds=app_settings.http_responses_session_bridge_idle_ttl_seconds,
+        codex_idle_ttl_seconds=app_settings.http_responses_session_bridge_codex_idle_ttl_seconds,
+        max_sessions=app_settings.http_responses_session_bridge_max_sessions,
+        queue_limit=app_settings.http_responses_session_bridge_queue_limit,
+        prompt_cache_idle_ttl_seconds=float(
+            dashboard_settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
+        ),
+        gateway_safe_mode=dashboard_settings.http_responses_session_bridge_gateway_safe_mode,
+    )
 
 
 def _http_bridge_owner_check_required(
@@ -5806,7 +5825,7 @@ def _effective_service_tier(requested_service_tier: str | None, actual_service_t
     return None
 
 
-def _normalize_service_tier_value(value: object) -> str | None:
+def _normalize_service_tier_value(value: JsonValue) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()

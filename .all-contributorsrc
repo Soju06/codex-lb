@@ -297,6 +297,16 @@
       "contributions": [
         "doc"
       ]
+    },
+    {
+      "login": "embogomolov",
+      "name": "embogomolov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/185256086?v=4",
+      "profile": "https://github.com/embogomolov",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

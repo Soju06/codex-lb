@@ -146,3 +146,36 @@ async def test_fetch_usage_raises_after_retries(failing_usage_server):
     exc = excinfo.value
     assert isinstance(exc, UsageFetchError)
     assert exc.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_preserves_error_code():
+    state = UsageClientState()
+    responses = [
+        StubResponse(
+            401,
+            {
+                "error": {
+                    "code": "account_deactivated",
+                    "message": "Your OpenAI account has been deactivated.",
+                }
+            },
+            "",
+        )
+    ]
+    client = StubRetryClient(responses, state)
+
+    with pytest.raises(UsageFetchError) as excinfo:
+        await fetch_usage(
+            access_token="access-token",
+            account_id=None,
+            base_url="http://usage.test/backend-api",
+            max_retries=0,
+            timeout_seconds=1.0,
+            client=client,
+        )
+
+    exc = excinfo.value
+    assert exc.status_code == 401
+    assert exc.code == "account_deactivated"
+    assert "deactivated" in exc.message.lower()

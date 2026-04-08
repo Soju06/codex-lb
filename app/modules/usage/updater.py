@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -267,7 +268,7 @@ class UsageUpdater:
                 account_id=usage_account_id,
             )
         except UsageFetchError as exc:
-            if _should_deactivate_for_usage_error(exc.status_code):
+            if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if exc.status_code != 401 or not self._auth_manager:
@@ -283,7 +284,7 @@ class UsageUpdater:
                     account_id=usage_account_id,
                 )
             except UsageFetchError as retry_exc:
-                if _should_deactivate_for_usage_error(retry_exc.status_code):
+                if _should_deactivate_for_usage_error(retry_exc):
                     await self._deactivate_for_client_error(account, retry_exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
@@ -674,7 +675,16 @@ def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: 
 # for proxy traffic, so treat it as a refresh failure instead of a permanent
 # account-level deactivation signal.
 _DEACTIVATING_USAGE_STATUS_CODES = {402, 404}
+_DEACTIVATING_USAGE_MESSAGE_HINTS = (
+    "your openai account has been deactivated",
+    "account has been deactivated",
+)
 
 
-def _should_deactivate_for_usage_error(status_code: int) -> bool:
-    return status_code in _DEACTIVATING_USAGE_STATUS_CODES
+def _should_deactivate_for_usage_error(exc: UsageFetchError) -> bool:
+    if exc.status_code in _DEACTIVATING_USAGE_STATUS_CODES:
+        return True
+    if exc.code in PERMANENT_FAILURE_CODES:
+        return True
+    lowered = exc.message.lower()
+    return any(hint in lowered for hint in _DEACTIVATING_USAGE_MESSAGE_HINTS)

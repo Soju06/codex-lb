@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 class UsageErrorDetail(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    code: str | None = None
     message: str | None = None
     error_description: str | None = None
 
@@ -36,10 +37,11 @@ class UsageErrorEnvelope(BaseModel):
 
 
 class UsageFetchError(Exception):
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int, message: str, code: str | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+        self.code = code
 
 
 async def fetch_usage(
@@ -70,14 +72,16 @@ async def fetch_usage(
         ) as resp:
             data = await _safe_json(resp)
             if resp.status >= 400:
+                code = _extract_error_code(data)
                 message = _extract_error_message(data) or f"Usage fetch failed ({resp.status})"
                 logger.warning(
-                    "Usage fetch failed request_id=%s status=%s message=%s",
+                    "Usage fetch failed request_id=%s status=%s code=%s message=%s",
                     get_request_id(),
                     resp.status,
+                    code,
                     message,
                 )
-                raise UsageFetchError(resp.status, message)
+                raise UsageFetchError(resp.status, message, code=code)
             try:
                 return UsagePayload.model_validate(data)
             except ValidationError as exc:
@@ -129,6 +133,15 @@ def _extract_error_message(payload: JsonObject) -> str | None:
     if isinstance(error, str):
         return envelope.error_description or error
     return envelope.message
+
+
+def _extract_error_code(payload: JsonObject) -> str | None:
+    envelope = UsageErrorEnvelope.model_validate(payload)
+    error = envelope.error
+    if isinstance(error, UsageErrorDetail) and isinstance(error.code, str):
+        normalized = error.code.strip().lower()
+        return normalized or None
+    return None
 
 
 def _retry_options(attempts: int) -> ExponentialRetry:

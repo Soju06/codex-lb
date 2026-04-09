@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import errno
 import json
@@ -285,6 +286,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
 
     async with main.lifespan(main.app):
+        await asyncio.sleep(0)
         assert startup_module._startup_complete is True
         assert usage_scheduler.started is True
         assert model_scheduler.started is True
@@ -364,6 +366,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     )
 
     async with main.lifespan(main.app):
+        await asyncio.sleep(0)
         assert startup_module._startup_complete is True
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
@@ -376,6 +379,76 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         grace_seconds=RING_STALE_GRACE_SECONDS,
     )
     ring_service.unregister.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_waits_for_advertise_endpoint_before_active_register(monkeypatch: pytest.MonkeyPatch):
+    import app.core.startup as startup_module
+    import app.main as main
+
+    settings = Settings(
+        otel_enabled=False,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        shutdown_drain_timeout_seconds=0,
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
+    )
+    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
+    usage_scheduler = _DummyScheduler()
+    model_scheduler = _DummyScheduler()
+    sticky_scheduler = _DummyScheduler()
+    close_http_client = AsyncMock()
+    close_db = AsyncMock()
+    ring_service = SimpleNamespace(
+        register=AsyncMock(),
+        mark_stale=AsyncMock(),
+        unregister=AsyncMock(),
+        heartbeat=AsyncMock(),
+    )
+    cache_poller = SimpleNamespace(
+        on_invalidation=Mock(),
+        start=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    wait_for_reachable = AsyncMock()
+    validate_advertise = AsyncMock()
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
+    monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "init_background_db", Mock())
+    monkeypatch.setattr(main, "init_http_client", AsyncMock())
+    monkeypatch.setattr(main, "close_http_client", close_http_client)
+    monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
+    monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
+    monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", wait_for_reachable)
+    monkeypatch.setattr(main, "_validate_bridge_advertise_endpoint_for_multi_replica", validate_advertise)
+    monkeypatch.setattr(main, "mark_process_dead", Mock())
+    monkeypatch.setattr(
+        "app.core.cache.invalidation.CacheInvalidationPoller",
+        lambda session_factory: cache_poller,
+    )
+
+    async with main.lifespan(main.app):
+        assert startup_module._startup_complete is False
+        await asyncio.sleep(0)
+        wait_for_reachable.assert_awaited_once_with(
+            "http://pod-a.bridge.default.svc.cluster.local:2455",
+            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+        )
+        validate_advertise.assert_awaited_once()
+        ring_service.register.assert_awaited_once_with(
+            "pod-a",
+            endpoint_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
+        )
+        assert startup_module._startup_complete is True
 
 
 def test_metrics_bind_failure_is_only_benign_in_multiprocess_mode(monkeypatch: pytest.MonkeyPatch):

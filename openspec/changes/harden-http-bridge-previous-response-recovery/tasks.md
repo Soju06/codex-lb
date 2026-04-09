@@ -1,0 +1,4 @@
+- [x] Add HTTP bridge previous-response recovery index keyed by `response.id` plus API key scope.
+- [x] Reuse recovered live bridge sessions for requests carrying `previous_response_id` before fail-closed continuity errors.
+- [x] Clean up previous-response recovery mappings when bridge sessions close.
+- [x] Add regression coverage for recovery without turn-state alias continuity.

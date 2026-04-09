@@ -202,6 +202,7 @@ class ProxyService:
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
+        self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_lock = anyio.Lock()
 
     def stream_responses(
@@ -409,20 +410,99 @@ class ProxyService:
             gateway_safe_mode=runtime_config.gateway_safe_mode,
             allow_forward_to_owner=True,
             forwarded_request=forwarded_request,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
         )
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
-            async for line in self._forward_http_bridge_request_to_owner(
-                owner_forward=session_or_forward,
-                payload=payload,
-                headers=headers,
-                api_key_reservation=api_key_reservation,
-                codex_session_affinity=codex_session_affinity,
-                downstream_turn_state=downstream_turn_state,
-                request_started_at=request_state.started_at,
-                proxy_api_authorization=proxy_api_authorization,
-            ):
-                yield line
-            return
+            try:
+                async for line in self._forward_http_bridge_request_to_owner(
+                    owner_forward=session_or_forward,
+                    payload=payload,
+                    headers=headers,
+                    api_key_reservation=api_key_reservation,
+                    codex_session_affinity=codex_session_affinity,
+                    downstream_turn_state=downstream_turn_state,
+                    request_started_at=request_state.started_at,
+                    proxy_api_authorization=proxy_api_authorization,
+                ):
+                    yield line
+                return
+            except ProxyResponseError as exc:
+                should_attempt_previous_response_recovery = (
+                    payload.previous_response_id is not None
+                    and _http_bridge_should_attempt_local_previous_response_recovery(exc)
+                )
+                should_attempt_bootstrap_rebind = _http_bridge_should_attempt_local_bootstrap_rebind(
+                    exc,
+                    key=bridge_session_key,
+                    headers=headers,
+                    previous_response_id=payload.previous_response_id,
+                )
+                if not should_attempt_previous_response_recovery and not should_attempt_bootstrap_rebind:
+                    raise
+                _log_http_bridge_event(
+                    "previous_response_recover_local"
+                    if should_attempt_previous_response_recovery
+                    else "bootstrap_rebind_local",
+                    bridge_session_key,
+                    account_id=None,
+                    model=payload.model,
+                    detail=(
+                        "outcome=local_rebind_after_forward_failure"
+                        if should_attempt_previous_response_recovery
+                        else "outcome=local_bootstrap_after_forward_failure"
+                    ),
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                    owner_check_applied=True,
+                )
+                session = await self._get_or_create_http_bridge_session(
+                    bridge_session_key,
+                    headers=dict(headers),
+                    affinity=affinity,
+                    api_key=api_key,
+                    request_model=payload.model,
+                    idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+                        affinity=affinity,
+                        idle_ttl_seconds=idle_ttl_seconds,
+                        codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                        prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+                    ),
+                    max_sessions=max_sessions,
+                    previous_response_id=request_state.previous_response_id,
+                    gateway_safe_mode=runtime_config.gateway_safe_mode,
+                    allow_forward_to_owner=False,
+                    forwarded_request=False,
+                    allow_previous_response_recovery_rebind=should_attempt_previous_response_recovery,
+                )
+                await self._submit_http_bridge_request(
+                    session,
+                    request_state=request_state,
+                    text_data=text_data,
+                    queue_limit=queue_limit,
+                )
+                if downstream_turn_state is not None:
+                    await self._register_http_bridge_turn_state(session, downstream_turn_state)
+                try:
+                    event_queue = request_state.event_queue
+                    assert event_queue is not None
+                    while True:
+                        event_block = await event_queue.get()
+                        if event_block is None:
+                            break
+                        if request_state.latency_first_token_ms is None:
+                            block_payload = parse_sse_data_json(event_block)
+                            block_event_type = _event_type_from_payload(None, block_payload)
+                            if block_event_type in _TEXT_DELTA_EVENT_TYPES:
+                                request_state.latency_first_token_ms = int(
+                                    (time.monotonic() - request_state.started_at) * 1000
+                                )
+                        yield event_block
+                finally:
+                    with anyio.CancelScope(shield=True):
+                        await self._detach_http_bridge_request(session, request_state=request_state)
+                        session.last_used_at = time.monotonic()
+                return
         session = session_or_forward
         await self._submit_http_bridge_request(
             session,
@@ -1687,6 +1767,9 @@ class ProxyService:
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: Literal[False] = False,
         forwarded_request: bool = False,
+        forwarded_affinity_kind: str | None = None,
+        forwarded_affinity_key: str | None = None,
+        allow_previous_response_recovery_rebind: bool = False,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -1704,6 +1787,9 @@ class ProxyService:
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: Literal[True],
         forwarded_request: bool = False,
+        forwarded_affinity_kind: str | None = None,
+        forwarded_affinity_key: str | None = None,
+        allow_previous_response_recovery_rebind: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -1720,6 +1806,9 @@ class ProxyService:
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: bool = False,
         forwarded_request: bool = False,
+        forwarded_affinity_kind: str | None = None,
+        forwarded_affinity_key: str | None = None,
+        allow_previous_response_recovery_rebind: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = get_settings()
         if await _http_bridge_should_wait_for_registration(self, key, settings):
@@ -1740,7 +1829,17 @@ class ProxyService:
         api_key_id = api_key.id if api_key is not None else None
         effective_idle_ttl_seconds = idle_ttl_seconds
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
-        forwarded_affinity_key = _forwarded_http_bridge_session_key(headers, api_key) if forwarded_request else None
+        incoming_session_key = _sticky_key_from_session_header(headers)
+        forwarded_affinity = (
+            _forwarded_http_bridge_session_key(
+                headers,
+                api_key,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+            )
+            if forwarded_request
+            else None
+        )
         old_account_id: str | None = None
         while True:
             sessions_to_close: list[_HTTPBridgeSession] = []
@@ -1751,9 +1850,10 @@ class ProxyService:
             owner_mismatch_error: ProxyResponseError | None = None
             owner_forward: _HTTPBridgeOwnerForward | None = None
             missing_turn_state_alias = False
+            used_session_header_fallback = False
 
             async with self._http_bridge_lock:
-                if incoming_turn_state is not None and forwarded_affinity_key is None:
+                if incoming_turn_state is not None and forwarded_affinity is None:
                     alias_index_key = _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
                     alias_key = self._http_bridge_turn_state_index.get(alias_index_key)
                     if alias_key is not None:
@@ -1778,8 +1878,41 @@ class ProxyService:
                                 ] = alias_session.key
                             key = alias_session.key
                     elif incoming_turn_state.startswith("http_turn_"):
-                        key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
-                        missing_turn_state_alias = True
+                        if previous_response_id is not None:
+                            previous_alias_key = _http_bridge_previous_response_alias_key(
+                                previous_response_id,
+                                api_key_id,
+                            )
+                            previous_key = self._http_bridge_previous_response_index.get(previous_alias_key)
+                            if previous_key is not None:
+                                previous_session = self._http_bridge_sessions.get(previous_key)
+                                if (
+                                    previous_session is not None
+                                    and not previous_session.closed
+                                    and previous_session.account.status == AccountStatus.ACTIVE
+                                ):
+                                    key = previous_session.key
+                                    self._promote_http_bridge_session_to_codex_affinity(
+                                        previous_session,
+                                        turn_state=incoming_turn_state,
+                                        settings=settings,
+                                    )
+                                    previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
+                                    for alias in previous_session.downstream_turn_state_aliases:
+                                        self._http_bridge_turn_state_index[
+                                            _http_bridge_turn_state_alias_key(
+                                                alias,
+                                                previous_session.key.api_key_id,
+                                            )
+                                        ] = previous_session.key
+                                    continue
+                                self._http_bridge_previous_response_index.pop(previous_alias_key, None)
+                        if incoming_session_key is not None:
+                            key = _HTTPBridgeSessionKey("session_header", incoming_session_key, api_key_id)
+                            used_session_header_fallback = True
+                        else:
+                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                            missing_turn_state_alias = True
 
                 await self._prune_http_bridge_sessions_locked()
 
@@ -1831,7 +1964,9 @@ class ProxyService:
                     if owner_instance is not None and len(ring) > 1 and owner_instance != current_instance:
                         if PROMETHEUS_AVAILABLE and bridge_owner_mismatch_total is not None:
                             bridge_owner_mismatch_total.labels(strength=_http_bridge_key_strength(key)).inc()
-                        if owner_check_required:
+                        if owner_check_required and not (
+                            previous_response_id is not None and allow_previous_response_recovery_rebind
+                        ):
                             _log_http_bridge_event(
                                 "owner_mismatch",
                                 key,
@@ -1996,7 +2131,59 @@ class ProxyService:
 
                 if owner_mismatch_error is None:
                     inflight_future = self._http_bridge_inflight_sessions.get(key)
-                    if previous_response_id is not None:
+                    if (
+                        previous_response_id is not None
+                        and inflight_future is None
+                        and (existing is None or existing.closed or existing.account.status != AccountStatus.ACTIVE)
+                    ):
+                        previous_alias_key = _http_bridge_previous_response_alias_key(previous_response_id, api_key_id)
+                        previous_key = self._http_bridge_previous_response_index.get(previous_alias_key)
+                        if previous_key is not None:
+                            previous_session = self._http_bridge_sessions.get(previous_key)
+                            if (
+                                previous_session is not None
+                                and not previous_session.closed
+                                and previous_session.account.status == AccountStatus.ACTIVE
+                            ):
+                                key = previous_session.key
+                                existing = previous_session
+                                inflight_future = self._http_bridge_inflight_sessions.get(previous_key)
+                                if incoming_turn_state:
+                                    self._promote_http_bridge_session_to_codex_affinity(
+                                        previous_session,
+                                        turn_state=incoming_turn_state,
+                                        settings=settings,
+                                    )
+                                    previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
+                                    for alias in previous_session.downstream_turn_state_aliases:
+                                        self._http_bridge_turn_state_index[
+                                            _http_bridge_turn_state_alias_key(
+                                                alias,
+                                                previous_session.key.api_key_id,
+                                            )
+                                        ] = previous_session.key
+                                if inflight_future is None:
+                                    previous_session.request_model = request_model
+                                    previous_session.last_used_at = time.monotonic()
+                                    _log_http_bridge_event(
+                                        "reuse",
+                                        key,
+                                        account_id=previous_session.account.id,
+                                        model=previous_session.request_model,
+                                        pending_count=await self._http_bridge_pending_count(previous_session),
+                                        cache_key_family=key.affinity_kind,
+                                        model_class=_extract_model_class(previous_session.request_model)
+                                        if previous_session.request_model
+                                        else None,
+                                    )
+                                    return previous_session
+                            else:
+                                self._http_bridge_previous_response_index.pop(previous_alias_key, None)
+                    if (
+                        previous_response_id is not None
+                        and not used_session_header_fallback
+                        and not allow_previous_response_recovery_rebind
+                    ):
                         continuity_error = ProxyResponseError(
                             400,
                             _http_bridge_previous_response_error_envelope(
@@ -2189,6 +2376,7 @@ class ProxyService:
             sessions_to_close = list(self._http_bridge_sessions.values())
             self._http_bridge_sessions.clear()
             self._http_bridge_inflight_sessions.clear()
+            self._http_bridge_previous_response_index.clear()
 
         for session in sessions_to_close:
             await self._close_http_bridge_session(session)
@@ -2228,8 +2416,10 @@ class ProxyService:
         session.closed = True
         if turn_state_lock_held:
             self._unregister_http_bridge_turn_states_locked(session)
+            self._unregister_http_bridge_previous_response_ids_locked(session)
         else:
             await self._unregister_http_bridge_turn_states(session)
+            await self._unregister_http_bridge_previous_response_ids(session)
         if session.upstream_reader is not None:
             await _await_cancelled_task(session.upstream_reader, label="http bridge upstream reader")
         try:
@@ -2257,9 +2447,28 @@ class ProxyService:
                     session.key
                 )
 
+    async def _register_http_bridge_previous_response_id(
+        self,
+        session: "_HTTPBridgeSession",
+        response_id: str,
+    ) -> None:
+        stripped_response_id = response_id.strip()
+        if not stripped_response_id:
+            return
+        async with self._http_bridge_lock:
+            if session.closed:
+                return
+            alias_key = _http_bridge_previous_response_alias_key(stripped_response_id, session.key.api_key_id)
+            self._http_bridge_previous_response_index[alias_key] = session.key
+            session.previous_response_ids.add(stripped_response_id)
+
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:
             self._unregister_http_bridge_turn_states_locked(session)
+
+    async def _unregister_http_bridge_previous_response_ids(self, session: "_HTTPBridgeSession") -> None:
+        async with self._http_bridge_lock:
+            self._unregister_http_bridge_previous_response_ids_locked(session)
 
     def _unregister_http_bridge_turn_states_locked(self, session: "_HTTPBridgeSession") -> None:
         aliases = tuple(session.downstream_turn_state_aliases)
@@ -2269,6 +2478,15 @@ class ProxyService:
                 None,
             )
         session.downstream_turn_state_aliases.clear()
+
+    def _unregister_http_bridge_previous_response_ids_locked(self, session: "_HTTPBridgeSession") -> None:
+        response_ids = tuple(session.previous_response_ids)
+        for response_id in response_ids:
+            self._http_bridge_previous_response_index.pop(
+                _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id),
+                None,
+            )
+        session.previous_response_ids.clear()
 
     def _promote_http_bridge_session_to_codex_affinity(
         self,
@@ -2889,6 +3107,9 @@ class ProxyService:
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
+
+        if response_id is not None and matched_request_state is not None:
+            await self._register_http_bridge_previous_response_id(session, response_id)
 
         if matched_request_state is not None and matched_request_state.event_queue is not None:
             await matched_request_state.event_queue.put(event_block)
@@ -4935,6 +5156,7 @@ class _HTTPBridgeSession:
     upstream_turn_state: str | None = None
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
+    previous_response_ids: set[str] = field(default_factory=set)
     upstream_reader: asyncio.Task[None] | None = None
     closed: bool = False
 
@@ -5562,6 +5784,10 @@ def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -
     return (turn_state, api_key_id)
 
 
+def _http_bridge_previous_response_alias_key(response_id: str, api_key_id: str | None) -> tuple[str, str | None]:
+    return (response_id.strip(), api_key_id)
+
+
 def _http_bridge_session_allows_api_key(session: "_HTTPBridgeSession", api_key: ApiKeyData | None) -> bool:
     if api_key is None or not api_key.account_assignment_scope_enabled:
         return True
@@ -5687,7 +5913,7 @@ async def _http_bridge_should_wait_for_registration(
 ) -> bool:
     import app.core.startup as startup_module
 
-    if not startup_module._startup_complete or startup_module._bridge_registration_complete:
+    if startup_module._bridge_registration_complete:
         return False
     if key.strength != "hard":
         return False
@@ -5805,6 +6031,49 @@ def _mark_request_state_previous_response_not_found(
     request_state.error_message_override = error.get("message")
     request_state.error_type_override = error.get("type")
     request_state.error_param_override = error.get("param")
+
+
+def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    return code in {
+        "bridge_owner_unreachable",
+        "previous_response_not_found",
+        "bridge_instance_mismatch",
+        "bridge_forward_loop_prevented",
+    }
+
+
+def _http_bridge_should_attempt_local_bootstrap_rebind(
+    exc: ProxyResponseError,
+    *,
+    key: _HTTPBridgeSessionKey,
+    headers: Mapping[str, str],
+    previous_response_id: str | None,
+) -> bool:
+    if key.affinity_kind != "session_header":
+        return False
+    if previous_response_id is not None:
+        return False
+    if _sticky_key_from_turn_state_header(headers) is not None:
+        return False
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    return code in {
+        "bridge_owner_unreachable",
+        "bridge_instance_mismatch",
+        "bridge_forward_loop_prevented",
+    }
 
 
 def _normalized_http_bridge_instance_ring(settings: Settings) -> tuple[str, tuple[str, ...]]:

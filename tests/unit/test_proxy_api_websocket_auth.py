@@ -13,6 +13,7 @@ from starlette.requests import Request
 import app.modules.proxy.api as proxy_api_module
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
+from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyData
 
 pytestmark = pytest.mark.unit
@@ -155,3 +156,81 @@ async def test_validate_internal_bridge_api_key_preserves_local_request_exemptio
 
     assert api_key is None
     assert response is None
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [(b"x-codex-turn-state", b"http_turn_header_value")],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    captured: dict[str, object] = {}
+
+    def fake_apply_api_key_enforcement(_payload, _api_key):
+        return None
+
+    def fake_validate_model_access(_api_key, _model):
+        return None
+
+    async def fake_enforce_request_limits(_api_key, *, request_model=None, request_service_tier=None):
+        return None
+
+    async def fake_release_reservation(_reservation):
+        return None
+
+    async def fake_rate_limit_headers():
+        return {}
+
+    async def fake_stream_http_responses(
+        _payload,
+        _headers,
+        *,
+        downstream_turn_state=None,
+        **kwargs,
+    ):
+        captured["downstream_turn_state"] = downstream_turn_state
+        event_block = (
+            'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
+            '"status":"completed","output":[]}}\n\n'
+        )
+        yield event_block
+
+    monkeypatch.setattr(proxy_api_module, "apply_api_key_enforcement", fake_apply_api_key_enforcement)
+    monkeypatch.setattr(proxy_api_module, "validate_model_access", fake_validate_model_access)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", fake_enforce_request_limits)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", fake_release_reservation)
+    monkeypatch.setattr(
+        proxy_api_module.proxy_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+    )
+
+    context = cast(
+        proxy_api_module.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                rate_limit_headers=fake_rate_limit_headers,
+                stream_http_responses=fake_stream_http_responses,
+            )
+        ),
+    )
+
+    response = await proxy_api_module._stream_responses(
+        request,
+        payload,
+        context,
+        None,
+        prefer_http_bridge=True,
+        forwarded_request=True,
+        forwarded_headers={"x-codex-turn-state": "http_turn_header_value"},
+        forwarded_downstream_turn_state="http_turn_forwarded_value",
+    )
+
+    assert captured["downstream_turn_state"] == "http_turn_forwarded_value"
+    assert response.headers["x-codex-turn-state"] == "http_turn_forwarded_value"

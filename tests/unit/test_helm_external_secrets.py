@@ -114,6 +114,7 @@ def test_upgrade_renders_legacy_deployment_prepare_hook() -> None:
     assert "kind: Job" in rendered
     assert '"helm.sh/hook": pre-upgrade' in rendered
     assert 'codex-lb.soju.dev/traffic": "legacy"' in rendered
+    assert "raise SystemExit(0)" in rendered
 
 
 def test_public_service_can_render_legacy_selector_for_cutover() -> None:

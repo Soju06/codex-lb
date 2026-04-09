@@ -126,7 +126,7 @@ spec:
               except error.HTTPError as exc:
                   if exc.code != 404:
                       raise
-                  raise SystemExit("Legacy Deployment missing; cannot prepare selector cutover")
+                  raise SystemExit(0)
 
               def get_json(url: str) -> dict:
                   req = request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})

@@ -271,6 +271,7 @@ async def internal_bridge_responses(
         include_rate_limit_headers=False,
         forwarded_request=True,
         forwarded_headers=forwarded_headers,
+        forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
     )
@@ -751,6 +752,7 @@ async def _stream_responses(
     include_rate_limit_headers: bool = True,
     forwarded_request: bool = False,
     forwarded_headers: Mapping[str, str] | None = None,
+    forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
 ) -> Response:
@@ -770,7 +772,11 @@ async def _stream_responses(
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
     downstream_turn_state = (
-        proxy_service_module.ensure_http_downstream_turn_state(effective_headers) if bridge_active else None
+        forwarded_downstream_turn_state
+        if bridge_active and forwarded_downstream_turn_state is not None
+        else proxy_service_module.ensure_http_downstream_turn_state(effective_headers)
+        if bridge_active
+        else None
     )
     turn_state_headers = (
         proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)

@@ -172,8 +172,12 @@ async def lifespan(app: FastAPI):
         while True:
             attempt += 1
             try:
-                await svc.register(iid, endpoint_base_url=None)
-                await _publish_bridge_endpoint(svc, iid)
+                if bridge_endpoint_base_url is not None:
+                    await _wait_for_bridge_advertise_endpoint(
+                        bridge_endpoint_base_url,
+                        connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+                    )
+                await _activate_bridge_membership(svc, iid)
                 startup_module.mark_bridge_registration_complete()
                 startup_module._startup_complete = True
                 logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
@@ -189,17 +193,9 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.warning("Ring heartbeat failed", exc_info=True)
 
-    async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
-        await _publish_bridge_endpoint(svc, iid)
-        while True:
-            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
-            try:
-                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
-            except Exception:
-                logger.warning("Ring heartbeat failed", exc_info=True)
-
-    async def _publish_bridge_endpoint(svc: RingMembershipService, iid: str) -> None:
+    async def _activate_bridge_membership(svc: RingMembershipService, iid: str) -> None:
         if bridge_endpoint_base_url is None:
+            await svc.register(iid, endpoint_base_url=None)
             return
         await _validate_bridge_advertise_endpoint_for_multi_replica(
             svc=svc,
@@ -207,7 +203,7 @@ async def lifespan(app: FastAPI):
             instance_id=iid,
             endpoint_base_url=bridge_endpoint_base_url,
         )
-        await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
+        await svc.register(iid, endpoint_base_url=bridge_endpoint_base_url)
 
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
@@ -229,19 +225,7 @@ async def lifespan(app: FastAPI):
     heartbeat_task: asyncio.Task[None] | None = None
     ring_service = RingMembershipService(SessionLocal)
     instance_id = settings.http_responses_session_bridge_instance_id
-    try:
-        await asyncio.wait_for(
-            ring_service.register(instance_id, endpoint_base_url=None),
-            timeout=5.0,
-        )
-        await _publish_bridge_endpoint(ring_service, instance_id)
-        startup_module.mark_bridge_registration_complete()
-        startup_module._startup_complete = True
-        logger.info("Registered in bridge ring", extra={"instance_id": instance_id, "attempt": 1})
-        heartbeat_task = asyncio.create_task(_heartbeat_only(ring_service, instance_id))
-    except Exception:
-        logger.warning("Initial ring registration failed, retrying in background", exc_info=True)
-        heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
+    heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
 
     try:
         yield
@@ -400,7 +384,8 @@ async def _wait_for_bridge_advertise_endpoint(
     *,
     connect_timeout_seconds: float,
 ) -> None:
-    probe_base_url = (bridge_endpoint_base_url or f"http://127.0.0.1:{_local_api_port()}").rstrip("/")
+    del bridge_endpoint_base_url
+    probe_base_url = f"http://127.0.0.1:{_local_api_port()}".rstrip("/")
     probe_url = f"{probe_base_url}/health/live"
     timeout = aiohttp.ClientTimeout(
         total=connect_timeout_seconds,

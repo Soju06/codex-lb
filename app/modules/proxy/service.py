@@ -667,8 +667,14 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
-            yield exc.event_block
-            return
+            raise ProxyResponseError(
+                503,
+                openai_error(
+                    "bridge_owner_unreachable",
+                    "HTTP bridge owner relay timed out",
+                    error_type="server_error",
+                ),
+            ) from exc
         except ProxyResponseError:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()
@@ -2781,39 +2787,36 @@ class ProxyService:
         *,
         allow_takeover: bool,
     ) -> None:
-        try:
-            lookup = await self._durable_bridge.claim_live_session(
-                session_key_kind=session.key.affinity_kind,
-                session_key_value=session.key.affinity_key,
+        lookup = await self._durable_bridge.claim_live_session(
+            session_key_kind=session.key.affinity_kind,
+            session_key_value=session.key.affinity_key,
+            api_key_id=session.key.api_key_id,
+            instance_id=get_settings().http_responses_session_bridge_instance_id,
+            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+            account_id=session.account.id,
+            model=session.request_model,
+            service_tier=None,
+            latest_turn_state=session.downstream_turn_state,
+            latest_response_id=None,
+            allow_takeover=allow_takeover,
+        )
+        session.durable_session_id = lookup.session_id
+        session.durable_owner_epoch = lookup.owner_epoch
+        session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
+        if (
+            PROMETHEUS_AVAILABLE
+            and bridge_durable_recover_total is not None
+            and allow_takeover
+            and lookup.owner_epoch > 1
+        ):
+            bridge_durable_recover_total.labels(path="restart_takeover").inc()
+            _record_bridge_reattach(path="restart_takeover", outcome="success")
+        if session.key.affinity_kind == "session_header":
+            await self._durable_bridge.register_session_header(
+                session_id=lookup.session_id,
                 api_key_id=session.key.api_key_id,
-                instance_id=get_settings().http_responses_session_bridge_instance_id,
-                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                account_id=session.account.id,
-                model=session.request_model,
-                service_tier=None,
-                latest_turn_state=session.downstream_turn_state,
-                latest_response_id=None,
-                allow_takeover=allow_takeover,
+                session_header=session.key.affinity_key,
             )
-            session.durable_session_id = lookup.session_id
-            session.durable_owner_epoch = lookup.owner_epoch
-            session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
-            if (
-                PROMETHEUS_AVAILABLE
-                and bridge_durable_recover_total is not None
-                and allow_takeover
-                and lookup.owner_epoch > 1
-            ):
-                bridge_durable_recover_total.labels(path="restart_takeover").inc()
-                _record_bridge_reattach(path="restart_takeover", outcome="success")
-            if session.key.affinity_kind == "session_header":
-                await self._durable_bridge.register_session_header(
-                    session_id=lookup.session_id,
-                    api_key_id=session.key.api_key_id,
-                    session_header=session.key.affinity_key,
-                )
-        except Exception:
-            logger.warning("Failed to claim durable HTTP bridge session", exc_info=True)
 
     async def _refresh_durable_http_bridge_session(
         self,

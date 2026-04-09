@@ -242,7 +242,7 @@ async def _run_session(client: httpx.AsyncClient, config: VerifyConfig, session_
 async def _trigger_restart(config: VerifyConfig) -> None:
     await asyncio.sleep(config.restart_delay_seconds)
     cmd = [
-        "kubectl",
+        config.kubectl_binary,
         "--context",
         config.rollout_context,
         "-n",

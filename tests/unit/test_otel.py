@@ -520,6 +520,87 @@ def test_local_api_port_falls_back_for_invalid_env(monkeypatch: pytest.MonkeyPat
     assert main._local_api_port() == 4123
 
 
+@pytest.mark.asyncio
+async def test_wait_for_bridge_advertise_endpoint_probes_configured_url(monkeypatch: pytest.MonkeyPatch):
+    import app.main as main
+
+    seen: dict[str, object] = {}
+
+    class _FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> "_FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    class _FakeSession:
+        def __init__(self, *args, **kwargs) -> None:
+            seen["timeout"] = kwargs.get("timeout")
+            seen["trust_env"] = kwargs.get("trust_env")
+
+        async def __aenter__(self) -> "_FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def get(self, url: str) -> _FakeResponse:
+            seen["url"] = url
+            return _FakeResponse()
+
+    monkeypatch.setattr(main.aiohttp, "ClientSession", _FakeSession)
+
+    await main._wait_for_bridge_advertise_endpoint(
+        "http://pod-a.bridge.default.svc.cluster.local:2455",
+        connect_timeout_seconds=3.0,
+    )
+
+    assert seen["url"] == "http://pod-a.bridge.default.svc.cluster.local:2455/health/live"
+    assert seen["trust_env"] is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_bridge_advertise_endpoint_skips_tls_verification_for_https_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    seen: dict[str, object] = {}
+
+    class _FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> "_FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    class _FakeSession:
+        async def __aenter__(self) -> "_FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def get(self, url: str, *, ssl: bool | None = None) -> _FakeResponse:
+            seen["url"] = url
+            seen["ssl"] = ssl
+            return _FakeResponse()
+
+    monkeypatch.setattr(main.aiohttp, "ClientSession", lambda *args, **kwargs: _FakeSession())
+
+    await main._wait_for_bridge_advertise_endpoint(
+        "https://pod-a.bridge.default.svc.cluster.local:2455",
+        connect_timeout_seconds=3.0,
+    )
+
+    assert seen["url"] == "https://pod-a.bridge.default.svc.cluster.local:2455/health/live"
+    assert seen["ssl"] is False
+
+
 def test_local_api_port_supports_equals_style_argv(monkeypatch: pytest.MonkeyPatch):
     import app.main as main
 
@@ -535,7 +616,20 @@ def test_local_api_port_falls_back_to_default_when_no_valid_port_source(monkeypa
     monkeypatch.setenv("PORT", "not-a-port")
     monkeypatch.setattr(main.sys, "argv", ["uvicorn", "app.main:app", "--port", "bad"])
 
-    assert main._local_api_port() == 2455
+    assert main._local_api_port() is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_bridge_advertise_endpoint_requires_known_local_port_without_advertise_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setattr(main.sys, "argv", ["gunicorn", "app.main:app"])
+
+    with pytest.raises(RuntimeError, match="Cannot determine local bridge listener port"):
+        await main._wait_for_bridge_advertise_endpoint(None, connect_timeout_seconds=3.0)
 
 
 @pytest.mark.asyncio

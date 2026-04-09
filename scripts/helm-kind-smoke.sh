@@ -40,6 +40,8 @@ install_bundled() {
     --set ingress.ingressClassName=nginx \
     --set ingress.nginx.enabled=true \
     --set-string 'ingress.hosts[0].host=codex-lb.localtest.me' \
+    --set-string 'ingress.hosts[0].paths[0].path=/' \
+    --set-string 'ingress.hosts[0].paths[0].pathType=Prefix' \
     --wait \
     --timeout 10m
 

@@ -412,9 +412,16 @@ async def _wait_for_bridge_advertise_endpoint(
     *,
     connect_timeout_seconds: float,
 ) -> None:
-    del bridge_endpoint_base_url
-    probe_base_url = f"http://127.0.0.1:{_local_api_port()}".rstrip("/")
+    local_port = _local_api_port()
+    if bridge_endpoint_base_url is None and local_port is None:
+        raise RuntimeError(
+            "Cannot determine local bridge listener port for registration probe; "
+            "set PORT or configure http_responses_session_bridge_advertise_base_url"
+        )
+    probe_base_url = bridge_endpoint_base_url or f"http://127.0.0.1:{local_port}"
+    probe_base_url = probe_base_url.rstrip("/")
     probe_url = f"{probe_base_url}/health/live"
+    probe_scheme = urlparse(probe_url).scheme.lower()
     timeout = aiohttp.ClientTimeout(
         total=connect_timeout_seconds,
         sock_connect=connect_timeout_seconds,
@@ -426,7 +433,7 @@ async def _wait_for_bridge_advertise_endpoint(
         attempt += 1
         try:
             async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                async with session.get(probe_url) as response:
+                async with session.get(probe_url, ssl=False if probe_scheme == "https" else None) as response:
                     if response.status == 200:
                         return
         except Exception:
@@ -439,13 +446,11 @@ async def _wait_for_bridge_advertise_endpoint(
         await asyncio.sleep(delay)
 
 
-def _local_api_port() -> int:
+def _local_api_port() -> int | None:
     raw = os.getenv("PORT")
     port = _parse_port_value(raw.strip()) if raw is not None else None
     if port is None:
         port = _port_from_argv()
-    if port is None:
-        return 2455
     return port
 
 

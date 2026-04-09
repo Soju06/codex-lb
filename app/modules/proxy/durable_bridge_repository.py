@@ -7,6 +7,7 @@ from hashlib import sha256
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
@@ -109,67 +110,83 @@ class DurableBridgeRepository:
         latest_response_id: str | None,
         allow_takeover: bool,
     ) -> DurableBridgeSessionSnapshot:
-        now = utcnow()
-        row = await self._session.execute(
-            select(HttpBridgeSessionRecord).where(
-                HttpBridgeSessionRecord.session_key_kind == session_key_kind,
-                HttpBridgeSessionRecord.session_key_hash == durable_bridge_hash(session_key_value),
-                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+        session_key_hash = durable_bridge_hash(session_key_value)
+        for attempt in range(2):
+            now = utcnow()
+            lease_expires_at = now + timedelta(seconds=max(1.0, lease_ttl_seconds))
+            row = await self._session.execute(
+                select(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.session_key_kind == session_key_kind,
+                    HttpBridgeSessionRecord.session_key_hash == session_key_hash,
+                    HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                )
+                .with_for_update()
             )
-        )
-        existing = row.scalar_one_or_none()
-        lease_expires_at = now + timedelta(seconds=max(1.0, lease_ttl_seconds))
-        if existing is None:
-            record = HttpBridgeSessionRecord(
-                session_key_kind=session_key_kind,
-                session_key_value=session_key_value,
-                session_key_hash=durable_bridge_hash(session_key_value),
-                api_key_scope=api_key_scope,
-                owner_instance_id=instance_id,
-                owner_epoch=1,
-                lease_expires_at=lease_expires_at,
-                state=HttpBridgeSessionState.ACTIVE,
-                account_id=account_id,
-                model=model,
-                service_tier=service_tier,
-                latest_turn_state=latest_turn_state,
-                latest_response_id=latest_response_id,
-                last_seen_at=now,
-                closed_at=None,
-            )
-            self._session.add(record)
+            existing = row.scalar_one_or_none()
+            if existing is None:
+                record = HttpBridgeSessionRecord(
+                    session_key_kind=session_key_kind,
+                    session_key_value=session_key_value,
+                    session_key_hash=session_key_hash,
+                    api_key_scope=api_key_scope,
+                    owner_instance_id=instance_id,
+                    owner_epoch=1,
+                    lease_expires_at=lease_expires_at,
+                    state=HttpBridgeSessionState.ACTIVE,
+                    account_id=account_id,
+                    model=model,
+                    service_tier=service_tier,
+                    latest_turn_state=latest_turn_state,
+                    latest_response_id=latest_response_id,
+                    last_seen_at=now,
+                    closed_at=None,
+                )
+                self._session.add(record)
+                try:
+                    await self._session.commit()
+                except IntegrityError:
+                    await self._session.rollback()
+                    if attempt == 0:
+                        continue
+                    raise
+                await self._session.refresh(record)
+                return _to_snapshot_required(record)
+
+            state_allows_takeover = existing.state in {
+                HttpBridgeSessionState.DRAINING,
+                HttpBridgeSessionState.CLOSED,
+            }
+            owner_changed = existing.owner_instance_id != instance_id
+            if not owner_changed:
+                next_epoch = existing.owner_epoch
+            else:
+                lease_expired = existing.lease_expires_at is None or existing.lease_expires_at <= now
+                if not allow_takeover and not lease_expired and not state_allows_takeover:
+                    return _to_snapshot_required(existing)
+                next_epoch = existing.owner_epoch + 1
+
+            existing.owner_instance_id = instance_id
+            existing.owner_epoch = next_epoch
+            existing.lease_expires_at = lease_expires_at
+            existing.state = HttpBridgeSessionState.ACTIVE
+            existing.account_id = account_id
+            existing.model = model
+            existing.service_tier = service_tier
+            if owner_changed:
+                existing.latest_turn_state = latest_turn_state
+                existing.latest_response_id = latest_response_id
+            else:
+                if latest_turn_state is not None:
+                    existing.latest_turn_state = latest_turn_state
+                if latest_response_id is not None:
+                    existing.latest_response_id = latest_response_id
+            existing.last_seen_at = now
+            existing.closed_at = None
             await self._session.commit()
-            await self._session.refresh(record)
-            return _to_snapshot_required(record)
-
-        state_allows_takeover = existing.state in {
-            HttpBridgeSessionState.DRAINING,
-            HttpBridgeSessionState.CLOSED,
-        }
-        if existing.owner_instance_id == instance_id:
-            next_epoch = existing.owner_epoch
-        else:
-            lease_expired = existing.lease_expires_at is None or existing.lease_expires_at <= now
-            if not allow_takeover and not lease_expired and not state_allows_takeover:
-                return _to_snapshot_required(existing)
-            next_epoch = existing.owner_epoch + 1
-
-        existing.owner_instance_id = instance_id
-        existing.owner_epoch = next_epoch
-        existing.lease_expires_at = lease_expires_at
-        existing.state = HttpBridgeSessionState.ACTIVE
-        existing.account_id = account_id
-        existing.model = model
-        existing.service_tier = service_tier
-        if latest_turn_state is not None:
-            existing.latest_turn_state = latest_turn_state
-        if latest_response_id is not None:
-            existing.latest_response_id = latest_response_id
-        existing.last_seen_at = now
-        existing.closed_at = None
-        await self._session.commit()
-        await self._session.refresh(existing)
-        return _to_snapshot_required(existing)
+            await self._session.refresh(existing)
+            return _to_snapshot_required(existing)
+        raise RuntimeError("Failed to claim durable bridge session after retry")
 
     async def renew_session(
         self,

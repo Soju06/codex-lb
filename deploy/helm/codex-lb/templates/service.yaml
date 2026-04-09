@@ -25,8 +25,7 @@ spec:
     {{- else if eq $selectorMode "workload" }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
     {{- else }}
-    {{- $legacyDeployment := lookup "apps/v1" "Deployment" .Release.Namespace (include "codex-lb.fullname" .) }}
-    {{- if $legacyDeployment }}
+    {{- if .Release.IsUpgrade }}
     {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- else }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}

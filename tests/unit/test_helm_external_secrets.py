@@ -139,6 +139,29 @@ def test_public_service_can_render_workload_selector_after_cutover() -> None:
     assert "codex-lb.soju.dev/traffic: workload" in rendered
 
 
+def test_public_service_auto_mode_renders_legacy_selector_on_upgrade_without_lookup() -> None:
+    rendered = _helm_template(
+        "--is-upgrade",
+        "--show-only",
+        "templates/service.yaml",
+        "--set",
+        "migration.serviceSelectorMode=auto",
+    )
+
+    assert "codex-lb.soju.dev/traffic: legacy" in rendered
+
+
+def test_public_service_auto_mode_renders_workload_selector_on_install() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/service.yaml",
+        "--set",
+        "migration.serviceSelectorMode=auto",
+    )
+
+    assert "codex-lb.soju.dev/traffic: workload" in rendered
+
+
 def test_legacy_cleanup_hook_includes_image_pull_secrets() -> None:
     rendered = _helm_template(
         "--is-upgrade",
@@ -258,13 +281,19 @@ def test_ingress_renders_dedicated_responses_ingress_with_session_hash() -> None
     assert "name: codex-lb-responses" in rendered
     assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_x_codex_session_id" in rendered
     assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_authorization" in rendered
-    assert (
-        "nginx.ingress.kubernetes.io/proxy-next-upstream: error timeout http_502 http_503 http_504 invalid_header"
-        in rendered
-    )
+    assert "nginx.ingress.kubernetes.io/proxy-next-upstream: error timeout http_502 http_503 http_504" in rendered
+    assert "invalid_header" in rendered
     assert 'nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "2"' in rendered
     assert "path: /v1/responses" in rendered
     assert "path: /backend-api/codex/responses" in rendered
+
+
+def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:
+    script = (_REPO_ROOT / "scripts" / "helm-kind-smoke.sh").read_text()
+
+    assert "--set-string 'ingress.hosts[0].host=codex-lb.localtest.me'" in script
+    assert "--set-string 'ingress.hosts[0].paths[0].path=/'" in script
+    assert "--set-string 'ingress.hosts[0].paths[0].pathType=Prefix'" in script
 
 
 def test_migration_job_image_does_not_duplicate_registry_prefix() -> None:

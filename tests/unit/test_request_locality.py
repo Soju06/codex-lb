@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ipaddress import ip_network
 from types import SimpleNamespace
 
 import pytest
@@ -101,6 +102,18 @@ def test_host_os_request_rejects_other_private_clients(monkeypatch: pytest.Monke
     assert is_host_os_request(request) is False
 
 
-def test_host_os_request_accepts_localhost_host_header_without_forwarded_hints() -> None:
+def test_host_os_request_accepts_localhost_host_header_with_host_network_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        request_locality,
+        "_insecure_allow_remote_no_auth_host_networks",
+        lambda: (ip_network("10.88.0.0/24"),),
+    )
     request = _request(client_host="10.88.0.176", host="localhost:2455")
     assert is_host_os_request(request) is True
+
+
+def test_host_os_request_rejects_localhost_host_header_without_host_network_proof() -> None:
+    request = _request(client_host="203.0.113.44", host="localhost:2455")
+    assert is_host_os_request(request) is False

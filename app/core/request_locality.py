@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import struct
 from collections.abc import Mapping
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
@@ -165,6 +166,48 @@ def _read_default_ipv4_gateway() -> str | None:
     return None
 
 
+def _read_default_ipv4_interface() -> str | None:
+    try:
+        with open("/proc/net/route", encoding="utf-8") as route_file:
+            next(route_file, None)
+            for line in route_file:
+                fields = line.split()
+                if len(fields) < 4 or fields[1] != "00000000":
+                    continue
+                interface = fields[0].strip()
+                if interface:
+                    return interface
+    except OSError:
+        return None
+    return None
+
+
+def _read_interface_ipv4_network(interface: str) -> IPv4Network | None:
+    if not interface:
+        return None
+
+    name = interface.encode("utf-8")
+    if len(name) >= 16:
+        name = name[:15]
+    ifreq = struct.pack("256s", name)
+
+    try:
+        import fcntl
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            address_bytes = fcntl.ioctl(sock.fileno(), 0x8915, ifreq)[20:24]
+            netmask_bytes = fcntl.ioctl(sock.fileno(), 0x891b, ifreq)[20:24]
+    except (ImportError, OSError):
+        return None
+
+    address = socket.inet_ntoa(address_bytes)
+    netmask = socket.inet_ntoa(netmask_bytes)
+    try:
+        return ip_network(f"{address}/{netmask}", strict=False)
+    except ValueError:
+        return None
+
+
 @lru_cache(maxsize=1)
 def _auto_detect_host_gateway_networks() -> tuple[IPv4Network | IPv6Network, ...]:
     networks: list[IPv4Network | IPv6Network] = []
@@ -174,6 +217,12 @@ def _auto_detect_host_gateway_networks() -> tuple[IPv4Network | IPv6Network, ...
         network = _single_host_network(default_gateway)
         if network is not None:
             networks.append(network)
+
+    default_interface = _read_default_ipv4_interface()
+    if default_interface is not None:
+        interface_network = _read_interface_ipv4_network(default_interface)
+        if interface_network is not None and interface_network not in networks:
+            networks.append(interface_network)
 
     for hostname in ("host.containers.internal", "host.docker.internal"):
         try:
@@ -264,13 +313,6 @@ def is_host_os_request(request: HTTPConnection) -> bool:
     if is_local_request(request):
         return True
 
-    # Rootless container port-forwarding can preserve a localhost Host header
-    # while presenting a bridge-network peer address to the app. Treat direct
-    # localhost Host headers without forwarded client hints as host-local.
-    host_name = _parse_host_header_hostname(request.headers.get("host"))
-    if is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers):
-        return True
-
     socket_host = _request_socket_host(request)
     if not socket_host:
         return False
@@ -279,4 +321,9 @@ def is_host_os_request(request: HTTPConnection) -> bool:
     except ValueError:
         return False
 
-    return any(address in network for network in _insecure_allow_remote_no_auth_host_networks())
+    host_name = _parse_host_header_hostname(request.headers.get("host"))
+    host_networks = _insecure_allow_remote_no_auth_host_networks()
+    if is_local_host(host_name) and _has_forwarded_client_ip_hint(request.headers):
+        return False
+
+    return any(address in network for network in host_networks)

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from ipaddress import ip_network
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import app.core.request_locality as request_locality
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
@@ -215,6 +217,11 @@ async def test_remote_insecure_no_auth_bypasses_dashboard_and_proxy_auth(app_ins
 async def test_podman_localhost_host_header_bypasses_bootstrap_and_proxy_auth(app_instance, monkeypatch):
     monkeypatch.setenv("CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH", "true")
     monkeypatch.delenv("CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH_HOST_CIDRS", raising=False)
+    monkeypatch.setattr(
+        request_locality,
+        "_auto_detect_host_gateway_networks",
+        lambda: (ip_network("10.88.0.0/24"),),
+    )
     from app.core.config.settings import get_settings
     from app.core.config.settings_cache import get_settings_cache
 
@@ -257,6 +264,10 @@ async def test_public_remote_insecure_no_auth_does_not_bypass_dashboard_or_proxy
             assert session.status_code == 200
             assert session.json()["authenticated"] is False
             assert session.json()["bootstrapRequired"] is True
+
+            spoofed = await remote_client.get("/api/settings", headers={"Host": "localhost"})
+            assert spoofed.status_code == 401
+            assert spoofed.json()["error"]["code"] == "bootstrap_required"
 
             protected_settings = await remote_client.get("/api/settings")
             assert protected_settings.status_code == 401

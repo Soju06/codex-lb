@@ -33,9 +33,9 @@ docker volume create codex-lb-data
 docker run -d --name codex-lb \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
-  # 아래 환경변수는 로컬에서 사용하고, 접속할때만 적용하세요.
   -e CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID=codex-lb-local \
   -e CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH=true \
+  -e CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH_HOST_CIDRS=172.17.0.0/16 \
   ghcr.io/kgskr/codex-lb:latest
 ```
 
@@ -47,13 +47,24 @@ uvx codex-lb
 
 브라우저에서 [http://localhost:2455](http://localhost:2455) 로 접속한 뒤 계정을 추가하면 바로 사용할 수 있습니다.
 
-컨테이너로 실행할 때는 아래 두 환경변수를 함께 주는 것을 권장합니다.
+컨테이너로 실행할 때는 아래 설정을 함께 주는 것을 권장합니다.
 
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID=codex-lb-local`
   - 컨테이너 재시작 시 bridge instance id가 흔들리지 않게 해서 세션 브리지 안정성을 높입니다.
 - `CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH=true`
   - 로컬 네트워크나 사내 개인용처럼 제한된 환경에서 로그인, bootstrap, proxy API key 인증 없이 바로 붙을 수 있게 합니다.
   - 테스트/내부 사용 전용이며, 외부에 노출되는 환경에는 권장하지 않습니다.
+
+Docker를 쓴다면 아래 CIDR 설정도 함께 주는 편이 안전합니다.
+
+- `CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH_HOST_CIDRS=172.17.0.0/16`
+  - Docker bridge 환경에서 호스트 OS에서 들어오는 요청만 무인증으로 허용하려면 함께 주는 것을 권장합니다.
+  - Docker 기본 bridge 대역 예시입니다. 네트워크 설정이 다르면 실제 bridge CIDR에 맞게 바꿔야 합니다.
+
+[Podman](https://podman.io/docs/installation)을 쓴다면 위 CIDR 값은 그대로 쓰지 말고, 환경에 맞는 bridge 대역을 넣거나 자동 감지에 맡기세요. 예를 들어 rootless Podman은 `10.88.0.0/16` 계열인 경우가 많습니다.
+
+> Podman은 rootless로 쓰기 쉽고 비교적 가벼운 컨테이너 런타임이라, Docker가 무겁다고 느껴지면 한 번 써볼 만합니다.
+
 
 ## 첫 설정
 

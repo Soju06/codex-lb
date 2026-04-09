@@ -487,6 +487,35 @@ async def test_should_fallback_to_platform_for_usage_drain_returns_true_when_all
 
 
 @pytest.mark.asyncio
+async def test_should_fallback_to_platform_for_usage_drain_returns_true_when_force_enabled(monkeypatch):
+    balancer = LoadBalancer(lambda: None)
+    accounts = [_make_test_account("a")]
+    selection_inputs = SelectionInputs(
+        accounts=accounts,
+        latest_primary={"a": _make_test_usage("a", window="primary", used_percent=10.0)},
+        latest_secondary={"a": _make_test_usage("a", window="secondary", used_percent=10.0)},
+    )
+
+    async def fake_load_selection_inputs(*, model=None, additional_limit_name=None, account_ids=None):
+        del model, additional_limit_name, account_ids
+        return selection_inputs
+
+    balancer._load_selection_inputs = fake_load_selection_inputs  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(
+            platform_fallback_force_enabled=True,
+            platform_fallback_primary_remaining_threshold_pct=10.0,
+            platform_fallback_secondary_remaining_threshold_pct=5.0,
+        ),
+    )
+
+    should_fallback = await balancer.should_fallback_to_platform_for_usage_drain(model="gpt-5.1")
+
+    assert should_fallback is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED])
 async def test_should_fallback_to_platform_for_usage_drain_ignores_non_active_status_when_usage_is_healthy(
     status: AccountStatus,

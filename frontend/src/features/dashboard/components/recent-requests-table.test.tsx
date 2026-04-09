@@ -103,6 +103,8 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("req-1")).toBeInTheDocument();
     expect(screen.getAllByText("upstream-req-1")[0]).toBeInTheDocument();
     expect(screen.getByText("platform-subject-1")).toBeInTheDocument();
+    expect(screen.getAllByText("priority")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("default")[0]).toBeInTheDocument();
     expect(screen.getAllByText("provider_transport_unsupported")[0]).toBeInTheDocument();
     expect(screen.getAllByText("rate_limit_exceeded")[0]).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");

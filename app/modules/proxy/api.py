@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
 from typing import cast
 
+import anyio
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -1355,6 +1356,8 @@ async def _maybe_handle_platform_responses(
 
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    reasoning_effort = payload.reasoning.effort if payload.reasoning else None
+    requested_service_tier = _normalize_service_tier_value(payload.service_tier)
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -1399,6 +1402,9 @@ async def _maybe_handle_platform_responses(
                 status="error",
                 error_code="upstream_unavailable",
                 error_message=str(exc) or "Failed to receive the initial OpenAI Platform streaming response.",
+                reasoning_effort=reasoning_effort,
+                service_tier=requested_service_tier,
+                requested_service_tier=requested_service_tier,
                 route_class=route_class,
                 rejection_reason="platform_stream_start_failed",
                 transport="http",
@@ -1431,6 +1437,8 @@ async def _maybe_handle_platform_responses(
             start=start,
             upstream_request_id=upstream_response.upstream_request_id,
             route_class=route_class,
+            reasoning_effort=reasoning_effort,
+            requested_service_tier=requested_service_tier,
         )
         return StreamingResponse(
             stream,
@@ -1470,8 +1478,10 @@ async def _maybe_handle_platform_responses(
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_tokens: int | None = None
+    actual_service_tier: str | None = None
     if parsed_result is not None:
         usage = parsed_result.usage
+        actual_service_tier = _service_tier_from_response_payload(parsed_result)
         if parsed_result.status == "failed":
             status = "error"
             error_code = parsed_result.error.code if parsed_result.error else None
@@ -1496,7 +1506,11 @@ async def _maybe_handle_platform_responses(
         output_tokens=output_tokens,
         cached_input_tokens=cached_input_tokens,
         reasoning_tokens=reasoning_tokens,
+        reasoning_effort=reasoning_effort,
         transport="http",
+        service_tier=_effective_service_tier(requested_service_tier, actual_service_tier),
+        requested_service_tier=requested_service_tier,
+        actual_service_tier=actual_service_tier,
         route_class=route_class,
         upstream_request_id=result.upstream_request_id,
     )
@@ -1566,6 +1580,8 @@ async def _instrument_platform_stream(
     start: float,
     upstream_request_id: str | None,
     route_class: str,
+    reasoning_effort: str | None,
+    requested_service_tier: str | None,
 ) -> AsyncIterator[str]:
     status = "success"
     error_code: str | None = None
@@ -1574,9 +1590,11 @@ async def _instrument_platform_stream(
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_tokens: int | None = None
+    actual_service_tier: str | None = None
 
     async def _handle_line(line: str) -> str:
-        nonlocal status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+        nonlocal status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens
+        nonlocal reasoning_tokens, actual_service_tier
         payload = _parse_sse_payload(line)
         if payload is None:
             return line
@@ -1591,6 +1609,7 @@ async def _instrument_platform_stream(
         parsed = parse_response_payload(response)
         if parsed is None:
             return line
+        actual_service_tier = _service_tier_from_event_payload(payload)
         if parsed.status == "failed":
             status = "error"
             error_code = parsed.error.code if parsed.error else None
@@ -1627,10 +1646,51 @@ async def _instrument_platform_stream(
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
             reasoning_tokens=reasoning_tokens,
+            reasoning_effort=reasoning_effort,
             transport="http",
+            service_tier=_effective_service_tier(requested_service_tier, actual_service_tier),
+            requested_service_tier=requested_service_tier,
+            actual_service_tier=actual_service_tier,
             route_class=route_class,
             upstream_request_id=upstream_request_id,
         )
+
+
+def _normalize_service_tier_value(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.lower() == "fast":
+        return "priority"
+    return stripped
+
+
+def _service_tier_from_response_payload(response: OpenAIResponsePayload | None) -> str | None:
+    if response is None:
+        return None
+    extra = response.model_extra
+    if not isinstance(extra, Mapping):
+        return None
+    return _normalize_service_tier_value(extra.get("service_tier"))
+
+
+def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    return _normalize_service_tier_value(response.get("service_tier"))
+
+
+def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
+    if isinstance(actual_service_tier, str):
+        return actual_service_tier
+    if isinstance(requested_service_tier, str):
+        return requested_service_tier
+    return None
 
 
 async def _websocket_provider_rejection(
@@ -1710,8 +1770,6 @@ def _platform_continuity_param(
         return "conversation"
     if payload.previous_response_id:
         return "previous_response_id"
-    if route_family == BACKEND_CODEX_HTTP_ROUTE_FAMILY:
-        return None
     for key in ("session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"):
         value = headers.get(key)
         if isinstance(value, str) and value.strip():
@@ -1859,10 +1917,11 @@ async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -
     if reservation is None:
         return
     try:
-        async with get_background_session() as session:
-            service = ApiKeysService(ApiKeysRepository(session))
-            await service.release_usage_reservation(reservation.reservation_id)
-    except Exception:
+        with anyio.CancelScope(shield=True):
+            async with get_background_session() as session:
+                service = ApiKeysService(ApiKeysRepository(session))
+                await service.release_usage_reservation(reservation.reservation_id)
+    except BaseException:
         logger.warning(
             "Failed to release API key usage reservation reservation_id=%s",
             reservation.reservation_id,

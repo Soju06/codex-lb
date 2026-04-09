@@ -122,6 +122,27 @@ _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
         "x-codex-beta-features",
     }
 )
+
+
+def _normalize_chatgpt_web_service_tier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.lower() == "fast":
+        return "priority"
+    return stripped
+
+
+def _normalize_chatgpt_web_payload(payload_dict: JsonObject) -> JsonObject:
+    normalized = dict(payload_dict)
+    service_tier = _normalize_chatgpt_web_service_tier(normalized.get("service_tier"))
+    if service_tier is not None:
+        normalized["service_tier"] = service_tier
+    return normalized
+
+
 _HOP_BY_HOP_HEADER_NAMES = frozenset(
     {
         "accept",
@@ -1601,7 +1622,7 @@ async def stream_responses(
     error_code: str | None = None
     error_message: str | None = None
     client_session = session or get_http_client().session
-    payload_dict = payload.to_payload()
+    payload_dict = _normalize_chatgpt_web_payload(payload.to_payload())
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
             payload_dict,
@@ -1995,7 +2016,7 @@ class _CompactCommandTransport:
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-        payload_dict = self.payload.to_payload()
+        payload_dict = _normalize_chatgpt_web_payload(self.payload.to_payload())
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,

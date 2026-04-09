@@ -579,6 +579,9 @@ class LoadBalancer:
         if not considered_states:
             return False
 
+        if bool(getattr(settings, "platform_fallback_force_enabled", False)):
+            return True
+
         if any(
             _is_chatgpt_state_healthy_for_platform_fallback(
                 state,

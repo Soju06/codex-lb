@@ -683,7 +683,7 @@ async def test_update_platform_identity_rejects_invalid_route_family(async_clien
 
     update_response = await async_client.patch(
         f"/api/accounts/platform/{account_id}",
-        json={"eligibleRouteFamilies": ["backend_codex_http"]},
+        json={"eligibleRouteFamilies": ["not_a_real_route_family"]},
     )
     assert update_response.status_code == 422
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import socket
 from collections.abc import Mapping
+from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 from starlette.requests import HTTPConnection
@@ -136,9 +138,70 @@ def _trusted_proxy_networks() -> tuple[IPv4Network | IPv6Network, ...]:
     return parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
 
 
+def _request_socket_host(request: HTTPConnection) -> str | None:
+    return request.client.host if request.client else None
+
+
+def _single_host_network(host: str) -> IPv4Network | IPv6Network | None:
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return None
+    return ip_network(f"{address}/{address.max_prefixlen}", strict=False)
+
+
+def _read_default_ipv4_gateway() -> str | None:
+    try:
+        with open("/proc/net/route", encoding="utf-8") as route_file:
+            next(route_file, None)
+            for line in route_file:
+                fields = line.split()
+                if len(fields) < 4 or fields[1] != "00000000":
+                    continue
+                gateway = int(fields[2], 16).to_bytes(4, "little")
+                return str(ip_address(gateway))
+    except OSError:
+        return None
+    return None
+
+
+@lru_cache(maxsize=1)
+def _auto_detect_host_gateway_networks() -> tuple[IPv4Network | IPv6Network, ...]:
+    networks: list[IPv4Network | IPv6Network] = []
+
+    default_gateway = _read_default_ipv4_gateway()
+    if default_gateway is not None:
+        network = _single_host_network(default_gateway)
+        if network is not None:
+            networks.append(network)
+
+    for hostname in ("host.containers.internal", "host.docker.internal"):
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+        except OSError:
+            continue
+        for info in infos:
+            candidate = info[4][0]
+            if not isinstance(candidate, str):
+                continue
+            network = _single_host_network(candidate)
+            if network is not None and network not in networks:
+                networks.append(network)
+
+    return tuple(networks)
+
+
+def _insecure_allow_remote_no_auth_host_networks() -> tuple[IPv4Network | IPv6Network, ...]:
+    settings = get_settings()
+    configured = settings.insecure_allow_remote_no_auth_host_cidrs
+    if configured:
+        return parse_trusted_proxy_networks(configured)
+    return _auto_detect_host_gateway_networks()
+
+
 def resolve_request_client_host(request: HTTPConnection) -> str | None:
     settings = get_settings()
-    socket_ip = request.client.host if request.client else None
+    socket_ip = _request_socket_host(request)
     return resolve_connection_client_ip(
         request.headers,
         socket_ip,
@@ -195,3 +258,25 @@ def is_local_request(request: HTTPConnection) -> bool:
             return is_local_host(host_name) and _has_forwarded_client_ip_hint(request.headers)
         return is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers)
     return address.is_loopback
+
+
+def is_host_os_request(request: HTTPConnection) -> bool:
+    if is_local_request(request):
+        return True
+
+    # Rootless container port-forwarding can preserve a localhost Host header
+    # while presenting a bridge-network peer address to the app. Treat direct
+    # localhost Host headers without forwarded client hints as host-local.
+    host_name = _parse_host_header_hostname(request.headers.get("host"))
+    if is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers):
+        return True
+
+    socket_host = _request_socket_host(request)
+    if not socket_host:
+        return False
+    try:
+        address = ip_address(socket_host)
+    except ValueError:
+        return False
+
+    return any(address in network for network in _insecure_allow_remote_no_auth_host_networks())

@@ -170,7 +170,7 @@ def test_derive_request_capabilities_marks_session_headers_as_continuity(header_
     "header_name",
     ["session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"],
 )
-def test_derive_request_capabilities_ignores_backend_codex_session_headers_for_platform_fallback(
+def test_derive_request_capabilities_marks_backend_codex_session_headers_as_continuity(
     header_name: str,
 ) -> None:
     capabilities = proxy_api_module._derive_request_capabilities(
@@ -182,14 +182,14 @@ def test_derive_request_capabilities_ignores_backend_codex_session_headers_for_p
         headers={header_name: "sid_1"},
     )
 
-    assert capabilities.continuity_param is None
+    assert capabilities.continuity_param == header_name
 
 
 @pytest.mark.parametrize(
     "header_name",
     ["session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"],
 )
-def test_derive_request_capabilities_ignores_backend_codex_header_continuity(header_name: str) -> None:
+def test_derive_request_capabilities_marks_backend_codex_header_continuity(header_name: str) -> None:
     capabilities = proxy_api_module._derive_request_capabilities(
         route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
         route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
@@ -199,7 +199,7 @@ def test_derive_request_capabilities_ignores_backend_codex_header_continuity(hea
         headers={header_name: "sid_1"},
     )
 
-    assert capabilities.continuity_param is None
+    assert capabilities.continuity_param == header_name
 
 
 @pytest.mark.asyncio

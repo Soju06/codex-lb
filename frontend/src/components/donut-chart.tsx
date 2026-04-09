@@ -222,7 +222,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
         </div>
 
         <div
-          className="flex-1 space-y-2.5 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="flex-1 space-y-0.5 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           data-testid="donut-legend-list"
           style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem + ${(LEGEND_VISIBLE_COUNT - 1) * LEGEND_ROW_GAP_REM}rem)` }}
         >
@@ -237,7 +237,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
               }}
               type="button"
               key={legendId}
-              className="animate-fade-in-up flex h-7 w-full items-center justify-between gap-3 rounded-lg border bg-transparent text-xs transition-all"
+              className="animate-fade-in-up flex h-7 w-full items-center justify-between px-1.5 gap-3 rounded-lg border bg-transparent text-xs transition-all"
               style={{ animationDelay: `${i * 75}ms`, borderColor: isActive ? item.color : "transparent" }}
               onMouseEnter={() => setActiveLegendId(legendId)}
               onMouseLeave={() => setActiveLegendId(null)}
@@ -269,7 +269,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
               legendRefs.current.__consumed__ = node;
             }}
             type="button"
-            className="flex h-7 w-full items-center justify-between gap-3 rounded-lg border bg-transparent text-xs transition-all"
+            className="flex h-7 w-full items-center justify-between px-1.5 gap-3 rounded-lg border bg-transparent text-xs transition-all"
             style={{ borderColor: activeLegendId === "__consumed__" ? consumedColor : "transparent" }}
             onMouseEnter={() => setActiveLegendId("__consumed__")}
             onMouseLeave={() => setActiveLegendId(null)}

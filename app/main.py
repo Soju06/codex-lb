@@ -43,6 +43,7 @@ from app.modules.firewall import api as firewall_api
 from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
     RING_HEARTBEAT_INTERVAL_SECONDS,
@@ -127,6 +128,8 @@ async def lifespan(app: FastAPI):
     await init_db()
     init_background_db()
     await init_http_client()
+    await _ensure_bridge_durable_schema_ready(settings)
+    startup_module.mark_bridge_durable_schema_ready()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
@@ -167,31 +170,36 @@ async def lifespan(app: FastAPI):
     elif settings.metrics_enabled:
         logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
 
-    async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                if bridge_endpoint_base_url is not None:
-                    await _wait_for_bridge_advertise_endpoint(
-                        bridge_endpoint_base_url,
-                        connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-                    )
-                await _activate_bridge_membership(svc, iid)
-                startup_module.mark_bridge_registration_complete()
-                startup_module._startup_complete = True
-                logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
-                break
-            except Exception:
-                delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
-                logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
-                await asyncio.sleep(delay)
+    async def _complete_bridge_registration(svc: RingMembershipService, iid: str) -> None:
+        if bridge_endpoint_base_url is not None:
+            await _wait_for_bridge_advertise_endpoint(
+                bridge_endpoint_base_url,
+                connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+            )
+        await _activate_bridge_membership(svc, iid)
+        startup_module.mark_bridge_registration_complete()
+
+    async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
         while True:
             await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
             try:
                 await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
             except Exception:
                 logger.warning("Ring heartbeat failed", exc_info=True)
+
+    async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await _complete_bridge_registration(svc, iid)
+                logger.info("Registered in bridge ring", extra={"instance_id": iid, "attempt": attempt})
+                break
+            except Exception:
+                delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
+                logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
+                await asyncio.sleep(delay)
+        await _heartbeat_only(svc, iid)
 
     async def _activate_bridge_membership(svc: RingMembershipService, iid: str) -> None:
         if bridge_endpoint_base_url is None:
@@ -226,6 +234,7 @@ async def lifespan(app: FastAPI):
     ring_service = RingMembershipService(SessionLocal)
     instance_id = settings.http_responses_session_bridge_instance_id
     heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
+    startup_module._startup_complete = True
 
     try:
         yield
@@ -382,6 +391,20 @@ def create_app() -> FastAPI:
         return FileResponse(index_html, media_type="text/html")
 
     return app
+
+
+async def _ensure_bridge_durable_schema_ready(settings) -> None:
+    if not settings.http_responses_session_bridge_enabled:
+        return
+    session = SessionLocal()
+    try:
+        missing_tables = await missing_durable_bridge_tables(session)
+    finally:
+        await session.close()
+    if not missing_tables:
+        return
+    missing = ", ".join(missing_tables)
+    raise RuntimeError(f"HTTP bridge durable schema is missing required tables: {missing}")
 
 
 async def _wait_for_bridge_advertise_endpoint(

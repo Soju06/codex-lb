@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from hashlib import sha256
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select as sa_select
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,10 +77,34 @@ async def health_ready() -> HealthCheckResponse:
     raise HTTPException(status_code=503, detail="Service unavailable")
 
 
+@router.post("/internal/drain/start", include_in_schema=False)
+async def start_internal_drain(request: Request) -> HealthCheckResponse:
+    client_host = request.client.host if request.client is not None else None
+    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise HTTPException(status_code=403, detail="Loopback access required")
+
+    import app.core.shutdown as shutdown_state
+
+    shutdown_state.set_bridge_drain_active(True)
+    shutdown_state.set_draining(True)
+
+    proxy_service = getattr(request.app.state, "proxy_service", None)
+    if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
+        await proxy_service.mark_http_bridge_draining()
+
+    return HealthCheckResponse(status="ok", checks={"draining": "ok"})
+
+
 def _bridge_readiness_failure_detail(bridge_ring: BridgeRingInfo) -> str | None:
+    import app.core.startup as startup_module
+
     settings = get_settings()
     if not getattr(settings, "http_responses_session_bridge_enabled", True):
         return None
+    if not startup_module._bridge_durable_schema_ready:
+        return "Service bridge durable schema is not ready"
+    if not startup_module._bridge_registration_complete:
+        return "Service bridge registration is not complete"
     if bridge_ring.error is not None:
         return "Service bridge ring metadata is unavailable"
     if bridge_ring.ring_size == 0:

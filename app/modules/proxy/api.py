@@ -24,8 +24,9 @@ from app.core.auth.dependencies import (
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
@@ -47,7 +48,7 @@ from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
-from app.core.utils.sse import parse_sse_data_json
+from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -85,6 +86,20 @@ from app.modules.proxy.schemas import (
 from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
+
+_PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
+    {
+        "message",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "web_search_call",
+        "file_search_call",
+        "computer_call",
+        "code_interpreter_call",
+    }
+)
+_PUBLIC_RESPONSE_TEXT_PART_TYPES = frozenset({"output_text", "input_text", "text", "refusal"})
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -810,6 +825,7 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
         )
+    stream = _normalize_public_responses_stream(stream)
     try:
         first = await stream.__anext__()
     except StopAsyncIteration:
@@ -1222,9 +1238,12 @@ def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | Non
 async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
     terminal_result: OpenAIResponseResult | None = None
+    contract_violation_kind: str | None = None
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
+            if _looks_like_sse_data_block(line):
+                contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
         event_type = payload.get("type")
         _collect_output_item_event(payload, output_items)
@@ -1252,16 +1271,30 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIRespon
             continue
         if event_type in ("response.completed", "response.incomplete"):
             response = payload.get("response")
-            if isinstance(response, dict):
-                parsed = parse_response_payload(_merge_collected_output_items(response, output_items))
+            if is_json_mapping(response):
+                normalized_response, violation_kind = _normalize_public_response_mapping(response, output_items)
+                if violation_kind is not None:
+                    contract_violation_kind = contract_violation_kind or violation_kind
+                if normalized_response is not None:
+                    parsed = parse_response_payload(normalized_response)
+                else:
+                    parsed = None
                 if parsed is not None:
                     terminal_result = parsed
                     continue
-            terminal_result = _default_error_envelope()
+            error_kind = contract_violation_kind or "invalid_json"
+            terminal_result = _public_contract_error_envelope(
+                error_kind,
+                _public_contract_error_message(error_kind),
+            )
 
     if terminal_result is not None:
         return terminal_result
-    return _default_error_envelope()
+    error_kind = contract_violation_kind or "upstream_stream_truncated"
+    return _public_contract_error_envelope(
+        error_kind,
+        _public_contract_error_message(error_kind),
+    )
 
 
 def _collect_output_item_event(
@@ -1292,6 +1325,204 @@ def _merge_collected_output_items(
 
     merged["output"] = [item for _, item in sorted(output_items.items())]
     return merged
+
+
+async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    terminal_seen = False
+    contract_violation_kind: str | None = None
+    async for event_block in stream:
+        if event_block.strip() == "data: [DONE]":
+            if terminal_seen:
+                yield event_block
+            continue
+        payload = _parse_sse_payload(event_block)
+        if payload is None:
+            if _looks_like_sse_data_block(event_block):
+                contract_violation_kind = contract_violation_kind or "invalid_json"
+            continue
+        normalized_payload, violation_kind = _normalize_public_stream_payload(payload)
+        if violation_kind is not None:
+            contract_violation_kind = contract_violation_kind or violation_kind
+        if normalized_payload is None:
+            continue
+        event_type = normalized_payload.get("type")
+        if isinstance(event_type, str) and event_type in {
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+            "error",
+        }:
+            terminal_seen = True
+        yield format_sse_event(normalized_payload)
+    if terminal_seen:
+        return
+    error_kind = contract_violation_kind or "upstream_stream_truncated"
+    yield format_sse_event(
+        response_failed_event(
+            error_kind,
+            _public_contract_error_message(error_kind),
+        )
+    )
+
+
+def _normalize_public_stream_payload(
+    payload: dict[str, JsonValue],
+) -> tuple[dict[str, JsonValue] | None, str | None]:
+    event_type = payload.get("type")
+    if event_type in ("response.completed", "response.incomplete"):
+        response = payload.get("response")
+        if not is_json_mapping(response):
+            return (
+                cast(
+                    dict[str, JsonValue],
+                    response_failed_event(
+                        "invalid_json",
+                        _public_contract_error_message("invalid_json"),
+                    ),
+                ),
+                "invalid_json",
+            )
+        normalized_response, violation_kind = _normalize_public_response_mapping(response)
+        if normalized_response is None:
+            error_kind = violation_kind or "invalid_output_item"
+            return (
+                cast(
+                    dict[str, JsonValue],
+                    response_failed_event(
+                        error_kind,
+                        _public_contract_error_message(error_kind),
+                    ),
+                ),
+                error_kind,
+            )
+        normalized_payload = dict(payload)
+        normalized_payload["response"] = normalized_response
+        return normalized_payload, violation_kind
+    if event_type in ("response.output_item.added", "response.output_item.done"):
+        item = payload.get("item")
+        if not is_json_mapping(item):
+            return None, "invalid_output_item"
+        normalized_item = _normalize_public_output_item(item)
+        if normalized_item is None:
+            return None, "invalid_output_item"
+        normalized_payload = dict(payload)
+        normalized_payload["item"] = normalized_item
+        violation_kind = None
+        item_type = item.get("type")
+        if isinstance(item_type, str) and item_type not in _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES:
+            violation_kind = "invalid_output_item"
+        return normalized_payload, violation_kind
+    return payload, None
+
+
+def _normalize_public_response_mapping(
+    response: Mapping[str, JsonValue],
+    output_items: dict[int, dict[str, JsonValue]] | None = None,
+) -> tuple[dict[str, JsonValue] | None, str | None]:
+    merged = _merge_collected_output_items(response, output_items or {})
+    output = merged.get("output")
+    if not isinstance(output, list):
+        return merged, None
+    normalized_output: list[JsonValue] = []
+    dropped_items = 0
+    for item in output:
+        if not is_json_mapping(item):
+            dropped_items += 1
+            continue
+        normalized_item = _normalize_public_output_item(item)
+        if normalized_item is None:
+            dropped_items += 1
+            continue
+        normalized_output.append(normalized_item)
+    if output and not normalized_output:
+        _record_public_contract_violation("invalid_output_item")
+        return None, "invalid_output_item"
+    normalized = dict(merged)
+    normalized["output"] = normalized_output
+    if dropped_items:
+        _record_public_contract_violation("invalid_output_item")
+        return normalized, "invalid_output_item"
+    return normalized, None
+
+
+def _normalize_public_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    item_type = item.get("type")
+    if isinstance(item_type, str) and item_type in _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES:
+        return dict(item)
+    text_value = _extract_public_output_item_text(item)
+    if text_value is None:
+        return None
+    normalized: dict[str, JsonValue] = {
+        "type": "message",
+        "role": "assistant",
+        "status": item.get("status") if isinstance(item.get("status"), str) else "completed",
+        "content": [{"type": "output_text", "text": text_value}],
+    }
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id:
+        normalized["id"] = item_id
+    return normalized
+
+
+def _extract_public_output_item_text(item: Mapping[str, JsonValue]) -> str | None:
+    direct_text = item.get("text")
+    if isinstance(direct_text, str) and direct_text:
+        return direct_text
+    content = item.get("content")
+    if is_json_mapping(content):
+        content_parts: list[Mapping[str, JsonValue]] = [content]
+    elif isinstance(content, list):
+        content_parts = [part for part in content if is_json_mapping(part)]
+    else:
+        content_parts = []
+    parts: list[str] = []
+    for part in content_parts:
+        part_type = part.get("type")
+        if isinstance(part_type, str) and part_type in _PUBLIC_RESPONSE_TEXT_PART_TYPES:
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+                continue
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    if parts:
+        return "".join(parts)
+    summary = item.get("summary")
+    if isinstance(summary, str) and summary:
+        return summary
+    return None
+
+
+def _looks_like_sse_data_block(event_block: str) -> bool:
+    return "data:" in event_block
+
+
+def _public_contract_error_message(kind: str) -> str:
+    if kind == "invalid_json":
+        return "Responses stream produced an invalid JSON payload"
+    if kind == "invalid_output_item":
+        return "Responses stream produced unsupported output items"
+    if kind == "upstream_stream_truncated":
+        return "Responses stream ended before a terminal event"
+    return "Responses stream violated the public contract"
+
+
+def _public_contract_error_envelope(kind: str, message: str) -> OpenAIErrorEnvelopeModel:
+    _record_public_contract_violation(kind)
+    return OpenAIErrorEnvelopeModel(
+        error=OpenAIError(
+            message=message,
+            type="server_error",
+            code=kind,
+        )
+    )
+
+
+def _record_public_contract_violation(kind: str) -> None:
+    logger.warning("bridge_public_contract_violation kind=%s", kind)
+    if PROMETHEUS_AVAILABLE and bridge_public_contract_error_total is not None:
+        bridge_public_contract_error_total.labels(kind=kind).inc()
 
 
 def _parse_event_error_envelope(payload: dict[str, JsonValue]) -> OpenAIErrorEnvelopeModel:

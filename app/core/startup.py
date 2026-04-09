@@ -6,13 +6,20 @@ import asyncio
 
 _startup_complete: bool = False
 _bridge_registration_complete: bool = False
+_bridge_durable_schema_ready: bool = False
 _bridge_registration_event: asyncio.Event | None = None
 
 
 def reset_bridge_registration() -> None:
-    global _bridge_registration_complete, _bridge_registration_event
+    global _bridge_registration_complete, _bridge_durable_schema_ready, _bridge_registration_event
     _bridge_registration_complete = False
+    _bridge_durable_schema_ready = False
     _bridge_registration_event = asyncio.Event()
+
+
+def mark_bridge_durable_schema_ready() -> None:
+    global _bridge_durable_schema_ready
+    _bridge_durable_schema_ready = True
 
 
 def mark_bridge_registration_complete() -> None:

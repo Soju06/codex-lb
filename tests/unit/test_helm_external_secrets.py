@@ -200,10 +200,9 @@ def test_bundled_mode_overlay_enables_startup_migration_and_skips_schema_gate() 
         "postgresql.auth.password=local-password",
     )
 
-    assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"' in rendered
+    assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
     assert "name: wait-for-schema-head" not in rendered
-    assert "name: wait-for-database" in rendered
-    assert "wait-for-connection" in rendered
+    assert "name: wait-for-database" not in rendered
     assert '"helm.sh/hook": "pre-upgrade"' in rendered
 
 
@@ -219,6 +218,69 @@ def test_external_db_mode_overlay_renders_schema_gate_init_container() -> None:
 
     assert "name: wait-for-schema-head" in rendered
     assert "wait-for-head" in rendered
+
+
+def test_deployment_prestop_starts_local_drain_before_sleep() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+    )
+
+    assert "http://127.0.0.1:2455/internal/drain/start" in rendered
+    assert "time.sleep(" in rendered
+
+
+def test_deployment_sets_encryption_key_file_env_by_default() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+    )
+
+    assert "CODEX_LB_ENCRYPTION_KEY_FILE" in rendered
+    assert "/var/lib/codex-lb/encryption.key" in rendered
+
+
+def test_ingress_renders_dedicated_responses_ingress_with_session_hash() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/ingress.yaml",
+        "--set",
+        "ingress.enabled=true",
+        "--set",
+        "ingress.ingressClassName=nginx",
+        "--set",
+        "ingress.nginx.enabled=true",
+        "--set-string",
+        "ingress.hosts[0].host=codex-lb.localtest.me",
+    )
+
+    assert rendered.count("kind: Ingress") == 2
+    assert "name: codex-lb-responses" in rendered
+    assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_x_codex_session_id" in rendered
+    assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_authorization" in rendered
+    assert (
+        "nginx.ingress.kubernetes.io/proxy-next-upstream: error timeout http_502 http_503 http_504 invalid_header"
+        in rendered
+    )
+    assert 'nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "2"' in rendered
+    assert "path: /v1/responses" in rendered
+    assert "path: /backend-api/codex/responses" in rendered
+
+
+def test_migration_job_image_does_not_duplicate_registry_prefix() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/hooks/migration-job.yaml",
+        "--set",
+        "image.registry=ghcr.io",
+        "--set",
+        "image.repository=soju06/codex-lb",
+        "--set",
+        "image.tag=local-test",
+    )
+
+    assert "ghcr.io/ghcr.io/" not in rendered
+    assert "ghcr.io/soju06/codex-lb:local-test" in rendered
 
 
 def test_external_secrets_mode_overlay_renders_schema_gate_init_container() -> None:

@@ -120,6 +120,34 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    bridge_durable_recover_total = Counter(
+        "codex_lb_bridge_durable_recover_total",
+        "Total durable bridge recoveries by path",
+        ["path"],
+        registry=REGISTRY,
+    )
+    bridge_same_account_takeover_total = Counter(
+        "codex_lb_bridge_same_account_takeover_total",
+        "Total same-account takeover outcomes",
+        ["outcome"],
+        registry=REGISTRY,
+    )
+    bridge_reattach_total = Counter(
+        "codex_lb_bridge_reattach_total",
+        "Total bridge reattach outcomes by path",
+        ["path", "outcome"],
+        registry=REGISTRY,
+    )
+    bridge_first_turn_timeout_total = Counter(
+        "codex_lb_bridge_first_turn_timeout_total",
+        "Total first-turn bridge timeouts during upstream connect",
+        registry=REGISTRY,
+    )
+    bridge_drain_recovery_allowed_total = Counter(
+        "codex_lb_bridge_drain_recovery_allowed_total",
+        "Total continuity recoveries allowed while bridge drain is active",
+        registry=REGISTRY,
+    )
     bridge_owner_mismatch_total = Counter(
         "codex_lb_bridge_owner_mismatch_total",
         "Total bridge owner mismatches by key strength",
@@ -135,6 +163,12 @@ if PROMETHEUS_AVAILABLE:
     bridge_forward_latency_seconds = Histogram(
         "codex_lb_bridge_forward_latency_seconds",
         "Bridge owner forward latency",
+        registry=REGISTRY,
+    )
+    bridge_public_contract_error_total = Counter(
+        "codex_lb_bridge_public_contract_error_total",
+        "Total public /responses contract violations by kind",
+        ["kind"],
         registry=REGISTRY,
     )
 
@@ -168,9 +202,15 @@ else:
     bridge_prompt_cache_locality_miss_total: CounterLike | None = None
     bridge_soft_local_rebind_total: CounterLike | None = None
     bridge_owner_forward_total: CounterLike | None = None
+    bridge_durable_recover_total: CounterLike | None = None
+    bridge_same_account_takeover_total: CounterLike | None = None
+    bridge_reattach_total: CounterLike | None = None
+    bridge_first_turn_timeout_total: CounterLike | None = None
+    bridge_drain_recovery_allowed_total: CounterLike | None = None
     bridge_owner_mismatch_total: CounterLike | None = None
     bridge_local_rebind_total: CounterLike | None = None
     bridge_forward_latency_seconds: HistogramLike | None = None
+    bridge_public_contract_error_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -187,10 +227,16 @@ __all__ = [
     "accounts_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",
+    "bridge_durable_recover_total",
+    "bridge_drain_recovery_allowed_total",
+    "bridge_first_turn_timeout_total",
     "bridge_local_rebind_total",
     "bridge_owner_forward_total",
     "bridge_owner_mismatch_total",
+    "bridge_public_contract_error_total",
     "bridge_prompt_cache_locality_miss_total",
+    "bridge_reattach_total",
+    "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
     "circuit_breaker_state",
     "make_scrape_registry",

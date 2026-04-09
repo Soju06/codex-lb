@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,10 @@ from app.core.utils.time import utcnow
 from app.db.models import HttpBridgeSessionAlias, HttpBridgeSessionRecord, HttpBridgeSessionState
 
 _ANONYMOUS_API_KEY_SCOPE = "__anonymous__"
+REQUIRED_DURABLE_BRIDGE_TABLES = (
+    "http_bridge_sessions",
+    "http_bridge_session_aliases",
+)
 
 
 def durable_bridge_api_key_scope(api_key_id: str | None) -> str:
@@ -138,11 +142,15 @@ class DurableBridgeRepository:
             await self._session.refresh(record)
             return _to_snapshot_required(record)
 
+        state_allows_takeover = existing.state in {
+            HttpBridgeSessionState.DRAINING,
+            HttpBridgeSessionState.CLOSED,
+        }
         if existing.owner_instance_id == instance_id:
             next_epoch = existing.owner_epoch
         else:
             lease_expired = existing.lease_expires_at is None or existing.lease_expires_at <= now
-            if not allow_takeover and not lease_expired:
+            if not allow_takeover and not lease_expired and not state_allows_takeover:
                 return _to_snapshot_required(existing)
             next_epoch = existing.owner_epoch + 1
 
@@ -205,10 +213,12 @@ class DurableBridgeRepository:
             return None
         if row.owner_instance_id != instance_id or row.owner_epoch != owner_epoch:
             return _to_snapshot(row)
+        now = utcnow()
         row.owner_instance_id = None
-        row.lease_expires_at = utcnow()
-        row.last_seen_at = utcnow()
-        row.state = HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.ACTIVE
+        row.lease_expires_at = now
+        row.last_seen_at = now
+        row.state = HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.CLOSED
+        row.closed_at = None if draining else now
         await self._session.commit()
         await self._session.refresh(row)
         return _to_snapshot(row)
@@ -283,6 +293,28 @@ class DurableBridgeRepository:
             raise RuntimeError(f"DurableBridgeRepository alias upsert unsupported for dialect={dialect!r}")
         await self._session.execute(statement)
         await self._session.commit()
+
+
+async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...]:
+    dialect = session.get_bind().dialect.name
+    expected = set(REQUIRED_DURABLE_BRIDGE_TABLES)
+    if dialect == "sqlite":
+        result = await session.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases')"
+            )
+        )
+    else:
+        result = await session.execute(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' "
+                "AND table_name IN ('http_bridge_sessions', 'http_bridge_session_aliases')"
+            )
+        )
+    present = {str(row[0]) for row in result.fetchall()}
+    return tuple(sorted(expected - present))
 
 
 def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSnapshot | None:

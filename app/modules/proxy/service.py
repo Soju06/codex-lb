@@ -55,12 +55,17 @@ from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_err
 from app.core.exceptions import AppError, ProxyAuthError, ProxyRateLimitError
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
+    bridge_drain_recovery_allowed_total,
+    bridge_durable_recover_total,
+    bridge_first_turn_timeout_total,
     bridge_forward_latency_seconds,
     bridge_instance_mismatch_total,
     bridge_local_rebind_total,
     bridge_owner_forward_total,
     bridge_owner_mismatch_total,
     bridge_prompt_cache_locality_miss_total,
+    bridge_reattach_total,
+    bridge_same_account_takeover_total,
     bridge_soft_local_rebind_total,
 )
 from app.core.openai.exceptions import ClientPayloadError
@@ -73,7 +78,7 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.auth_manager import AuthManager
@@ -391,14 +396,18 @@ class ProxyService:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
-        durable_lookup = await self._durable_bridge.lookup_request_targets(
-            session_key_kind=bridge_session_key.affinity_kind,
-            session_key_value=bridge_session_key.affinity_key,
-            api_key_id=bridge_session_key.api_key_id,
-            turn_state=_sticky_key_from_turn_state_header(headers) if not forwarded_request else None,
-            session_header=_sticky_key_from_session_header(headers) if not forwarded_request else None,
-            previous_response_id=payload.previous_response_id,
-        )
+        try:
+            durable_lookup = await self._durable_bridge.lookup_request_targets(
+                session_key_kind=bridge_session_key.affinity_kind,
+                session_key_value=bridge_session_key.affinity_key,
+                api_key_id=bridge_session_key.api_key_id,
+                turn_state=_sticky_key_from_turn_state_header(headers) if not forwarded_request else None,
+                session_header=_sticky_key_from_session_header(headers) if not forwarded_request else None,
+                previous_response_id=payload.previous_response_id,
+            )
+        except Exception:
+            logger.warning("Durable bridge lookup failed; falling back to non-durable request handling", exc_info=True)
+            durable_lookup = None
         effective_payload = payload
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
@@ -431,6 +440,12 @@ class ProxyService:
             request_id=request_id,
         )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
+        request_state.request_stage = _http_bridge_request_stage(
+            headers=headers,
+            payload=effective_payload,
+            durable_lookup=durable_lookup,
+        )
+        request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),
@@ -451,6 +466,8 @@ class ProxyService:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
             durable_lookup=durable_lookup,
+            request_stage=request_state.request_stage,
+            preferred_account_id=request_state.preferred_account_id,
         )
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
             try:
@@ -479,6 +496,12 @@ class ProxyService:
                 )
                 if not should_attempt_previous_response_recovery and not should_attempt_bootstrap_rebind:
                     raise
+                if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
+                    bridge_durable_recover_total.labels(
+                        path="owner_forward_fail"
+                        if should_attempt_previous_response_recovery
+                        else "owner_forward_bootstrap"
+                    ).inc()
                 _log_http_bridge_event(
                     "previous_response_recover_local"
                     if should_attempt_previous_response_recovery
@@ -513,7 +536,16 @@ class ProxyService:
                     allow_forward_to_owner=False,
                     forwarded_request=False,
                     allow_previous_response_recovery_rebind=should_attempt_previous_response_recovery,
+                    allow_bootstrap_owner_rebind=should_attempt_bootstrap_rebind,
                     durable_lookup=durable_lookup,
+                    request_stage="reattach",
+                    preferred_account_id=request_state.preferred_account_id,
+                )
+                _record_bridge_reattach(
+                    path="owner_forward_fail"
+                    if should_attempt_previous_response_recovery
+                    else "owner_forward_bootstrap",
+                    outcome="success",
                 )
                 await self._submit_http_bridge_request(
                     session,
@@ -1810,7 +1842,10 @@ class ProxyService:
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
+        allow_bootstrap_owner_rebind: bool = False,
         durable_lookup: DurableBridgeLookup | None = None,
+        request_stage: str = "first_turn",
+        preferred_account_id: str | None = None,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -1831,7 +1866,10 @@ class ProxyService:
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
+        allow_bootstrap_owner_rebind: bool = False,
         durable_lookup: DurableBridgeLookup | None = None,
+        request_stage: str = "first_turn",
+        preferred_account_id: str | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -1851,7 +1889,10 @@ class ProxyService:
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
+        allow_bootstrap_owner_rebind: bool = False,
         durable_lookup: DurableBridgeLookup | None = None,
+        request_stage: str = "first_turn",
+        preferred_account_id: str | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = get_settings()
         if await _http_bridge_should_wait_for_registration(self, key, settings):
@@ -1966,20 +2007,30 @@ class ProxyService:
                     and existing.account.status == AccountStatus.ACTIVE
                     and _http_bridge_session_allows_api_key(existing, api_key)
                 ):
-                    existing.api_key = api_key
-                    existing.request_model = request_model
-                    existing.last_used_at = time.monotonic()
-                    await self._refresh_durable_http_bridge_session(existing)
-                    _log_http_bridge_event(
-                        "reuse",
-                        key,
-                        account_id=existing.account.id,
-                        model=existing.request_model,
-                        pending_count=await self._http_bridge_pending_count(existing),
-                        cache_key_family=key.affinity_kind,
-                        model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
-                    )
-                    return existing
+                    current_instance = settings.http_responses_session_bridge_instance_id
+                    if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
+                        existing.api_key = api_key
+                        existing.request_model = request_model
+                        existing.last_used_at = time.monotonic()
+                        await self._refresh_durable_http_bridge_session(existing)
+                        _log_http_bridge_event(
+                            "reuse",
+                            key,
+                            account_id=existing.account.id,
+                            model=existing.request_model,
+                            pending_count=await self._http_bridge_pending_count(existing),
+                            cache_key_family=key.affinity_kind,
+                            model_class=_extract_model_class(existing.request_model)
+                            if existing.request_model
+                            else None,
+                        )
+                        return existing
+                    old_account_id = existing.account.id
+                    self._http_bridge_sessions.pop(key, None)
+                    self._unregister_http_bridge_turn_states_locked(existing)
+                    existing.closed = True
+                    sessions_to_close.append(existing)
+                    existing = None
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
                     old_account_id = existing.account.id
                     self._http_bridge_sessions.pop(key, None)
@@ -1988,7 +2039,12 @@ class ProxyService:
                     sessions_to_close.append(existing)
                     existing = None
 
-                if shutdown_state.is_bridge_drain_active():
+                if shutdown_state.is_bridge_drain_active() and not _http_bridge_can_recover_during_drain(
+                    key=key,
+                    headers=headers,
+                    previous_response_id=previous_response_id,
+                    durable_lookup=durable_lookup,
+                ):
                     raise ProxyResponseError(
                         503,
                         openai_error(
@@ -1997,6 +2053,8 @@ class ProxyService:
                             error_type="server_error",
                         ),
                     )
+                elif shutdown_state.is_bridge_drain_active():
+                    _record_bridge_drain_recovery_allowed()
 
                 owner_check_required = _http_bridge_owner_check_required(
                     key,
@@ -2004,15 +2062,51 @@ class ProxyService:
                 )
                 if owner_check_required or key.affinity_kind == "prompt_cache":
                     owner_instance = _durable_bridge_lookup_active_owner(durable_lookup)
+                    ring_lookup_failed = False
                     if owner_instance is None:
-                        owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
-                    current_instance, ring = await _active_http_bridge_instance_ring(settings, self._ring_membership)
+                        try:
+                            owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
+                        except Exception:
+                            ring_lookup_failed = True
+                            if _http_bridge_can_local_recover_without_ring(
+                                key=key,
+                                headers=headers,
+                                previous_response_id=previous_response_id,
+                                durable_lookup=durable_lookup,
+                            ):
+                                logger.warning(
+                                    "Bridge owner lookup failed; allowing local recovery path",
+                                    exc_info=True,
+                                )
+                                owner_instance = settings.http_responses_session_bridge_instance_id
+                            else:
+                                raise
+                    try:
+                        current_instance, ring = await _active_http_bridge_instance_ring(
+                            settings, self._ring_membership
+                        )
+                    except Exception:
+                        if ring_lookup_failed or _http_bridge_can_local_recover_without_ring(
+                            key=key,
+                            headers=headers,
+                            previous_response_id=previous_response_id,
+                            durable_lookup=durable_lookup,
+                        ):
+                            logger.warning(
+                                "Bridge ring lookup failed; falling back to local recovery ring", exc_info=True
+                            )
+                            current_instance = settings.http_responses_session_bridge_instance_id
+                            ring = (current_instance,)
+                        else:
+                            raise
                     owner_mismatch = owner_instance is not None and owner_instance != current_instance
                     if owner_mismatch and (len(ring) > 1 or durable_lookup is not None):
                         if PROMETHEUS_AVAILABLE and bridge_owner_mismatch_total is not None:
                             bridge_owner_mismatch_total.labels(strength=_http_bridge_key_strength(key)).inc()
-                        if owner_check_required and not (
-                            previous_response_id is not None and allow_previous_response_recovery_rebind
+                        if (
+                            owner_check_required
+                            and not (previous_response_id is not None and allow_previous_response_recovery_rebind)
+                            and not allow_bootstrap_owner_rebind
                         ):
                             _log_http_bridge_event(
                                 "owner_mismatch",
@@ -2038,38 +2132,64 @@ class ProxyService:
                                         ),
                                     )
                                 elif self._ring_membership is None:
-                                    _log_http_bridge_event(
-                                        "owner_mismatch_retry",
-                                        key,
-                                        account_id=None,
-                                        model=request_model,
-                                        detail=(
-                                            "expected_instance="
-                                            f"{owner_instance}, current_instance={current_instance}, "
-                                            "outcome=retry_no_ring"
-                                        ),
-                                        cache_key_family=key.affinity_kind,
-                                        model_class=_extract_model_class(request_model) if request_model else None,
-                                        owner_check_applied=True,
-                                    )
-                                    if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
-                                        bridge_instance_mismatch_total.labels(outcome="retry").inc()
-                                    owner_mismatch_error = ProxyResponseError(
-                                        409,
-                                        openai_error(
-                                            "bridge_instance_mismatch",
-                                            (
-                                                "HTTP bridge session is owned by a different instance; "
-                                                "retry to reach the correct replica"
+                                    if _http_bridge_has_durable_recovery_anchor(
+                                        previous_response_id=previous_response_id,
+                                        durable_lookup=durable_lookup,
+                                    ):
+                                        if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
+                                            bridge_durable_recover_total.labels(path="owner_missing").inc()
+                                        _log_http_bridge_event(
+                                            "owner_mismatch_local_recover",
+                                            key,
+                                            account_id=None,
+                                            model=request_model,
+                                            detail=(
+                                                "expected_instance="
+                                                f"{owner_instance}, current_instance={current_instance}, "
+                                                "outcome=local_recover_no_ring"
                                             ),
-                                            error_type="server_error",
-                                        ),
-                                    )
+                                            cache_key_family=key.affinity_kind,
+                                            model_class=_extract_model_class(request_model) if request_model else None,
+                                            owner_check_applied=True,
+                                        )
+                                    else:
+                                        _log_http_bridge_event(
+                                            "owner_mismatch_retry",
+                                            key,
+                                            account_id=None,
+                                            model=request_model,
+                                            detail=(
+                                                "expected_instance="
+                                                f"{owner_instance}, current_instance={current_instance}, "
+                                                "outcome=retry_no_ring"
+                                            ),
+                                            cache_key_family=key.affinity_kind,
+                                            model_class=_extract_model_class(request_model) if request_model else None,
+                                            owner_check_applied=True,
+                                        )
+                                        if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
+                                            bridge_instance_mismatch_total.labels(outcome="retry").inc()
+                                        owner_mismatch_error = ProxyResponseError(
+                                            409,
+                                            openai_error(
+                                                "bridge_instance_mismatch",
+                                                (
+                                                    "HTTP bridge session is owned by a different instance; "
+                                                    "retry to reach the correct replica"
+                                                ),
+                                                error_type="server_error",
+                                            ),
+                                        )
                                 else:
                                     assert owner_instance is not None
                                     owner_endpoint = await self._ring_membership.resolve_endpoint(owner_instance)
                                     if owner_endpoint is None:
-                                        if durable_lookup is not None and durable_lookup.latest_response_id is not None:
+                                        if _http_bridge_has_durable_recovery_anchor(
+                                            previous_response_id=previous_response_id,
+                                            durable_lookup=durable_lookup,
+                                        ):
+                                            if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
+                                                bridge_durable_recover_total.labels(path="owner_missing").inc()
                                             _log_http_bridge_event(
                                                 "owner_endpoint_missing_local_recover",
                                                 key,
@@ -2123,32 +2243,53 @@ class ProxyService:
                                             key=key,
                                         )
                             else:
-                                _log_http_bridge_event(
-                                    "owner_mismatch_retry",
-                                    key,
-                                    account_id=None,
-                                    model=request_model,
-                                    detail=(
-                                        "expected_instance="
-                                        f"{owner_instance}, current_instance={current_instance}, outcome=retry"
-                                    ),
-                                    cache_key_family=key.affinity_kind,
-                                    model_class=_extract_model_class(request_model) if request_model else None,
-                                    owner_check_applied=True,
-                                )
-                                if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
-                                    bridge_instance_mismatch_total.labels(outcome="retry").inc()
-                                owner_mismatch_error = ProxyResponseError(
-                                    409,
-                                    openai_error(
-                                        "bridge_instance_mismatch",
-                                        (
-                                            "HTTP bridge session is owned by a different instance; "
-                                            "retry to reach the correct replica"
+                                if _http_bridge_has_durable_recovery_anchor(
+                                    previous_response_id=previous_response_id,
+                                    durable_lookup=durable_lookup,
+                                ):
+                                    if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
+                                        bridge_durable_recover_total.labels(path="owner_missing").inc()
+                                    _log_http_bridge_event(
+                                        "owner_mismatch_local_recover",
+                                        key,
+                                        account_id=None,
+                                        model=request_model,
+                                        detail=(
+                                            "expected_instance="
+                                            f"{owner_instance}, current_instance={current_instance}, "
+                                            "outcome=local_recover"
                                         ),
-                                        error_type="server_error",
-                                    ),
-                                )
+                                        cache_key_family=key.affinity_kind,
+                                        model_class=_extract_model_class(request_model) if request_model else None,
+                                        owner_check_applied=True,
+                                    )
+                                else:
+                                    _log_http_bridge_event(
+                                        "owner_mismatch_retry",
+                                        key,
+                                        account_id=None,
+                                        model=request_model,
+                                        detail=(
+                                            "expected_instance="
+                                            f"{owner_instance}, current_instance={current_instance}, outcome=retry"
+                                        ),
+                                        cache_key_family=key.affinity_kind,
+                                        model_class=_extract_model_class(request_model) if request_model else None,
+                                        owner_check_applied=True,
+                                    )
+                                    if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
+                                        bridge_instance_mismatch_total.labels(outcome="retry").inc()
+                                    owner_mismatch_error = ProxyResponseError(
+                                        409,
+                                        openai_error(
+                                            "bridge_instance_mismatch",
+                                            (
+                                                "HTTP bridge session is owned by a different instance; "
+                                                "retry to reach the correct replica"
+                                            ),
+                                            error_type="server_error",
+                                        ),
+                                    )
                         else:
                             _log_http_bridge_event(
                                 "prompt_cache_locality_miss",
@@ -2369,10 +2510,12 @@ class ProxyService:
                     and session.account.status == AccountStatus.ACTIVE
                     and _http_bridge_session_allows_api_key(session, api_key)
                 ):
-                    session.api_key = api_key
-                    session.request_model = request_model
-                    session.last_used_at = time.monotonic()
-                    return session
+                    current_instance = settings.http_responses_session_bridge_instance_id
+                    if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
+                        session.api_key = api_key
+                        session.request_model = request_model
+                        session.last_used_at = time.monotonic()
+                        return session
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     old_account_id = session.account.id
                     async with self._http_bridge_lock:
@@ -2393,6 +2536,8 @@ class ProxyService:
                     api_key=api_key,
                     request_model=request_model,
                     idle_ttl_seconds=effective_idle_ttl_seconds,
+                    request_stage=request_stage,
+                    preferred_account_id=preferred_account_id,
                 )
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -2430,6 +2575,11 @@ class ProxyService:
                 key,
                 account_id=created_session.account.id,
                 model=created_session.request_model,
+                detail=(
+                    f"request_stage={request_stage}, preferred_account_id={preferred_account_id}, "
+                    f"selected_account_id={created_session.account.id}, "
+                    f"durable_session_id={created_session.durable_session_id}"
+                ),
                 cache_key_family=key.affinity_kind,
                 model_class=_extract_model_class(created_session.request_model)
                 if created_session.request_model
@@ -2648,6 +2798,14 @@ class ProxyService:
             session.durable_session_id = lookup.session_id
             session.durable_owner_epoch = lookup.owner_epoch
             session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
+            if (
+                PROMETHEUS_AVAILABLE
+                and bridge_durable_recover_total is not None
+                and allow_takeover
+                and lookup.owner_epoch > 1
+            ):
+                bridge_durable_recover_total.labels(path="restart_takeover").inc()
+                _record_bridge_reattach(path="restart_takeover", outcome="success")
             if session.key.affinity_kind == "session_header":
                 await self._durable_bridge.register_session_header(
                     session_id=lookup.session_id,
@@ -2687,6 +2845,8 @@ class ProxyService:
         api_key: ApiKeyData | None,
         request_model: str | None,
         idle_ttl_seconds: float,
+        request_stage: str = "first_turn",
+        preferred_account_id: str | None = None,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -2699,51 +2859,90 @@ class ProxyService:
         )
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         settings = await get_settings_cache().get()
-        selection = await self._select_account_with_budget(
-            deadline,
-            request_id=request_state.request_log_id or request_state.request_id,
-            kind="http_bridge",
-            api_key=api_key,
-            sticky_key=affinity.key,
-            sticky_kind=affinity.kind,
-            reallocate_sticky=affinity.reallocate_sticky,
-            sticky_max_age_seconds=affinity.max_age_seconds,
-            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
-            routing_strategy=_routing_strategy(settings),
-            model=request_model,
-        )
-        account = selection.account
-        if account is None:
-            raise ProxyResponseError(
-                503,
-                openai_error(
-                    selection.error_code or "no_accounts",
-                    selection.error_message or "No active accounts available",
-                    error_type="server_error",
-                ),
+        excluded_account_ids: set[str] = set()
+        retry_same_account_once = preferred_account_id is not None
+        preferred_candidate_id = preferred_account_id
+        while True:
+            selection = await self._select_account_with_budget(
+                deadline,
+                request_id=request_state.request_log_id or request_state.request_id,
+                kind="http_bridge",
+                request_stage=request_stage,
+                api_key=api_key,
+                sticky_key=affinity.key,
+                sticky_kind=affinity.kind,
+                reallocate_sticky=affinity.reallocate_sticky,
+                sticky_max_age_seconds=affinity.max_age_seconds,
+                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                routing_strategy=_routing_strategy(settings),
+                model=request_model,
+                exclude_account_ids=excluded_account_ids,
+                preferred_account_id=preferred_candidate_id,
             )
-        try:
-            account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
-            connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
-            upstream = await self._open_upstream_websocket_with_budget(
-                account,
-                connect_headers,
-                timeout_seconds=_remaining_budget_seconds(deadline),
-            )
-        except RefreshError as exc:
-            if exc.is_permanent:
-                await self._load_balancer.mark_permanent_failure(account, exc.code)
+            account = selection.account
+            if account is None:
+                _record_same_account_takeover(
+                    preferred_account_id=preferred_account_id,
+                    selected_account_id=None,
+                )
                 raise ProxyResponseError(
-                    401,
+                    503,
                     openai_error(
-                        "invalid_api_key",
-                        exc.message,
-                        error_type="authentication_error",
+                        selection.error_code or "no_accounts",
+                        selection.error_message or "No active accounts available",
+                        error_type="server_error",
                     ),
-                ) from exc
-            _raise_proxy_unavailable(exc.message or "Temporary upstream refresh failure")
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                )
+            selected_is_preferred = preferred_account_id is not None and account.id == preferred_account_id
+            try:
+                account = await self._ensure_fresh_with_budget(
+                    account,
+                    timeout_seconds=_remaining_budget_seconds(deadline),
+                )
+                connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
+                upstream = await self._open_upstream_websocket_with_budget(
+                    account,
+                    connect_headers,
+                    timeout_seconds=_remaining_budget_seconds(deadline),
+                )
+                _record_same_account_takeover(
+                    preferred_account_id=preferred_account_id,
+                    selected_account_id=account.id,
+                )
+                break
+            except RefreshError as exc:
+                if exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, exc.code)
+                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                    if retry_same_account_once and not exc.is_permanent:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                if exc.is_permanent:
+                    raise ProxyResponseError(
+                        401,
+                        openai_error(
+                            "invalid_api_key",
+                            exc.message,
+                            error_type="authentication_error",
+                        ),
+                    ) from exc
+                if request_stage == "first_turn":
+                    _record_bridge_first_turn_timeout()
+                _raise_proxy_unavailable(exc.message or "Temporary upstream refresh failure")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                    if retry_same_account_once:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                if request_stage == "first_turn":
+                    _record_bridge_first_turn_timeout()
+                _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
         session = _HTTPBridgeSession(
             key=key,
             headers=connect_headers,
@@ -2898,6 +3097,7 @@ class ProxyService:
         if (
             not session.codex_session
             or session.prewarmed
+            or request_state.previous_response_id is not None
             or not getattr(get_settings(), "http_responses_session_bridge_codex_prewarm_enabled", False)
         ):
             return
@@ -3181,39 +3381,80 @@ class ProxyService:
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         settings = await get_settings_cache().get()
         session.api_key = request_state.api_key
-        selection = await self._select_account_with_budget(
-            deadline,
-            request_id=request_state.request_log_id or request_state.request_id,
-            kind="http_bridge",
-            api_key=session.api_key,
-            sticky_key=session.affinity.key,
-            sticky_kind=session.affinity.kind,
-            reallocate_sticky=session.affinity.reallocate_sticky,
-            sticky_max_age_seconds=session.affinity.max_age_seconds,
-            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
-            routing_strategy=_routing_strategy(settings),
-            model=session.request_model,
-        )
-        account = selection.account
-        if account is None:
-            raise ProxyResponseError(
-                503,
-                openai_error(
-                    selection.error_code or "no_accounts",
-                    selection.error_message or "No active accounts available",
-                    error_type="server_error",
-                ),
+        excluded_account_ids: set[str] = set()
+        retry_same_account_once = True
+        preferred_candidate_id: str | None = session.account.id
+        while True:
+            selection = await self._select_account_with_budget(
+                deadline,
+                request_id=request_state.request_log_id or request_state.request_id,
+                kind="http_bridge",
+                request_stage="reattach",
+                api_key=session.api_key,
+                sticky_key=session.affinity.key,
+                sticky_kind=session.affinity.kind,
+                reallocate_sticky=session.affinity.reallocate_sticky,
+                sticky_max_age_seconds=session.affinity.max_age_seconds,
+                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                routing_strategy=_routing_strategy(settings),
+                model=session.request_model,
+                exclude_account_ids=excluded_account_ids,
+                preferred_account_id=preferred_candidate_id,
             )
-        account = await self._ensure_fresh_with_budget(account, timeout_seconds=_remaining_budget_seconds(deadline))
-        connect_headers = _headers_with_turn_state(
-            session.headers,
-            _preferred_http_bridge_reconnect_turn_state(session),
-        )
-        upstream = await self._open_upstream_websocket_with_budget(
-            account,
-            connect_headers,
-            timeout_seconds=_remaining_budget_seconds(deadline),
-        )
+            account = selection.account
+            if account is None:
+                _record_same_account_takeover(
+                    preferred_account_id=session.account.id,
+                    selected_account_id=None,
+                )
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        selection.error_code or "no_accounts",
+                        selection.error_message or "No active accounts available",
+                        error_type="server_error",
+                    ),
+                )
+            selected_is_preferred = account.id == session.account.id
+            try:
+                account = await self._ensure_fresh_with_budget(
+                    account,
+                    timeout_seconds=_remaining_budget_seconds(deadline),
+                )
+                connect_headers = _headers_with_turn_state(
+                    session.headers,
+                    _preferred_http_bridge_reconnect_turn_state(session),
+                )
+                upstream = await self._open_upstream_websocket_with_budget(
+                    account,
+                    connect_headers,
+                    timeout_seconds=_remaining_budget_seconds(deadline),
+                )
+                _record_same_account_takeover(
+                    preferred_account_id=session.account.id,
+                    selected_account_id=account.id,
+                )
+                break
+            except RefreshError as exc:
+                if exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, exc.code)
+                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                    if retry_same_account_once and not exc.is_permanent:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                    if retry_same_account_once:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                raise
         session.account = account
         session.headers = connect_headers
         session.upstream = upstream
@@ -3227,7 +3468,11 @@ class ProxyService:
             session.key,
             account_id=account.id,
             model=session.request_model,
-            detail=f"previous_account={old_account_id}",
+            detail=(
+                f"request_stage=reattach, previous_account={old_account_id}, "
+                f"preferred_account_id={old_account_id}, selected_account_id={account.id}, "
+                f"durable_session_id={session.durable_session_id}"
+            ),
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
@@ -5104,6 +5349,7 @@ class ProxyService:
         *,
         request_id: str,
         kind: str,
+        request_stage: str = "first_turn",
         api_key: ApiKeyData | None = None,
         sticky_key: str | None = None,
         sticky_kind: StickySessionKind | None = None,
@@ -5114,6 +5360,7 @@ class ProxyService:
         model: str | None = None,
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
+        preferred_account_id: str | None = None,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -5121,9 +5368,41 @@ class ProxyService:
                 "%s request budget exhausted before account selection request_id=%s", kind.title(), request_id
             )
             _raise_proxy_budget_exhausted()
+        scoped_account_ids = (
+            set(api_key.assigned_account_ids)
+            if api_key is not None and api_key.account_assignment_scope_enabled
+            else None
+        )
+        excluded_account_ids_set = set(exclude_account_ids or ())
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                if (
+                    preferred_account_id is not None
+                    and preferred_account_id not in excluded_account_ids_set
+                    and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
+                ):
+                    preferred_selection = await self._load_balancer.select_account(
+                        sticky_key=sticky_key,
+                        sticky_kind=sticky_kind,
+                        reallocate_sticky=reallocate_sticky,
+                        sticky_max_age_seconds=sticky_max_age_seconds,
+                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        model=model,
+                        additional_limit_name=additional_limit_name,
+                        account_ids={preferred_account_id},
+                        budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+                    )
+                    if preferred_selection.account is not None:
+                        logger.info(
+                            "Selected preferred account request_id=%s kind=%s request_stage=%s account_id=%s",
+                            request_id,
+                            kind,
+                            request_stage,
+                            preferred_account_id,
+                        )
+                        return preferred_selection
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
@@ -5133,19 +5412,11 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,
-                    account_ids=(
-                        api_key.assigned_account_ids
-                        if api_key is not None and api_key.account_assignment_scope_enabled
-                        else None
-                    ),
-                    exclude_account_ids=exclude_account_ids,
+                    account_ids=scoped_account_ids,
+                    exclude_account_ids=excluded_account_ids_set,
                     budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                 )
-                if (
-                    selection.account is not None
-                    and exclude_account_ids is not None
-                    and selection.account.id in exclude_account_ids
-                ):
+                if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     return AccountSelection(
                         account=None,
                         error_message="No active accounts available",
@@ -5277,6 +5548,8 @@ class _WebSocketRequestState:
     replay_count: int = 0
     skip_request_log: bool = False
     previous_response_id: str | None = None
+    request_stage: str = "first_turn"
+    preferred_account_id: str | None = None
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None
@@ -6112,9 +6385,105 @@ def _durable_bridge_lookup_active_owner(lookup: DurableBridgeLookup | None) -> s
         return None
     if lookup.owner_instance_id is None or lookup.lease_expires_at is None:
         return None
-    if lookup.lease_expires_at <= utcnow():
+    lease_expires_at = to_utc_naive(lookup.lease_expires_at)
+    if lease_expires_at <= utcnow():
         return None
     return lookup.owner_instance_id
+
+
+def _durable_bridge_lookup_allows_local_reuse(
+    lookup: DurableBridgeLookup | None,
+    *,
+    current_instance: str,
+) -> bool:
+    if lookup is None:
+        return True
+    return _durable_bridge_lookup_active_owner(lookup) == current_instance
+
+
+def _http_bridge_has_durable_recovery_anchor(
+    *,
+    previous_response_id: str | None,
+    durable_lookup: DurableBridgeLookup | None,
+) -> bool:
+    if previous_response_id is not None:
+        return True
+    return durable_lookup is not None and durable_lookup.latest_response_id is not None
+
+
+def _http_bridge_can_local_recover_without_ring(
+    *,
+    key: _HTTPBridgeSessionKey,
+    headers: Mapping[str, str],
+    previous_response_id: str | None,
+    durable_lookup: DurableBridgeLookup | None,
+) -> bool:
+    if _http_bridge_has_durable_recovery_anchor(
+        previous_response_id=previous_response_id,
+        durable_lookup=durable_lookup,
+    ):
+        return True
+    return (
+        key.affinity_kind == "session_header"
+        and previous_response_id is None
+        and _sticky_key_from_turn_state_header(headers) is None
+    )
+
+
+def _http_bridge_can_recover_during_drain(
+    *,
+    key: _HTTPBridgeSessionKey,
+    headers: Mapping[str, str],
+    previous_response_id: str | None,
+    durable_lookup: DurableBridgeLookup | None,
+) -> bool:
+    return _http_bridge_can_local_recover_without_ring(
+        key=key,
+        headers=headers,
+        previous_response_id=previous_response_id,
+        durable_lookup=durable_lookup,
+    )
+
+
+def _http_bridge_request_stage(
+    *,
+    headers: Mapping[str, str],
+    payload: ResponsesRequest,
+    durable_lookup: DurableBridgeLookup | None,
+) -> str:
+    if (
+        payload.previous_response_id is not None
+        or _sticky_key_from_turn_state_header(headers) is not None
+        or (durable_lookup is not None and durable_lookup.latest_response_id is not None)
+    ):
+        return "follow_up"
+    return "first_turn"
+
+
+def _record_same_account_takeover(*, preferred_account_id: str | None, selected_account_id: str | None) -> None:
+    if not PROMETHEUS_AVAILABLE or bridge_same_account_takeover_total is None or preferred_account_id is None:
+        return
+    if selected_account_id is None:
+        bridge_same_account_takeover_total.labels(outcome="fail").inc()
+    elif selected_account_id == preferred_account_id:
+        bridge_same_account_takeover_total.labels(outcome="success").inc()
+    else:
+        bridge_same_account_takeover_total.labels(outcome="fallback").inc()
+
+
+def _record_bridge_reattach(*, path: str, outcome: str) -> None:
+    if PROMETHEUS_AVAILABLE and bridge_reattach_total is not None:
+        bridge_reattach_total.labels(path=path, outcome=outcome).inc()
+
+
+def _record_bridge_first_turn_timeout() -> None:
+    if PROMETHEUS_AVAILABLE and bridge_first_turn_timeout_total is not None:
+        bridge_first_turn_timeout_total.inc()
+
+
+def _record_bridge_drain_recovery_allowed() -> None:
+    if PROMETHEUS_AVAILABLE and bridge_drain_recovery_allowed_total is not None:
+        bridge_drain_recovery_allowed_total.inc()
 
 
 def _http_bridge_durable_lease_ttl_seconds() -> float:

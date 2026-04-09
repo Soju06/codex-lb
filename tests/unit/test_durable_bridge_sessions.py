@@ -191,6 +191,53 @@ async def test_durable_bridge_claim_takes_over_after_release(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_release_without_draining_marks_session_closed(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-closed",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    released = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+
+    assert released is not None
+    assert released.state == "closed"
+    assert released.owner_instance_id is None
+
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-closed",
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_2",
+        latest_response_id="resp_2",
+        allow_takeover=True,
+    )
+
+    assert reclaimed.owner_instance_id == "instance-b"
+    assert reclaimed.latest_response_id == "resp_2"
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_lookup_active_lease_survives_request_lookup(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

@@ -25,6 +25,7 @@ class DurableBridgeLookup:
     canonical_kind: str
     canonical_key: str
     api_key_scope: str
+    account_id: str | None
     owner_instance_id: str | None
     owner_epoch: int
     lease_expires_at: datetime | None
@@ -247,6 +248,7 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         canonical_kind=snapshot.session_key_kind,
         canonical_key=snapshot.session_key_value,
         api_key_scope=snapshot.api_key_scope,
+        account_id=snapshot.account_id,
         owner_instance_id=snapshot.owner_instance_id,
         owner_epoch=snapshot.owner_epoch,
         lease_expires_at=snapshot.lease_expires_at,

@@ -297,6 +297,26 @@ ingress:
     upstreamHashBySubset: false
     # @param ingress.nginx.upstreamHashBySubsetSize Subset size when subset mode is enabled
     upstreamHashBySubsetSize: 3
+  responses:
+    # @param ingress.responses.enabled Render a dedicated ingress for `/v1/responses` and `/backend-api/codex/responses`
+    enabled: true
+    # @param ingress.responses.pathType Path match type for responses routes
+    pathType: Exact
+    # @param ingress.responses.paths Responses-specific ingress paths
+    paths:
+      - /v1/responses
+      - /backend-api/codex/responses
+    nginx:
+      # @param ingress.responses.nginx.upstreamHashBy Continuity-aware sticky key for responses traffic
+      upstreamHashBy: "$http_x_codex_session_id"
+      # @param ingress.responses.nginx.upstreamHashBySubset Enable subset mode for responses ingress
+      upstreamHashBySubset: false
+      # @param ingress.responses.nginx.upstreamHashBySubsetSize Subset size for responses ingress
+      upstreamHashBySubsetSize: 3
+      # @param ingress.responses.nginx.proxyNextUpstream Retry once on transient upstream unavailability during owner loss or rollout
+      proxyNextUpstream: "error timeout http_502 http_503 http_504 invalid_header"
+      # @param ingress.responses.nginx.proxyNextUpstreamTries Retry budget for responses ingress failover
+      proxyNextUpstreamTries: 2
 
 # @section Gateway API parameters
 gatewayApi:

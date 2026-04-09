@@ -1,4 +1,9 @@
 - [x] Keep replicas out of the active bridge ring until the local HTTP bridge endpoint is reachable and ready.
 - [x] Recover HTTP bridge continuity from durable `previous_response_id` mappings when turn-state aliases are unavailable during rollout windows.
+- [x] Normalize public `/v1/responses` follow-up bodies and streams so recovery paths never emit empty or non-JSON responses.
+- [x] Gate bridge-enabled readiness on completed bridge registration rather than database reachability alone.
+- [x] Render a dedicated responses ingress with session-scoped sticky hashing instead of API key-wide hashing.
+- [x] Disable startup migrations for bundled/local smoke installs and verify the explicit migration path.
+- [x] Export the mounted encryption key file by default so restored accounts decrypt on fresh installs.
 - [x] Verify `5 replicas / 10 sessions / 5 turns` steady state and rolling-restart overlap behavior on local kind + ingress.
 - [x] Document any remaining gaps that still require externalized session state or upstream connection migration.

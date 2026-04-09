@@ -41,10 +41,32 @@ Stores replayable aliases scoped by API key identity.
 4. If the durable row has a live owner lease on another replica, owner-forward remains the preferred fast path.
 5. If the durable row has `latest_response_id` and the request does not provide `previous_response_id`, the service injects that replay anchor before preparing the new upstream request.
 6. When owner-forward fails or the live in-memory alias is missing, the service may create a fresh upstream websocket locally and continue from the durable replay anchor.
+7. Recovery prefers the durable session's last successful `account_id` before falling back to the general account pool, with one bounded retry on transient same-account connect failures.
+
+## Public Edge Contract
+
+The public `/v1/responses` edge is responsible for normalizing recovery-path output before it reaches a gateway client.
+
+- Non-stream collection always returns valid JSON or an OpenAI-style error envelope.
+- Unknown or internal-only output items are normalized into gateway-safe message items when possible, otherwise dropped or converted into a deterministic server error.
+- Streaming responses are wrapped so malformed SSE payloads or truncated streams terminate with `response.failed` rather than surfacing an invalid public stream.
+
+## Ingress / Deployment Defaults
+
+Ingress-backed deployments need responses-specific sticky routing semantics.
+
+- General API ingress may continue to hash by `Authorization`.
+- `/v1/responses` and `/backend-api/codex/responses` should use a dedicated ingress that hashes by `x-codex-session-id` instead of API key-wide affinity.
+- Local and bundled smoke installs must not rely on startup migrations; schema migration is handled explicitly before serving traffic.
+- The application container must export `CODEX_LB_ENCRYPTION_KEY_FILE` by default so restored encrypted account tokens remain decryptable on a read-only root filesystem.
 
 ## Shutdown / Drain
 
 Before closing in-memory bridge sessions, the process marks durable rows owned by the instance as `draining`. When sessions are closed, the durable lease is released without deleting the continuity row or alias history.
+
+## Readiness / Startup
+
+Bridge-enabled readiness now depends on bridge registration completion, not only database reachability and active ring membership. Initial registration is attempted before startup yields; only failure paths fall back to background retry.
 
 ## Remaining Gap
 

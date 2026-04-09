@@ -7,7 +7,7 @@ Remote dashboard setup requires manually configuring `CODEX_LB_DASHBOARD_BOOTSTR
 - Auto-generate a cryptographically random bootstrap token on first startup when no password is configured and no manual token is set
 - Print the token prominently to server logs (visible via `docker logs`)
 - Wire the auto-generated token into the existing bootstrap validation path so `POST /api/dashboard-auth/password/setup` accepts it
-- Persist the auto-generated token in shared encrypted storage so any replica can validate it
+- Persist the auto-generated token in shared storage so any replica can validate it
 - Keep full backward compatibility with manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var
 - Update frontend bootstrap screen messaging to reference server logs
 - Add remote setup documentation to README (concise) and OpenSpec context docs (SoT)

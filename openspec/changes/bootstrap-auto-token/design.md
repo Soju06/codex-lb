@@ -19,9 +19,9 @@ Remote dashboard bootstrap currently requires `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKE
 
 ## Decisions
 
-**D1: Shared encrypted token in `dashboard_settings`**
+**D1: Shared token in `dashboard_settings`**
 
-Persist the auto-generated bootstrap token in `DashboardSettings.bootstrap_token_encrypted` using `TokenEncryptor`. `get_active_bootstrap_token()` resolves `env var → decrypted DB token → None`. `ensure_auto_bootstrap_token()` creates the row if needed, stores the token atomically if absent, and returns the shared plaintext token for logging.
+Persist the auto-generated bootstrap token in `DashboardSettings.bootstrap_token` as shared DB state. `get_active_bootstrap_token()` resolves `env var → DB token → None`. `ensure_auto_bootstrap_token()` creates the row if needed, stores the token atomically if absent, and returns the shared token for logging.
 
 Alternative: module-global in-memory token → rejected because Helm defaults are multi-replica and the token must validate across pods.
 
@@ -37,9 +37,9 @@ Multi-line log with `====` borders for visibility in `docker logs` output. Uses 
 
 Alternative: `print()` → rejected — bypasses log configuration and formatting.
 
-**D4: Priority chain — env var > shared encrypted token > None**
+**D4: Priority chain — env var > shared token > None**
 
-`get_active_bootstrap_token()` checks env var first (via `get_settings().dashboard_bootstrap_token`), then falls back to the shared encrypted token stored in `dashboard_settings`. If env var is set, the shared token is ignored and cleared on startup.
+`get_active_bootstrap_token()` checks env var first (via `get_settings().dashboard_bootstrap_token`), then falls back to the shared token stored in `dashboard_settings`. If env var is set, the shared token is ignored and cleared on startup.
 
 **D5: Token cleared atomically with password setup**
 
@@ -51,4 +51,6 @@ Alternative: `print()` → rejected — bypasses log configuration and formattin
 
 **R2: Token persists across restarts until consumed** → Intentional. Multi-replica and restarted pods must validate the same token until setup completes.
 
-**R3: Shared-state race on generation/consumption** → Mitigated by atomic `UPDATE ... WHERE ... IS NULL` guards in the repository. One replica wins generation, one successful setup consumes the token.
+**R3: Password removal re-bootstrap** → After an authenticated password removal, the API immediately recreates and logs a new bootstrap token so remote-only operators do not need a restart.
+
+**R4: Shared-state race on generation/consumption** → Mitigated by atomic `UPDATE ... WHERE ... IS NULL` guards in the repository. One replica wins generation, one successful setup consumes the token.

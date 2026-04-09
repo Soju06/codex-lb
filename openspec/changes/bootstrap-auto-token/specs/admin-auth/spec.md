@@ -2,7 +2,7 @@
 
 ### Requirement: Auto-generated bootstrap token
 
-The system SHALL auto-generate a cryptographically random bootstrap token on startup when ALL of the following conditions are true: (1) no dashboard password is configured (`password_hash` is NULL), (2) no manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set. The token MUST be generated using `secrets.token_urlsafe(32)` (256 bits entropy). The token MUST be encrypted with the application encryption key and stored in the shared `dashboard_settings` row so every replica can validate the same token.
+The system SHALL auto-generate a cryptographically random bootstrap token on startup when ALL of the following conditions are true: (1) no dashboard password is configured (`password_hash` is NULL), (2) no manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set. The token MUST be generated using `secrets.token_urlsafe(32)` (256 bits entropy). The token MUST be stored in the shared `dashboard_settings` row so every replica can validate the same token.
 
 #### Scenario: Auto-generation on fresh install without env var
 
@@ -35,7 +35,7 @@ The system SHALL print the auto-generated bootstrap token to server logs on star
 
 ### Requirement: Bootstrap token priority chain
 
-The system SHALL resolve the active bootstrap token using the following priority: (1) manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var, (2) shared encrypted auto-generated token from `dashboard_settings`, (3) None. A single accessor function (`get_active_bootstrap_token()`) MUST be the sole source of truth for the active token, replacing direct reads of the env var in the session and password-setup endpoints.
+The system SHALL resolve the active bootstrap token using the following priority: (1) manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var, (2) shared auto-generated token from `dashboard_settings`, (3) None. A single accessor function (`get_active_bootstrap_token()`) MUST be the sole source of truth for the active token, replacing direct reads of the env var in the session and password-setup endpoints.
 
 #### Scenario: Env var takes priority over auto-generated token
 
@@ -44,8 +44,8 @@ The system SHALL resolve the active bootstrap token using the following priority
 
 #### Scenario: Auto-generated token used when no env var
 
-- **WHEN** no env var is set and a shared encrypted token exists
-- **THEN** `get_active_bootstrap_token()` returns the decrypted shared value
+- **WHEN** no env var is set and a shared token exists
+- **THEN** `get_active_bootstrap_token()` returns the shared value
 
 #### Scenario: None returned when neither exists
 
@@ -71,6 +71,17 @@ The system SHALL make the same auto-generated bootstrap token valid across all r
 - **WHEN** replica A generates the auto bootstrap token and the password is still unset
 - **AND** the user submits that token to replica B behind a load balancer
 - **THEN** replica B accepts the same token for `POST /api/dashboard-auth/password/setup`
+
+### Requirement: Password removal regenerates bootstrap access
+
+The system SHALL immediately recreate an auto-generated bootstrap token after a successful dashboard password removal when no manual bootstrap token env var is configured.
+
+#### Scenario: Removing password recreates bootstrap token without restart
+
+- **WHEN** an authenticated admin removes the dashboard password
+- **AND** no manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is configured
+- **THEN** a new auto-generated bootstrap token is stored and logged immediately
+- **AND** a subsequent remote `GET /api/dashboard-auth/session` reports `{ "bootstrapTokenConfigured": true }`
 
 ## MODIFIED Requirements
 

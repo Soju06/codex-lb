@@ -5,6 +5,7 @@
 - [x] 1.3 Update `app/modules/dashboard_auth/api.py` session endpoint to use `get_active_bootstrap_token()` instead of direct env var read
 - [x] 1.4 Update `app/modules/dashboard_auth/api.py` `setup_password()` and repository password write path to consume the shared token atomically after success
 - [x] 1.5 Add `dashboard_settings.bootstrap_token_encrypted` migration for shared storage
+- [x] 1.6 Harden bootstrap token handling for non-ASCII manual tokens and immediate regeneration after password removal
 
 ## 2. Tests
 

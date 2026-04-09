@@ -10,11 +10,11 @@ The bootstrap token secures the initial remote password setup flow. Without it, 
 
 **Auto-generation (default path):**
 
-On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy), encrypts it with the app encryption key, stores it in the shared `dashboard_settings` row, and prints it to server logs with visual delimiters.
+On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy), stores it in the shared `dashboard_settings` row, and prints it to server logs with visual delimiters.
 
 **Priority chain:**
 
-`get_active_bootstrap_token()` resolves the token using: manual env var → shared DB-backed encrypted token → None. A single accessor function is the sole source of truth, used by both the session endpoint and the password setup endpoint.
+`get_active_bootstrap_token()` resolves the token using: manual env var → shared DB-backed token → None. A single accessor function is the sole source of truth, used by both the session endpoint and the password setup endpoint.
 
 **Lifecycle:**
 
@@ -25,7 +25,7 @@ On server startup, if no dashboard password is configured and no `CODEX_LB_DASHB
 
 **Restart behavior:**
 
-If the server restarts before a password is set, the same stored token remains valid and any replica can validate it. Replicas may log the same token again on startup for discoverability.
+If the server restarts before a password is set, the same stored token remains valid and any replica can validate it. Replicas may log the same token again on startup for discoverability. If an authenticated admin removes the dashboard password later, a new bootstrap token is generated immediately so remote setup continues to work without restart.
 
 ### Manual Override
 
@@ -42,7 +42,7 @@ Requests from localhost (127.0.0.1, ::1) bypass bootstrap entirely — no token 
 ### Threat Model
 
 - **Token in logs**: Acceptable risk (same pattern as Grafana/GitLab/Portainer). `docker logs` requires container access. Token is one-time — useless after password is set.
-- **Token in shared DB storage**: Encrypted at rest with the app encryption key, shared across replicas, and cleared as soon as password setup succeeds.
+- **Token in shared DB storage**: Shared across replicas and cleared as soon as password setup succeeds.
 - **Replica safety**: Any pod can validate the same bootstrap token, avoiding load-balancer flakiness during first-run setup.
 
 ## Session Management

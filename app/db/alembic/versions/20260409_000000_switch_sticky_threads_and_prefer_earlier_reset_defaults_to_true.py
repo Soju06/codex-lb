@@ -51,30 +51,6 @@ def upgrade() -> None:
                 server_default=sa.true(),
             )
 
-    if {"created_at", "updated_at"}.issubset(columns):
-        if "sticky_threads_enabled" in columns:
-            op.execute(
-                sa.text(
-                    """
-                    UPDATE dashboard_settings
-                    SET sticky_threads_enabled = TRUE
-                    WHERE sticky_threads_enabled = FALSE
-                      AND updated_at = created_at
-                    """
-                )
-            )
-        if "prefer_earlier_reset_accounts" in columns:
-            op.execute(
-                sa.text(
-                    """
-                    UPDATE dashboard_settings
-                    SET prefer_earlier_reset_accounts = TRUE
-                    WHERE prefer_earlier_reset_accounts = FALSE
-                      AND updated_at = created_at
-                    """
-                )
-            )
-
 
 def downgrade() -> None:
     bind = op.get_bind()

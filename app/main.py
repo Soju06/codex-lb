@@ -10,7 +10,7 @@ from typing import Any, cast
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from app.core.bootstrap import ensure_auto_bootstrap_token
+from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -92,18 +92,7 @@ async def lifespan(app: FastAPI):
     init_background_db()
     _auto_bootstrap_token = await ensure_auto_bootstrap_token()
     if _auto_bootstrap_token:
-        logger.info(
-            "\n"
-            "============================================\n"
-            "  Dashboard bootstrap token (first-run):\n"
-            "  %s\n"
-            "\n"
-            "  Use this token for initial remote setup.\n"
-            "  It is shared across replicas and stays\n"
-            "  valid until a password is set.\n"
-            "============================================",
-            _auto_bootstrap_token,
-        )
+        log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()

@@ -28,7 +28,7 @@ class SettingsRepository:
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
-            bootstrap_token_encrypted=None,
+            bootstrap_token=None,
             api_key_auth_enabled=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,

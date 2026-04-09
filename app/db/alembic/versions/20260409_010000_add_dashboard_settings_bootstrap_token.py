@@ -35,9 +35,9 @@ def upgrade() -> None:
         return
 
     columns = _columns(bind, "dashboard_settings")
-    if "bootstrap_token_encrypted" not in columns:
+    if "bootstrap_token" not in columns:
         with op.batch_alter_table("dashboard_settings") as batch_op:
-            batch_op.add_column(sa.Column("bootstrap_token_encrypted", sa.LargeBinary(), nullable=True))
+            batch_op.add_column(sa.Column("bootstrap_token", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
@@ -46,6 +46,6 @@ def downgrade() -> None:
         return
 
     columns = _columns(bind, "dashboard_settings")
-    if "bootstrap_token_encrypted" in columns:
+    if "bootstrap_token" in columns:
         with op.batch_alter_table("dashboard_settings") as batch_op:
-            batch_op.drop_column("bootstrap_token_encrypted")
+            batch_op.drop_column("bootstrap_token")

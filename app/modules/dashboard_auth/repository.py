@@ -29,7 +29,7 @@ class DashboardAuthRepository:
     async def set_password_hash(self, password_hash: str) -> DashboardSettings:
         row = await self._settings_repository.get_or_create()
         row.password_hash = password_hash
-        row.bootstrap_token_encrypted = None
+        row.bootstrap_token = None
         await self._settings_repository.commit_refresh(row)
         return row
 
@@ -39,7 +39,7 @@ class DashboardAuthRepository:
             update(DashboardSettings)
             .where(DashboardSettings.id == _SETTINGS_ID)
             .where(DashboardSettings.password_hash.is_(None))
-            .values(password_hash=password_hash, bootstrap_token_encrypted=None)
+            .values(password_hash=password_hash, bootstrap_token=None)
             .returning(DashboardSettings.id)
         )
         await self._session.commit()
@@ -52,21 +52,21 @@ class DashboardAuthRepository:
     async def clear_password_and_totp(self) -> DashboardSettings:
         row = await self._settings_repository.get_or_create()
         row.password_hash = None
-        row.bootstrap_token_encrypted = None
+        row.bootstrap_token = None
         row.totp_required_on_login = False
         row.totp_secret_encrypted = None
         row.totp_last_verified_step = None
         await self._settings_repository.commit_refresh(row)
         return row
 
-    async def store_bootstrap_token_if_absent(self, token_encrypted: bytes) -> bool:
+    async def store_bootstrap_token_if_absent(self, token: str) -> bool:
         await self._settings_repository.get_or_create()
         result = await self._session.execute(
             update(DashboardSettings)
             .where(DashboardSettings.id == _SETTINGS_ID)
             .where(DashboardSettings.password_hash.is_(None))
-            .where(DashboardSettings.bootstrap_token_encrypted.is_(None))
-            .values(bootstrap_token_encrypted=token_encrypted)
+            .where(DashboardSettings.bootstrap_token.is_(None))
+            .values(bootstrap_token=token)
             .returning(DashboardSettings.id)
         )
         await self._session.commit()
@@ -77,8 +77,8 @@ class DashboardAuthRepository:
         result = await self._session.execute(
             update(DashboardSettings)
             .where(DashboardSettings.id == _SETTINGS_ID)
-            .where(DashboardSettings.bootstrap_token_encrypted.is_not(None))
-            .values(bootstrap_token_encrypted=None)
+            .where(DashboardSettings.bootstrap_token.is_not(None))
+            .values(bootstrap_token=None)
             .returning(DashboardSettings.id)
         )
         await self._session.commit()

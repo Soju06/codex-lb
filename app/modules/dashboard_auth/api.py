@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 from secrets import compare_digest
 
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
 from app.core.auth.dependencies import set_dashboard_error_format
-from app.core.bootstrap import get_active_bootstrap_token
+from app.core.bootstrap import ensure_auto_bootstrap_token, get_active_bootstrap_token, log_bootstrap_token
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
     DashboardAuthError,
@@ -47,6 +48,8 @@ router = APIRouter(
     tags=["dashboard"],
     dependencies=[Depends(set_dashboard_error_format)],
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _session_client_key(request: Request, *, prefix: str) -> str:
@@ -109,7 +112,10 @@ async def setup_password(
                 code="bootstrap_unavailable",
             )
         submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
-        if not compare_digest(submitted_bootstrap_token, configured_bootstrap_token):
+        if not compare_digest(
+            submitted_bootstrap_token.encode("utf-8"),
+            configured_bootstrap_token.encode("utf-8"),
+        ):
             raise DashboardAuthError("Invalid dashboard bootstrap token.", code="invalid_bootstrap_token")
     password = payload.password.strip()
     if len(password) < 8:
@@ -205,7 +211,9 @@ async def remove_password(
     except InvalidCredentialsError as exc:
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
 
-    await get_settings_cache().invalidate()
+    bootstrap_token = await ensure_auto_bootstrap_token()
+    if bootstrap_token:
+        log_bootstrap_token(logger, bootstrap_token, reason="password-removed")
     response = JSONResponse(status_code=200, content={"status": "ok"})
     response.delete_cookie(key=DASHBOARD_SESSION_COOKIE, path="/")
     return response

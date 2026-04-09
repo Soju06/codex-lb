@@ -92,6 +92,22 @@ async def test_remote_bootstrap_with_manual_env_token(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_remote_bootstrap_with_non_ascii_manual_env_token(async_client, monkeypatch):
+    _force_remote(monkeypatch)
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "부트스트랩-토큰")
+    get_settings.cache_clear()
+    await get_settings_cache().invalidate()
+
+    response = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123", "bootstrapToken": "부트스트랩-토큰"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["authenticated"] is True
+
+
+@pytest.mark.asyncio
 async def test_remote_bootstrap_rejects_wrong_token(async_client, monkeypatch):
     _force_remote(monkeypatch)
 
@@ -156,3 +172,33 @@ async def test_auto_generated_token_is_shared_across_app_instances(monkeypatch: 
     assert isinstance(first_token, str) and first_token
     assert first_token == second_token
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_remove_password_regenerates_bootstrap_token(async_client, monkeypatch):
+    setup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123"},
+    )
+    assert setup.status_code == 200
+
+    remove = await async_client.request(
+        "DELETE",
+        "/api/dashboard-auth/password",
+        json={"password": "password123"},
+    )
+    assert remove.status_code == 200
+
+    token = await get_active_bootstrap_token()
+    assert isinstance(token, str) and token
+
+    _force_remote(monkeypatch)
+    session = await async_client.get("/api/dashboard-auth/session")
+    assert session.status_code == 200
+    assert session.json()["bootstrapTokenConfigured"] is True
+
+    resetup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "new-password-456", "bootstrapToken": token},
+    )
+    assert resetup.status_code == 200

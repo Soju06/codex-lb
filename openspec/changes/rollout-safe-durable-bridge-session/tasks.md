@@ -1,4 +1,4 @@
-- [ ] Keep replicas out of the active bridge ring until the local HTTP bridge endpoint is reachable and ready.
-- [ ] Recover HTTP bridge continuity from durable `previous_response_id` mappings when turn-state aliases are unavailable during rollout windows.
-- [ ] Verify `5 replicas / 10 sessions / 5 turns` steady state and rolling-restart overlap behavior on local kind + ingress.
-- [ ] Document any remaining gaps that still require externalized session state or upstream connection migration.
+- [x] Keep replicas out of the active bridge ring until the local HTTP bridge endpoint is reachable and ready.
+- [x] Recover HTTP bridge continuity from durable `previous_response_id` mappings when turn-state aliases are unavailable during rollout windows.
+- [x] Verify `5 replicas / 10 sessions / 5 turns` steady state and rolling-restart overlap behavior on local kind + ingress.
+- [x] Document any remaining gaps that still require externalized session state or upstream connection migration.

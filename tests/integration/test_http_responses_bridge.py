@@ -38,6 +38,7 @@ async def _cleanup_http_bridge_sessions(app_instance):
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()
         service._http_bridge_turn_state_index.clear()
+        service._http_bridge_previous_response_index.clear()
     for session in sessions:
         await service._close_http_bridge_session(session)
     for inflight_future in inflight_sessions:
@@ -382,8 +383,13 @@ def _make_dummy_bridge_session(session_key: proxy_module._HTTPBridgeSessionKey) 
         last_used_at=time.monotonic(),
         idle_ttl_seconds=120.0,
         codex_session=False,
+        downstream_turn_state=None,
         downstream_turn_state_aliases=set(),
+        previous_response_ids=set(),
+        durable_session_id=None,
+        durable_owner_epoch=None,
         upstream_reader=None,
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
         upstream=SimpleNamespace(close=_close),
     )
 
@@ -3242,7 +3248,7 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_requires_live_session_for_previous_response_id(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_recovers_previous_response_id_across_key_drift(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -3331,21 +3337,8 @@ async def test_v1_responses_http_bridge_requires_live_session_for_previous_respo
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
+    assert second.status_code == 200
+    assert second.json()["output"][0]["content"][0]["text"] == "OK"
     assert connect_count == 1
 
 
@@ -4038,7 +4031,9 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous_response_id(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_response_id_recovery(
+    async_client, monkeypatch
+):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -4130,22 +4125,9 @@ async def test_v1_responses_http_bridge_does_not_open_fresh_session_for_previous
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
-    assert connect_count == 1
+    assert second.status_code == 200
+    assert second.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
 
 
 @pytest.mark.asyncio

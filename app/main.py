@@ -237,6 +237,11 @@ async def lifespan(app: FastAPI):
             logger.warning("Drain timeout reached, proceeding with shutdown")
 
         proxy_service = getattr(app.state, "proxy_service", None)
+        if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
+            try:
+                await proxy_service.mark_http_bridge_draining()
+            except Exception:
+                logger.warning("Failed to mark HTTP bridge durable sessions draining during shutdown", exc_info=True)
         if proxy_service is not None and hasattr(proxy_service, "close_all_http_bridge_sessions"):
             try:
                 await proxy_service.close_all_http_bridge_sessions()

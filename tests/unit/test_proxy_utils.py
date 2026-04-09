@@ -5,8 +5,10 @@ import json
 import logging
 from collections import deque
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Protocol, Self, cast
+from typing import Any, Protocol, Self, TypedDict, cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -30,7 +32,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
@@ -185,8 +187,10 @@ async def test_owner_instance_uses_rendezvous_hash() -> None:
 @pytest.mark.anyio
 async def test_ring_raises_on_db_error() -> None:
     settings = SimpleNamespace(
+        database_url="postgresql+asyncpg://user:pass@db.example/codex",
+        http_responses_session_bridge_enabled=True,
         http_responses_session_bridge_instance_id="pod-a",
-        http_responses_session_bridge_instance_ring=["pod-b", "pod-c"],
+        http_responses_session_bridge_instance_ring=[],
     )
     ring_membership = AsyncMock()
     ring_membership.list_active.side_effect = RuntimeError("db unavailable")
@@ -198,6 +202,26 @@ async def test_ring_raises_on_db_error() -> None:
             settings,
             cast(proxy_service.RingMembershipService, ring_membership),
         )
+
+
+@pytest.mark.anyio
+async def test_active_http_bridge_instance_ring_uses_static_ring_for_sqlite_single_instance() -> None:
+    settings = SimpleNamespace(
+        database_url="sqlite+aiosqlite:///./store.db",
+        http_responses_session_bridge_enabled=True,
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_instance_ring=[],
+    )
+    ring_membership = AsyncMock()
+
+    instance_id, ring = await proxy_service._active_http_bridge_instance_ring(
+        settings,
+        cast(proxy_service.RingMembershipService, ring_membership),
+    )
+
+    assert instance_id == "pod-a"
+    assert ring == ("pod-a",)
+    ring_membership.list_active.assert_not_called()
 
 
 def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_insensitively():
@@ -498,24 +522,37 @@ def _repo_factory(request_logs: _RequestLogsRecorder) -> proxy_service.ProxyRepo
     return factory
 
 
-def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
-    return SimpleNamespace(
-        prefer_earlier_reset_accounts=False,
-        sticky_threads_enabled=False,
-        sticky_reallocation_budget_threshold_pct=95.0,
-        upstream_stream_transport="default",
-        openai_cache_affinity_max_age_seconds=300,
-        openai_prompt_cache_key_derivation_enabled=True,
-        routing_strategy="usage_weighted",
-        proxy_request_budget_seconds=75.0,
-        compact_request_budget_seconds=75.0,
-        transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
-        http_responses_session_bridge_gateway_safe_mode=False,
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=log_proxy_service_tier_trace,
+@dataclass
+class _ProxySettings:
+    prefer_earlier_reset_accounts: bool = False
+    sticky_threads_enabled: bool = False
+    sticky_reallocation_budget_threshold_pct: float = 95.0
+    upstream_stream_transport: str = "default"
+    openai_cache_affinity_max_age_seconds: int = 300
+    openai_prompt_cache_key_derivation_enabled: bool = True
+    routing_strategy: str = "usage_weighted"
+    proxy_request_budget_seconds: float = 75.0
+    compact_request_budget_seconds: float = 75.0
+    transcription_request_budget_seconds: float = 120.0
+    upstream_compact_timeout_seconds: float | None = None
+    http_responses_session_bridge_gateway_safe_mode: bool = False
+    http_responses_session_bridge_codex_prewarm_enabled: bool = False
+    log_proxy_request_payload: bool = False
+    log_proxy_request_shape: bool = False
+    log_proxy_request_shape_raw_cache_key: bool = False
+    log_proxy_service_tier_trace: bool = False
+    image_inline_allowed_hosts: list[str] = field(default_factory=list)
+
+
+def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> _ProxySettings:
+    return _ProxySettings(log_proxy_service_tier_trace=log_proxy_service_tier_trace)
+
+
+def _reservation(reservation_id: str, *, model: str = "gpt-5.1") -> ApiKeyUsageReservationData:
+    return ApiKeyUsageReservationData(
+        reservation_id=reservation_id,
+        key_id="key_test",
+        model=model,
     )
 
 
@@ -598,18 +635,24 @@ class _SsePostResponse:
 
 
 class _SseSession:
+    class _PostCall(TypedDict):
+        url: str
+        json: dict[str, object] | None
+        headers: dict[str, str] | None
+        timeout: object | None
+
     def __init__(self, response: _SsePostResponse) -> None:
         self._response = response
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[_SseSession._PostCall] = []
 
     def post(
         self,
         url: str,
         *,
-        json=None,
+        json: dict[str, object] | None = None,
         headers: dict[str, str] | None = None,
-        timeout=None,
-    ):
+        timeout: object | None = None,
+    ) -> _SsePostResponse:
         self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         return self._response
 
@@ -888,6 +931,82 @@ def test_log_proxy_request_payload(monkeypatch, caplog):
 
     assert "proxy_request_payload" in caplog.text
     assert '"model":"gpt-5.1"' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_release_reservation_swallows_cancelled_error(monkeypatch, caplog):
+    @asynccontextmanager
+    async def fake_background_session():
+        yield object()
+
+    class _FakeService:
+        def __init__(self, repository) -> None:
+            self.repository = repository
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            del reservation_id
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(proxy_api, "get_background_session", fake_background_session)
+    monkeypatch.setattr(proxy_api, "ApiKeysRepository", lambda session: session)
+    monkeypatch.setattr(proxy_api, "ApiKeysService", _FakeService)
+
+    with caplog.at_level(logging.WARNING):
+        await proxy_api._release_reservation(_reservation("res_test"))
+
+    assert "Failed to release API key usage reservation" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_release_websocket_reservation_swallows_cancelled_error(monkeypatch, caplog):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    @asynccontextmanager
+    async def fake_repo_factory():
+        yield SimpleNamespace(api_keys=object())
+
+    class _FakeService:
+        def __init__(self, repository) -> None:
+            self.repository = repository
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            del reservation_id
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(service, "_repo_factory", fake_repo_factory)
+    monkeypatch.setattr(proxy_service, "ApiKeysService", _FakeService)
+
+    with caplog.at_level(logging.WARNING):
+        await service._release_websocket_reservation(_reservation("ws_res_test"))
+
+    assert "Failed to release websocket API key reservation" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_release_websocket_reservation_swallows_repository_error(monkeypatch, caplog):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    @asynccontextmanager
+    async def fake_repo_factory():
+        yield SimpleNamespace(api_keys=object())
+
+    class _FakeService:
+        def __init__(self, repository) -> None:
+            self.repository = repository
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            del reservation_id
+            raise ValueError("db closed")
+
+    monkeypatch.setattr(service, "_repo_factory", fake_repo_factory)
+    monkeypatch.setattr(proxy_service, "ApiKeysService", _FakeService)
+
+    with caplog.at_level(logging.WARNING):
+        await service._release_websocket_reservation(_reservation("ws_res_error"))
+
+    assert "Failed to release websocket API key reservation" in caplog.text
 
 
 def test_log_proxy_request_shape_includes_affinity_metadata(monkeypatch, caplog):
@@ -1227,6 +1346,193 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     assert timeout.total == pytest.approx(4.5, abs=0.01)
     assert timeout.sock_connect == pytest.approx(2.5)
     assert seen["idle_timeout_seconds"] == pytest.approx(3.5)
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_normalizes_fast_service_tier_to_priority_for_chatgpt_http(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        upstream_stream_transport = "http"
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+            "service_tier": "fast",
+        }
+    )
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    request_json = cast(dict[str, object], session.calls[0]["json"])
+    assert request_json["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_releases_reservation_when_cancelled_before_enqueue(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    release_reservation = AsyncMock()
+
+    class _Gate:
+        async def acquire(self) -> None:
+            raise asyncio.CancelledError
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("codex_session", "turn_1", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        account=_make_account("acc_bridge_cancel"),
+        request_model="gpt-5.1",
+        upstream=cast(Any, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock())),
+        upstream_reader=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=cast(asyncio.Semaphore, _Gate()),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+        codex_session=True,
+        prewarm_lock=anyio.Lock(),
+        upstream_turn_state=None,
+        downstream_turn_state=None,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_cancel_req",
+        model="gpt-5.1",
+        service_tier="priority",
+        reasoning_effort=None,
+        api_key_reservation=_reservation("res_bridge_cancel"),
+        started_at=0.0,
+    )
+    reservation = request_state.api_key_reservation
+
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+        )
+
+    assert session.queued_request_count == 0
+    assert list(session.pending_requests) == []
+    release_reservation.assert_awaited_once_with(reservation)
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_unregistered_websocket_request_releases_gate_and_reservation(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    release_reservation = AsyncMock()
+    response_create_gate = asyncio.Semaphore(0)
+    reservation = _reservation("res_ws_unregistered")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_unregistered_req",
+        model="gpt-5.1",
+        service_tier="priority",
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=0.0,
+        awaiting_response_created=True,
+    )
+
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    await service._cleanup_unregistered_websocket_request(
+        request_state,
+        response_create_gate=response_create_gate,
+        gate_acquired=True,
+    )
+
+    await asyncio.wait_for(response_create_gate.acquire(), timeout=0.1)
+    release_reservation.assert_awaited_once_with(reservation)
+    assert request_state.api_key_reservation is None
+    assert request_state.awaiting_response_created is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_prewarm_cleans_up_on_cancelled_error(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_session_bridge_codex_prewarm_enabled = True
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("codex_session", "turn_1", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        account=_make_account("acc_prewarm_cancel"),
+        request_model="gpt-5.1",
+        upstream=cast(
+            Any,
+            SimpleNamespace(
+                send_text=AsyncMock(side_effect=asyncio.CancelledError()),
+                close=AsyncMock(),
+            ),
+        ),
+        upstream_reader=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+        codex_session=True,
+        prewarm_lock=anyio.Lock(),
+        upstream_turn_state=None,
+        downstream_turn_state=None,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_prewarm_req",
+        model="gpt-5.1",
+        service_tier="priority",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create","input":[]}',
+        )
+
+    assert session.prewarmed is False
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    await asyncio.wait_for(session.response_create_gate.acquire(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -3886,7 +4192,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
             "promptCacheKey": "thread_123",
             "promptCacheRetention": "12h",
             "tools": [{"type": "web_search_preview"}],
-            "service_tier": "priority",
+            "service_tier": "fast",
             "reasoning": {"effort": "low"},
         },
         headers={"session_id": "sid-ignored"},

@@ -566,8 +566,12 @@ class LoadBalancer:
         )
 
         settings = get_settings()
-        primary_threshold = float(getattr(settings, "drain_primary_threshold_pct", 85.0))
-        secondary_threshold = float(getattr(settings, "drain_secondary_threshold_pct", 90.0))
+        primary_remaining_threshold = float(
+            getattr(settings, "platform_fallback_primary_remaining_threshold_pct", 10.0)
+        )
+        secondary_remaining_threshold = float(
+            getattr(settings, "platform_fallback_secondary_remaining_threshold_pct", 5.0)
+        )
 
         considered_states = [
             state for state in states if state.status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
@@ -575,11 +579,14 @@ class LoadBalancer:
         if not considered_states:
             return False
 
+        if bool(getattr(settings, "platform_fallback_force_enabled", False)):
+            return True
+
         if any(
             _is_chatgpt_state_healthy_for_platform_fallback(
                 state,
-                primary_threshold=primary_threshold,
-                secondary_threshold=secondary_threshold,
+                primary_remaining_threshold=primary_remaining_threshold,
+                secondary_remaining_threshold=secondary_remaining_threshold,
             )
             for state in considered_states
         ):
@@ -1198,13 +1205,13 @@ def _build_states(
 def _is_chatgpt_state_healthy_for_platform_fallback(
     state: AccountState,
     *,
-    primary_threshold: float,
-    secondary_threshold: float,
+    primary_remaining_threshold: float,
+    secondary_remaining_threshold: float,
 ) -> bool:
-    primary_healthy = state.used_percent is None or float(state.used_percent) < primary_threshold
-    secondary_healthy = (
-        state.secondary_used_percent is None or float(state.secondary_used_percent) < secondary_threshold
-    )
+    primary_remaining = usage_core.remaining_percent_from_used(state.used_percent)
+    secondary_remaining = usage_core.remaining_percent_from_used(state.secondary_used_percent)
+    primary_healthy = primary_remaining is None or primary_remaining > primary_remaining_threshold
+    secondary_healthy = secondary_remaining is None or secondary_remaining > secondary_remaining_threshold
     return primary_healthy and secondary_healthy
 
 

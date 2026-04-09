@@ -4,6 +4,7 @@ export const ProviderKindSchema = z.enum(["chatgpt_web", "openai_platform"]);
 export const PlatformRouteFamilySchema = z.enum([
   "public_models_http",
   "public_responses_http",
+  "backend_codex_http",
 ]);
 
 const OptionalTrimmedStringSchema = z

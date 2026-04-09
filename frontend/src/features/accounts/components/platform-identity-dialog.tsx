@@ -135,15 +135,15 @@ export function PlatformIdentityDialog({
           <DialogDescription>
             {isEdit ? (
               <>
-                Update the fallback-only upstream identity for <code>/v1/models</code> and stateless HTTP{" "}
-                <code>/v1/responses</code>. ChatGPT accounts stay primary, and this key is used only when the
-                compatible ChatGPT pool is unhealthy under the primary or secondary drain thresholds.
+                Update the fallback-only upstream identity for the enabled HTTP fallback routes. ChatGPT accounts stay
+                primary, and this key is used only when the compatible ChatGPT pool is unhealthy under the primary or
+                secondary drain thresholds.
               </>
             ) : (
               <>
-                Register a fallback-only upstream identity for <code>/v1/models</code> and stateless HTTP{" "}
-                <code>/v1/responses</code>. ChatGPT accounts stay primary, and this key is used only when the
-                compatible ChatGPT pool is unhealthy under the primary or secondary drain thresholds.
+                Register a fallback-only upstream identity for the enabled HTTP fallback routes. ChatGPT accounts stay
+                primary, and this key is used only when the compatible ChatGPT pool is unhealthy under the primary or
+                secondary drain thresholds.
               </>
             )}
           </DialogDescription>
@@ -385,6 +385,8 @@ function PlatformIdentityDialogForm({
                   {option.description}
                   {option.value === "public_responses_http"
                     ? " Stateless HTTP only; compact, chat completions, websocket, and continuity-bound requests stay on ChatGPT."
+                    : option.value === "backend_codex_http"
+                    ? " Compact, websocket, and continuity-bound Codex requests stay on ChatGPT."
                     : ""}
                 </span>
               </span>
@@ -400,8 +402,8 @@ function PlatformIdentityDialogForm({
         </p>
         <p className="text-xs text-muted-foreground">
           {isEdit
-            ? "Only /v1/models and stateless HTTP /v1/responses can ever use this key. ChatGPT-only, compact, websocket, and continuity-bound requests stay on ChatGPT."
-            : "Requires an existing ChatGPT account that is not paused or deactivated. Only one Platform API key can be registered, and it is used only for /v1/models plus stateless HTTP /v1/responses fallback."}
+            ? "This key can back /v1/models, stateless HTTP /v1/responses, /backend-api/codex/models, and stateless HTTP /backend-api/codex/responses only when the matching route families are enabled. Compact, websocket, and continuity-bound requests stay on ChatGPT."
+            : "Requires an existing ChatGPT account that is not paused or deactivated. Only one Platform API key can be registered, and it is used only as fallback for enabled /v1/models, stateless /v1/responses, /backend-api/codex/models, and stateless /backend-api/codex/responses routes."}
         </p>
         {!isEdit && !prerequisiteSatisfied ? (
           <p className="text-xs text-destructive">

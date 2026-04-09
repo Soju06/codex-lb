@@ -57,6 +57,30 @@ def _validate_context_window_entries(data: dict) -> dict[str, int]:
     return result
 
 
+def _normalize_cidr_list(value: object, *, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    cidrs: list[str] = []
+    if isinstance(value, str):
+        entries = [entry.strip() for entry in value.split(",")]
+        cidrs = [entry for entry in entries if entry]
+    elif isinstance(value, list):
+        for entry in value:
+            if isinstance(entry, str):
+                cidr = entry.strip()
+                if cidr:
+                    cidrs.append(cidr)
+    else:
+        raise TypeError(f"{field_name} must be a list or comma-separated string")
+
+    for cidr in cidrs:
+        try:
+            ip_network(cidr, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"Invalid {field_name}: {cidr}") from exc
+    return cidrs
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
@@ -153,6 +177,9 @@ class Settings(BaseSettings):
     deterministic_failover_enabled: bool = True
     drain_primary_threshold_pct: float = 85.0
     drain_secondary_threshold_pct: float = 90.0
+    platform_fallback_primary_remaining_threshold_pct: float = 10.0
+    platform_fallback_secondary_remaining_threshold_pct: float = 5.0
+    platform_fallback_force_enabled: bool = False
     drain_error_window_seconds: float = 60.0
     drain_error_count_threshold: int = 2
     probe_quiet_seconds: float = 60.0
@@ -164,6 +191,8 @@ class Settings(BaseSettings):
     bulkhead_proxy_limit: int = 200
     bulkhead_dashboard_limit: int = 50
     dashboard_bootstrap_token: str | None = None
+    insecure_allow_remote_no_auth: bool = False
+    insecure_allow_remote_no_auth_host_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     memory_warning_threshold_mb: int = 0
     memory_reject_threshold_mb: int = 0
@@ -219,27 +248,12 @@ class Settings(BaseSettings):
     @field_validator("firewall_trusted_proxy_cidrs", mode="before")
     @classmethod
     def _normalize_firewall_trusted_proxy_cidrs(cls, value: object) -> list[str]:
-        if value is None:
-            return []
-        cidrs: list[str] = []
-        if isinstance(value, str):
-            entries = [entry.strip() for entry in value.split(",")]
-            cidrs = [entry for entry in entries if entry]
-        elif isinstance(value, list):
-            for entry in value:
-                if isinstance(entry, str):
-                    cidr = entry.strip()
-                    if cidr:
-                        cidrs.append(cidr)
-        else:
-            raise TypeError("firewall_trusted_proxy_cidrs must be a list or comma-separated string")
+        return _normalize_cidr_list(value, field_name="firewall_trusted_proxy_cidrs")
 
-        for cidr in cidrs:
-            try:
-                ip_network(cidr, strict=False)
-            except ValueError as exc:
-                raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
-        return cidrs
+    @field_validator("insecure_allow_remote_no_auth_host_cidrs", mode="before")
+    @classmethod
+    def _normalize_insecure_allow_remote_no_auth_host_cidrs(cls, value: object) -> list[str]:
+        return _normalize_cidr_list(value, field_name="insecure_allow_remote_no_auth_host_cidrs")
 
     @field_validator("http_responses_session_bridge_instance_ring", mode="before")
     @classmethod

@@ -50,10 +50,14 @@ export function PlatformIdentityPanel({ account }: PlatformIdentityPanelProps) {
         if (routeFamily === "public_responses_http") {
           return "Fallback stateless HTTP /v1/responses";
         }
+        if (routeFamily === "backend_codex_http") {
+          return "Fallback HTTP /backend-api/codex/models + stateless HTTP /backend-api/codex/responses";
+        }
         return formatRouteFamilyLabel(routeFamily);
       }).join(", ")
     : "None";
   const responsesFallbackEnabled = account.eligibleRouteFamilies.includes("public_responses_http");
+  const backendCodexFallbackEnabled = account.eligibleRouteFamilies.includes("backend_codex_http");
 
   return (
     <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
@@ -78,8 +82,18 @@ export function PlatformIdentityPanel({ account }: PlatformIdentityPanelProps) {
         </p>
         {responsesFallbackEnabled ? (
           <p className="mt-1 text-xs text-muted-foreground">
-            Stateless HTTP <code>/v1/responses</code> only. Compact, chat completions, websocket, and continuity-bound
-            requests stay on ChatGPT.
+            Public Responses fallback covers stateless HTTP <code>/v1/responses</code> only.
+          </p>
+        ) : null}
+        {backendCodexFallbackEnabled ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Codex HTTP fallback covers <code>/backend-api/codex/models</code> plus stateless HTTP{" "}
+            <code>/backend-api/codex/responses</code> only.
+          </p>
+        ) : null}
+        {responsesFallbackEnabled || backendCodexFallbackEnabled ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Compact, websocket, and continuity-bound requests stay on ChatGPT.
           </p>
         ) : null}
       </div>

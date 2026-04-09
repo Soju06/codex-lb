@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
-from app.core.auth.dependencies import set_dashboard_error_format
+from app.core.auth.dependencies import insecure_remote_no_auth_allowed, set_dashboard_error_format
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
@@ -80,6 +80,19 @@ async def get_dashboard_auth_session(
 ) -> DashboardAuthSessionResponse:
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     response = await context.service.get_session_state(session_id)
+    if (
+        insecure_remote_no_auth_allowed(request)
+        and not response.password_required
+        and not response.totp_required_on_login
+    ):
+        return response.model_copy(
+            update={
+                "authenticated": True,
+                "bootstrap_required": False,
+                "bootstrap_token_configured": False,
+                "totp_required_on_login": False,
+            }
+        )
     if response.password_required or is_local_request(request):
         return response
     bootstrap_token_configured = bool((get_settings().dashboard_bootstrap_token or "").strip())

@@ -10,11 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from starlette.responses import JSONResponse
 from starlette.testclient import WebSocketDenialResponse
 
 import app.modules.accounts.service as accounts_service_module
 import app.modules.proxy.api as proxy_api_module
+import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.provider_adapters as provider_adapters_module
 import app.modules.proxy.service as proxy_service_module
 import app.modules.upstream_identities.repository as platform_repository_module
@@ -108,6 +108,7 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         stream_idle_timeout_seconds=300.0,
         drain_primary_threshold_pct=85.0,
         drain_secondary_threshold_pct=90.0,
+        platform_fallback_force_enabled=False,
     )
 
     class _SettingsCache:
@@ -544,12 +545,14 @@ async def test_v1_responses_falls_back_to_platform_for_stateless_requests(async_
     async def fake_create_platform_response(*, base_url, payload, api_key, organization=None, project=None):
         del base_url, api_key, organization, project
         assert payload["model"] == "gpt-5.1"
+        assert payload["service_tier"] == "priority"
         _assert_platform_text_input(payload, "hi")
         return PlatformResponseResult(
             payload=OpenAIResponsePayload.model_validate(
                 {
                     "id": "resp_platform_1",
                     "status": "completed",
+                    "service_tier": "default",
                     "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
                 }
             ),
@@ -558,7 +561,10 @@ async def test_v1_responses_falls_back_to_platform_for_stateless_requests(async_
 
     monkeypatch.setattr(provider_adapters_module, "create_platform_response", fake_create_platform_response)
 
-    response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": "hi"})
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "input": "hi", "service_tier": "fast"},
+    )
     assert response.status_code == 200
     payload = response.json()
     assert payload["id"] == "resp_platform_1"
@@ -570,6 +576,9 @@ async def test_v1_responses_falls_back_to_platform_for_stateless_requests(async_
     assert log.routing_subject_id == identity_id
     assert log.route_class == "openai_public_http"
     assert log.upstream_request_id == "up_req_resp_1"
+    assert log.requested_service_tier == "priority"
+    assert log.actual_service_tier == "default"
+    assert log.service_tier == "default"
 
 
 @pytest.mark.asyncio
@@ -833,23 +842,43 @@ async def test_v1_chat_completions_stays_on_chatgpt_even_when_platform_fallback_
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_models_stays_on_chatgpt_even_when_platform_fallback_exists(async_client, monkeypatch):
-    await _import_account(async_client, "acc_backend_models_primary", "backend-models-primary@example.com")
-    await _create_platform_identity(async_client, monkeypatch, route_families=["public_models_http"])
+async def test_backend_codex_models_uses_platform_when_backend_http_usage_is_drained(async_client, monkeypatch):
+    await _populate_platform_model_registry()
+    account_id = await _import_account(async_client, "acc_backend_models_primary", "backend-models-primary@example.com")
+    await _seed_primary_usage(account_id, 95.0)
+    await _seed_secondary_usage(account_id, 95.0)
+    identity_id = await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
 
-    async def fake_build_codex_models_response(_api_key):
-        return JSONResponse(
-            {
+    async def fake_fetch_platform_models(*, base_url, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        return PlatformModelsResponse(
+            payload={
                 "object": "list",
-                "data": [{"id": "gpt-5.1-codex", "object": "model", "owned_by": "openai"}],
-            }
+                "data": [
+                    {"id": "gpt-5.1", "object": "model", "owned_by": "openai"},
+                    {"id": "gpt-5.1-codex", "object": "model", "owned_by": "openai"},
+                ],
+            },
+            upstream_request_id="up_req_backend_codex_models",
         )
 
-    monkeypatch.setattr(proxy_api_module, "_build_codex_models_response", fake_build_codex_models_response)
+    async def fail_build_codex_models_response(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("backend codex models should use the Platform fallback path when backend HTTP is enabled")
+
+    monkeypatch.setattr(provider_adapters_module, "fetch_platform_models", fake_fetch_platform_models)
+    monkeypatch.setattr(proxy_api_module, "_build_codex_models_response", fail_build_codex_models_response)
 
     response = await async_client.get("/backend-api/codex/models")
     assert response.status_code == 200
-    assert response.json()["data"][0]["id"] == "gpt-5.1-codex"
+    payload = response.json()
+    assert [entry["slug"] for entry in payload["models"]] == ["gpt-5.1", "gpt-5.1-codex"]
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "openai_platform"
+    assert log.routing_subject_id == identity_id
+    assert log.route_class == "chatgpt_private"
 
 
 @pytest.mark.asyncio
@@ -859,7 +888,7 @@ async def test_backend_codex_websocket_stays_on_chatgpt_even_when_platform_fallb
     monkeypatch,
 ):
     await _import_account(async_client, "acc_backend_ws_primary", "backend-ws-primary@example.com")
-    await _create_platform_identity(async_client, monkeypatch, route_families=["public_responses_http"])
+    await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
 
     async def allow_firewall(_websocket):
         return None
@@ -1100,8 +1129,8 @@ async def test_v1_responses_rejects_continuity_headers_when_only_platform_before
 
 
 @pytest.mark.asyncio
-async def test_platform_only_rejects_compact_and_backend_codex_routes(async_client, monkeypatch):
-    await _insert_platform_identity_direct(route_families=["public_responses_http"])
+async def test_platform_only_rejects_compact_and_backend_codex_unsupported_routes(async_client, monkeypatch):
+    await _insert_platform_identity_direct(route_families=["public_responses_http", "backend_codex_http"])
 
     async def fail_compact_responses(self, *args, **kwargs):
         del self, args, kwargs
@@ -1121,19 +1150,26 @@ async def test_platform_only_rejects_compact_and_backend_codex_routes(async_clie
     assert compact_response.status_code == 400
     assert compact_response.json()["error"]["code"] == "provider_feature_unsupported"
 
+    backend_compact_response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": []},
+    )
+    assert backend_compact_response.status_code == 400
+    assert backend_compact_response.json()["error"]["code"] == "provider_feature_unsupported"
+
     backend_response = await async_client.post(
         "/backend-api/codex/responses",
         json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
     )
     assert backend_response.status_code == 400
-    assert backend_response.json()["error"]["code"] == "provider_feature_unsupported"
+    assert backend_response.json()["error"]["code"] == "provider_fallback_requires_chatgpt"
 
 
 @pytest.mark.parametrize(
-    ("path", "expected_code", "expected_param"),
+    ("path", "route_families", "expected_code", "expected_param"),
     [
-        ("/v1/responses", "provider_transport_unsupported", "transport"),
-        ("/backend-api/codex/responses", "provider_feature_unsupported", None),
+        ("/v1/responses", ["public_responses_http"], "provider_transport_unsupported", "transport"),
+        ("/backend-api/codex/responses", ["backend_codex_http"], "provider_transport_unsupported", "transport"),
     ],
 )
 @pytest.mark.asyncio
@@ -1142,6 +1178,7 @@ async def test_platform_only_websocket_routes_reject_before_upstream_transport(
     app_instance,
     monkeypatch,
     path: str,
+    route_families: list[str],
     expected_code: str,
     expected_param: str | None,
 ):
@@ -1156,7 +1193,7 @@ async def test_platform_only_websocket_routes_reject_before_upstream_transport(
         del self, args, kwargs
         raise AssertionError("rejected websocket path must not start upstream transport")
 
-    await _insert_platform_identity_direct(route_families=["public_responses_http"])
+    await _insert_platform_identity_direct(route_families=route_families)
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_auth)
     monkeypatch.setattr(
@@ -1181,8 +1218,8 @@ async def test_platform_only_websocket_routes_reject_before_upstream_transport(
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_models_rejects_platform_only_operation(async_client, monkeypatch):
-    await _insert_platform_identity_direct(route_families=["public_models_http"])
+async def test_backend_codex_models_require_chatgpt_when_only_platform_is_available(async_client, monkeypatch):
+    await _insert_platform_identity_direct(route_families=["backend_codex_http"])
 
     async def fail_build_codex_models_response(*args, **kwargs):
         del args, kwargs
@@ -1192,31 +1229,101 @@ async def test_backend_codex_models_rejects_platform_only_operation(async_client
 
     response = await async_client.get("/backend-api/codex/models")
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "provider_feature_unsupported"
+    assert response.json()["error"]["code"] == "provider_fallback_requires_chatgpt"
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_responses_stays_on_chatgpt_even_when_platform_fallback_exists(
+async def test_backend_codex_responses_uses_platform_when_backend_http_usage_is_drained(
     async_client,
     monkeypatch,
 ):
-    await _import_account(async_client, "acc_backend_http_primary", "backend-http-primary@example.com")
-    await _create_platform_identity(async_client, monkeypatch, route_families=["public_responses_http"])
+    account_id = await _import_account(async_client, "acc_backend_http_primary", "backend-http-primary@example.com")
+    await _seed_primary_usage(account_id, 95.0)
+    await _seed_secondary_usage(account_id, 95.0)
+    identity_id = await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
 
-    async def fail_stream_platform_responses(*, base_url, payload, api_key, organization=None, project=None):
-        del base_url, payload, api_key, organization, project
-        raise AssertionError("backend codex responses must stay on the ChatGPT path in phase 1")
+    async def fake_stream_platform_responses(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        assert payload["model"] == "gpt-5.1"
+        return PlatformStreamResponse(
+            event_stream=_stream_lines(
+                [
+                    'data: {"type":"response.created"}\n\n',
+                    'data: {"type":"response.completed","response":{"id":"resp_backend_http_platform"}}\n\n',
+                ]
+            ),
+            upstream_request_id="up_req_backend_http_stream",
+        )
 
-    async def _fake_backend_http_stream():
-        yield 'data: {"type":"response.created"}\n\n'
-        yield 'data: {"type":"response.completed","response":{"id":"resp_backend_http_primary"}}\n\n'
+    def fail_stream_http_responses(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError(
+            "backend codex responses should not stay on the ChatGPT path when backend HTTP fallback is enabled"
+        )
 
-    def fake_stream_http_responses(self, payload, headers, **kwargs):
-        del self, payload, headers, kwargs
-        return _fake_backend_http_stream()
+    monkeypatch.setattr(provider_adapters_module, "stream_platform_responses", fake_stream_platform_responses)
+    monkeypatch.setattr(proxy_service_module.ProxyService, "stream_http_responses", fail_stream_http_responses)
 
-    monkeypatch.setattr(provider_adapters_module, "stream_platform_responses", fail_stream_platform_responses)
-    monkeypatch.setattr(proxy_service_module.ProxyService, "stream_http_responses", fake_stream_http_responses)
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "reasoning": {"effort": "high"},
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert lines == [
+        'data: {"type":"response.created"}',
+        'data: {"type":"response.completed","response":{"id":"resp_backend_http_platform"}}',
+    ]
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "openai_platform"
+    assert log.routing_subject_id == identity_id
+    assert log.route_class == "chatgpt_private"
+    assert log.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_uses_platform_when_force_fallback_is_enabled(
+    async_client,
+    monkeypatch,
+):
+    account_id = await _import_account(async_client, "acc_backend_http_force", "backend-http-force@example.com")
+    await _seed_primary_usage(account_id, 10.0)
+    await _seed_secondary_usage(account_id, 10.0)
+    identity_id = await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
+
+    settings = proxy_service_module.get_settings()
+    settings.platform_fallback_force_enabled = True
+    monkeypatch.setattr(load_balancer_module, "get_settings", lambda: settings)
+
+    async def fake_stream_platform_responses(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        assert payload["model"] == "gpt-5.1"
+        return PlatformStreamResponse(
+            event_stream=_stream_lines(
+                [
+                    'data: {"type":"response.created"}\n\n',
+                    'data: {"type":"response.completed","response":{"id":"resp_backend_http_platform_force"}}\n\n',
+                ]
+            ),
+            upstream_request_id="up_req_backend_http_force_stream",
+        )
+
+    def fail_stream_http_responses(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError("force fallback should bypass the ChatGPT transport for backend codex responses")
+
+    monkeypatch.setattr(provider_adapters_module, "stream_platform_responses", fake_stream_platform_responses)
+    monkeypatch.setattr(proxy_service_module.ProxyService, "stream_http_responses", fail_stream_http_responses)
 
     async with async_client.stream(
         "POST",
@@ -1228,5 +1335,138 @@ async def test_backend_codex_responses_stays_on_chatgpt_even_when_platform_fallb
 
     assert lines == [
         'data: {"type":"response.created"}',
-        'data: {"type":"response.completed","response":{"id":"resp_backend_http_primary"}}',
+        'data: {"type":"response.completed","response":{"id":"resp_backend_http_platform_force"}}',
     ]
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "openai_platform"
+    assert log.routing_subject_id == identity_id
+    assert log.route_class == "chatgpt_private"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_with_turn_state_stays_on_chatgpt_path(async_client, monkeypatch):
+    raw_account_id = "acc_backend_http_turn_state"
+    expected_account_id = await _import_account(async_client, raw_account_id, "backend-http-turn-state@example.com")
+    await _seed_primary_usage(expected_account_id, 95.0)
+    await _seed_secondary_usage(expected_account_id, 95.0)
+    await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
+
+    async def fail_stream_platform_responses(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, payload, api_key, organization, project
+        raise AssertionError("turn-state continuity should keep backend codex responses on the ChatGPT path")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del payload, headers, access_token, base_url, raise_for_status, _kw
+        assert account_id == raw_account_id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_chatgpt_turn_state"}}\n\n'
+
+    monkeypatch.setattr(provider_adapters_module, "stream_platform_responses", fail_stream_platform_responses)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"x-codex-turn-state": "turn_state_chatgpt"},
+        json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert lines == ['data: {"type":"response.completed","response":{"id":"resp_chatgpt_turn_state"}}']
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "chatgpt_web"
+    assert log.account_id == expected_account_id
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_platform_logs_enforced_api_key_service_tier(async_client, monkeypatch):
+    account_id = await _import_account(async_client, "acc_platform_enforced_tier", "platform-enforced-tier@example.com")
+    await _seed_primary_usage(account_id, 95.0)
+    await _seed_secondary_usage(account_id, 95.0)
+    await _create_platform_identity(async_client, monkeypatch, route_families=["public_responses_http"])
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "platform-enforced-service-tier",
+            "allowedModels": ["gpt-5.1"],
+            "enforcedModel": "gpt-5.1",
+            "enforcedServiceTier": "fast",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    assert created.json()["enforcedServiceTier"] == "priority"
+
+    async def fake_create_platform_response(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        assert payload["model"] == "gpt-5.1"
+        assert payload["service_tier"] == "priority"
+        _assert_platform_text_input(payload, "hi")
+        return PlatformResponseResult(
+            payload=OpenAIResponsePayload.model_validate(
+                {
+                    "id": "resp_platform_enforced_tier",
+                    "status": "completed",
+                    "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                }
+            ),
+            upstream_request_id="up_req_platform_enforced_tier",
+        )
+
+    monkeypatch.setattr(provider_adapters_module, "create_platform_response", fake_create_platform_response)
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "gpt-5.1", "input": "hi", "service_tier": "default"},
+    )
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_platform_enforced_tier"
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "openai_platform"
+    assert log.requested_service_tier == "priority"
+    assert log.actual_service_tier is None
+    assert log.service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_rejects_continuity_when_only_platform(async_client, monkeypatch):
+    await _insert_platform_identity_direct(route_families=["backend_codex_http"])
+
+    async def fail_create_platform_response(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError("continuity rejection must not start platform transport")
+
+    monkeypatch.setattr(proxy_service_module.ProxyService, "create_platform_response", fail_create_platform_response)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "previous_response_id": "resp_prev_1",
+        },
+    )
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "provider_continuity_unsupported"
+    assert payload["error"]["param"] == "previous_response_id"

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v1.12.1)"
+        description: "Release tag (e.g. v1.12.2 or v1.12.2-platform)"
         required: true
 
 concurrency:
@@ -50,7 +50,7 @@ jobs:
               print("Missing RELEASE_TAG")
               sys.exit(1)
 
-          match = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
+          match = re.fullmatch(r"v(\d+\.\d+\.\d+)(-[0-9A-Za-z.-]+)?", tag)
           if not match:
               print(f"Invalid tag format: {tag!r}")
               sys.exit(1)
@@ -89,6 +89,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=${{ env.RELEASE_TAG }}
             type=raw,value=latest
 
       - name: Build and push Docker image

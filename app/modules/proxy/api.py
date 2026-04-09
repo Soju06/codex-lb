@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
 from typing import cast
 
+import anyio
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -83,6 +84,7 @@ from app.modules.proxy.schemas import (
     V1UsageResponse,
 )
 from app.modules.upstream_identities.types import (
+    BACKEND_CODEX_HTTP_ROUTE_FAMILY,
     CHATGPT_PRIVATE_ROUTE_CLASS,
     OPENAI_PLATFORM_PROVIDER_KIND,
     OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
@@ -149,15 +151,14 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    effective_model = _effective_model_for_api_key(api_key, payload.model)
-    provider_rejection = await _backend_codex_route_rejection(
+    platform_response = await _maybe_handle_platform_backend_codex_responses(
         request=request,
+        payload=payload,
         context=context,
         api_key=api_key,
-        model=effective_model,
     )
-    if provider_rejection is not None:
-        return provider_rejection
+    if platform_response is not None:
+        return platform_response
     return await _stream_responses(
         request,
         payload,
@@ -182,9 +183,13 @@ async def responses_websocket(
         websocket,
         context,
         api_key,
+        route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
         route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
-        error_code="provider_feature_unsupported",
-        error_message="OpenAI Platform identities do not support /backend-api/codex websocket routes in phase 1.",
+        error_code="provider_transport_unsupported",
+        error_message=(
+            "OpenAI Platform identities do not support downstream websocket "
+            "/backend-api/codex/responses in this increment."
+        ),
     )
     if websocket_rejection is not None:
         await websocket.send_denial_response(websocket_rejection)
@@ -271,6 +276,7 @@ async def v1_responses_websocket(
         websocket,
         context,
         api_key,
+        route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
         route_class=OPENAI_PUBLIC_WS_ROUTE_CLASS,
         error_code="provider_transport_unsupported",
         error_message="OpenAI Platform identities do not support downstream websocket /v1/responses in phase 1.",
@@ -297,32 +303,13 @@ async def models(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    if await _should_reject_platform_only_public_route(
+    platform_response = await _maybe_build_platform_codex_models_response(
+        request=request,
         context=context,
         api_key=api_key,
-        route_family=PUBLIC_MODELS_HTTP_ROUTE_FAMILY,
-        model=None,
-    ):
-        error = _provider_error(
-            "provider_feature_unsupported",
-            "OpenAI Platform identities do not support /backend-api/codex/models in phase 1.",
-        )
-        await context.service.write_provider_rejection_log(
-            api_key=api_key,
-            request_id=ensure_request_id(),
-            model=None,
-            error_code="provider_feature_unsupported",
-            error_message=error["error"]["message"],
-            route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
-            rejection_reason="backend_codex_models_platform_unsupported",
-        )
-        return _logged_error_json_response(
-            request,
-            400,
-            error,
-            route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
-            rejection_reason="backend_codex_models_platform_unsupported",
-        )
+    )
+    if platform_response is not None:
+        return platform_response
     return await _build_codex_models_response(api_key)
 
 
@@ -756,7 +743,7 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
-    if await _should_reject_platform_only_public_route(
+    if await _should_reject_platform_only_route(
         context=context,
         api_key=api_key,
         route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
@@ -999,14 +986,32 @@ async def responses_compact(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
     effective_model = _effective_model_for_api_key(api_key, payload.model)
-    provider_rejection = await _backend_codex_route_rejection(
-        request=request,
+    if await _should_reject_platform_only_route(
         context=context,
         api_key=api_key,
+        route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
         model=effective_model,
-    )
-    if provider_rejection is not None:
-        return cast(JSONResponse, provider_rejection)
+    ):
+        error = _provider_error(
+            "provider_feature_unsupported",
+            "OpenAI Platform identities do not support /backend-api/codex/responses/compact in this increment.",
+        )
+        await context.service.write_provider_rejection_log(
+            api_key=api_key,
+            request_id=ensure_request_id(),
+            model=effective_model,
+            error_code="provider_feature_unsupported",
+            error_message=error["error"]["message"],
+            route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+            rejection_reason="backend_codex_compact_platform_unsupported",
+        )
+        return _logged_error_json_response(
+            request,
+            400,
+            error,
+            route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+            rejection_reason="backend_codex_compact_platform_unsupported",
+        )
     return await _compact_responses(
         request, payload, context, api_key, codex_session_affinity=True, openai_cache_affinity=True
     )
@@ -1034,7 +1039,7 @@ async def v1_responses_compact(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
     effective_model = _effective_model_for_api_key(api_key, compact_payload.model)
-    if await _should_reject_platform_only_public_route(
+    if await _should_reject_platform_only_route(
         context=context,
         api_key=api_key,
         route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
@@ -1189,7 +1194,7 @@ def _derive_request_capabilities(
 ) -> proxy_service_module.RequestCapabilities:
     continuity_param = None
     if payload is not None and headers is not None:
-        continuity_param = _platform_continuity_param(payload, headers)
+        continuity_param = _platform_continuity_param(route_family, payload, headers)
     return proxy_service_module.RequestCapabilities(
         route_family=route_family,
         route_class=route_class,
@@ -1199,42 +1204,91 @@ def _derive_request_capabilities(
     )
 
 
+async def _provider_selection_failure_response(
+    *,
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    model: str | None,
+    failure: proxy_service_module.ProviderSelectionFailure,
+) -> JSONResponse:
+    error = _provider_error(
+        failure.error_code,
+        failure.error_message,
+        param=failure.error_param,
+    )
+    await context.service.write_provider_rejection_log(
+        api_key=api_key,
+        request_id=ensure_request_id(),
+        model=model,
+        error_code=failure.error_code,
+        error_message=error["error"]["message"],
+        route_class=failure.route_class,
+        rejection_reason=failure.rejection_reason,
+    )
+    return _logged_error_json_response(
+        request,
+        failure.http_status,
+        error,
+        route_class=failure.route_class,
+        rejection_reason=failure.rejection_reason,
+    )
+
+
+def _build_platform_codex_models_response(
+    payload: Mapping[str, JsonValue],
+    *,
+    api_key: ApiKeyData | None,
+) -> CodexModelsResponse:
+    allowed_models = _allowed_models_for_api_key(api_key)
+    registry = get_model_registry()
+    models = registry.get_models_with_fallback()
+    if not models:
+        return CodexModelsResponse(models=[])
+
+    raw_items = payload.get("data")
+    if not isinstance(raw_items, list):
+        return CodexModelsResponse(models=[])
+
+    entries: list[CodexModelEntry] = []
+    for item in raw_items:
+        if not is_json_mapping(item):
+            continue
+        model_id = item.get("id")
+        if not isinstance(model_id, str):
+            continue
+        model = models.get(model_id)
+        if model is None or not is_public_model(model, allowed_models):
+            continue
+        entries.append(_to_codex_model_entry(model))
+    return CodexModelsResponse(models=entries)
+
+
 async def _maybe_build_platform_models_response(
     *,
     request: Request,
     context: ProxyContext,
     api_key: ApiKeyData | None,
+    route_family: str = PUBLIC_MODELS_HTTP_ROUTE_FAMILY,
+    route_class: str = OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+    codex_shape: bool = False,
 ) -> Response | None:
     selection = await context.service.select_routing_subject(
         capabilities=_derive_request_capabilities(
-            route_family=PUBLIC_MODELS_HTTP_ROUTE_FAMILY,
-            route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+            route_family=route_family,
+            route_class=route_class,
             transport="http",
             model=None,
         ),
         api_key=api_key,
     )
     if selection.failure is not None:
-        error = _provider_error(
-            selection.failure.error_code,
-            selection.failure.error_message,
-            param=selection.failure.error_param,
-        )
-        await context.service.write_provider_rejection_log(
+        return await _provider_selection_failure_response(
+            request=request,
+            context=context,
             api_key=api_key,
-            request_id=ensure_request_id(),
             model=None,
-            error_code=selection.failure.error_code,
-            error_message=error["error"]["message"],
-            route_class=selection.failure.route_class,
-            rejection_reason=selection.failure.rejection_reason,
-        )
-        return _logged_error_json_response(
-            request,
-            selection.failure.http_status,
-            error,
-            route_class=selection.failure.route_class,
-            rejection_reason=selection.failure.rejection_reason,
+            failure=selection.failure,
         )
     if not selection.is_platform:
         return None
@@ -1245,29 +1299,39 @@ async def _maybe_build_platform_models_response(
         request_service_tier=None,
     )
     try:
-        response = await context.service.fetch_platform_models(api_key, identity=selected.identity)
+        response = await context.service.fetch_platform_models(
+            api_key,
+            identity=selected.identity,
+            route_family=route_family,
+            route_class=route_class,
+        )
     except OpenAIPlatformError as exc:
         await _release_reservation(reservation)
         return JSONResponse(status_code=exc.status_code, content=exc.payload)
     await _release_reservation(reservation)
     if response is None:
         return None
-    content = _build_platform_model_list_response(response.payload, api_key=api_key).model_dump(mode="json")
+    if codex_shape:
+        content = _build_platform_codex_models_response(response.payload, api_key=api_key).model_dump(mode="json")
+    else:
+        content = _build_platform_model_list_response(response.payload, api_key=api_key).model_dump(mode="json")
     return JSONResponse(content=content)
 
 
-async def _maybe_handle_platform_v1_responses(
+async def _maybe_handle_platform_responses(
     *,
     request: Request,
     payload: ResponsesRequest,
     context: ProxyContext,
     api_key: ApiKeyData | None,
+    route_family: str,
+    route_class: str,
 ) -> Response | None:
     effective_model = _effective_model_for_api_key(api_key, payload.model)
     selection = await context.service.select_routing_subject(
         capabilities=_derive_request_capabilities(
-            route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
-            route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+            route_family=route_family,
+            route_class=route_class,
             transport="http",
             model=effective_model,
             payload=payload,
@@ -1276,26 +1340,12 @@ async def _maybe_handle_platform_v1_responses(
         api_key=api_key,
     )
     if selection.failure is not None:
-        error = _provider_error(
-            selection.failure.error_code,
-            selection.failure.error_message,
-            param=selection.failure.error_param,
-        )
-        await context.service.write_provider_rejection_log(
+        return await _provider_selection_failure_response(
+            request=request,
+            context=context,
             api_key=api_key,
-            request_id=ensure_request_id(),
             model=effective_model,
-            error_code=selection.failure.error_code,
-            error_message=error["error"]["message"],
-            route_class=selection.failure.route_class,
-            rejection_reason=selection.failure.rejection_reason,
-        )
-        return _logged_error_json_response(
-            request,
-            selection.failure.http_status,
-            error,
-            route_class=selection.failure.route_class,
-            rejection_reason=selection.failure.rejection_reason,
+            failure=selection.failure,
         )
     if not selection.is_platform:
         return None
@@ -1303,6 +1353,8 @@ async def _maybe_handle_platform_v1_responses(
 
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    reasoning_effort = payload.reasoning.effort if payload.reasoning else None
+    requested_service_tier = _normalize_service_tier_value(payload.service_tier)
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -1317,6 +1369,7 @@ async def _maybe_handle_platform_v1_responses(
                 payload=payload,
                 api_key=api_key,
                 identity=selected.identity,
+                route_family=route_family,
             )
             if identity is None or upstream_response is None:
                 await _release_reservation(reservation)
@@ -1346,7 +1399,10 @@ async def _maybe_handle_platform_v1_responses(
                 status="error",
                 error_code="upstream_unavailable",
                 error_message=str(exc) or "Failed to receive the initial OpenAI Platform streaming response.",
-                route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+                reasoning_effort=reasoning_effort,
+                service_tier=requested_service_tier,
+                requested_service_tier=requested_service_tier,
+                route_class=route_class,
                 rejection_reason="platform_stream_start_failed",
                 transport="http",
             )
@@ -1360,7 +1416,7 @@ async def _maybe_handle_platform_v1_responses(
                 headers=rate_limit_headers,
                 provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
                 routing_subject_id=selected.identity.id,
-                route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+                route_class=route_class,
                 rejection_reason="platform_stream_start_failed",
             )
         except BaseException:
@@ -1377,6 +1433,9 @@ async def _maybe_handle_platform_v1_responses(
             reservation=reservation,
             start=start,
             upstream_request_id=upstream_response.upstream_request_id,
+            route_class=route_class,
+            reasoning_effort=reasoning_effort,
+            requested_service_tier=requested_service_tier,
         )
         return StreamingResponse(
             stream,
@@ -1389,6 +1448,7 @@ async def _maybe_handle_platform_v1_responses(
             payload=payload,
             api_key=api_key,
             identity=selected.identity,
+            route_family=route_family,
         )
     except OpenAIPlatformError as exc:
         await _release_reservation(reservation)
@@ -1415,8 +1475,10 @@ async def _maybe_handle_platform_v1_responses(
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_tokens: int | None = None
+    actual_service_tier: str | None = None
     if parsed_result is not None:
         usage = parsed_result.usage
+        actual_service_tier = _service_tier_from_response_payload(parsed_result)
         if parsed_result.status == "failed":
             status = "error"
             error_code = parsed_result.error.code if parsed_result.error else None
@@ -1441,11 +1503,65 @@ async def _maybe_handle_platform_v1_responses(
         output_tokens=output_tokens,
         cached_input_tokens=cached_input_tokens,
         reasoning_tokens=reasoning_tokens,
+        reasoning_effort=reasoning_effort,
         transport="http",
-        route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+        service_tier=_effective_service_tier(requested_service_tier, actual_service_tier),
+        requested_service_tier=requested_service_tier,
+        actual_service_tier=actual_service_tier,
+        route_class=route_class,
         upstream_request_id=result.upstream_request_id,
     )
     return JSONResponse(content=result_payload, headers=rate_limit_headers)
+
+
+async def _maybe_handle_platform_v1_responses(
+    *,
+    request: Request,
+    payload: ResponsesRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response | None:
+    return await _maybe_handle_platform_responses(
+        request=request,
+        payload=payload,
+        context=context,
+        api_key=api_key,
+        route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
+        route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+    )
+
+
+async def _maybe_build_platform_codex_models_response(
+    *,
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response | None:
+    return await _maybe_build_platform_models_response(
+        request=request,
+        context=context,
+        api_key=api_key,
+        route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+        route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+        codex_shape=True,
+    )
+
+
+async def _maybe_handle_platform_backend_codex_responses(
+    *,
+    request: Request,
+    payload: ResponsesRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response | None:
+    return await _maybe_handle_platform_responses(
+        request=request,
+        payload=payload,
+        context=context,
+        api_key=api_key,
+        route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+        route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+    )
 
 
 async def _instrument_platform_stream(
@@ -1460,6 +1576,9 @@ async def _instrument_platform_stream(
     reservation: ApiKeyUsageReservationData | None,
     start: float,
     upstream_request_id: str | None,
+    route_class: str,
+    reasoning_effort: str | None,
+    requested_service_tier: str | None,
 ) -> AsyncIterator[str]:
     status = "success"
     error_code: str | None = None
@@ -1468,9 +1587,11 @@ async def _instrument_platform_stream(
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_tokens: int | None = None
+    actual_service_tier: str | None = None
 
     async def _handle_line(line: str) -> str:
-        nonlocal status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+        nonlocal status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens
+        nonlocal reasoning_tokens, actual_service_tier
         payload = _parse_sse_payload(line)
         if payload is None:
             return line
@@ -1485,6 +1606,7 @@ async def _instrument_platform_stream(
         parsed = parse_response_payload(response)
         if parsed is None:
             return line
+        actual_service_tier = _service_tier_from_event_payload(payload)
         if parsed.status == "failed":
             status = "error"
             error_code = parsed.error.code if parsed.error else None
@@ -1521,46 +1643,51 @@ async def _instrument_platform_stream(
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
             reasoning_tokens=reasoning_tokens,
+            reasoning_effort=reasoning_effort,
             transport="http",
-            route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+            service_tier=_effective_service_tier(requested_service_tier, actual_service_tier),
+            requested_service_tier=requested_service_tier,
+            actual_service_tier=actual_service_tier,
+            route_class=route_class,
             upstream_request_id=upstream_request_id,
         )
 
 
-async def _backend_codex_route_rejection(
-    *,
-    request: Request,
-    context: ProxyContext,
-    api_key: ApiKeyData | None,
-    model: str | None,
-) -> Response | None:
-    if not await _should_reject_platform_only_public_route(
-        context=context,
-        api_key=api_key,
-        route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
-        model=model,
-    ):
+def _normalize_service_tier_value(value: object) -> str | None:
+    if not isinstance(value, str):
         return None
-    error = _provider_error(
-        "provider_feature_unsupported",
-        "OpenAI Platform identities do not support /backend-api/codex routes in phase 1.",
-    )
-    await context.service.write_provider_rejection_log(
-        api_key=api_key,
-        request_id=ensure_request_id(),
-        model=model,
-        error_code="provider_feature_unsupported",
-        error_message=error["error"]["message"],
-        route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
-        rejection_reason="backend_codex_platform_unsupported",
-    )
-    return _logged_error_json_response(
-        request,
-        400,
-        error,
-        route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
-        rejection_reason="backend_codex_platform_unsupported",
-    )
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.lower() == "fast":
+        return "priority"
+    return stripped
+
+
+def _service_tier_from_response_payload(response: OpenAIResponsePayload | None) -> str | None:
+    if response is None:
+        return None
+    extra = response.model_extra
+    if not isinstance(extra, Mapping):
+        return None
+    return _normalize_service_tier_value(extra.get("service_tier"))
+
+
+def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    return _normalize_service_tier_value(response.get("service_tier"))
+
+
+def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
+    if isinstance(actual_service_tier, str):
+        return actual_service_tier
+    if isinstance(requested_service_tier, str):
+        return requested_service_tier
+    return None
 
 
 async def _websocket_provider_rejection(
@@ -1568,14 +1695,15 @@ async def _websocket_provider_rejection(
     context: ProxyContext,
     api_key: ApiKeyData | None,
     *,
+    route_family: str,
     route_class: str,
     error_code: str,
     error_message: str,
 ) -> JSONResponse | None:
-    if not await _should_reject_platform_only_public_route(
+    if not await _should_reject_platform_only_route(
         context=context,
         api_key=api_key,
-        route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
+        route_family=route_family,
         model=None,
     ):
         return None
@@ -1614,7 +1742,7 @@ async def _websocket_provider_rejection(
     return JSONResponse(status_code=400, content=error)
 
 
-async def _should_reject_platform_only_public_route(
+async def _should_reject_platform_only_route(
     *,
     context: ProxyContext,
     api_key: ApiKeyData | None,
@@ -1630,7 +1758,11 @@ async def _should_reject_platform_only_public_route(
     return not await context.service.has_chatgpt_candidates(model, account_ids=scoped_account_ids)
 
 
-def _platform_continuity_param(payload: ResponsesRequest, headers: Mapping[str, str]) -> str | None:
+def _platform_continuity_param(
+    route_family: str,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+) -> str | None:
     if payload.conversation:
         return "conversation"
     if payload.previous_response_id:
@@ -1781,9 +1913,17 @@ async def _enforce_request_limits(
 async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -> None:
     if reservation is None:
         return
-    async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
-        await service.release_usage_reservation(reservation.reservation_id)
+    try:
+        with anyio.CancelScope(shield=True):
+            async with get_background_session() as session:
+                service = ApiKeysService(ApiKeysRepository(session))
+                await service.release_usage_reservation(reservation.reservation_id)
+    except BaseException:
+        logger.warning(
+            "Failed to release API key usage reservation reservation_id=%s",
+            reservation.reservation_id,
+            exc_info=True,
+        )
 
 
 def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:

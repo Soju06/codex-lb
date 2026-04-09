@@ -356,6 +356,60 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     ring_service.unregister.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_lifespan_skips_dynamic_bridge_ring_membership_when_disabled(monkeypatch: pytest.MonkeyPatch):
+    import app.main as main
+
+    settings = SimpleNamespace(
+        otel_enabled=False,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        shutdown_drain_timeout_seconds=0,
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_enabled=True,
+        database_url="sqlite+aiosqlite:///./store.db",
+        http_responses_session_bridge_instance_ring=[],
+    )
+    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
+    usage_scheduler = _DummyScheduler()
+    model_scheduler = _DummyScheduler()
+    sticky_scheduler = _DummyScheduler()
+    close_http_client = AsyncMock()
+    close_db = AsyncMock()
+    cache_poller = SimpleNamespace(
+        on_invalidation=Mock(),
+        start=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    ring_service_factory = Mock(side_effect=AssertionError("dynamic ring membership should stay disabled"))
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
+    monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "init_background_db", Mock())
+    monkeypatch.setattr(main, "init_http_client", AsyncMock())
+    monkeypatch.setattr(main, "close_http_client", close_http_client)
+    monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
+    monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
+    monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "dynamic_bridge_ring_membership_enabled", lambda current: False)
+    monkeypatch.setattr(main, "RingMembershipService", ring_service_factory)
+    monkeypatch.setattr(main, "mark_process_dead", Mock())
+    monkeypatch.setattr(
+        "app.core.cache.invalidation.CacheInvalidationPoller",
+        lambda session_factory: cache_poller,
+    )
+
+    async with main.lifespan(main.app):
+        pass
+
+    ring_service_factory.assert_not_called()
+
+
 def test_metrics_bind_failure_is_only_benign_in_multiprocess_mode(monkeypatch: pytest.MonkeyPatch):
     import app.main as main
 

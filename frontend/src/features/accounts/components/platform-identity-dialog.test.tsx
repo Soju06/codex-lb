@@ -31,9 +31,15 @@ describe("PlatformIdentityDialog", () => {
     expect(screen.getByText(/Register a fallback-only upstream identity for/i)).toBeInTheDocument();
     expect(screen.getAllByText("/v1/models").length).toBeGreaterThan(0);
     expect(screen.getAllByText("/v1/responses").length).toBeGreaterThan(0);
+    expect(screen.getByText("/backend-api/codex HTTP")).toBeInTheDocument();
     expect(
       screen.getByText(
         "Allow this identity to handle stateless HTTP Responses API calls only. Stateless HTTP only; compact, chat completions, websocket, and continuity-bound requests stay on ChatGPT.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Allow this identity to back Codex HTTP models and stateless HTTP responses only. Compact, websocket, and continuity-bound Codex requests stay on ChatGPT.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -41,7 +47,7 @@ describe("PlatformIdentityDialog", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Requires an existing ChatGPT account that is not paused or deactivated. Only one Platform API key can be registered, and it is used only for /v1/models plus stateless HTTP /v1/responses fallback.",
+        "Requires an existing ChatGPT account that is not paused or deactivated. Only one Platform API key can be registered, and it is used only as fallback for enabled /v1/models, stateless /v1/responses, /backend-api/codex/models, and stateless /backend-api/codex/responses routes.",
       ),
     ).toBeInTheDocument();
 
@@ -166,7 +172,7 @@ describe("PlatformIdentityDialog", () => {
 
     expect(
       screen.getByText(
-        "Only /v1/models and stateless HTTP /v1/responses can ever use this key. ChatGPT-only, compact, websocket, and continuity-bound requests stay on ChatGPT.",
+        "This key can back /v1/models, stateless HTTP /v1/responses, /backend-api/codex/models, and stateless HTTP /backend-api/codex/responses only when the matching route families are enabled. Compact, websocket, and continuity-bound requests stay on ChatGPT.",
       ),
     ).toBeInTheDocument();
 

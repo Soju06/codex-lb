@@ -1,6 +1,6 @@
 <!--
 About
-Codex/ChatGPT account load balancer & proxy with usage tracking, dashboard, and OpenCode-compatible endpoints
+ChatGPT/Codex account load balancer and proxy with usage tracking, dashboard, and OpenAI-compatible endpoints
 
 Topics
 python oauth sqlalchemy dashboard load-balancer openai rate-limit api-proxy codex fastapi usage-tracking chatgpt opencode
@@ -10,69 +10,81 @@ Resources
 
 # codex-lb
 
-Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage API keys, view everything in a dashboard.
+여러 ChatGPT 계정을 묶어서 사용량을 관리하고, Codex CLI나 OpenAI 호환 클라이언트에서 공통 엔드포인트로 붙을 수 있게 해주는 프록시입니다. 대시보드에서 계정, API 키, 사용량, 최근 요청을 한 곳에서 관리할 수 있습니다.
 
-| ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |
-|:---:|:---:|
+이 포크는  [codex-lb](https://github.com/Soju06/codex-lb)를 기반으로, `OpenAI Platform API key`를 보조 upstream으로 등록해 ChatGPT 계정들의 사용량이 모두 소진되었을 때 fallback으로 사용할 수 있도록 수정한 버전입니다. 즉 기본 경로는 계속 ChatGPT 계정 풀을 사용하고, 필요할 때만 Platform API로 우회하는 개인/사내 운영용 포크를 목표로 합니다.
 
-<details>
-<summary>More screenshots</summary>
 
-| Settings | Login |
-|:---:|:---:|
-| ![settings](docs/screenshots/settings.jpg) | ![login](docs/screenshots/login.jpg) |
+## 주요 기능
 
-| Dashboard (dark) | Accounts (dark) | Settings (dark) |
-|:---:|:---:|:---:|
-| ![dashboard-dark](docs/screenshots/dashboard-dark.jpg) | ![accounts-dark](docs/screenshots/accounts-dark.jpg) | ![settings-dark](docs/screenshots/settings-dark.jpg) |
+- 여러 ChatGPT 계정을 한 풀로 묶어서 로드밸런싱
+- 계정별 사용량, 토큰, 비용, 최근 추이 확인
+- 대시보드에서 API 키 발급 및 키별 제한 설정
+- Codex CLI, OpenCode, OpenClaw, OpenAI SDK와 연동
+- 업스트림 모델 목록 자동 동기화
+- 대시보드 비밀번호 및 선택형 TOTP 인증
 
-</details>
+## 빠른 시작
 
-## Features
-
-<table>
-<tr>
-<td><b>Account Pooling</b><br>Load balance across multiple ChatGPT accounts</td>
-<td><b>Usage Tracking</b><br>Per-account tokens, cost, 28-day trends</td>
-<td><b>API Keys</b><br>Per-key rate limits by token, cost, window, model</td>
-</tr>
-<tr>
-<td><b>Dashboard Auth</b><br>Password + optional TOTP</td>
-<td><b>OpenAI-compatible</b><br>Codex CLI, OpenCode, any OpenAI client</td>
-<td><b>Auto Model Sync</b><br>Available models fetched from upstream</td>
-</tr>
-</table>
-
-## Quick Start
+컨테이너 실행:
 
 ```bash
-# Docker (recommended)
 docker volume create codex-lb-data
 docker run -d --name codex-lb \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
-  ghcr.io/soju06/codex-lb:latest
+  -e CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID=codex-lb-local \
+  -e CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH=true \
+  -e CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH_HOST_CIDRS=172.17.0.0/16 \
+  ghcr.io/kgskr/codex-lb:latest
+```
 
-# or uvx
+또는 로컬 실행:
+
+```bash
 uvx codex-lb
 ```
 
-Open [localhost:2455](http://localhost:2455) → Add account → Done.
+브라우저에서 [http://localhost:2455](http://localhost:2455) 로 접속한 뒤 계정을 추가하면 바로 사용할 수 있습니다.
 
-## Client Setup
+컨테이너로 실행할 때는 아래 설정을 함께 주는 것을 권장합니다.
 
-Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authentication) is enabled, pass a key from the dashboard as a Bearer token.
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID=codex-lb-local`
+  - 컨테이너 재시작 시 bridge instance id가 흔들리지 않게 해서 세션 브리지 안정성을 높입니다.
+- `CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH=true`
+  - 로컬 네트워크나 사내 개인용처럼 제한된 환경에서 로그인, bootstrap, proxy API key 인증 없이 바로 붙을 수 있게 합니다.
+  - 테스트/내부 사용 전용이며, 외부에 노출되는 환경에는 권장하지 않습니다.
 
-| Logo | Client | Endpoint | Config |
-|---|--------|----------|--------|
-| <img src="https://avatars.githubusercontent.com/u/14957082?s=200" width="32" alt="OpenAI"> | **Codex CLI** | `http://127.0.0.1:2455/backend-api/codex` | `~/.codex/config.toml` |
-| <img src="https://avatars.githubusercontent.com/u/208539476?s=200" width="32" alt="OpenCode"> | **OpenCode** | `http://127.0.0.1:2455/v1` | `~/.config/opencode/opencode.json` |
-| <img src="https://avatars.githubusercontent.com/u/252820863?s=200" width="32" alt="OpenClaw"> | **OpenClaw** | `http://127.0.0.1:2455/v1` | `~/.openclaw/openclaw.json` |
-| <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="32" alt="Python"> | **OpenAI Python SDK** | `http://127.0.0.1:2455/v1` | Code |
+Docker를 쓴다면 아래 CIDR 설정도 함께 주는 편이 안전합니다.
+
+- `CODEX_LB_INSECURE_ALLOW_REMOTE_NO_AUTH_HOST_CIDRS=172.17.0.0/16`
+  - Docker bridge 환경에서 호스트 OS에서 들어오는 요청만 무인증으로 허용하려면 함께 주는 것을 권장합니다.
+  - Docker 기본 bridge 대역 예시입니다. 네트워크 설정이 다르면 실제 bridge CIDR에 맞게 바꿔야 합니다.
+
+[Podman](https://podman.io/docs/installation)을 쓴다면 위 CIDR 값은 그대로 쓰지 말고, 환경에 맞는 bridge 대역을 넣거나 자동 감지에 맡기세요. 예를 들어 rootless Podman은 `10.88.0.0/16` 계열인 경우가 많습니다.
+
+> Podman은 rootless로 쓰기 쉽고 비교적 가벼운 컨테이너 런타임이라, Docker가 무겁다고 느껴지면 한 번 써볼 만합니다.
+
+
+## 첫 설정
+
+1. 대시보드에 접속합니다.
+2. ChatGPT 계정과 Platform API Key를 추가합니다.
+4. 클라이언트에서 `codex-lb` 엔드포인트를 사용하도록 설정합니다.
+
+## 클라이언트 연결
+
+OpenAI 호환 클라이언트는 모두 `codex-lb`를 upstream처럼 사용할 수 있습니다. API 키 인증을 켠 경우 대시보드에서 발급한 키를 Bearer 토큰으로 넣어야 합니다.
+
+| 클라이언트 | 엔드포인트 | 설정 위치 |
+|---|---|---|
+| Codex CLI | `http://127.0.0.1:2455/backend-api/codex` | `~/.codex/config.toml` |
+| OpenCode | `http://127.0.0.1:2455/v1` | `~/.config/opencode/opencode.json` |
+| OpenClaw | `http://127.0.0.1:2455/v1` | `~/.openclaw/openclaw.json` |
+| OpenAI Python SDK | `http://127.0.0.1:2455/v1` | 코드에서 설정 |
 
 <details>
-<summary><img src="https://avatars.githubusercontent.com/u/14957082?s=200" width="20" align="center" alt="OpenAI">&ensp;<b>Codex CLI / IDE Extension</b></summary>
-<br>
+<summary><b>Codex CLI / IDE 확장</b></summary>
 
 `~/.codex/config.toml`:
 
@@ -80,41 +92,14 @@ Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authe
 model = "gpt-5.3-codex"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
-
+# 아래 부분만 붙여 넣으세요.
 [model_providers.codex-lb]
-name = "OpenAI"  # required — enables remote /responses/compact
+name = "OpenAI"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
-supports_websockets = true
-requires_openai_auth = true # required for codex app
 ```
 
-Optional: enable native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling:
-
-```bash
-export CODEX_LB_UPSTREAM_STREAM_TRANSPORT=websocket
-```
-
-`auto` is the default and uses native WebSockets for native Codex headers or models that prefer them.
-You can also switch this in the dashboard under Settings -> Routing -> Upstream stream transport.
-
-Note: Codex itself does not currently expose a stable documented `wire_api = "websocket"` provider mode.
-If you want to experiment on the Codex side, the current CLI exposes under-development feature flags:
-
-```toml
-[features]
-responses_websockets = true
-# or
-responses_websockets_v2 = true
-```
-
-These flags are experimental and do not replace `wire_api = "responses"`.
-
-If upstream websocket handshakes must use environment proxies in your deployment, set
-`CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=true`. By default websocket handshakes connect directly to
-match Codex CLI's native transport.
-
-**With [API key auth](#api-key-authentication):**
+API 키 인증을 켠 경우:
 
 ```toml
 [model_providers.codex-lb]
@@ -123,50 +108,24 @@ base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
 supports_websockets = true
-requires_openai_auth = true # required for codex app
+requires_openai_auth = true
 ```
 
 ```bash
-export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
+export CODEX_LB_API_KEY="sk-clb-..."
 codex
 ```
 
-**Verify WebSocket transport**
+추가 메모:
 
-Use a one-off debug run:
-
-```bash
-RUST_LOG=debug codex exec "Reply with OK only."
-```
-
-Healthy websocket signals:
-
-- CLI logs contain `connecting to websocket` and `successfully connected to websocket`
-- `codex-lb` logs show `WebSocket /backend-api/codex/responses`
-- `codex-lb` logs do **not** show fallback `POST /backend-api/codex/responses` for the same run
-
-If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket upgrades.
-
-**Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
-old sessions won't appear until you re-tag them:
-
-```bash
-# JSONL session files (all versions)
-find ~/.codex/sessions -name '*.jsonl' \
-  -exec sed -i '' 's/"model_provider":"openai"/"model_provider":"codex-lb"/g' {} +
-
-# SQLite state DB (>= v0.105.0, creates ~/.codex/state_*.sqlite)
-sqlite3 ~/.codex/state_5.sqlite \
-  "UPDATE threads SET model_provider = 'codex-lb' WHERE model_provider = 'openai';"
-```
+- `CODEX_LB_UPSTREAM_STREAM_TRANSPORT=websocket` 를 주면 업스트림 스트리밍을 WebSocket 우선으로 강제할 수 있습니다.
+- 기본값인 `auto`는 Codex 전용 헤더나 모델에 맞춰 적절한 transport를 고릅니다.
+- Codex 자체의 실험적 WebSocket 플래그는 계속 `wire_api = "responses"` 와 함께 사용하는 전제입니다.
 
 </details>
 
 <details>
-<summary><img src="https://avatars.githubusercontent.com/u/208539476?s=200" width="20" align="center" alt="OpenCode">&ensp;<b>OpenCode</b></summary>
-<br>
-
-> **Important**: Use the built-in `openai` provider with `baseURL` override — not a custom provider with `@ai-sdk/openai-compatible`. Custom providers use the Chat Completions API which **drops reasoning/thinking content**. The built-in `openai` provider uses the Responses API, which properly preserves `encrypted_content` and multi-turn reasoning state.
+<summary><b>OpenCode</b></summary>
 
 `~/.config/opencode/opencode.json`:
 
@@ -191,18 +150,6 @@ sqlite3 ~/.codex/state_5.sqlite \
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
           "limit": { "context": 272000, "output": 65536 }
-        },
-        "gpt-5.1-codex-mini": {
-          "name": "GPT-5.1 Codex Mini",
-          "reasoning": true,
-          "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 272000, "output": 65536 }
-        },
-        "gpt-5.3-codex-spark": {
-          "name": "GPT-5.3 Codex Spark",
-          "reasoning": true,
-          "options": { "reasoningEffort": "xhigh", "reasoningSummary": "detailed" },
-          "limit": { "context": 128000, "output": 65536 }
         }
       }
     }
@@ -211,18 +158,15 @@ sqlite3 ~/.codex/state_5.sqlite \
 }
 ```
 
-This overrides the built-in `openai` provider's endpoint to point at codex-lb while keeping the Responses API code path that handles reasoning properly.
-
 ```bash
-export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
+export CODEX_LB_API_KEY="sk-clb-..."
 opencode
 ```
 
 </details>
 
 <details>
-<summary><img src="https://avatars.githubusercontent.com/u/252820863?s=200" width="20" align="center" alt="OpenClaw">&ensp;<b>OpenClaw</b></summary>
-<br>
+<summary><b>OpenClaw</b></summary>
 
 `~/.openclaw/openclaw.json`:
 
@@ -232,8 +176,8 @@ opencode
     "defaults": {
       "model": { "primary": "codex-lb/gpt-5.4" },
       "models": {
-        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } }
-        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } }
+        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } },
+        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } },
         "codex-lb/gpt-5.3-codex": { "params": { "cacheRetention": "short" } }
       }
     }
@@ -243,7 +187,7 @@ opencode
     "providers": {
       "codex-lb": {
         "baseUrl": "http://127.0.0.1:2455/v1",
-        "apiKey": "${CODEX_LB_API_KEY}",   // or "dummy" if API key auth is disabled
+        "apiKey": "${CODEX_LB_API_KEY}",
         "api": "openai-responses",
         "models": [
           {
@@ -263,15 +207,6 @@ opencode
             "maxTokens": 4096,
             "input": ["text"],
             "reasoning": false
-          },
-          {
-            "id": "gpt-5.3-codex",
-            "name": "gpt-5.3-codex (codex-lb)",
-            "contextWindow": 400000,
-            "contextTokens": 272000,
-            "maxTokens": 4096,
-            "input": ["text"],
-            "reasoning": false
           }
         ]
       }
@@ -280,134 +215,91 @@ opencode
 }
 ```
 
-Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled, any value works.
-
 </details>
 
 <details>
-<summary><img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="20" align="center" alt="Python">&ensp;<b>OpenAI Python SDK</b></summary>
-<br>
+<summary><b>OpenAI Python SDK</b></summary>
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:2455/v1",
-    api_key="sk-clb-...",  # from dashboard, or any string if auth is disabled
+    api_key="sk-clb-...",  # 인증을 끄면 아무 문자열이어도 됩니다.
 )
 
 response = client.chat.completions.create(
     model="gpt-5.3-codex",
-    messages=[{"role": "user", "content": "Hello!"}],
+    messages=[{"role": "user", "content": "안녕하세요"}],
 )
+
 print(response.choices[0].message.content)
 ```
 
 </details>
 
-## API Key Authentication
+## API 키 인증(Codex LB 인증용, Platform API key가 아님.)
 
-API key auth is **disabled by default** — the proxy is open to any client. Enable it in **Settings → API Key Auth** on the dashboard.
+API 키 인증은 기본적으로 꺼져 있습니다. 켜려면 대시보드의 `Settings -> API Key Auth` 에서 활성화하면 됩니다.
 
-When enabled, clients must pass a valid API key as a Bearer token:
+활성화 후에는 모든 클라이언트 요청이 다음 형식을 따라야 합니다.
 
-```
+```text
 Authorization: Bearer sk-clb-...
 ```
 
-**Creating keys**: Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
+API 키는 `Dashboard -> API Keys -> Create` 에서 발급합니다. 전체 키 값은 생성 시 한 번만 표시됩니다.
 
-## Configuration
+지원 항목:
 
-Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
-Dashboard auth is configured in Settings.
-SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
+- 만료일
+- 허용 모델 제한
+- 강제 모델
+- 토큰 / 비용 / 기간 기반 제한
 
-## Data
+## 설정
 
-| Environment | Path |
-|-------------|------|
-| Local / uvx | `~/.codex-lb/` |
-| Docker | `/var/lib/codex-lb/` |
+- 환경 변수는 `CODEX_LB_` 접두어를 사용합니다.
+- 예시는 `.env.example` 에 있습니다.
+- 대시보드 인증 설정은 UI에서 변경할 수 있습니다.
+- 기본 DB는 SQLite이며, `CODEX_LB_DATABASE_URL` 을 주면 PostgreSQL도 사용할 수 있습니다.
 
-Backup this directory to preserve your data.
+## 데이터 위치
 
-## Kubernetes
+| 실행 방식 | 경로 |
+|---|---|
+| 로컬 / `uvx` | `~/.codex-lb/` |
+| 컨테이너 | `/var/lib/codex-lb/` |
 
-```bash
-helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
-  --set postgresql.auth.password=changeme \
-  --set config.databaseMigrateOnStartup=true \
-  --set migration.schemaGate.enabled=false
-kubectl port-forward svc/codex-lb 2455:2455
+이 디렉터리를 백업하면 계정, 설정, 키, 로그를 보존할 수 있습니다.
+
+## 배포 메모
+
+이 포크는 컨테이너 배포를 기준으로 문서를 유지합니다. Kubernetes/Helm 관련 절차는 이 README에서 다루지 않습니다.
+
+이미지 주소:
+
+```text
+ghcr.io/kgskr/codex-lb
 ```
 
-Open [localhost:2455](http://localhost:2455) → Add account → Done.
-
-For external database, production config, ingress, observability, and more see the [Helm chart README](deploy/helm/codex-lb/README.md).
-
-## Development
+## 개발
 
 ```bash
-# Docker
+# 백엔드 + 프론트 개발 서버
+uv sync
+cd frontend && bun install && cd ..
+uv run fastapi run app/main.py --reload
+cd frontend && bun run dev
+```
+
+컨테이너 기반 개발:
+
+```bash
 docker compose watch
-
-# Local
-uv sync && cd frontend && bun install && cd ..
-uv run fastapi run app/main.py --reload        # backend :2455
-cd frontend && bun run dev                     # frontend :5173
 ```
 
-## Contributors ✨
+기본 포트:
 
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable -->
-<table>
-  <tbody>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Soju06"><img src="https://avatars.githubusercontent.com/u/34199905?v=4?s=100" width="100px;" alt="Soju06"/><br /><sub><b>Soju06</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Soju06" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Soju06" title="Tests">⚠️</a> <a href="#maintenance-Soju06" title="Maintenance">🚧</a> <a href="#infra-Soju06" title="Infrastructure (Hosting, Build-Tools, etc)">🚇</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="http://jonas.kamsker.at/"><img src="https://avatars.githubusercontent.com/u/11245306?v=4?s=100" width="100px;" alt="Jonas Kamsker"/><br /><sub><b>Jonas Kamsker</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=JKamsker" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AJKamsker" title="Bug reports">🐛</a> <a href="#maintenance-JKamsker" title="Maintenance">🚧</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Quack6765"><img src="https://avatars.githubusercontent.com/u/5446230?v=4?s=100" width="100px;" alt="Quack"/><br /><sub><b>Quack</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Quack6765" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AQuack6765" title="Bug reports">🐛</a> <a href="#maintenance-Quack6765" title="Maintenance">🚧</a> <a href="#design-Quack6765" title="Design">🎨</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/hhsw2015"><img src="https://avatars.githubusercontent.com/u/103614420?v=4?s=100" width="100px;" alt="Jill Kok, San Mou"/><br /><sub><b>Jill Kok, San Mou</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=hhsw2015" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=hhsw2015" title="Tests">⚠️</a> <a href="#maintenance-hhsw2015" title="Maintenance">🚧</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Ahhsw2015" title="Bug reports">🐛</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/pcy06"><img src="https://avatars.githubusercontent.com/u/44970486?v=4?s=100" width="100px;" alt="PARK CHANYOUNG"/><br /><sub><b>PARK CHANYOUNG</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=pcy06" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=pcy06" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=pcy06" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/choi138"><img src="https://avatars.githubusercontent.com/u/84369321?v=4?s=100" width="100px;" alt="Choi138"/><br /><sub><b>Choi138</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=choi138" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Achoi138" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=choi138" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/dwnmf"><img src="https://avatars.githubusercontent.com/u/56194792?v=4?s=100" width="100px;" alt="LYA⚚CAP⚚OCEAN"/><br /><sub><b>LYA⚚CAP⚚OCEAN</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=dwnmf" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=dwnmf" title="Tests">⚠️</a></td>
-    </tr>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/azkore"><img src="https://avatars.githubusercontent.com/u/7746783?v=4?s=100" width="100px;" alt="Eugene Korekin"/><br /><sub><b>Eugene Korekin</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=azkore" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Aazkore" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=azkore" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/JordxnBN"><img src="https://avatars.githubusercontent.com/u/259802500?v=4?s=100" width="100px;" alt="jordan"/><br /><sub><b>jordan</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=JordxnBN" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AJordxnBN" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=JordxnBN" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/DOCaCola"><img src="https://avatars.githubusercontent.com/u/2077396?v=4?s=100" width="100px;" alt="DOCaCola"/><br /><sub><b>DOCaCola</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/issues?q=author%3ADOCaCola" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=DOCaCola" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=DOCaCola" title="Documentation">📖</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/joeblack2k"><img src="https://avatars.githubusercontent.com/u/3456102?v=4?s=100" width="100px;" alt="JoeBlack2k"/><br /><sub><b>JoeBlack2k</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=joeblack2k" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Ajoeblack2k" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=joeblack2k" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ink-splatters"><img src="https://avatars.githubusercontent.com/u/2706884?v=4?s=100" width="100px;" alt="Peter A."/><br /><sub><b>Peter A.</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ink-splatters" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=ink-splatters" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Aink-splatters" title="Bug reports">🐛</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/xCatalitY"><img src="https://avatars.githubusercontent.com/u/74815681?v=4?s=100" width="100px;" alt="Hannah Markfort"/><br /><sub><b>Hannah Markfort</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=xCatalitY" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=xCatalitY" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mws-weekend-projects"><img src="https://avatars.githubusercontent.com/u/255546191?v=4?s=100" width="100px;" alt="mws-weekend-projects"/><br /><sub><b>mws-weekend-projects</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mws-weekend-projects" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mws-weekend-projects" title="Tests">⚠️</a></td>
-    </tr>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="http://hextra.us"><img src="https://avatars.githubusercontent.com/u/88663250?v=4?s=100" width="100px;" alt="Quang Do"/><br /><sub><b>Quang Do</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=quangdo126" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=quangdo126" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aaiyer"><img src="https://avatars.githubusercontent.com/u/426027?v=4?s=100" width="100px;" alt="Anand Aiyer"/><br /><sub><b>Anand Aiyer</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/issues?q=author%3Aaaiyer" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aaiyer" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aaiyer" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/defin85"><img src="https://avatars.githubusercontent.com/u/31535407?v=4?s=100" width="100px;" alt="defin85"/><br /><sub><b>defin85</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=defin85" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Adefin85" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=defin85" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://linktree.huzky.dev/"><img src="https://avatars.githubusercontent.com/u/194083329?v=4?s=100" width="100px;" alt="Jacky Fong"/><br /><sub><b>Jacky Fong</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=huzky-v" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Ahuzky-v" title="Bug reports">🐛</a> <a href="#question-huzky-v" title="Answering Questions">💬</a> <a href="#maintenance-huzky-v" title="Maintenance">🚧</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/flokosti96"><img src="https://avatars.githubusercontent.com/u/144428350?v=4?s=100" width="100px;" alt="flokosti96"/><br /><sub><b>flokosti96</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=flokosti96" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=flokosti96" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/minpeter"><img src="https://avatars.githubusercontent.com/u/62207008?v=4?s=100" width="100px;" alt="Woonggi Min"/><br /><sub><b>Woonggi Min</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=minpeter" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=minpeter" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://www.linkedin.com/in/yigitkonur/"><img src="https://avatars.githubusercontent.com/u/9989650?v=4?s=100" width="100px;" alt="Yigit Konur"/><br /><sub><b>Yigit Konur</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/issues?q=author%3Ayigitkonur" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=yigitkonur" title="Code">💻</a></td>
-    </tr>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Daltonganger"><img src="https://avatars.githubusercontent.com/u/17501732?v=4?s=100" width="100px;" alt="Ruben"/><br /><sub><b>Ruben</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Daltonganger" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Daltonganger" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3ADaltonganger" title="Bug reports">🐛</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/L1st3r"><img src="https://avatars.githubusercontent.com/u/336408?v=4?s=100" width="100px;" alt="Steve Santacroce"/><br /><sub><b>Steve Santacroce</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=L1st3r" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=L1st3r" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AL1st3r" title="Bug reports">🐛</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mhughdo"><img src="https://avatars.githubusercontent.com/u/15611134?v=4?s=100" width="100px;" alt="Hugh Do"/><br /><sub><b>Hugh Do</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mhughdo" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mhughdo" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/salwinh"><img src="https://avatars.githubusercontent.com/u/6965142?v=4?s=100" width="100px;" alt="Hubert Salwin"/><br /><sub><b>Hubert Salwin</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=salwinh" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=salwinh" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Daeroni"><img src="https://avatars.githubusercontent.com/u/1648961?v=4?s=100" width="100px;" alt="Teemu Koskinen"/><br /><sub><b>Teemu Koskinen</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Daeroni" title="Documentation">📖</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="http://felixypz.me"><img src="https://avatars.githubusercontent.com/u/151984457?v=4?s=100" width="100px;" alt="Yu Peng Zheng"/><br /><sub><b>Yu Peng Zheng</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Felix201209" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Felix201209" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/embogomolov"><img src="https://avatars.githubusercontent.com/u/185256086?v=4?s=100" width="100px;" alt="embogomolov"/><br /><sub><b>embogomolov</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=embogomolov" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=embogomolov" title="Tests">⚠️</a></td>
-    </tr>
-  </tbody>
-</table>
-
-<!-- markdownlint-restore -->
-<!-- prettier-ignore-end -->
-
-<!-- ALL-CONTRIBUTORS-LIST:END -->
-
-This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
+- 백엔드: `2455`
+- 프론트 개발 서버: `5173`

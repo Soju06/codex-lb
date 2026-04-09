@@ -21,6 +21,30 @@ if TYPE_CHECKING:
 RING_HEARTBEAT_INTERVAL_SECONDS = 30
 RING_STALE_THRESHOLD_SECONDS = 120
 RING_STALE_GRACE_SECONDS = RING_HEARTBEAT_INTERVAL_SECONDS + 5
+_SQLITE_URL_PREFIXES = ("sqlite+aiosqlite:///", "sqlite:///")
+
+
+def dynamic_bridge_ring_membership_enabled(settings: object) -> bool:
+    bridge_enabled = getattr(settings, "http_responses_session_bridge_enabled", True)
+    if isinstance(bridge_enabled, bool) and not bridge_enabled:
+        return False
+
+    database_url = getattr(settings, "database_url", None)
+    if isinstance(database_url, str) and database_url.startswith(_SQLITE_URL_PREFIXES):
+        return False
+
+    ring_value = getattr(settings, "http_responses_session_bridge_instance_ring", None)
+    if isinstance(ring_value, list):
+        normalized = []
+        for entry in ring_value:
+            if isinstance(entry, str):
+                stripped = entry.strip()
+                if stripped:
+                    normalized.append(stripped)
+        if normalized:
+            return False
+
+    return True
 
 
 class RingMembershipService:

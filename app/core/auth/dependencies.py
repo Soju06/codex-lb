@@ -9,9 +9,10 @@ from starlette.requests import HTTPConnection
 
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.clients.usage import UsageFetchError, fetch_usage
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
-from app.core.request_locality import is_local_request
+from app.core.request_locality import is_host_os_request, is_local_request
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -22,6 +23,23 @@ from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_das
 logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
+
+
+def _insecure_allow_remote_no_auth(settings: object) -> bool:
+    return bool(getattr(settings, "insecure_allow_remote_no_auth", False))
+
+
+def insecure_remote_no_auth_allowed(
+    request: HTTPConnection | None,
+    *,
+    settings: object | None = None,
+) -> bool:
+    effective_settings = settings or get_settings()
+    if not _insecure_allow_remote_no_auth(effective_settings):
+        return False
+    if request is None:
+        return False
+    return is_host_os_request(request)
 
 
 # --- Error format markers ---
@@ -51,6 +69,8 @@ async def validate_proxy_api_key_authorization(
     *,
     request: HTTPConnection | None = None,
 ) -> ApiKeyData | None:
+    if insecure_remote_no_auth_allowed(request):
+        return None
     settings = await get_settings_cache().get()
     if not settings.api_key_auth_enabled:
         if request is not None and not is_local_request(request):
@@ -111,9 +131,15 @@ async def validate_usage_api_key(
 
 
 async def validate_dashboard_session(request: Request) -> None:
-    settings = await get_settings_cache().get()
-    password_required = bool(settings.password_hash)
-    requires_auth = password_required or settings.totp_required_on_login
+    dashboard_settings = await get_settings_cache().get()
+    password_required = bool(dashboard_settings.password_hash)
+    requires_auth = password_required or dashboard_settings.totp_required_on_login
+    if (
+        insecure_remote_no_auth_allowed(request)
+        and not requires_auth
+        and not request.url.path.startswith("/api/dashboard-auth")
+    ):
+        return
     if not requires_auth:
         if not is_local_request(request):
             raise DashboardAuthError(
@@ -122,7 +148,7 @@ async def validate_dashboard_session(request: Request) -> None:
             )
         return
 
-    if not password_required and settings.totp_required_on_login:
+    if not password_required and dashboard_settings.totp_required_on_login:
         logger.warning(
             "dashboard_auth_migration_inconsistency password_hash is NULL"
             " while totp_required_on_login=true metric=dashboard_auth_migration_inconsistency"
@@ -134,7 +160,7 @@ async def validate_dashboard_session(request: Request) -> None:
         raise DashboardAuthError("Authentication is required")
     if password_required and not state.password_verified:
         raise DashboardAuthError("Authentication is required")
-    if settings.totp_required_on_login and not state.totp_verified:
+    if dashboard_settings.totp_required_on_login and not state.totp_verified:
         raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
 
 

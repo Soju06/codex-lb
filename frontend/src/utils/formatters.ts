@@ -65,6 +65,8 @@ export function formatRouteFamilyLabel(value: string): string {
       return "Fallback HTTP /v1/models";
     case "public_responses_http":
       return "Fallback stateless HTTP /v1/responses";
+    case "backend_codex_http":
+      return "Fallback HTTP /backend-api/codex";
     default:
       return formatSlug(value);
   }

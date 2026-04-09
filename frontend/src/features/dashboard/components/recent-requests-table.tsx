@@ -300,6 +300,8 @@ export function RecentRequestsTable({
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Status" value={selectedRequest ? (REQUEST_STATUS_LABELS[selectedRequest.status] ?? selectedRequest.status) : "—"} />
                 <RequestDetailField label="Model" value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
+                <RequestDetailField label="Requested Tier" value={selectedRequest?.requestedServiceTier ?? "—"} />
+                <RequestDetailField label="Actual Tier" value={selectedRequest?.actualServiceTier ?? "—"} />
                 <RequestDetailField label="Provider" value={selectedRequest?.providerKind ? formatProviderLabel(selectedRequest.providerKind) : "—"} />
                 <RequestDetailField label="Routing Subject" value={selectedRequest?.routingSubjectId ?? "—"} mono />
                 <RequestDetailField label="Route Class" value={formatRouteClassLabel(selectedRequest?.routeClass)} />

@@ -15,6 +15,8 @@ from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickyRoutingTarget
 from app.modules.upstream_identities.types import (
+    BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+    CHATGPT_PRIVATE_ROUTE_CLASS,
     OPENAI_PLATFORM_PROVIDER_KIND,
     OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
     PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
@@ -91,7 +93,7 @@ def _platform_identity(identity_id: str) -> OpenAIPlatformIdentity:
         api_key_encrypted=TokenEncryptor().encrypt(f"sk-{identity_id}"),
         organization_id="org_test",
         project_id="proj_test",
-        eligible_route_families="public_models_http,public_responses_http",
+        eligible_route_families="public_models_http,public_responses_http,backend_codex_http",
         status=AccountStatus.ACTIVE,
         last_validated_at=None,
         last_auth_failure_reason=None,
@@ -155,6 +157,42 @@ def test_derive_request_capabilities_marks_session_headers_as_continuity(header_
     capabilities = proxy_api_module._derive_request_capabilities(
         route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
         route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+        transport="http",
+        model="gpt-5.1",
+        payload=_responses_request(),
+        headers={header_name: "sid_1"},
+    )
+
+    assert capabilities.continuity_param == header_name
+
+
+@pytest.mark.parametrize(
+    "header_name",
+    ["session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"],
+)
+def test_derive_request_capabilities_marks_backend_codex_session_headers_as_continuity(
+    header_name: str,
+) -> None:
+    capabilities = proxy_api_module._derive_request_capabilities(
+        route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+        route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+        transport="http",
+        model="gpt-5.1",
+        payload=_responses_request(),
+        headers={header_name: "sid_1"},
+    )
+
+    assert capabilities.continuity_param == header_name
+
+
+@pytest.mark.parametrize(
+    "header_name",
+    ["session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"],
+)
+def test_derive_request_capabilities_marks_backend_codex_header_continuity(header_name: str) -> None:
+    capabilities = proxy_api_module._derive_request_capabilities(
+        route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+        route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
         transport="http",
         model="gpt-5.1",
         payload=_responses_request(),
@@ -292,6 +330,51 @@ async def test_select_routing_subject_uses_platform_for_models_when_public_http_
 
 
 @pytest.mark.asyncio
+async def test_select_routing_subject_uses_platform_for_backend_codex_http_when_usage_is_drained(
+    monkeypatch,
+) -> None:
+    service = proxy_service_module.ProxyService(lambda: _repo_factory())
+    identity = proxy_service_module._SelectedPlatformIdentity(
+        id="plat_1",
+        api_key_encrypted=TokenEncryptor().encrypt("sk-platform"),
+        organization_id="org_test",
+        project_id="proj_test",
+    )
+
+    async def fake_has_chatgpt_candidates(model: str | None = None, *, account_ids=None) -> bool:
+        del model, account_ids
+        return True
+
+    async def fake_should_fallback(*, model: str | None, account_ids=None) -> bool:
+        del model, account_ids
+        return True
+
+    async def fake_select_platform_identity(route_family: str, **kwargs):
+        del kwargs
+        assert route_family == BACKEND_CODEX_HTTP_ROUTE_FAMILY
+        return identity
+
+    monkeypatch.setattr(service, "has_chatgpt_candidates", fake_has_chatgpt_candidates)
+    monkeypatch.setattr(service, "should_fallback_to_platform_for_usage_drain", fake_should_fallback)
+    monkeypatch.setattr(service, "select_platform_identity", fake_select_platform_identity)
+
+    result = await service.select_routing_subject(
+        capabilities=proxy_service_module.RequestCapabilities(
+            route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+            route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+            transport="http",
+            model="gpt-5.1",
+        )
+    )
+
+    assert result.is_platform is True
+    selected = result.selected
+    assert isinstance(selected, proxy_service_module.SelectedPlatformSubject)
+    assert selected.provider_kind == OPENAI_PLATFORM_PROVIDER_KIND
+    assert selected.routing_subject_id == "plat_1"
+
+
+@pytest.mark.asyncio
 async def test_select_routing_subject_falls_back_to_chatgpt_for_continuity(monkeypatch) -> None:
     service = proxy_service_module.ProxyService(lambda: _repo_factory())
 
@@ -397,6 +480,43 @@ async def test_select_routing_subject_does_not_use_platform_when_only_platform_e
 
 
 @pytest.mark.asyncio
+async def test_select_routing_subject_requires_chatgpt_for_backend_codex_http_when_only_platform_exists(
+    monkeypatch,
+) -> None:
+    service = proxy_service_module.ProxyService(lambda: _repo_factory())
+
+    async def fake_has_chatgpt_candidates(model: str | None = None, *, account_ids=None) -> bool:
+        del model, account_ids
+        return False
+
+    async def fake_select_platform_identity(route_family: str, **kwargs):
+        del kwargs
+        assert route_family == BACKEND_CODEX_HTTP_ROUTE_FAMILY
+        return proxy_service_module._SelectedPlatformIdentity(
+            id="plat_1",
+            api_key_encrypted=TokenEncryptor().encrypt("sk-platform"),
+            organization_id=None,
+            project_id=None,
+        )
+
+    monkeypatch.setattr(service, "has_chatgpt_candidates", fake_has_chatgpt_candidates)
+    monkeypatch.setattr(service, "select_platform_identity", fake_select_platform_identity)
+
+    result = await service.select_routing_subject(
+        capabilities=proxy_service_module.RequestCapabilities(
+            route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+            route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+            transport="http",
+            model="gpt-5.1",
+        )
+    )
+
+    assert result.selected is None
+    assert result.failure is not None
+    assert result.failure.error_code == "provider_fallback_requires_chatgpt"
+
+
+@pytest.mark.asyncio
 async def test_load_balancer_select_routing_subject_uses_platform_prompt_cache_sticky() -> None:
     sticky_repo = DummyStickyRepository(
         StickyRoutingTarget(
@@ -447,7 +567,7 @@ async def test_load_balancer_select_routing_subject_discards_stale_platform_stic
 
 
 @pytest.mark.asyncio
-async def test_platform_only_public_route_rejection_respects_api_key_account_scope() -> None:
+async def test_platform_only_route_rejection_respects_api_key_account_scope() -> None:
     seen: dict[str, object] = {}
 
     class DummyService:
@@ -469,7 +589,7 @@ async def test_platform_only_public_route_rejection_respects_api_key_account_sco
         account_assignment_scope_enabled=True,
         assigned_account_ids=["acc_scoped"],
     )
-    result = await proxy_api_module._should_reject_platform_only_public_route(
+    result = await proxy_api_module._should_reject_platform_only_route(
         context=cast(Any, SimpleNamespace(service=DummyService())),
         api_key=cast(Any, api_key),
         route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,

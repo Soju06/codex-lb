@@ -43,6 +43,7 @@ from app.modules.proxy.ring_membership import (
     RING_STALE_GRACE_SECONDS,
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
+    dynamic_bridge_ring_membership_enabled,
 )
 from app.modules.request_logs import api as request_logs_api
 from app.modules.settings import api as settings_api
@@ -160,16 +161,17 @@ async def lifespan(app: FastAPI):
     ring_service: RingMembershipService | None = None
     instance_id: str | None = None
     heartbeat_task: asyncio.Task[None] | None = None
-    try:
-        ring_service = RingMembershipService(SessionLocal)
-        instance_id = settings.http_responses_session_bridge_instance_id
-        await asyncio.wait_for(ring_service.register(instance_id), timeout=5.0)
-        logger.info("Registered in bridge ring", extra={"instance_id": instance_id})
-        heartbeat_task = asyncio.create_task(_heartbeat_only(ring_service, instance_id))
-    except Exception:
-        logger.warning("Ring registration failed, retrying in background", exc_info=True)
-        if ring_service is not None and instance_id is not None:
-            heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
+    if dynamic_bridge_ring_membership_enabled(settings):
+        try:
+            ring_service = RingMembershipService(SessionLocal)
+            instance_id = settings.http_responses_session_bridge_instance_id
+            await asyncio.wait_for(ring_service.register(instance_id), timeout=5.0)
+            logger.info("Registered in bridge ring", extra={"instance_id": instance_id})
+            heartbeat_task = asyncio.create_task(_heartbeat_only(ring_service, instance_id))
+        except Exception:
+            logger.warning("Ring registration failed, retrying in background", exc_info=True)
+            if ring_service is not None and instance_id is not None:
+                heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
 
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (

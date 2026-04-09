@@ -124,7 +124,7 @@ from app.modules.proxy.request_policy import (
     openai_validation_error,
     validate_model_access,
 )
-from app.modules.proxy.ring_membership import RingMembershipService
+from app.modules.proxy.ring_membership import RingMembershipService, dynamic_bridge_ring_membership_enabled
 from app.modules.proxy.types import (
     AdditionalRateLimitData,
     RateLimitStatusDetailsData,
@@ -132,6 +132,7 @@ from app.modules.proxy.types import (
     RateLimitWindowSnapshotData,
 )
 from app.modules.upstream_identities.types import (
+    BACKEND_CODEX_HTTP_ROUTE_FAMILY,
     CHATGPT_WEB_PROVIDER_KIND,
     OPENAI_PLATFORM_PROVIDER_KIND,
     OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
@@ -258,11 +259,14 @@ class ProxyService:
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
+        settings = get_settings()
         self._provider_adapters: dict[str, ProviderAdapter] = {
             CHATGPT_WEB_PROVIDER_KIND: ChatGPTWebProviderAdapter(repo_factory),
             OPENAI_PLATFORM_PROVIDER_KIND: OpenAIPlatformProviderAdapter(),
         }
-        self._ring_membership = RingMembershipService(SessionLocal)
+        self._ring_membership = (
+            RingMembershipService(SessionLocal) if dynamic_bridge_ring_membership_enabled(settings) else None
+        )
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
@@ -354,8 +358,12 @@ class ProxyService:
             self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND),
         )
 
-        if capabilities.route_family == PUBLIC_MODELS_HTTP_ROUTE_FAMILY:
-            identity = await self.select_platform_identity(PUBLIC_MODELS_HTTP_ROUTE_FAMILY)
+        is_models_route = capabilities.route_family == PUBLIC_MODELS_HTTP_ROUTE_FAMILY or (
+            capabilities.route_family == BACKEND_CODEX_HTTP_ROUTE_FAMILY and capabilities.model is None
+        )
+
+        if is_models_route:
+            identity = await self.select_platform_identity(capabilities.route_family)
             if has_chatgpt:
                 should_fallback = await self.should_fallback_to_platform_for_usage_drain(
                     model=None,
@@ -404,7 +412,7 @@ class ProxyService:
                         routing_subject_id="chatgpt_web_pool",
                     )
                 )
-            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+            identity = await self.select_platform_identity(capabilities.route_family)
             if identity is None:
                 return ProviderSelectionResult()
             decision = platform_adapter.check_capabilities(
@@ -422,7 +430,7 @@ class ProxyService:
                         routing_subject_id="chatgpt_web_pool",
                     )
                 )
-            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+            identity = await self.select_platform_identity(capabilities.route_family)
             if identity is None:
                 return ProviderSelectionResult()
             decision = platform_adapter.check_capabilities(
@@ -431,7 +439,7 @@ class ProxyService:
             )
             return self._provider_selection_failure(decision, capabilities)
 
-        identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+        identity = await self.select_platform_identity(capabilities.route_family)
         if has_chatgpt:
             should_fallback = await self.should_fallback_to_platform_for_usage_drain(
                 model=capabilities.model,
@@ -509,9 +517,11 @@ class ProxyService:
         api_key: ApiKeyData | None,
         *,
         identity: _SelectedPlatformIdentity | None = None,
+        route_family: str = PUBLIC_MODELS_HTTP_ROUTE_FAMILY,
+        route_class: str = OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
     ) -> PlatformModelsResponse | None:
         if identity is None:
-            identity = await self.select_platform_identity(PUBLIC_MODELS_HTTP_ROUTE_FAMILY)
+            identity = await self.select_platform_identity(route_family)
         if identity is None:
             return None
         adapter = cast(OpenAIPlatformProviderAdapter, self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND))
@@ -533,7 +543,7 @@ class ProxyService:
                 status="error",
                 error_code=_platform_error_code(exc.payload),
                 error_message=_platform_error_message(exc.payload),
-                route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+                route_class=route_class,
                 rejection_reason="platform_models_request_failed",
                 transport=_REQUEST_TRANSPORT_HTTP,
             )
@@ -547,7 +557,7 @@ class ProxyService:
             model="",
             latency_ms=int((time.monotonic() - start) * 1000),
             status="success",
-            route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+            route_class=route_class,
             upstream_request_id=result.upstream_request_id,
             transport=_REQUEST_TRANSPORT_HTTP,
         )
@@ -562,9 +572,10 @@ class ProxyService:
         payload: ResponsesRequest,
         api_key: ApiKeyData | None,
         identity: _SelectedPlatformIdentity | None = None,
+        route_family: str = PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
     ) -> tuple[_SelectedPlatformIdentity | None, PlatformStreamResponse | None]:
         if identity is None:
-            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+            identity = await self.select_platform_identity(route_family)
         if identity is None:
             return None, None
         adapter = cast(OpenAIPlatformProviderAdapter, self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND))
@@ -588,9 +599,10 @@ class ProxyService:
         payload: ResponsesRequest,
         api_key: ApiKeyData | None,
         identity: _SelectedPlatformIdentity | None = None,
+        route_family: str = PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
     ) -> tuple[_SelectedPlatformIdentity | None, PlatformResponseResult | None]:
         if identity is None:
-            identity = await self.select_platform_identity(PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY)
+            identity = await self.select_platform_identity(route_family)
         if identity is None:
             return None, None
         adapter = cast(OpenAIPlatformProviderAdapter, self._provider_adapter(OPENAI_PLATFORM_PROVIDER_KIND))
@@ -979,7 +991,7 @@ class ProxyService:
                         exc_info=True,
                     )
                     _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
-                request_service_tier = _service_tier_from_compact_payload(payload)
+                request_service_tier = _normalize_service_tier_value(payload.service_tier)
 
                 safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
                 transient_retries = 0
@@ -1397,141 +1409,151 @@ class ProxyService:
                 bytes_data = message.get("bytes")
                 request_state: _WebSocketRequestState | None = None
                 request_state_registered = False
+                response_create_gate_acquired = False
                 request_affinity = _AffinityPolicy()
                 payload: dict[str, JsonValue] | None = None
 
-                if text_data is not None:
-                    payload = _parse_websocket_payload(text_data)
-                    if payload is not None and _is_websocket_response_create(payload):
-                        try:
-                            prepared_request = await self._prepare_websocket_response_create_request(
-                                payload,
-                                headers=headers,
-                                codex_session_affinity=codex_session_affinity,
-                                openai_cache_affinity=openai_cache_affinity,
-                                sticky_threads_enabled=sticky_threads_enabled,
-                                openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
-                                api_key=api_key,
-                            )
-                            request_state = prepared_request.request_state
-                            request_affinity = prepared_request.affinity_policy
-                            text_data = prepared_request.text_data
-                        except AppError as exc:
-                            async with client_send_lock:
-                                await websocket.send_text(
-                                    _serialize_websocket_error_event(_app_error_to_websocket_event(exc))
-                                )
-                            continue
-                        except ClientPayloadError as exc:
-                            async with client_send_lock:
-                                await websocket.send_text(
-                                    _serialize_websocket_error_event(
-                                        _wrapped_websocket_error_event(400, openai_invalid_payload_error(exc.param))
-                                    )
-                                )
-                            continue
-                        except ValidationError as exc:
-                            async with client_send_lock:
-                                await websocket.send_text(
-                                    _serialize_websocket_error_event(
-                                        _wrapped_websocket_error_event(400, openai_validation_error(exc))
-                                    )
-                                )
-                            continue
-
-                if (
-                    request_state is not None
-                    and upstream_control is not None
-                    and upstream_control.reconnect_requested
-                    and upstream_reader is not None
-                ):
-                    await upstream_reader
-                    upstream_reader = None
-                    upstream_control = None
-                    if upstream is not None:
-                        try:
-                            await upstream.close()
-                        except Exception:
-                            logger.debug("Failed to close upstream websocket", exc_info=True)
-                    upstream = None
-                    account = None
-
-                if request_state is not None:
-                    await response_create_gate.acquire()
-                    async with pending_lock:
-                        pending_requests.append(request_state)
-                    request_state_registered = True
-
-                if upstream is None:
-                    if text_data is not None and payload is None:
-                        async with client_send_lock:
-                            await websocket.send_text(
-                                _serialize_websocket_error_event(
-                                    _wrapped_websocket_error_event(400, openai_invalid_payload_error())
-                                )
-                            )
-                        continue
-                    if request_state is None:
-                        async with client_send_lock:
-                            await websocket.send_text(
-                                _serialize_websocket_error_event(
-                                    _wrapped_websocket_error_event(
-                                        400,
-                                        openai_error(
-                                            "invalid_request_error",
-                                            "WebSocket connection has no active upstream session",
-                                            error_type="invalid_request_error",
-                                        ),
-                                    )
-                                )
-                            )
-                        continue
-                    connect_headers = _headers_with_turn_state(filtered_headers, upstream_turn_state)
-                    account, upstream = await self._connect_proxy_websocket(
-                        connect_headers,
-                        sticky_key=request_affinity.key,
-                        sticky_kind=request_affinity.kind,
-                        reallocate_sticky=request_affinity.reallocate_sticky,
-                        sticky_max_age_seconds=request_affinity.max_age_seconds,
-                        prefer_earlier_reset=prefer_earlier_reset,
-                        routing_strategy=routing_strategy,
-                        model=request_state.model,
-                        request_state=request_state,
-                        api_key=api_key,
-                        client_send_lock=client_send_lock,
-                        websocket=websocket,
-                    )
-                    if upstream is None or account is None:
-                        if request_state_registered:
-                            async with pending_lock:
-                                if request_state in pending_requests:
-                                    pending_requests.remove(request_state)
-                            _release_websocket_response_create_gate(request_state, response_create_gate)
-                        continue
-                    upstream_turn_state = _upstream_turn_state_from_socket(upstream) or upstream_turn_state
-                    upstream_control = _WebSocketUpstreamControl()
-                    upstream_reader = asyncio.create_task(
-                        self._relay_upstream_websocket_messages(
-                            websocket,
-                            upstream,
-                            account=account,
-                            account_id_value=account.id,
-                            pending_requests=pending_requests,
-                            pending_lock=pending_lock,
-                            client_send_lock=client_send_lock,
-                            api_key=api_key,
-                            upstream_control=upstream_control,
-                            response_create_gate=response_create_gate,
-                            proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
-                            stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
-                        )
-                    )
-
                 try:
+                    if text_data is not None:
+                        payload = _parse_websocket_payload(text_data)
+                        if payload is not None and _is_websocket_response_create(payload):
+                            try:
+                                prepared_request = await self._prepare_websocket_response_create_request(
+                                    payload,
+                                    headers=headers,
+                                    codex_session_affinity=codex_session_affinity,
+                                    openai_cache_affinity=openai_cache_affinity,
+                                    sticky_threads_enabled=sticky_threads_enabled,
+                                    openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+                                    api_key=api_key,
+                                )
+                                request_state = prepared_request.request_state
+                                request_affinity = prepared_request.affinity_policy
+                                text_data = prepared_request.text_data
+                            except AppError as exc:
+                                async with client_send_lock:
+                                    await websocket.send_text(
+                                        _serialize_websocket_error_event(_app_error_to_websocket_event(exc))
+                                    )
+                                continue
+                            except ClientPayloadError as exc:
+                                async with client_send_lock:
+                                    await websocket.send_text(
+                                        _serialize_websocket_error_event(
+                                            _wrapped_websocket_error_event(400, openai_invalid_payload_error(exc.param))
+                                        )
+                                    )
+                                continue
+                            except ValidationError as exc:
+                                async with client_send_lock:
+                                    await websocket.send_text(
+                                        _serialize_websocket_error_event(
+                                            _wrapped_websocket_error_event(400, openai_validation_error(exc))
+                                        )
+                                    )
+                                continue
+
+                    if (
+                        request_state is not None
+                        and upstream_control is not None
+                        and upstream_control.reconnect_requested
+                        and upstream_reader is not None
+                    ):
+                        await upstream_reader
+                        upstream_reader = None
+                        upstream_control = None
+                        if upstream is not None:
+                            try:
+                                await upstream.close()
+                            except Exception:
+                                logger.debug("Failed to close upstream websocket", exc_info=True)
+                        upstream = None
+                        account = None
+
+                    if request_state is not None:
+                        await response_create_gate.acquire()
+                        response_create_gate_acquired = True
+                        async with pending_lock:
+                            pending_requests.append(request_state)
+                        request_state_registered = True
+
+                    if upstream is None:
+                        if text_data is not None and payload is None:
+                            async with client_send_lock:
+                                await websocket.send_text(
+                                    _serialize_websocket_error_event(
+                                        _wrapped_websocket_error_event(400, openai_invalid_payload_error())
+                                    )
+                                )
+                            continue
+                        if request_state is None:
+                            async with client_send_lock:
+                                await websocket.send_text(
+                                    _serialize_websocket_error_event(
+                                        _wrapped_websocket_error_event(
+                                            400,
+                                            openai_error(
+                                                "invalid_request_error",
+                                                "WebSocket connection has no active upstream session",
+                                                error_type="invalid_request_error",
+                                            ),
+                                        )
+                                    )
+                                )
+                            continue
+                        connect_headers = _headers_with_turn_state(filtered_headers, upstream_turn_state)
+                        account, upstream = await self._connect_proxy_websocket(
+                            connect_headers,
+                            sticky_key=request_affinity.key,
+                            sticky_kind=request_affinity.kind,
+                            reallocate_sticky=request_affinity.reallocate_sticky,
+                            sticky_max_age_seconds=request_affinity.max_age_seconds,
+                            prefer_earlier_reset=prefer_earlier_reset,
+                            routing_strategy=routing_strategy,
+                            model=request_state.model,
+                            request_state=request_state,
+                            api_key=api_key,
+                            client_send_lock=client_send_lock,
+                            websocket=websocket,
+                        )
+                        if upstream is None or account is None:
+                            if request_state_registered:
+                                async with pending_lock:
+                                    if request_state in pending_requests:
+                                        pending_requests.remove(request_state)
+                                _release_websocket_response_create_gate(request_state, response_create_gate)
+                            continue
+                        upstream_turn_state = _upstream_turn_state_from_socket(upstream) or upstream_turn_state
+                        upstream_control = _WebSocketUpstreamControl()
+                        upstream_reader = asyncio.create_task(
+                            self._relay_upstream_websocket_messages(
+                                websocket,
+                                upstream,
+                                account=account,
+                                account_id_value=account.id,
+                                pending_requests=pending_requests,
+                                pending_lock=pending_lock,
+                                client_send_lock=client_send_lock,
+                                api_key=api_key,
+                                upstream_control=upstream_control,
+                                response_create_gate=response_create_gate,
+                                proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                                stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                            )
+                        )
+
                     if text_data is not None:
                         await upstream.send_text(text_data)
                     elif bytes_data is not None:
                         await upstream.send_bytes(bytes_data)
+                except asyncio.CancelledError:
+                    if request_state is not None and not request_state_registered:
+                        await self._cleanup_unregistered_websocket_request(
+                            request_state,
+                            response_create_gate=response_create_gate,
+                            gate_acquired=response_create_gate_acquired,
+                        )
+                    raise
                 except Exception:
                     await self._fail_pending_websocket_requests(
                         account_id_value=account.id if account else None,
@@ -1671,6 +1693,9 @@ class ProxyService:
         request_log_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         upstream_payload = dict(payload.to_payload())
+        service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
+        if service_tier is not None:
+            upstream_payload["service_tier"] = service_tier
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
         if include_type_field:
@@ -2576,6 +2601,7 @@ class ProxyService:
                 request_state=request_state,
                 gate_acquired=gate_acquired,
                 request_enqueued=request_enqueued,
+                release_reservation=True,
             )
             raise
         except Exception as exc:
@@ -2701,7 +2727,7 @@ class ProxyService:
                             ),
                         )
                 session.last_used_at = time.monotonic()
-            except Exception:
+            except BaseException:
                 session.prewarmed = False
                 await self._cleanup_http_bridge_submit_interruption(
                     session,
@@ -2718,6 +2744,7 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         gate_acquired: bool,
         request_enqueued: bool,
+        release_reservation: bool = False,
     ) -> None:
         async with session.pending_lock:
             if request_enqueued and request_state in session.pending_requests:
@@ -2725,6 +2752,21 @@ class ProxyService:
             session.queued_request_count = max(0, session.queued_request_count - 1)
         if gate_acquired:
             _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        if release_reservation:
+            await self._release_websocket_reservation(request_state.api_key_reservation)
+            request_state.api_key_reservation = None
+
+    async def _cleanup_unregistered_websocket_request(
+        self,
+        request_state: _WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        gate_acquired: bool,
+    ) -> None:
+        if gate_acquired:
+            _release_websocket_response_create_gate(request_state, response_create_gate)
+        await self._release_websocket_reservation(request_state.api_key_reservation)
+        request_state.api_key_reservation = None
 
     async def _detach_http_bridge_request(
         self,
@@ -3638,10 +3680,23 @@ class ProxyService:
     ) -> None:
         if reservation is None:
             return
-        with anyio.CancelScope(shield=True):
-            async with self._repo_factory() as repos:
-                service = ApiKeysService(repos.api_keys)
-                await service.release_usage_reservation(reservation.reservation_id)
+        try:
+            with anyio.CancelScope(shield=True):
+                async with self._repo_factory() as repos:
+                    service = ApiKeysService(repos.api_keys)
+                    await service.release_usage_reservation(reservation.reservation_id)
+        except asyncio.CancelledError:
+            logger.warning(
+                "Failed to release websocket API key reservation reservation_id=%s",
+                reservation.reservation_id,
+                exc_info=True,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to release websocket API key reservation reservation_id=%s",
+                reservation.reservation_id,
+                exc_info=True,
+            )
 
     async def _settle_compact_api_key_usage(
         self,
@@ -3820,6 +3875,7 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         start = time.monotonic()
+        requested_service_tier = _normalize_service_tier_value(payload.service_tier)
         base_settings = get_settings()
         settings = await get_settings_cache().get()
         deadline = start + base_settings.proxy_request_budget_seconds
@@ -3873,7 +3929,7 @@ class ProxyService:
                         error_code="upstream_request_timeout",
                         error_message="Proxy request budget exhausted",
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                        service_tier=payload.service_tier,
+                        service_tier=requested_service_tier,
                         transport=request_transport,
                     )
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -3907,7 +3963,7 @@ class ProxyService:
                             error_code="upstream_request_timeout",
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                            service_tier=payload.service_tier,
+                            service_tier=requested_service_tier,
                             transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -3947,8 +4003,8 @@ class ProxyService:
                         error_message=no_accounts_msg,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
-                        service_tier=payload.service_tier,
-                        requested_service_tier=payload.service_tier,
+                        service_tier=requested_service_tier,
+                        requested_service_tier=requested_service_tier,
                     )
                     return
 
@@ -3972,7 +4028,7 @@ class ProxyService:
                             error_code="upstream_request_timeout",
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                            service_tier=payload.service_tier,
+                            service_tier=requested_service_tier,
                             transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -3997,7 +4053,7 @@ class ProxyService:
                             error_code="upstream_unavailable",
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                            service_tier=payload.service_tier,
+                            service_tier=requested_service_tier,
                             transport=request_transport,
                         )
                         event = response_failed_event(
@@ -4027,7 +4083,7 @@ class ProxyService:
                             error_code="upstream_request_timeout",
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                            service_tier=payload.service_tier,
+                            service_tier=requested_service_tier,
                             transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -4179,7 +4235,7 @@ class ProxyService:
                                 error_code="upstream_request_timeout",
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                                service_tier=payload.service_tier,
+                                service_tier=requested_service_tier,
                                 transport=request_transport,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -4212,7 +4268,7 @@ class ProxyService:
                                 error_code="upstream_unavailable",
                                 error_message=message,
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                                service_tier=payload.service_tier,
+                                service_tier=requested_service_tier,
                                 transport=request_transport,
                             )
                             event = response_failed_event(
@@ -4241,7 +4297,7 @@ class ProxyService:
                                 error_code="upstream_request_timeout",
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                                service_tier=payload.service_tier,
+                                service_tier=requested_service_tier,
                                 transport=request_transport,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -4343,8 +4399,8 @@ class ProxyService:
                     error_message=retries_exhausted_msg,
                     reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                     transport=request_transport,
-                    service_tier=payload.service_tier,
-                    requested_service_tier=payload.service_tier,
+                    service_tier=requested_service_tier,
+                    requested_service_tier=requested_service_tier,
                 )
         finally:
             if not settled and api_key is not None and api_key_reservation is not None:
@@ -4382,7 +4438,7 @@ class ProxyService:
         account_id_value = account.id
         adapter = cast(ChatGPTWebProviderAdapter, self._provider_adapter(CHATGPT_WEB_PROVIDER_KIND))
         model = payload.model
-        requested_service_tier = payload.service_tier
+        requested_service_tier = _normalize_service_tier_value(payload.service_tier)
         service_tier = requested_service_tier
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
@@ -5904,6 +5960,8 @@ async def _active_http_bridge_instance_ring(
     ring_membership: RingMembershipService | None,
 ) -> tuple[str, tuple[str, ...]]:
     instance_id, static_ring = _normalized_http_bridge_instance_ring(settings)
+    if not dynamic_bridge_ring_membership_enabled(settings):
+        return instance_id, static_ring
     if ring_membership is None:
         return instance_id, static_ring
     try:

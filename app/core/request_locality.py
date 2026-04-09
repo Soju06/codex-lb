@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import socket
+import struct
 from collections.abc import Mapping
+from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 from starlette.requests import HTTPConnection
@@ -136,9 +139,119 @@ def _trusted_proxy_networks() -> tuple[IPv4Network | IPv6Network, ...]:
     return parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
 
 
+def _request_socket_host(request: HTTPConnection) -> str | None:
+    return request.client.host if request.client else None
+
+
+def _single_host_network(host: str) -> IPv4Network | IPv6Network | None:
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return None
+    return ip_network(f"{address}/{address.max_prefixlen}", strict=False)
+
+
+def _read_default_ipv4_gateway() -> str | None:
+    try:
+        with open("/proc/net/route", encoding="utf-8") as route_file:
+            next(route_file, None)
+            for line in route_file:
+                fields = line.split()
+                if len(fields) < 4 or fields[1] != "00000000":
+                    continue
+                gateway = int(fields[2], 16).to_bytes(4, "little")
+                return str(ip_address(gateway))
+    except OSError:
+        return None
+    return None
+
+
+def _read_default_ipv4_interface() -> str | None:
+    try:
+        with open("/proc/net/route", encoding="utf-8") as route_file:
+            next(route_file, None)
+            for line in route_file:
+                fields = line.split()
+                if len(fields) < 4 or fields[1] != "00000000":
+                    continue
+                interface = fields[0].strip()
+                if interface:
+                    return interface
+    except OSError:
+        return None
+    return None
+
+
+def _read_interface_ipv4_network(interface: str) -> IPv4Network | None:
+    if not interface:
+        return None
+
+    name = interface.encode("utf-8")
+    if len(name) >= 16:
+        name = name[:15]
+    ifreq = struct.pack("256s", name)
+
+    try:
+        import fcntl
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            address_bytes = fcntl.ioctl(sock.fileno(), 0x8915, ifreq)[20:24]
+            netmask_bytes = fcntl.ioctl(sock.fileno(), 0x891B, ifreq)[20:24]
+    except (ImportError, OSError):
+        return None
+
+    address = socket.inet_ntoa(address_bytes)
+    netmask = socket.inet_ntoa(netmask_bytes)
+    try:
+        network = ip_network(f"{address}/{netmask}", strict=False)
+    except ValueError:
+        return None
+    return network if isinstance(network, IPv4Network) else None
+
+
+@lru_cache(maxsize=1)
+def _auto_detect_host_gateway_networks() -> tuple[IPv4Network | IPv6Network, ...]:
+    networks: list[IPv4Network | IPv6Network] = []
+
+    default_gateway = _read_default_ipv4_gateway()
+    if default_gateway is not None:
+        network = _single_host_network(default_gateway)
+        if network is not None:
+            networks.append(network)
+
+    default_interface = _read_default_ipv4_interface()
+    if default_interface is not None:
+        interface_network = _read_interface_ipv4_network(default_interface)
+        if interface_network is not None and interface_network not in networks:
+            networks.append(interface_network)
+
+    for hostname in ("host.containers.internal", "host.docker.internal"):
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+        except OSError:
+            continue
+        for info in infos:
+            candidate = info[4][0]
+            if not isinstance(candidate, str):
+                continue
+            network = _single_host_network(candidate)
+            if network is not None and network not in networks:
+                networks.append(network)
+
+    return tuple(networks)
+
+
+def _insecure_allow_remote_no_auth_host_networks() -> tuple[IPv4Network | IPv6Network, ...]:
+    settings = get_settings()
+    configured = settings.insecure_allow_remote_no_auth_host_cidrs
+    if configured:
+        return parse_trusted_proxy_networks(configured)
+    return _auto_detect_host_gateway_networks()
+
+
 def resolve_request_client_host(request: HTTPConnection) -> str | None:
     settings = get_settings()
-    socket_ip = request.client.host if request.client else None
+    socket_ip = _request_socket_host(request)
     return resolve_connection_client_ip(
         request.headers,
         socket_ip,
@@ -195,3 +308,23 @@ def is_local_request(request: HTTPConnection) -> bool:
             return is_local_host(host_name) and _has_forwarded_client_ip_hint(request.headers)
         return is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers)
     return address.is_loopback
+
+
+def is_host_os_request(request: HTTPConnection) -> bool:
+    if is_local_request(request):
+        return True
+
+    socket_host = _request_socket_host(request)
+    if not socket_host:
+        return False
+    try:
+        address = ip_address(socket_host)
+    except ValueError:
+        return False
+
+    host_name = _parse_host_header_hostname(request.headers.get("host"))
+    host_networks = _insecure_allow_remote_no_auth_host_networks()
+    if is_local_host(host_name) and _has_forwarded_client_ip_hint(request.headers):
+        return False
+
+    return any(address in network for network in host_networks)

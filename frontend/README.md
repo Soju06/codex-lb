@@ -1,40 +1,40 @@
-# Frontend (Bun + Vite + React + TypeScript + SWC)
+# 프론트엔드
 
-This frontend is built with Bun, Vite, React, TypeScript, and SWC.
+이 프론트엔드는 Bun, Vite, React, TypeScript, SWC를 사용합니다.
 
-## Prerequisites
+## 준비
 
-- Bun 1.3+
+- Bun 1.3 이상
 
-## Setup
+## 설치
 
 ```bash
 cd frontend
 bun install
 ```
 
-## Development
+## 개발 서버
 
 ```bash
 bun run dev
 ```
 
-Vite dev server runs on port `5173` by default and proxies API routes to FastAPI:
+기본 포트는 `5173`이며, 다음 경로를 FastAPI로 프록시합니다.
 
 - `/api/*`
 - `/v1/*`
 - `/backend-api/*`
 - `/health`
 
-## Build
+## 빌드
 
 ```bash
 bun run build
 ```
 
-Production assets are emitted to `../app/static`.
+빌드 결과물은 `../app/static` 에 생성됩니다.
 
-## Quality
+## 품질 검사
 
 ```bash
 bun run lint

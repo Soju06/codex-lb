@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -13,6 +14,7 @@ from app.modules.proxy.ring_membership import (
     RING_STALE_GRACE_SECONDS,
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
+    dynamic_bridge_ring_membership_enabled,
 )
 
 pytestmark = pytest.mark.unit
@@ -160,3 +162,33 @@ async def test_heartbeat_updates_timestamp(ring_service: RingMembershipService) 
         updated_hb = member2.last_heartbeat_at
 
     assert updated_hb > initial_hb
+
+
+def test_dynamic_bridge_ring_membership_disabled_for_sqlite() -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=True,
+        database_url="sqlite+aiosqlite:///./store.db",
+        http_responses_session_bridge_instance_ring=[],
+    )
+
+    assert dynamic_bridge_ring_membership_enabled(settings) is False
+
+
+def test_dynamic_bridge_ring_membership_disabled_for_static_ring() -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=True,
+        database_url="postgresql+asyncpg://example/db",
+        http_responses_session_bridge_instance_ring=["pod-a", "pod-b"],
+    )
+
+    assert dynamic_bridge_ring_membership_enabled(settings) is False
+
+
+def test_dynamic_bridge_ring_membership_enabled_for_non_sqlite_without_static_ring() -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=True,
+        database_url="postgresql+asyncpg://example/db",
+        http_responses_session_bridge_instance_ring=[],
+    )
+
+    assert dynamic_bridge_ring_membership_enabled(settings) is True

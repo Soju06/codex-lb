@@ -1,80 +1,84 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Iterator
+from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.fernet import Fernet
 
 import app.core.bootstrap as bootstrap_module
+from app.core.crypto import TokenEncryptor
 
 pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
-def _reset_bootstrap_state():
-    bootstrap_module._auto_generated_token = None
+def _reset_bootstrap_state() -> Iterator[None]:
+    bootstrap_module._encryptor = None
     yield
-    bootstrap_module._auto_generated_token = None
+    bootstrap_module._encryptor = None
 
 
 def _patch_settings(monkeypatch: pytest.MonkeyPatch, *, token: str | None) -> None:
     monkeypatch.setattr(
-        "app.core.config.settings.get_settings",
+        "app.core.bootstrap.get_settings",
         lambda: SimpleNamespace(dashboard_bootstrap_token=token),
     )
 
 
-def test_get_active_bootstrap_token_returns_env_var_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch_settings_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    password_hash: str | None,
+    bootstrap_token_encrypted: bytes | None,
+) -> None:
+    cache = SimpleNamespace(
+        get=AsyncMock(
+            return_value=SimpleNamespace(
+                password_hash=password_hash,
+                bootstrap_token_encrypted=bootstrap_token_encrypted,
+            )
+        )
+    )
+    monkeypatch.setattr("app.core.bootstrap.get_settings_cache", lambda: cache)
+
+
+@pytest.mark.asyncio
+async def test_get_active_bootstrap_token_returns_env_var_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_settings(monkeypatch, token="manual-token")
-    bootstrap_module._auto_generated_token = "auto-token"
+    _patch_settings_cache(monkeypatch, password_hash=None, bootstrap_token_encrypted=b"ignored")
 
-    assert bootstrap_module.get_active_bootstrap_token() == "manual-token"
+    assert await bootstrap_module.get_active_bootstrap_token() == "manual-token"
 
 
-def test_get_active_bootstrap_token_returns_auto_generated_when_no_env(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_get_active_bootstrap_token_returns_db_token_when_no_env(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_settings(monkeypatch, token=None)
-    bootstrap_module._auto_generated_token = "auto-token"
+    encryptor = TokenEncryptor(key=Fernet.generate_key())
+    bootstrap_module._encryptor = encryptor
+    encrypted = encryptor.encrypt("shared-auto-token")
+    _patch_settings_cache(monkeypatch, password_hash=None, bootstrap_token_encrypted=encrypted)
 
-    assert bootstrap_module.get_active_bootstrap_token() == "auto-token"
+    assert await bootstrap_module.get_active_bootstrap_token() == "shared-auto-token"
 
 
-def test_get_active_bootstrap_token_returns_none_when_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_get_active_bootstrap_token_returns_none_when_password_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_settings(monkeypatch, token=None)
+    encryptor = TokenEncryptor(key=Fernet.generate_key())
+    bootstrap_module._encryptor = encryptor
+    encrypted = encryptor.encrypt("shared-auto-token")
+    _patch_settings_cache(monkeypatch, password_hash="configured", bootstrap_token_encrypted=encrypted)
 
-    assert bootstrap_module.get_active_bootstrap_token() is None
+    assert await bootstrap_module.get_active_bootstrap_token() is None
 
 
-def test_maybe_generate_creates_token_when_no_env_no_password(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_get_active_bootstrap_token_returns_none_when_nothing_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_settings(monkeypatch, token=None)
+    _patch_settings_cache(monkeypatch, password_hash=None, bootstrap_token_encrypted=None)
 
-    token = bootstrap_module.maybe_generate_bootstrap_token(password_exists=False)
-
-    assert isinstance(token, str)
-    assert token
-    assert bootstrap_module._auto_generated_token == token
-
-
-def test_maybe_generate_skips_when_env_var_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_settings(monkeypatch, token="manual-token")
-
-    token = bootstrap_module.maybe_generate_bootstrap_token(password_exists=False)
-
-    assert token is None
-    assert bootstrap_module._auto_generated_token is None
-
-
-def test_maybe_generate_skips_when_password_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_settings(monkeypatch, token=None)
-
-    token = bootstrap_module.maybe_generate_bootstrap_token(password_exists=True)
-
-    assert token is None
-    assert bootstrap_module._auto_generated_token is None
-
-
-def test_clear_auto_generated_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_settings(monkeypatch, token=None)
-    bootstrap_module.maybe_generate_bootstrap_token(password_exists=False)
-
-    bootstrap_module.clear_auto_generated_token()
-
-    assert bootstrap_module.get_active_bootstrap_token() is None
+    assert await bootstrap_module.get_active_bootstrap_token() is None

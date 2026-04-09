@@ -2,12 +2,12 @@
 
 ### Requirement: Auto-generated bootstrap token
 
-The system SHALL auto-generate a cryptographically random bootstrap token on startup when ALL of the following conditions are true: (1) no dashboard password is configured (`password_hash` is NULL), (2) no manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set. The token MUST be generated using `secrets.token_urlsafe(32)` (256 bits entropy). The token MUST be stored in memory only and MUST NOT be persisted to disk or database.
+The system SHALL auto-generate a cryptographically random bootstrap token on startup when ALL of the following conditions are true: (1) no dashboard password is configured (`password_hash` is NULL), (2) no manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set. The token MUST be generated using `secrets.token_urlsafe(32)` (256 bits entropy). The token MUST be encrypted with the application encryption key and stored in the shared `dashboard_settings` row so every replica can validate the same token.
 
 #### Scenario: Auto-generation on fresh install without env var
 
 - **WHEN** the server starts with no configured password and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var
-- **THEN** the system generates a random token and stores it in memory
+- **THEN** the system generates a random token, encrypts it, and stores it in shared database-backed state
 
 #### Scenario: Auto-generation skipped when env var is set
 
@@ -35,17 +35,17 @@ The system SHALL print the auto-generated bootstrap token to server logs on star
 
 ### Requirement: Bootstrap token priority chain
 
-The system SHALL resolve the active bootstrap token using the following priority: (1) manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var, (2) auto-generated in-memory token, (3) None. A single accessor function (`get_active_bootstrap_token()`) MUST be the sole source of truth for the active token, replacing direct reads of the env var in the session and password-setup endpoints.
+The system SHALL resolve the active bootstrap token using the following priority: (1) manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var, (2) shared encrypted auto-generated token from `dashboard_settings`, (3) None. A single accessor function (`get_active_bootstrap_token()`) MUST be the sole source of truth for the active token, replacing direct reads of the env var in the session and password-setup endpoints.
 
 #### Scenario: Env var takes priority over auto-generated token
 
-- **WHEN** both an env var and auto-generated token exist
+- **WHEN** both an env var and shared auto-generated token exist
 - **THEN** `get_active_bootstrap_token()` returns the env var value
 
 #### Scenario: Auto-generated token used when no env var
 
-- **WHEN** no env var is set and an auto-generated token exists
-- **THEN** `get_active_bootstrap_token()` returns the auto-generated value
+- **WHEN** no env var is set and a shared encrypted token exists
+- **THEN** `get_active_bootstrap_token()` returns the decrypted shared value
 
 #### Scenario: None returned when neither exists
 
@@ -54,13 +54,23 @@ The system SHALL resolve the active bootstrap token using the following priority
 
 ### Requirement: Bootstrap token cleared after password setup
 
-The system SHALL clear the auto-generated bootstrap token from memory immediately after a successful password setup via `POST /api/dashboard-auth/password/setup`. The manual env var token is unaffected (it remains readable from the environment).
+The system SHALL clear the shared auto-generated bootstrap token immediately after a successful password setup via `POST /api/dashboard-auth/password/setup`. The manual env var token is unaffected (it remains readable from the environment).
 
 #### Scenario: Auto-generated token cleared after password set
 
 - **WHEN** a password is successfully configured using the auto-generated token
-- **THEN** the in-memory auto-generated token is cleared
+- **THEN** the shared stored auto-generated token is cleared
 - **AND** subsequent calls to `get_active_bootstrap_token()` return None (unless env var is set)
+
+### Requirement: Bootstrap token works across replicas
+
+The system SHALL make the same auto-generated bootstrap token valid across all replicas and restarts until password setup succeeds.
+
+#### Scenario: Token generated on one replica is accepted by another
+
+- **WHEN** replica A generates the auto bootstrap token and the password is still unset
+- **AND** the user submits that token to replica B behind a load balancer
+- **THEN** replica B accepts the same token for `POST /api/dashboard-auth/password/setup`
 
 ## MODIFIED Requirements
 

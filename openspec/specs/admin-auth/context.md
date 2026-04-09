@@ -10,22 +10,22 @@ The bootstrap token secures the initial remote password setup flow. Without it, 
 
 **Auto-generation (default path):**
 
-On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy) and prints it to server logs with visual delimiters. The token exists only in memory — never persisted to disk or database.
+On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy), encrypts it with the app encryption key, stores it in the shared `dashboard_settings` row, and prints it to server logs with visual delimiters.
 
 **Priority chain:**
 
-`get_active_bootstrap_token()` resolves the token using: manual env var → auto-generated in-memory token → None. A single accessor function is the sole source of truth, used by both the session endpoint and the password setup endpoint.
+`get_active_bootstrap_token()` resolves the token using: manual env var → shared DB-backed encrypted token → None. A single accessor function is the sole source of truth, used by both the session endpoint and the password setup endpoint.
 
 **Lifecycle:**
 
-1. Server starts → `maybe_generate_bootstrap_token()` checks conditions → generates if needed → logs it
+1. Server starts → `ensure_auto_bootstrap_token()` checks conditions → generates and persists the token if needed → logs it
 2. User copies token from `docker logs` → enters it in the dashboard with new password
-3. `setup_password()` validates token → sets password → calls `clear_auto_generated_token()`
-4. Token is cleared from memory. Subsequent requests don't need it.
+3. `setup_password()` validates token → atomically sets the password → clears the shared stored token
+4. Token is cleared from shared storage. Subsequent requests don't need it.
 
 **Restart behavior:**
 
-If the server restarts before a password is set, a new token is generated. The old one is invalid. Users must re-check logs.
+If the server restarts before a password is set, the same stored token remains valid and any replica can validate it. Replicas may log the same token again on startup for discoverability.
 
 ### Manual Override
 
@@ -42,8 +42,8 @@ Requests from localhost (127.0.0.1, ::1) bypass bootstrap entirely — no token 
 ### Threat Model
 
 - **Token in logs**: Acceptable risk (same pattern as Grafana/GitLab/Portainer). `docker logs` requires container access. Token is one-time — useless after password is set.
-- **Token in memory**: Cleared after password setup. On restart, a new one is generated.
-- **No persistence**: Intentional. Prevents stale tokens from accumulating on disk.
+- **Token in shared DB storage**: Encrypted at rest with the app encryption key, shared across replicas, and cleared as soon as password setup succeeds.
+- **Replica safety**: Any pod can validate the same bootstrap token, avoiding load-balancer flakiness during first-run setup.
 
 ## Session Management
 

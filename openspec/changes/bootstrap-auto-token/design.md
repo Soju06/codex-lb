@@ -8,23 +8,22 @@ Remote dashboard bootstrap currently requires `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKE
 - Auto-generate a bootstrap token on first startup when no password exists and no manual token is set
 - Print it to server logs so users can copy from `docker logs`
 - Wire it into the existing validation path with zero behavioral change for existing env var users
-- Clear the token from memory after password is set
+- Make the token valid across replicas and restarts until password setup succeeds
 - Update frontend messaging to reference server logs
 - Document the flow in README and OpenSpec context docs
 
 **Non-Goals:**
-- Persisting auto-generated tokens to DB or disk
 - Adding a web-based token display (security risk)
 - Changing the localhost bypass behavior
 - Modifying the TOTP or password hashing flow
 
 ## Decisions
 
-**D1: New module `app/core/bootstrap.py` for token state**
+**D1: Shared encrypted token in `dashboard_settings`**
 
-Module-level `_auto_generated_token: str | None` with three functions: `get_active_bootstrap_token()`, `maybe_generate_bootstrap_token()`, `clear_auto_generated_token()`. Follows `app/core/startup.py` pattern (module-level state + accessor functions).
+Persist the auto-generated bootstrap token in `DashboardSettings.bootstrap_token_encrypted` using `TokenEncryptor`. `get_active_bootstrap_token()` resolves `env var → decrypted DB token → None`. `ensure_auto_bootstrap_token()` creates the row if needed, stores the token atomically if absent, and returns the shared plaintext token for logging.
 
-Alternative: Store on the Settings object → rejected because token is ephemeral and env-level, not a DB-persisted setting.
+Alternative: module-global in-memory token → rejected because Helm defaults are multi-replica and the token must validate across pods.
 
 **D2: `secrets.token_urlsafe(32)` for generation**
 
@@ -38,18 +37,18 @@ Multi-line log with `====` borders for visibility in `docker logs` output. Uses 
 
 Alternative: `print()` → rejected — bypasses log configuration and formatting.
 
-**D4: Priority chain — env var > auto-generated > None**
+**D4: Priority chain — env var > shared encrypted token > None**
 
-`get_active_bootstrap_token()` checks env var first (via `get_settings().dashboard_bootstrap_token`), then falls back to `_auto_generated_token`. If env var is set, auto-generation never fires.
+`get_active_bootstrap_token()` checks env var first (via `get_settings().dashboard_bootstrap_token`), then falls back to the shared encrypted token stored in `dashboard_settings`. If env var is set, the shared token is ignored and cleared on startup.
 
-**D5: Token cleared after password setup, not on explicit endpoint**
+**D5: Token cleared atomically with password setup**
 
-`clear_auto_generated_token()` called inside `setup_password()` after successful password storage. Token becomes stale in memory but harmless since the password setup endpoint rejects duplicate setups (409 Conflict).
+`DashboardAuthRepository.try_set_password_hash()` now clears `bootstrap_token_encrypted` in the same UPDATE that sets `password_hash`. That guarantees one successful setup consumes the shared token across all replicas.
 
 ## Risks / Trade-offs
 
 **R1: Token visible in logs** → By design. Same pattern as Grafana/GitLab/Portainer. Mitigated by: token is one-time (useless after password set), `docker logs` requires container access.
 
-**R2: Token regenerates on each restart** → Intentional. Prevents stale tokens from accumulating. Users must re-check logs if they restart before setting a password.
+**R2: Token persists across restarts until consumed** → Intentional. Multi-replica and restarted pods must validate the same token until setup completes.
 
-**R3: Race condition on clear** → Not a real risk. Single-threaded async — `clear_auto_generated_token()` runs in the same request that sets the password. No concurrent access issue.
+**R3: Shared-state race on generation/consumption** → Mitigated by atomic `UPDATE ... WHERE ... IS NULL` guards in the repository. One replica wins generation, one successful setup consumes the token.

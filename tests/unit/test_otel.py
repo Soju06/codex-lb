@@ -685,3 +685,26 @@ async def test_validate_bridge_advertise_endpoint_rejects_loopback_when_peer_exi
             instance_id="instance-a",
             endpoint_base_url=settings.http_responses_session_bridge_advertise_base_url,
         )
+
+
+@pytest.mark.asyncio
+async def test_validate_bridge_advertise_endpoint_rejects_loopback_for_multi_replica_intent():
+    import app.main as main
+
+    class _RingReader:
+        async def list_active(self) -> list[str]:
+            return ["instance-a"]
+
+    settings = Settings(
+        http_responses_session_bridge_instance_id="instance-a",
+        http_responses_session_bridge_instance_ring=["instance-a", "instance-b"],
+        http_responses_session_bridge_advertise_base_url="http://127.0.0.1:2455",
+    )
+
+    with pytest.raises(RuntimeError):
+        await main._validate_bridge_advertise_endpoint_for_multi_replica(
+            svc=_RingReader(),
+            settings=settings,
+            instance_id="instance-a",
+            endpoint_base_url=settings.http_responses_session_bridge_advertise_base_url,
+        )

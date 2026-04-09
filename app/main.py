@@ -491,6 +491,10 @@ async def _validate_bridge_advertise_endpoint_for_multi_replica(
     except ValueError:
         parsed_ip = None
     if parsed_ip is not None and parsed_ip.is_loopback:
+        if len(settings.http_responses_session_bridge_instance_ring) > 1:
+            raise RuntimeError(
+                "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
+            )
         active_members = await svc.list_active()
         if any(member != instance_id for member in active_members):
             raise RuntimeError(

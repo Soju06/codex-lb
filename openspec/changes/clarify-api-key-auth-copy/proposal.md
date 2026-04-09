@@ -4,7 +4,7 @@ The current API key auth copy no longer matches runtime behavior after the proxy
 In reality, the same guard applies to `/v1/*`, `/backend-api/codex/*`, and `/backend-api/transcribe`, and disabling API key auth now only allows unauthenticated local requests. This mismatch is causing operator confusion, especially for Docker deployments where host-to-container requests are often classified as remote.
 
 ## What Changes
-- Clarify the dashboard API key auth toggle copy so it reflects the real protected proxy routes and the local-only anonymous behavior.
+- Clarify the dashboard API key auth toggle copy with a short, layout-safe description of protected proxy requests.
 - Update the README provider setup and API key auth section to explain that disabled auth only permits local requests.
 - Update the main OpenSpec API key auth requirement to match the implemented fail-closed behavior.
 

@@ -6,6 +6,7 @@
 - [x] 1.4 Update `app/modules/dashboard_auth/api.py` `setup_password()` and repository password write path to consume the shared token atomically after success
 - [x] 1.5 Add `dashboard_settings.bootstrap_token_encrypted` migration for shared storage
 - [x] 1.6 Harden bootstrap token handling for non-ASCII manual tokens and immediate regeneration after password removal
+- [x] 1.7 Persist only a hash of the auto-generated bootstrap token and avoid re-logging stored tokens on restart
 
 ## 2. Tests
 

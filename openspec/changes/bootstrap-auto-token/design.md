@@ -19,9 +19,9 @@ Remote dashboard bootstrap currently requires `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKE
 
 ## Decisions
 
-**D1: Shared token in `dashboard_settings`**
+**D1: Shared hashed token in `dashboard_settings`**
 
-Persist the auto-generated bootstrap token in `DashboardSettings.bootstrap_token` as shared DB state. `get_active_bootstrap_token()` resolves `env var → DB token → None`. `ensure_auto_bootstrap_token()` creates the row if needed, stores the token atomically if absent, and returns the shared token for logging.
+Persist a SHA-256 hash of the auto-generated bootstrap token in `DashboardSettings.bootstrap_token_hash` as shared DB state. `has_active_bootstrap_token()` exposes availability, `validate_bootstrap_token()` verifies submitted tokens, and `ensure_auto_bootstrap_token()` only returns plaintext when it created a new token that should be logged.
 
 Alternative: module-global in-memory token → rejected because Helm defaults are multi-replica and the token must validate across pods.
 
@@ -37,9 +37,9 @@ Multi-line log with `====` borders for visibility in `docker logs` output. Uses 
 
 Alternative: `print()` → rejected — bypasses log configuration and formatting.
 
-**D4: Priority chain — env var > shared token > None**
+**D4: Priority chain — env var > shared token hash > None**
 
-`get_active_bootstrap_token()` checks env var first (via `get_settings().dashboard_bootstrap_token`), then falls back to the shared token stored in `dashboard_settings`. If env var is set, the shared token is ignored and cleared on startup.
+Bootstrap validation checks env var first (via `get_settings().dashboard_bootstrap_token`), then falls back to the shared token hash stored in `dashboard_settings`. If env var is set, the shared auto-generated token hash is ignored and cleared on startup.
 
 **D5: Token cleared atomically with password setup**
 

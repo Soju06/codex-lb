@@ -51,6 +51,30 @@ def upgrade() -> None:
                 server_default=sa.true(),
             )
 
+    required_seed_shape_columns = {
+        "password_hash",
+        "totp_secret_encrypted",
+        "totp_required_on_login",
+        "api_key_auth_enabled",
+    }
+    if required_seed_shape_columns.issubset(columns):
+        op.execute(
+            sa.text(
+                """
+                UPDATE dashboard_settings
+                SET sticky_threads_enabled = TRUE,
+                    prefer_earlier_reset_accounts = TRUE
+                WHERE id = 1
+                  AND sticky_threads_enabled = FALSE
+                  AND prefer_earlier_reset_accounts = FALSE
+                  AND password_hash IS NULL
+                  AND totp_secret_encrypted IS NULL
+                  AND totp_required_on_login = FALSE
+                  AND api_key_auth_enabled = FALSE
+                """
+            )
+        )
+
 
 def downgrade() -> None:
     bind = op.get_bind()

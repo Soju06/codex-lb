@@ -649,3 +649,36 @@ async def test_dashboard_settings_default_flip_migration_does_not_infer_intent_f
             assert row[1] in (False, 0)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_default_flip_migration_updates_fresh_seeded_row(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-settings-defaults-fresh.sqlite'}"
+
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260409_000000_switch_sticky_threads_and_prefer_earlier_reset_defaults_to_true",
+            bootstrap_legacy=True,
+        )
+    )
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT sticky_threads_enabled, prefer_earlier_reset_accounts
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert row[0] in (True, 1)
+            assert row[1] in (True, 1)
+    finally:
+        await engine.dispose()

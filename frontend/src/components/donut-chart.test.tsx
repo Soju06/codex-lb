@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { DonutChart } from "@/components/donut-chart";
@@ -100,6 +100,39 @@ describe("DonutChart", () => {
 
     expect(screen.getByText(/^Used$/)).toBeInTheDocument();
     expect(screen.getByTestId("donut-used-value")).toHaveTextContent("300");
+  });
+
+  it("highlights the matching legend row when a legend item is hovered", () => {
+    render(
+      <DonutChart
+        title="Legend Hover"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    const legendRow = screen.getByTestId("donut-legend-0");
+    fireEvent.mouseEnter(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "true");
+
+    fireEvent.mouseLeave(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "false");
+  });
+
+  it("highlights the matching legend row when a pie slice is hovered", () => {
+    const { container } = render(
+      <DonutChart
+        title="Slice Hover"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    const sectors = container.querySelectorAll(".recharts-pie-sector");
+    const legendRow = screen.getByTestId("donut-legend-0");
+
+    fireEvent.mouseEnter(sectors[0]!);
+    expect(legendRow).toHaveAttribute("data-active", "true");
   });
 
   it("renders empty state when total is zero", () => {

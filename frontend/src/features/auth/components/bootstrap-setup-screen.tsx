@@ -34,8 +34,8 @@ export function BootstrapSetupScreen() {
             </p>
             <AlertMessage variant="error">
               {bootstrapTokenConfigured
-                ? "Enter the dashboard bootstrap token when you set the initial password."
-                : "Remote setup is blocked until CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN is configured on the server."}
+                ? "Find the bootstrap token in your server logs (docker logs <container>) and enter it below with your new password."
+                : "Remote setup is blocked. Set CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN on the server or restart without a password to auto-generate one."}
             </AlertMessage>
           </div>
         </div>

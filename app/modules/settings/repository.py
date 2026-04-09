@@ -20,9 +20,9 @@ class SettingsRepository:
 
         row = DashboardSettings(
             id=_SETTINGS_ID,
-            sticky_threads_enabled=False,
+            sticky_threads_enabled=True,
             upstream_stream_transport="default",
-            prefer_earlier_reset_accounts=False,
+            prefer_earlier_reset_accounts=True,
             routing_strategy="capacity_weighted",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             import_without_overwrite=True,

@@ -12,7 +12,8 @@ export function ApiKeyAuthToggle({ enabled, disabled = false, onChange }: ApiKey
       <div className="space-y-1">
         <p className="text-sm font-medium">API Key Auth</p>
         <p className="text-xs text-muted-foreground">
-          Require API keys for incoming `/v1/*` requests.
+          Require API keys for `/v1/*`, `/backend-api/codex/*`, and `/backend-api/transcribe`. When disabled,
+          only local proxy requests can proceed without a key.
         </p>
       </div>
       <Switch checked={enabled} disabled={disabled} onCheckedChange={onChange} />

@@ -280,7 +280,8 @@ opencode
 }
 ```
 
-Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled, any value works.
+Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled,
+local requests can omit the key, but non-local requests are still rejected until proxy authentication is configured.
 
 </details>
 
@@ -293,7 +294,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:2455/v1",
-    api_key="sk-clb-...",  # from dashboard, or any string if auth is disabled
+    api_key="sk-clb-...",  # from dashboard when auth is enabled; local-only requests may omit it when disabled
 )
 
 response = client.chat.completions.create(
@@ -307,13 +308,22 @@ print(response.choices[0].message.content)
 
 ## API Key Authentication
 
-API key auth is **disabled by default** — the proxy is open to any client. Enable it in **Settings → API Key Auth** on the dashboard.
+API key auth is **disabled by default**. In that mode, only local requests to the protected proxy routes can
+proceed without a key; non-local requests are rejected until proxy authentication is configured. Enable it in
+**Settings → API Key Auth** on the dashboard when clients connect remotely or through Docker, VM, or container
+networking that appears non-local to the service.
 
 When enabled, clients must pass a valid API key as a Bearer token:
 
 ```
 Authorization: Bearer sk-clb-...
 ```
+
+The protected proxy routes covered by this setting are:
+
+- `/v1/*`
+- `/backend-api/codex/*`
+- `/backend-api/transcribe`
 
 **Creating keys**: Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
 

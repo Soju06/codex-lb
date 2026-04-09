@@ -550,6 +550,12 @@ def run_upgrade(
     auto_remap_legacy_revisions: bool = True,
 ) -> MigrationRunResult:
     config = _build_alembic_config(database_url)
+    state_before = inspect_migration_state(database_url)
+    config.attributes["codex_lb_fresh_install"] = (
+        state_before.current_revision is None
+        and not state_before.has_alembic_version_table
+        and not state_before.has_legacy_migrations_table
+    )
 
     bootstrap_result = LegacyBootstrapResult(
         stamped_revision=None,
@@ -560,6 +566,8 @@ def run_upgrade(
 
     if bootstrap_legacy:
         bootstrap_result = _bootstrap_legacy_history(config)
+        if bootstrap_result.stamped_revision is not None:
+            config.attributes["codex_lb_fresh_install"] = False
 
     _ensure_alembic_version_table_capacity(config)
     if auto_remap_legacy_revisions:

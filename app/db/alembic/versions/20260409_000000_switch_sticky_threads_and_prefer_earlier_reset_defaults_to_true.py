@@ -34,6 +34,8 @@ def upgrade() -> None:
     if not _table_exists(bind, "dashboard_settings"):
         return
     columns = _columns(bind, "dashboard_settings")
+    config = op.get_context().config
+    fresh_install = bool(config.attributes.get("codex_lb_fresh_install")) if config is not None else False
 
     if "sticky_threads_enabled" in columns:
         with op.batch_alter_table("dashboard_settings") as batch_op:
@@ -51,13 +53,7 @@ def upgrade() -> None:
                 server_default=sa.true(),
             )
 
-    required_seed_shape_columns = {
-        "password_hash",
-        "totp_secret_encrypted",
-        "totp_required_on_login",
-        "api_key_auth_enabled",
-    }
-    if required_seed_shape_columns.issubset(columns):
+    if fresh_install:
         op.execute(
             sa.text(
                 """
@@ -65,12 +61,6 @@ def upgrade() -> None:
                 SET sticky_threads_enabled = TRUE,
                     prefer_earlier_reset_accounts = TRUE
                 WHERE id = 1
-                  AND sticky_threads_enabled = FALSE
-                  AND prefer_earlier_reset_accounts = FALSE
-                  AND password_hash IS NULL
-                  AND totp_secret_encrypted IS NULL
-                  AND totp_required_on_login = FALSE
-                  AND api_key_auth_enabled = FALSE
                 """
             )
         )

@@ -178,10 +178,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TMP_DB="$(mktemp -u /tmp/codex-lb-ci-migrate-XXXXXX.db)"
+          TMP_DB="$(mktemp -u /tmp/codex-lb-cinamon-ci-migrate-XXXXXX.db)"
           DB_URL="sqlite+aiosqlite:///${TMP_DB}"
-          uv run codex-lb-db --db-url "${DB_URL}" upgrade head
-          uv run codex-lb-db --db-url "${DB_URL}" check
+          uv run codex-lb-cinamon-db --db-url "${DB_URL}" upgrade head
+          uv run codex-lb-cinamon-db --db-url "${DB_URL}" check
 
   package:
     name: Package (build)
@@ -260,14 +260,14 @@ jobs:
           file: Dockerfile
           push: false
           load: true
-          tags: codex-lb:ci
+          tags: codex-lb-cinamon:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Scan Docker image with Trivy
         uses: aquasecurity/trivy-action@0.35.0
         with:
-          image-ref: codex-lb:ci
+          image-ref: codex-lb-cinamon:ci
           format: table
           exit-code: 1
           severity: CRITICAL

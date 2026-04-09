@@ -19,7 +19,7 @@ def test_main_passes_timestamped_log_config(monkeypatch):
         captured["args"] = args
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+    monkeypatch.setattr(sys, "argv", ["codex-lb-cinamon"])
     monkeypatch.setattr(cli.uvicorn, "run", fake_run)
 
     cli.main()

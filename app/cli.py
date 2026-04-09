@@ -9,7 +9,7 @@ from app.core.runtime_logging import build_log_config
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the codex-lb API server.")
+    parser = argparse.ArgumentParser(description="Run the codex-lb-cinamon API server.")
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "2455")))
     parser.add_argument("--ssl-certfile", default=os.getenv("SSL_CERTFILE"))

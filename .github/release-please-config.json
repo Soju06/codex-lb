@@ -9,7 +9,7 @@
         {
           "type": "toml",
           "path": "uv.lock",
-          "jsonpath": "$.package[?(@.name=='codex-lb')].version"
+          "jsonpath": "$.package[?(@.name=='codex-lb-cinamon')].version"
         },
         {
           "type": "json",

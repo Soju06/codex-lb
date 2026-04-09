@@ -669,7 +669,7 @@ def wait_for_head(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Database migration utility for codex-lb.")
+    parser = argparse.ArgumentParser(description="Database migration utility for codex-lb-cinamon.")
     parser.add_argument(
         "--db-url",
         default=None,

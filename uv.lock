@@ -437,8 +437,8 @@ wheels = [
 ]
 
 [[package]]
-name = "codex-lb"
-version = "1.11.0"
+name = "codex-lb-cinamon"
+version = "1.12.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

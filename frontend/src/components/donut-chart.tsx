@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
@@ -77,6 +77,9 @@ const PIE_CY = 72;
 const INNER_R = 53;
 const OUTER_R = 68;
 const ACTIVE_RADIUS_OFFSET = 4;
+const LEGEND_VISIBLE_COUNT = 4;
+const LEGEND_ROW_HEIGHT_REM = 1.75;
+const LEGEND_ROW_GAP_REM = 0.625;
 
 type DonutDatum = {
   id: string;
@@ -99,6 +102,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
   const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
+  const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const consumedColor = isDark ? "#404040" : "#d3d3d3";
   const palette = buildDonutPalette(items.length, isDark);
   const normalizedItems = items.map((item, index) => ({
@@ -129,6 +133,14 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
     chartData.length = 0;
     chartData.push({ id: "__empty__", name: "__empty__", value: 1, fill: consumedColor });
   }
+
+  useEffect(() => {
+    if (!activeLegendId) {
+      return;
+    }
+
+    legendRefs.current[activeLegendId]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeLegendId]);
 
   const renderDonutShape = (props: PieSectorShapeProps) => {
     const isHighlighted = props.isActive || (props.payload as DonutDatum | undefined)?.id === activeLegendId;
@@ -209,16 +221,23 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
           </p>
         </div>
 
-        <div className="flex-1 space-y-2.5">
+        <div
+          className="flex-1 space-y-2.5 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          data-testid="donut-legend-list"
+          style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem + ${(LEGEND_VISIBLE_COUNT - 1) * LEGEND_ROW_GAP_REM}rem)` }}
+        >
           {normalizedItems.map((item, i) => {
             const legendId = item.id ?? item.label;
             const isActive = activeLegendId === legendId;
 
             return (
             <button
+              ref={(node) => {
+                legendRefs.current[legendId] = node;
+              }}
               type="button"
               key={legendId}
-              className="animate-fade-in-up flex w-full items-center justify-between gap-3 rounded-lg border bg-transparent px-2 py-1.5 text-xs transition-all"
+              className="animate-fade-in-up flex h-7 w-full items-center justify-between gap-3 rounded-lg border bg-transparent text-xs transition-all"
               style={{ animationDelay: `${i * 75}ms`, borderColor: isActive ? item.color : "transparent" }}
               onMouseEnter={() => setActiveLegendId(legendId)}
               onMouseLeave={() => setActiveLegendId(null)}
@@ -246,8 +265,11 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
             );
           })}
           <button
+            ref={(node) => {
+              legendRefs.current.__consumed__ = node;
+            }}
             type="button"
-            className="flex w-full items-center justify-between gap-3 rounded-lg border bg-transparent px-2 py-1.5 text-xs transition-all"
+            className="flex h-7 w-full items-center justify-between gap-3 rounded-lg border bg-transparent text-xs transition-all"
             style={{ borderColor: activeLegendId === "__consumed__" ? consumedColor : "transparent" }}
             onMouseEnter={() => setActiveLegendId("__consumed__")}
             onMouseLeave={() => setActiveLegendId(null)}

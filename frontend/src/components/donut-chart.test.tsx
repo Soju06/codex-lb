@@ -159,7 +159,7 @@ describe("DonutChart", () => {
     );
 
     expect(screen.getByTestId("donut-legend-list")).toHaveStyle({
-      maxHeight: "calc(4 * 1.75rem + 1.875rem)",
+      maxHeight: "calc(4 * 1.75rem + 0.375rem)",
     });
   });
 

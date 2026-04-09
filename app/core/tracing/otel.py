@@ -77,7 +77,8 @@ def init_tracing(service_name: str = "codex-lb", endpoint: str = "", app: object
 
     except ImportError:
         logger.warning(
-            "opentelemetry packages not installed; tracing disabled. Install with: pip install codex-lb-cinamon[tracing]"
+            "opentelemetry packages not installed; tracing disabled. "
+            "Install with: pip install codex-lb-cinamon[tracing]"
         )
         return False
 

@@ -28,11 +28,30 @@ Resources
 
 PyPI로 설치:
 
+macOS / Linux:
+
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install codex-lb-cinamon
-codex-lb-cinamon
+codex-lb-cinamon start
+#동작상태 확인
+codex-lb-cinamon status
+#종료시
+codex-lb-cinamon shutdown
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install codex-lb-cinamon
+codex-lb-cinamon start
+# 동작 상태 확인
+codex-lb-cinamon status
+# 종료 시
+codex-lb-cinamon shutdown
 ```
 
 DB 마이그레이션을 수동으로 실행해야 하면:
@@ -61,6 +80,25 @@ docker run -d --name codex-lb-cinamon \
 ```bash
 uvx codex-lb-cinamon
 ```
+
+포그라운드로 명시 실행:
+
+```bash
+codex-lb-cinamon serve
+```
+
+
+
+기본 PID 파일과 로그 파일은 아래 경로를 사용합니다.
+
+```text
+macOS / Linux: ~/.codex-lb/server.pid
+macOS / Linux: ~/.codex-lb/server.log
+Windows: %USERPROFILE%\.codex-lb\server.pid
+Windows: %USERPROFILE%\.codex-lb\server.log
+```
+
+원하면 `start`에 `--pid-file`, `--log-file`, `--host`, `--port`를 함께 줄 수 있습니다.
 
 컨테이너로 실행할 때는 아래 설정을 함께 주는 것을 권장합니다.
 

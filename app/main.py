@@ -10,6 +10,7 @@ from typing import Any, cast
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from app import __version__
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -262,7 +263,7 @@ def create_app() -> FastAPI:
     )
     app = FastAPI(
         title="codex-lb",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         swagger_ui_parameters={"persistAuthorization": True},
     )

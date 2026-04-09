@@ -1,4 +1,4 @@
-"""add shared bootstrap token storage to dashboard settings
+"""add shared bootstrap token hash storage to dashboard settings
 
 Revision ID: 20260409_010000_add_dashboard_settings_bootstrap_token
 Revises: 20260409_000000_switch_sticky_threads_and_prefer_earlier_reset_defaults_to_true
@@ -35,9 +35,9 @@ def upgrade() -> None:
         return
 
     columns = _columns(bind, "dashboard_settings")
-    if "bootstrap_token" not in columns:
+    if "bootstrap_token_hash" not in columns:
         with op.batch_alter_table("dashboard_settings") as batch_op:
-            batch_op.add_column(sa.Column("bootstrap_token", sa.Text(), nullable=True))
+            batch_op.add_column(sa.Column("bootstrap_token_hash", sa.LargeBinary(), nullable=True))
 
 
 def downgrade() -> None:
@@ -46,6 +46,6 @@ def downgrade() -> None:
         return
 
     columns = _columns(bind, "dashboard_settings")
-    if "bootstrap_token" in columns:
+    if "bootstrap_token_hash" in columns:
         with op.batch_alter_table("dashboard_settings") as batch_op:
-            batch_op.drop_column("bootstrap_token")
+            batch_op.drop_column("bootstrap_token_hash")

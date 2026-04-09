@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
+from secrets import compare_digest
 
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -12,6 +14,10 @@ from app.modules.dashboard_auth.repository import DashboardAuthRepository
 def _get_manual_bootstrap_token() -> str | None:
     manual = (get_settings().dashboard_bootstrap_token or "").strip()
     return manual or None
+
+
+def _hash_bootstrap_token(token: str) -> bytes:
+    return hashlib.sha256(token.encode("utf-8")).digest()
 
 
 def log_bootstrap_token(logger: logging.Logger, token: str, *, reason: str = "first-run") -> None:
@@ -31,14 +37,27 @@ def log_bootstrap_token(logger: logging.Logger, token: str, *, reason: str = "fi
 
 
 async def get_active_bootstrap_token() -> str | None:
+    return _get_manual_bootstrap_token()
+
+
+async def has_active_bootstrap_token() -> bool:
     manual = _get_manual_bootstrap_token()
     if manual:
-        return manual
+        return True
 
     settings = await get_settings_cache().get()
-    if settings.password_hash is not None or settings.bootstrap_token is None:
-        return None
-    return settings.bootstrap_token
+    return settings.password_hash is None and settings.bootstrap_token_hash is not None
+
+
+async def validate_bootstrap_token(submitted_token: str) -> bool:
+    manual = _get_manual_bootstrap_token()
+    if manual is not None:
+        return compare_digest(submitted_token.encode("utf-8"), manual.encode("utf-8"))
+
+    settings = await get_settings_cache().get()
+    if settings.password_hash is not None or settings.bootstrap_token_hash is None:
+        return False
+    return compare_digest(_hash_bootstrap_token(submitted_token), settings.bootstrap_token_hash)
 
 
 async def ensure_auto_bootstrap_token() -> str | None:
@@ -49,25 +68,21 @@ async def ensure_auto_bootstrap_token() -> str | None:
         settings = await repository.get_settings()
 
         if manual or settings.password_hash is not None:
-            if settings.bootstrap_token is not None:
+            if settings.bootstrap_token_hash is not None:
                 await repository.clear_bootstrap_token()
                 await get_settings_cache().invalidate()
             return None
 
-        if settings.bootstrap_token is not None:
-            return settings.bootstrap_token
+        if settings.bootstrap_token_hash is not None:
+            return None
 
         token = secrets.token_urlsafe(32)
-        stored = await repository.store_bootstrap_token_if_absent(token)
+        stored = await repository.store_bootstrap_token_if_absent(_hash_bootstrap_token(token))
 
     await get_settings_cache().invalidate()
     if stored:
         return token
-
-    settings = await get_settings_cache().get()
-    if settings.password_hash is not None or settings.bootstrap_token is None:
-        return None
-    return settings.bootstrap_token
+    return None
 
 
 async def clear_auto_generated_token() -> None:

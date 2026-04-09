@@ -7,17 +7,20 @@ from httpx import ASGITransport, AsyncClient
 import app.core.bootstrap as bootstrap_module
 import app.main as main_module
 import app.modules.dashboard_auth.api as dashboard_auth_api_module
-from app.core.bootstrap import ensure_auto_bootstrap_token, get_active_bootstrap_token
+from app.core.bootstrap import ensure_auto_bootstrap_token, has_active_bootstrap_token
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 
 pytestmark = pytest.mark.integration
+
+_AUTO_BOOTSTRAP_TOKEN = "generated-bootstrap-token"
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_bootstrap_runtime(_reset_db_state, monkeypatch: pytest.MonkeyPatch):
     del _reset_db_state
     monkeypatch.delenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", raising=False)
+    monkeypatch.setattr(bootstrap_module.secrets, "token_urlsafe", lambda _size: _AUTO_BOOTSTRAP_TOKEN)
     get_settings.cache_clear()
     await get_settings_cache().invalidate()
     await bootstrap_module.clear_auto_generated_token()
@@ -50,7 +53,7 @@ async def test_session_reports_bootstrap_token_configured_true_with_auto_token(a
 
     response = await async_client.get("/api/dashboard-auth/session")
 
-    assert await get_active_bootstrap_token()
+    assert await has_active_bootstrap_token() is True
     assert response.status_code == 200
     payload = response.json()
     assert payload["authenticated"] is False
@@ -61,18 +64,16 @@ async def test_session_reports_bootstrap_token_configured_true_with_auto_token(a
 @pytest.mark.asyncio
 async def test_remote_bootstrap_with_auto_generated_token(async_client, monkeypatch):
     _force_remote(monkeypatch)
-    token = await get_active_bootstrap_token()
 
     response = await async_client.post(
         "/api/dashboard-auth/password/setup",
-        json={"password": "password123", "bootstrapToken": token},
+        json={"password": "password123", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
     )
 
-    assert isinstance(token, str) and token
     assert response.status_code == 200
     payload = response.json()
     assert payload["authenticated"] is True
-    assert await get_active_bootstrap_token() is None
+    assert await has_active_bootstrap_token() is False
 
 
 @pytest.mark.asyncio
@@ -128,7 +129,7 @@ async def test_no_token_generated_when_password_exists(async_client, monkeypatch
     )
 
     assert setup.status_code == 200
-    assert await get_active_bootstrap_token() is None
+    assert await has_active_bootstrap_token() is False
 
     settings = await get_settings_cache().get()
     assert settings.password_hash is not None
@@ -158,19 +159,16 @@ async def test_auto_generated_token_is_shared_across_app_instances(monkeypatch: 
     second_app = main_module.create_app()
 
     async with first_app.router.lifespan_context(first_app):
-        first_token = await get_active_bootstrap_token()
+        assert await has_active_bootstrap_token() is True
 
     async with second_app.router.lifespan_context(second_app):
-        second_token = await get_active_bootstrap_token()
         transport = ASGITransport(app=second_app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
                 "/api/dashboard-auth/password/setup",
-                json={"password": "password123", "bootstrapToken": first_token},
+                json={"password": "password123", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
             )
 
-    assert isinstance(first_token, str) and first_token
-    assert first_token == second_token
     assert response.status_code == 200
 
 
@@ -189,8 +187,7 @@ async def test_remove_password_regenerates_bootstrap_token(async_client, monkeyp
     )
     assert remove.status_code == 200
 
-    token = await get_active_bootstrap_token()
-    assert isinstance(token, str) and token
+    assert await has_active_bootstrap_token() is True
 
     _force_remote(monkeypatch)
     session = await async_client.get("/api/dashboard-auth/session")
@@ -199,6 +196,6 @@ async def test_remove_password_regenerates_bootstrap_token(async_client, monkeyp
 
     resetup = await async_client.post(
         "/api/dashboard-auth/password/setup",
-        json={"password": "new-password-456", "bootstrapToken": token},
+        json={"password": "new-password-456", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
     )
     assert resetup.status_code == 200

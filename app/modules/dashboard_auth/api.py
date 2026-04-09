@@ -7,7 +7,12 @@ from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
 from app.core.auth.dependencies import set_dashboard_error_format
-from app.core.bootstrap import ensure_auto_bootstrap_token, get_active_bootstrap_token, log_bootstrap_token
+from app.core.bootstrap import (
+    ensure_auto_bootstrap_token,
+    has_active_bootstrap_token,
+    log_bootstrap_token,
+    validate_bootstrap_token,
+)
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
     DashboardAuthError,
@@ -87,7 +92,7 @@ async def get_dashboard_auth_session(
     response = await context.service.get_session_state(session_id)
     if response.password_required or is_local_request(request):
         return response
-    bootstrap_token_configured = bool(await get_active_bootstrap_token())
+    bootstrap_token_configured = await has_active_bootstrap_token()
     return response.model_copy(
         update={
             "authenticated": False,
@@ -105,17 +110,13 @@ async def setup_password(
 ) -> DashboardAuthSessionResponse | JSONResponse:
     current_settings = await context.repository.get_settings()
     if current_settings.password_hash is None and not is_local_request(request):
-        configured_bootstrap_token = await get_active_bootstrap_token()
-        if not configured_bootstrap_token:
+        if not await has_active_bootstrap_token():
             raise DashboardAuthError(
                 "Remote bootstrap is disabled until CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN is configured.",
                 code="bootstrap_unavailable",
             )
         submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
-        if not compare_digest(
-            submitted_bootstrap_token.encode("utf-8"),
-            configured_bootstrap_token.encode("utf-8"),
-        ):
+        if not await validate_bootstrap_token(submitted_bootstrap_token):
             raise DashboardAuthError("Invalid dashboard bootstrap token.", code="invalid_bootstrap_token")
     password = payload.password.strip()
     if len(password) < 8:
@@ -211,6 +212,7 @@ async def remove_password(
     except InvalidCredentialsError as exc:
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
 
+    await get_settings_cache().invalidate()
     bootstrap_token = await ensure_auto_bootstrap_token()
     if bootstrap_token:
         log_bootstrap_token(logger, bootstrap_token, reason="password-removed")

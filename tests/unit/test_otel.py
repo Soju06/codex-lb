@@ -268,7 +268,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
-    monkeypatch.setattr(main, "maybe_generate_bootstrap_token", lambda *, password_exists: None)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
     monkeypatch.setattr(main, "init_db", init_db)
@@ -334,7 +334,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
-    monkeypatch.setattr(main, "maybe_generate_bootstrap_token", lambda *, password_exists: None)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
     monkeypatch.setattr(main, "init_db", AsyncMock())

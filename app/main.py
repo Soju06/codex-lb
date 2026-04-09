@@ -10,7 +10,7 @@ from typing import Any, cast
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from app.core.bootstrap import maybe_generate_bootstrap_token
+from app.core.bootstrap import ensure_auto_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -90,8 +90,7 @@ async def lifespan(app: FastAPI):
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
     await init_db()
     init_background_db()
-    _cached_settings = await get_settings_cache().get()
-    _auto_bootstrap_token = maybe_generate_bootstrap_token(password_exists=_cached_settings.password_hash is not None)
+    _auto_bootstrap_token = await ensure_auto_bootstrap_token()
     if _auto_bootstrap_token:
         logger.info(
             "\n"
@@ -100,8 +99,8 @@ async def lifespan(app: FastAPI):
             "  %s\n"
             "\n"
             "  Use this token for initial remote setup.\n"
-            "  It is ephemeral and will regenerate on\n"
-            "  each restart until a password is set.\n"
+            "  It is shared across replicas and stays\n"
+            "  valid until a password is set.\n"
             "============================================",
             _auto_bootstrap_token,
         )

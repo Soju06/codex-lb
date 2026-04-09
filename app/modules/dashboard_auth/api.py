@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from secrets import compare_digest
+
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
 from app.core.auth.dependencies import set_dashboard_error_format
-from app.core.bootstrap import clear_auto_generated_token, get_active_bootstrap_token
+from app.core.bootstrap import get_active_bootstrap_token
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
     DashboardAuthError,
@@ -82,7 +84,7 @@ async def get_dashboard_auth_session(
     response = await context.service.get_session_state(session_id)
     if response.password_required or is_local_request(request):
         return response
-    bootstrap_token_configured = bool(get_active_bootstrap_token())
+    bootstrap_token_configured = bool(await get_active_bootstrap_token())
     return response.model_copy(
         update={
             "authenticated": False,
@@ -100,14 +102,14 @@ async def setup_password(
 ) -> DashboardAuthSessionResponse | JSONResponse:
     current_settings = await context.repository.get_settings()
     if current_settings.password_hash is None and not is_local_request(request):
-        configured_bootstrap_token = get_active_bootstrap_token()
+        configured_bootstrap_token = await get_active_bootstrap_token()
         if not configured_bootstrap_token:
             raise DashboardAuthError(
                 "Remote bootstrap is disabled until CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN is configured.",
                 code="bootstrap_unavailable",
             )
         submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
-        if submitted_bootstrap_token != configured_bootstrap_token:
+        if not compare_digest(submitted_bootstrap_token, configured_bootstrap_token):
             raise DashboardAuthError("Invalid dashboard bootstrap token.", code="invalid_bootstrap_token")
     password = payload.password.strip()
     if len(password) < 8:
@@ -117,7 +119,6 @@ async def setup_password(
     except PasswordAlreadyConfiguredError as exc:
         raise DashboardConflictError(str(exc), code="password_already_configured") from exc
 
-    clear_auto_generated_token()
     await get_settings_cache().invalidate()
     session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
     response = await context.service.get_session_state(session_id)

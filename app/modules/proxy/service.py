@@ -169,6 +169,8 @@ _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline im
 
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")
+_DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
+_DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 
 
 async def _await_cancelled_task(
@@ -1312,10 +1314,32 @@ class ProxyService:
         upstream_control: _WebSocketUpstreamControl | None = None
         account: Account | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
+        downstream_idle_started_at: float | None = time.monotonic()
 
         try:
             while True:
-                message = await websocket.receive()
+                downstream_idle_timeout_seconds = runtime_settings.proxy_downstream_websocket_idle_timeout_seconds
+                try:
+                    message = await asyncio.wait_for(
+                        websocket.receive(),
+                        timeout=min(downstream_idle_timeout_seconds, _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS),
+                    )
+                except asyncio.TimeoutError:
+                    downstream_idle_started_at = await self._refresh_downstream_websocket_idle_started_at(
+                        pending_requests,
+                        pending_lock=pending_lock,
+                        idle_started_at=downstream_idle_started_at,
+                    )
+                    if downstream_idle_started_at is None:
+                        continue
+                    if time.monotonic() - downstream_idle_started_at < downstream_idle_timeout_seconds:
+                        continue
+                    try:
+                        await websocket.close(code=1001, reason=_DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON)
+                    except Exception:
+                        logger.debug("Failed to close idle downstream websocket", exc_info=True)
+                    break
+                downstream_idle_started_at = time.monotonic()
                 message_type = message["type"]
 
                 if message_type == "websocket.disconnect":
@@ -1417,6 +1441,7 @@ class ProxyService:
                         )
                         async with pending_lock:
                             pending_requests.append(request_state)
+                        downstream_idle_started_at = None
                         request_state_registered = True
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
@@ -4074,6 +4099,20 @@ class ProxyService:
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
         )
+
+    async def _refresh_downstream_websocket_idle_started_at(
+        self,
+        pending_requests: deque[_WebSocketRequestState],
+        *,
+        pending_lock: anyio.Lock,
+        idle_started_at: float | None,
+    ) -> float | None:
+        async with pending_lock:
+            if pending_requests:
+                return None
+        if idle_started_at is not None:
+            return idle_started_at
+        return time.monotonic()
 
     async def _fail_expired_pending_websocket_requests(
         self,

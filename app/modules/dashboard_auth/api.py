@@ -75,14 +75,18 @@ def _decorate_session_response(
 ) -> DashboardAuthSessionResponse:
     request_auth = get_dashboard_request_auth(request)
     auth_mode = get_settings().dashboard_auth_mode
+    store = get_dashboard_session_store()
     sid = password_session_id or request.cookies.get(DASHBOARD_SESSION_COOKIE)
-    has_pwd_session = get_dashboard_session_store().is_password_verified(sid) if sid else False
+    session_state = store.get(sid) if sid else None
+    has_pwd = session_state is not None and session_state.password_verified
+    totp_pending = has_pwd and response.totp_required_on_login and not session_state.totp_verified
+    fully_authorized = has_pwd and not totp_pending
 
     if request_auth is None:
         update: dict[str, object] = {
             "auth_mode": auth_mode,
             "password_management_enabled": password_management_enabled(auth_mode),
-            "password_session_active": has_pwd_session,
+            "password_session_active": fully_authorized,
         }
         if (
             auth_mode == DashboardAuthMode.TRUSTED_HEADER
@@ -95,10 +99,10 @@ def _decorate_session_response(
     return response.model_copy(
         update={
             "authenticated": force_authenticated or response.authenticated,
-            "totp_required_on_login": False,
+            "totp_required_on_login": totp_pending,
             "auth_mode": request_auth.mode,
             "password_management_enabled": password_management_enabled(request_auth.mode),
-            "password_session_active": has_pwd_session,
+            "password_session_active": fully_authorized,
         }
     )
 

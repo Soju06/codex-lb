@@ -16,12 +16,13 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { changePassword, loginPassword, removePassword, setupPassword } from "@/features/auth/api";
+import { changePassword, loginPassword, removePassword, setupPassword, verifyTotp } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import {
   PasswordChangeRequestSchema,
   PasswordRemoveRequestSchema,
   PasswordSetupRequestSchema,
+  TotpVerifyRequestSchema,
 } from "@/features/auth/schemas";
 import { getErrorMessage } from "@/utils/errors";
 
@@ -42,6 +43,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
 
   const authenticated = useAuthStore((s) => s.authenticated);
   const [activeDialog, setActiveDialog] = useState<PasswordDialog>(null);
+  const [verifyStep, setVerifyStep] = useState<"password" | "totp">("password");
   const [error, setError] = useState<string | null>(null);
 
   const setupForm = useForm({
@@ -64,11 +66,17 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
     defaultValues: { password: "" },
   });
 
+  const verifyTotpForm = useForm({
+    resolver: zodResolver(TotpVerifyRequestSchema),
+    defaultValues: { code: "" },
+  });
+
   const busy =
     setupForm.formState.isSubmitting ||
     changeForm.formState.isSubmitting ||
     removeForm.formState.isSubmitting ||
-    verifyForm.formState.isSubmitting;
+    verifyForm.formState.isSubmitting ||
+    verifyTotpForm.formState.isSubmitting;
   const lock = busy || disabled || !passwordManagementEnabled;
 
   const closeDialog = () => {
@@ -78,6 +86,8 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
     changeForm.reset();
     removeForm.reset();
     verifyForm.reset();
+    verifyTotpForm.reset();
+    setVerifyStep("password");
   };
 
   const handleSetup = async (values: { password: string; bootstrapToken?: string }) => {
@@ -121,7 +131,23 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
   const handleVerify = async (values: { password: string }) => {
     setError(null);
     try {
-      await loginPassword(values);
+      const session = await loginPassword(values);
+      if (session.totpRequiredOnLogin && !session.passwordSessionActive) {
+        setVerifyStep("totp");
+        return;
+      }
+      await refreshSession();
+      toast.success("Password session established");
+      closeDialog();
+    } catch (caught) {
+      setError(getErrorMessage(caught));
+    }
+  };
+
+  const handleVerifyTotp = async (values: { code: string }) => {
+    setError(null);
+    try {
+      await verifyTotp(values);
       await refreshSession();
       toast.success("Password session established");
       closeDialog();
@@ -351,35 +377,67 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
       <Dialog open={activeDialog === "verify"} onOpenChange={(open) => !open && closeDialog()}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Verify password</DialogTitle>
-            <DialogDescription>Enter your password to unlock password and TOTP management.</DialogDescription>
+            <DialogTitle>{verifyStep === "password" ? "Verify password" : "TOTP verification"}</DialogTitle>
+            <DialogDescription>
+              {verifyStep === "password"
+                ? "Enter your password to unlock password and TOTP management."
+                : "Enter your TOTP code to complete verification."}
+            </DialogDescription>
           </DialogHeader>
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
-          <Form {...verifyForm}>
-            <form onSubmit={verifyForm.handleSubmit(handleVerify)} className="space-y-4">
-              <FormField
-                control={verifyForm.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Password</FormLabel>
-                    <FormControl>
-                      <Input {...field} type="password" autoComplete="current-password" placeholder="Enter current password" />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <DialogFooter>
-                <Button type="button" variant="outline" onClick={closeDialog} disabled={busy}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={busy}>
-                  Verify
-                </Button>
-              </DialogFooter>
-            </form>
-          </Form>
+          {verifyStep === "password" ? (
+            <Form {...verifyForm}>
+              <form onSubmit={verifyForm.handleSubmit(handleVerify)} className="space-y-4">
+                <FormField
+                  control={verifyForm.control}
+                  name="password"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Password</FormLabel>
+                      <FormControl>
+                        <Input {...field} type="password" autoComplete="current-password" placeholder="Enter current password" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <DialogFooter>
+                  <Button type="button" variant="outline" onClick={closeDialog} disabled={busy}>
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={busy}>
+                    Verify
+                  </Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          ) : (
+            <Form {...verifyTotpForm}>
+              <form onSubmit={verifyTotpForm.handleSubmit(handleVerifyTotp)} className="space-y-4">
+                <FormField
+                  control={verifyTotpForm.control}
+                  name="code"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>TOTP code</FormLabel>
+                      <FormControl>
+                        <Input {...field} type="text" inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit code" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <DialogFooter>
+                  <Button type="button" variant="outline" onClick={closeDialog} disabled={busy}>
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={busy}>
+                    Verify
+                  </Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          )}
         </DialogContent>
       </Dialog>
     </section>

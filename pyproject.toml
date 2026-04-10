@@ -1,6 +1,6 @@
 [project]
 name = "codex-lb-cinamon"
-version = "1.12.5"
+version = "1.12.6"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }

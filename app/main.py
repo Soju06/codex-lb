@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from importlib import import_module
@@ -412,9 +413,11 @@ async def _wait_for_bridge_advertise_endpoint(
         sock_connect=connect_timeout_seconds,
         sock_read=connect_timeout_seconds,
     )
+    max_probe_wait_seconds = max(connect_timeout_seconds, 5.0)
+    deadline = time.monotonic() + max_probe_wait_seconds
     await asyncio.sleep(0)
     attempt = 0
-    while True:
+    while time.monotonic() < deadline:
         attempt += 1
         try:
             async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
@@ -428,7 +431,13 @@ async def _wait_for_bridge_advertise_endpoint(
                 exc_info=True,
             )
         delay = min(0.5 * (2 ** min(attempt - 1, 4)), 5.0)
-        await asyncio.sleep(delay)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(delay, remaining))
+    raise RuntimeError(
+        f"Bridge advertise endpoint did not become reachable before registration probe deadline: {probe_url}"
+    )
 
 
 def _local_api_port() -> int | None:

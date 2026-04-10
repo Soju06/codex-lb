@@ -9,6 +9,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import aiohttp
 import pytest
 
 import app.core.tracing.otel as otel
@@ -611,6 +612,48 @@ async def test_wait_for_bridge_advertise_endpoint_skips_tls_verification_for_htt
 
     assert seen["url"] == "https://pod-a.bridge.default.svc.cluster.local:2455/health/live"
     assert seen["ssl"] is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_bridge_advertise_endpoint_raises_after_bounded_retry_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    current_time = 0.0
+    attempts = 0
+
+    def _monotonic() -> float:
+        return current_time
+
+    async def _sleep(delay: float) -> None:
+        nonlocal current_time
+        current_time += delay
+
+    class _FakeSession:
+        async def __aenter__(self) -> "_FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def get(self, url: str, *, ssl: bool | None = None):
+            nonlocal attempts
+            attempts += 1
+            raise aiohttp.ClientConnectionError("unreachable")
+
+    monkeypatch.setattr(main.time, "monotonic", _monotonic)
+    monkeypatch.setattr(main.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(main.aiohttp, "ClientSession", lambda *args, **kwargs: _FakeSession())
+
+    with pytest.raises(RuntimeError, match="did not become reachable"):
+        await main._wait_for_bridge_advertise_endpoint(
+            "http://pod-a.bridge.default.svc.cluster.local:2455",
+            connect_timeout_seconds=3.0,
+        )
+
+    assert attempts >= 3
+    assert current_time >= 5.0
 
 
 def test_local_api_port_supports_equals_style_argv(monkeypatch: pytest.MonkeyPatch):

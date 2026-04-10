@@ -3024,21 +3024,23 @@ class ProxyService:
                 session,
                 request_state=request_state,
                 text_data=text_data,
+                send_request=False,
             )
             if recovered:
-                return
-            _log_http_bridge_event(
-                "submit_on_closed",
-                session.key,
-                account_id=session.account.id,
-                model=session.request_model,
-                cache_key_family=session.key.affinity_kind,
-                model_class=_extract_model_class(session.request_model) if session.request_model else None,
-            )
-            raise ProxyResponseError(
-                502,
-                openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
-            )
+                session.closed = False
+            else:
+                _log_http_bridge_event(
+                    "submit_on_closed",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                )
         await self._maybe_prewarm_http_bridge_session(
             session,
             request_state=request_state,
@@ -3323,8 +3325,9 @@ class ProxyService:
         *,
         request_state: _WebSocketRequestState,
         text_data: str,
+        send_request: bool = True,
     ) -> bool:
-        if request_state.previous_response_id is not None:
+        if request_state.previous_response_id is not None and send_request:
             _mark_request_state_previous_response_not_found(
                 request_state,
                 (
@@ -3351,7 +3354,8 @@ class ProxyService:
                 request_state=request_state,
                 restart_reader=True,
             )
-            await session.upstream.send_text(text_data)
+            if send_request:
+                await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
             return True
         except Exception:

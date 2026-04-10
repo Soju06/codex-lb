@@ -5137,7 +5137,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
 
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_when_account_is_no_longer_assigned(
-    app_instance, monkeypatch
+    async_client, app_instance, monkeypatch
 ):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
@@ -5159,6 +5159,16 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
     create_started = asyncio.Event()
     release_create = asyncio.Event()
     create_calls: list[list[str]] = []
+    stale_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_stale",
+        "http-bridge-stale@example.com",
+    )
+    fresh_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_fresh",
+        "http-bridge-fresh@example.com",
+    )
 
     async def fake_create_http_bridge_session(
         self,
@@ -5176,17 +5186,17 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
             create_started.set()
             await release_create.wait()
             session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
-            cast(Any, session).account = SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE)
+            cast(Any, session).account = SimpleNamespace(id=stale_account_id, status=AccountStatus.ACTIVE)
             return session
         session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
-        cast(Any, session).account = SimpleNamespace(id="acc-fresh", status=AccountStatus.ACTIVE)
+        cast(Any, session).account = SimpleNamespace(id=fresh_account_id, status=AccountStatus.ACTIVE)
         return session
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
     key = proxy_module._HTTPBridgeSessionKey("session_header", "shared-session", "key-assignments")
-    stale_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=["acc-stale"])
-    refreshed_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=["acc-fresh"])
+    stale_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=[stale_account_id])
+    refreshed_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=[fresh_account_id])
 
     try:
         creator = asyncio.create_task(
@@ -5222,10 +5232,10 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         created_session, follower_session = await asyncio.gather(creator, follower)
 
         assert created_session is not follower_session
-        assert created_session.account.id == "acc-stale"
-        assert follower_session.account.id == "acc-fresh"
+        assert created_session.account.id == stale_account_id
+        assert follower_session.account.id == fresh_account_id
         assert service._http_bridge_sessions[key] is follower_session
-        assert create_calls == [["acc-stale"], ["acc-fresh"]]
+        assert create_calls == [[stale_account_id], [fresh_account_id]]
     finally:
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()

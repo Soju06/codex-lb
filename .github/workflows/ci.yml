@@ -127,9 +127,17 @@ jobs:
         run: uv run ty check
 
   test:
-    name: Tests (pytest)
+    name: Tests (pytest, ${{ matrix.slice.name }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        slice:
+          - name: unit
+            paths: "tests/unit tests/test_request_logs_options_api.py"
+          - name: integration
+            paths: "tests/integration tests/e2e"
     env:
       PYTHONFAULTHANDLER: "1"
 
@@ -158,7 +166,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest -q -ra -o faulthandler_timeout=300 --durations=20
+        run: uv run pytest -q -ra -o faulthandler_timeout=300 --durations=20 ${{ matrix.slice.paths }}
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)

@@ -11,6 +11,7 @@ metadata:
   {{- end }}
 spec:
   serviceName: {{ include "codex-lb.bridgeHeadlessServiceName" . }}
+  {{- $httpPort := .Values.service.port | default 2455 }}
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
@@ -76,7 +77,7 @@ spec:
               podAffinityTerm:
                 labelSelector:
                   matchLabels:
-                    {{- include "codex-lb.selectorLabels" . | nindent 20 }}
+                    {{- include "codex-lb.workloadSelectorLabels" . | nindent 20 }}
                 topologyKey: kubernetes.io/hostname
       {{- else if eq .Values.affinity.podAntiAffinity "hard" }}
       affinity:
@@ -84,7 +85,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  {{- include "codex-lb.selectorLabels" . | nindent 18 }}
+                  {{- include "codex-lb.workloadSelectorLabels" . | nindent 18 }}
               topologyKey: kubernetes.io/hostname
       {{- end }}
       {{- with .Values.topologySpreadConstraints }}
@@ -199,10 +200,10 @@ spec:
             - --host
             - "0.0.0.0"
             - --port
-            - "2455"
+            - {{ $httpPort | quote }}
           ports:
             - name: http
-              containerPort: 2455
+              containerPort: {{ $httpPort }}
               protocol: TCP
             {{- if .Values.metrics.enabled }}
             - name: metrics
@@ -264,7 +265,7 @@ spec:
                 command:
                   - python
                   - -c
-                  - "import time, urllib.error, urllib.request; req = urllib.request.Request('http://127.0.0.1:2455/internal/drain/start', method='POST');\ntry: urllib.request.urlopen(req, timeout=2).read()\nexcept Exception: pass\ntime.sleep({{ .Values.preStopSleepSeconds }})"
+                  - "import time, urllib.error, urllib.request; req = urllib.request.Request('http://127.0.0.1:{{ $httpPort }}/internal/drain/start', method='POST');\ntry: urllib.request.urlopen(req, timeout=2).read()\nexcept Exception: pass\ntime.sleep({{ .Values.preStopSleepSeconds }})"
           startupProbe:
             httpGet:
               path: /health/startup

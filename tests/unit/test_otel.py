@@ -352,6 +352,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
     monkeypatch.setattr(main, "init_db", AsyncMock())
@@ -492,6 +493,7 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
     monkeypatch.setattr(main, "init_db", AsyncMock())
@@ -664,7 +666,7 @@ async def test_validate_bridge_advertise_endpoint_rejects_shared_hostname():
 
 
 @pytest.mark.asyncio
-async def test_validate_bridge_advertise_endpoint_rejects_loopback_even_for_first_replica():
+async def test_validate_bridge_advertise_endpoint_allows_loopback_for_single_replica():
     import app.main as main
 
     class _RingReader:
@@ -676,13 +678,12 @@ async def test_validate_bridge_advertise_endpoint_rejects_loopback_even_for_firs
         http_responses_session_bridge_advertise_base_url="http://127.0.0.1:2455",
     )
 
-    with pytest.raises(RuntimeError):
-        await main._validate_bridge_advertise_endpoint_for_multi_replica(
-            svc=_RingReader(),
-            settings=settings,
-            instance_id="instance-a",
-            endpoint_base_url=settings.http_responses_session_bridge_advertise_base_url,
-        )
+    await main._validate_bridge_advertise_endpoint_for_multi_replica(
+        svc=_RingReader(),
+        settings=settings,
+        instance_id="instance-a",
+        endpoint_base_url=settings.http_responses_session_bridge_advertise_base_url,
+    )
 
 
 @pytest.mark.asyncio

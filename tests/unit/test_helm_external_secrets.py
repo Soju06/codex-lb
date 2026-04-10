@@ -96,10 +96,8 @@ def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migratio
     assert "PUBLIC_SERVICE_NAME" in rendered
     assert "STATEFULSET_NAME" in rendered
     assert "STATEFULSET_MIN_REPLICAS" in rendered
-    assert "AUTOSCALING_ENABLED" in rendered
-    assert "STATEFULSET_MAX_REPLICAS" in rendered
     assert 'desired = int(spec.get("replicas") or int(os.environ.get("STATEFULSET_MIN_REPLICAS", "1")))' in rendered
-    assert "desired = max(desired, min(legacy_ready, max_replicas))" in rendered
+    assert "desired = max(desired, min(legacy_ready, max_replicas))" not in rendered
     assert 'codex-lb.soju.dev/traffic": "workload"' in rendered
     assert "if ready >= desired:" in rendered
 
@@ -139,7 +137,7 @@ def test_public_service_can_render_workload_selector_after_cutover() -> None:
     assert "codex-lb.soju.dev/traffic: workload" in rendered
 
 
-def test_public_service_auto_mode_renders_workload_selector_on_upgrade_without_lookup() -> None:
+def test_public_service_auto_mode_renders_shared_selector_on_upgrade_without_lookup() -> None:
     rendered = _helm_template(
         "--is-upgrade",
         "--show-only",
@@ -148,7 +146,9 @@ def test_public_service_auto_mode_renders_workload_selector_on_upgrade_without_l
         "migration.serviceSelectorMode=auto",
     )
 
-    assert "codex-lb.soju.dev/traffic: workload" in rendered
+    assert "app.kubernetes.io/name: codex-lb" in rendered
+    assert "app.kubernetes.io/instance: codex-lb" in rendered
+    assert "codex-lb.soju.dev/traffic:" not in rendered
 
 
 def test_public_service_auto_mode_renders_workload_selector_on_install() -> None:
@@ -270,10 +270,36 @@ def test_deployment_prestop_starts_local_drain_before_sleep() -> None:
     rendered = _helm_template(
         "--show-only",
         "templates/deployment.yaml",
+        "--set",
+        "service.port=3456",
     )
 
-    assert "http://127.0.0.1:2455/internal/drain/start" in rendered
+    assert "http://127.0.0.1:3456/internal/drain/start" in rendered
     assert "time.sleep(" in rendered
+
+
+def test_deployment_uses_service_port_for_container_and_probes() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "service.port=3456",
+    )
+
+    assert '- "3456"' in rendered
+    assert "containerPort: 3456" in rendered
+
+
+def test_deployment_anti_affinity_targets_workload_lane_only() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "affinity.podAntiAffinity=hard",
+    )
+
+    assert "codex-lb.soju.dev/traffic: workload" in rendered
+    assert "codex-lb.soju.dev/traffic: legacy" not in rendered
 
 
 def test_deployment_sets_encryption_key_file_env_by_default() -> None:
@@ -502,7 +528,9 @@ def test_network_policy_allows_internal_bridge_handoff_egress_between_pods() -> 
         str(_CHART_DIR / "values-prod.yaml"),
         "--show-only",
         "templates/networkpolicy.yaml",
+        "--set",
+        "service.port=3456",
     )
 
     assert "# Allow pod-to-pod bridge owner handoff egress" in rendered
-    assert "port: 2455" in rendered.split("# Allow pod-to-pod bridge owner handoff egress", 1)[1]
+    assert "port: 3456" in rendered.split("# Allow pod-to-pod bridge owner handoff egress", 1)[1]

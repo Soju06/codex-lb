@@ -585,6 +585,47 @@ async def test_forward_http_bridge_request_to_owner_raises_proxy_error_on_relay_
 
 
 @pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_forwarded_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+
+    async def fake_stream_responses(**kwargs: object):
+        del kwargs
+        yield "data: first\n\n"
+        raise OwnerForwardRelayFailure("data: terminal\n\n")
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_stream_responses)),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={"x-codex-session-id": "sid-123"},
+            api_key_reservation=None,
+            codex_session_affinity=True,
+            downstream_turn_state="http_turn_generated",
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        )
+    ]
+
+    assert chunks == ["data: first\n\n", "data: terminal\n\n"]
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_does_not_rebind_after_forwarded_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

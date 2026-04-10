@@ -646,6 +646,7 @@ class ProxyService:
             owner_check_applied=True,
         )
 
+        forwarded_any = False
         try:
             async for event_block in self._http_bridge_owner_client.stream_responses(
                 owner_endpoint=owner_forward.owner_endpoint,
@@ -654,6 +655,7 @@ class ProxyService:
                 context=forward_context,
                 request_started_at=request_started_at,
             ):
+                forwarded_any = True
                 yield event_block
         except OwnerForwardRelayFailure as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
@@ -671,6 +673,9 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
+            if forwarded_any:
+                yield exc.event_block
+                return
             raise ProxyResponseError(
                 503,
                 openai_error(

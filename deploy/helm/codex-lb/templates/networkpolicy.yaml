@@ -1,4 +1,5 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- $httpPort := .Values.service.port | default 2455 }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,7 +18,7 @@ spec:
     {{- if .Values.networkPolicy.ingressNSMatchLabels }}
     # Allow HTTP traffic from ingress controller
     - ports:
-        - port: 2455
+        - port: {{ $httpPort }}
           protocol: TCP
       from:
         - namespaceSelector:
@@ -26,7 +27,7 @@ spec:
     {{- end }}
     # Allow internal bridge handoff and peer-to-peer health traffic between codex-lb pods
     - ports:
-        - port: 2455
+        - port: {{ $httpPort }}
           protocol: TCP
       from:
         - podSelector:
@@ -78,7 +79,7 @@ spec:
             matchLabels:
               {{- include "codex-lb.selectorLabels" . | nindent 14 }}
       ports:
-        - port: 2455
+        - port: {{ $httpPort }}
           protocol: TCP
     # OTLP gRPC tracing (port 4317)
     {{- if .Values.tracing.enabled }}

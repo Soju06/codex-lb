@@ -20,12 +20,27 @@ spec:
   {{- end }}
   selector:
     {{- $selectorMode := .Values.migration.serviceSelectorMode | default "auto" }}
+    {{- $legacyDeployment := lookup "apps/v1" "Deployment" .Release.Namespace (include "codex-lb.fullname" .) }}
+    {{- $existingService := lookup "v1" "Service" .Release.Namespace (include "codex-lb.fullname" .) }}
+    {{- $existingSelector := dict }}
+    {{- if $existingService }}
+    {{- $existingSelector = get ($existingService.spec | default dict) "selector" | default dict }}
+    {{- end }}
+    {{- $existingTrafficLane := get $existingSelector "codex-lb.soju.dev/traffic" | default "" }}
     {{- if eq $selectorMode "legacy" }}
     {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- else if eq $selectorMode "workload" }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
-    {{- else }}
+    {{- else if not .Release.IsUpgrade }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
+    {{- else if $legacyDeployment }}
+    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
+    {{- else if eq $existingTrafficLane "workload" }}
+    {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
+    {{- else if eq $existingTrafficLane "legacy" }}
+    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
+    {{- else }}
+    {{- include "codex-lb.selectorLabels" . | nindent 4 }}
     {{- end }}
   ports:
     - name: http

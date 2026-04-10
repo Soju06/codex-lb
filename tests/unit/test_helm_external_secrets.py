@@ -294,6 +294,9 @@ def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:
     assert "--set-string 'ingress.hosts[0].host=codex-lb.localtest.me'" in script
     assert "--set-string 'ingress.hosts[0].paths[0].path=/'" in script
     assert "--set-string 'ingress.hosts[0].paths[0].pathType=Prefix'" in script
+    assert 'run_bundled_migration "${release}" "${namespace}"' in script
+    assert 'python", "-m", "app.db.migrate", "upgrade"' in script
+    assert "rollout status \\" in script
 
 
 def test_migration_job_image_does_not_duplicate_registry_prefix() -> None:

@@ -10,7 +10,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
+from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -813,7 +813,7 @@ class ProxyService:
             last_exc: ProxyResponseError | None = None
             excluded_account_ids: set[str] = set()
             for _account_attempt in range(_COMPACT_MAX_ACCOUNT_ATTEMPTS):
-                selection = await self._select_account_with_budget(
+                selection = await self._select_account_with_budget_compatible(
                     deadline,
                     request_id=request_id,
                     kind="compact",
@@ -1080,7 +1080,7 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         try:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_id,
                 kind="transcribe",
@@ -1589,7 +1589,7 @@ class ProxyService:
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         try:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="websocket",
@@ -1833,6 +1833,24 @@ class ProxyService:
     async def _http_bridge_pending_count(self, session: "_HTTPBridgeSession") -> int:
         async with session.pending_lock:
             return max(len(session.pending_requests), session.queued_request_count)
+
+    async def _select_account_with_budget_compatible(
+        self,
+        deadline: float,
+        **kwargs: object,
+    ) -> AccountSelection:
+        select_account = self._select_account_with_budget
+        select_account_any = cast(Any, select_account)
+        try:
+            signature = inspect.signature(select_account)
+        except (TypeError, ValueError):
+            return await select_account_any(deadline, **kwargs)
+
+        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+            return await select_account_any(deadline, **kwargs)
+
+        supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
+        return await select_account_any(deadline, **supported_kwargs)
 
     @overload
     async def _get_or_create_http_bridge_session(
@@ -2872,7 +2890,7 @@ class ProxyService:
         retry_same_account_once = preferred_account_id is not None
         preferred_candidate_id = preferred_account_id
         while True:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="http_bridge",
@@ -3394,7 +3412,7 @@ class ProxyService:
         retry_same_account_once = True
         preferred_candidate_id: str | None = session.account.id
         while True:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="http_bridge",
@@ -4389,7 +4407,7 @@ class ProxyService:
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
                     return
                 try:
-                    selection = await self._select_account_with_budget(
+                    selection = await self._select_account_with_budget_compatible(
                         deadline,
                         request_id=request_id,
                         kind="stream",

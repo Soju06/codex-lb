@@ -79,7 +79,7 @@ const OUTER_R = 68;
 const ACTIVE_RADIUS_OFFSET = 4;
 const LEGEND_VISIBLE_COUNT = 5;
 const LEGEND_ROW_HEIGHT_REM = 1.75;
-const LEGEND_ROW_GAP_REM = 0.125;
+const LEGEND_ROW_GAP_REM = 0;
 
 type DonutDatum = {
   id: string;

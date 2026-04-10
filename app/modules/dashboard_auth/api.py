@@ -9,9 +9,9 @@ from fastapi.responses import JSONResponse
 from app.core.auth.dependencies import set_dashboard_error_format
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
+    get_bootstrap_validation_status,
     has_active_bootstrap_token,
     log_bootstrap_token,
-    validate_bootstrap_token,
 )
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
@@ -110,13 +110,16 @@ async def setup_password(
 ) -> DashboardAuthSessionResponse | JSONResponse:
     current_settings = await context.repository.get_settings()
     if current_settings.password_hash is None and not is_local_request(request):
-        if not await has_active_bootstrap_token():
+        submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
+        validation_status = await get_bootstrap_validation_status(submitted_bootstrap_token)
+        if validation_status == "unavailable":
             raise DashboardAuthError(
                 "Remote bootstrap is disabled until CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN is configured.",
                 code="bootstrap_unavailable",
             )
-        submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
-        if not await validate_bootstrap_token(submitted_bootstrap_token):
+        if validation_status == "password_already_configured":
+            raise DashboardConflictError("Password is already configured", code="password_already_configured")
+        if validation_status != "valid":
             raise DashboardAuthError("Invalid dashboard bootstrap token.", code="invalid_bootstrap_token")
     password = payload.password.strip()
     if len(password) < 8:

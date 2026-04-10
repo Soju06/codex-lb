@@ -21,7 +21,7 @@ _ROTATED_BOOTSTRAP_TOKEN = "rotated-bootstrap-token"
 async def _reset_bootstrap_runtime(_reset_db_state, monkeypatch: pytest.MonkeyPatch):
     del _reset_db_state
     monkeypatch.delenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", raising=False)
-    tokens = iter([_AUTO_BOOTSTRAP_TOKEN, _ROTATED_BOOTSTRAP_TOKEN, _AUTO_BOOTSTRAP_TOKEN, _ROTATED_BOOTSTRAP_TOKEN])
+    tokens = iter([_AUTO_BOOTSTRAP_TOKEN, _ROTATED_BOOTSTRAP_TOKEN])
     monkeypatch.setattr(bootstrap_module.secrets, "token_urlsafe", lambda _size: next(tokens))
     get_settings.cache_clear()
     await get_settings_cache().invalidate()
@@ -168,14 +168,14 @@ async def test_auto_generated_token_is_shared_across_app_instances(monkeypatch: 
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
                 "/api/dashboard-auth/password/setup",
-                json={"password": "password123", "bootstrapToken": _ROTATED_BOOTSTRAP_TOKEN},
+                json={"password": "password123", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
             )
 
     assert response.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_existing_auto_token_rotates_and_relogs_on_restart(monkeypatch: pytest.MonkeyPatch):
+async def test_existing_auto_token_is_reused_on_restart(monkeypatch: pytest.MonkeyPatch):
     _force_remote(monkeypatch)
 
     async def _noop_init_db() -> None:
@@ -193,8 +193,8 @@ async def test_existing_auto_token_rotates_and_relogs_on_restart(monkeypatch: py
     assert await bootstrap_module.validate_bootstrap_token(_AUTO_BOOTSTRAP_TOKEN) is True
 
     async with second_app.router.lifespan_context(second_app):
-        assert await bootstrap_module.validate_bootstrap_token(_AUTO_BOOTSTRAP_TOKEN) is False
-        assert await bootstrap_module.validate_bootstrap_token(_ROTATED_BOOTSTRAP_TOKEN) is True
+        assert await bootstrap_module.validate_bootstrap_token(_AUTO_BOOTSTRAP_TOKEN) is True
+        assert await bootstrap_module.validate_bootstrap_token(_ROTATED_BOOTSTRAP_TOKEN) is False
 
 
 @pytest.mark.asyncio
@@ -224,3 +224,20 @@ async def test_remove_password_regenerates_bootstrap_token(async_client, monkeyp
         json={"password": "new-password-456", "bootstrapToken": _ROTATED_BOOTSTRAP_TOKEN},
     )
     assert resetup.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_remote_bootstrap_conflict_after_token_consumed(async_client, monkeypatch):
+    _force_remote(monkeypatch)
+    setup = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "password123", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
+    )
+    assert setup.status_code == 200
+
+    conflict = await async_client.post(
+        "/api/dashboard-auth/password/setup",
+        json={"password": "new-password-456", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "password_already_configured"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from secrets import compare_digest
 
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse

@@ -118,7 +118,9 @@ async def ensure_auto_bootstrap_token() -> str | None:
                 return _get_encryptor().decrypt(encrypted)
             except Exception:
                 logger.warning(
-                    "Stored bootstrap token could not be decrypted; leaving existing token valid. Configure CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN or restore a shared encryption key to recover it.",
+                    "Stored bootstrap token could not be decrypted; leaving existing token valid. "
+                    "Configure CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN or restore a shared encryption key "
+                    "to recover it.",
                     exc_info=True,
                 )
                 return None

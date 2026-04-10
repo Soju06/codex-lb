@@ -25,8 +25,8 @@ from app.db.migrate import (
     LEGACY_MIGRATION_ORDER,
     check_schema_drift,
     inspect_migration_state,
-    run_upgrade,
     run_startup_migrations,
+    run_upgrade,
 )
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal

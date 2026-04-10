@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DonutChart } from "@/components/donut-chart";
 
@@ -8,7 +8,17 @@ const BASE_ITEMS = [
   { label: "Account B", value: 80, color: "#d9a441" },
 ];
 
+let scrollIntoViewMock: ReturnType<typeof vi.fn>;
+
 describe("DonutChart", () => {
+  beforeEach(() => {
+    scrollIntoViewMock = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoViewMock,
+    });
+  });
+
   it("renders chart title, subtitle, legend, and SVG", () => {
     const { container } = render(
       <DonutChart
@@ -100,6 +110,78 @@ describe("DonutChart", () => {
 
     expect(screen.getByText(/^Used$/)).toBeInTheDocument();
     expect(screen.getByTestId("donut-used-value")).toHaveTextContent("300");
+  });
+
+  it("highlights the matching legend row when a legend item is hovered", () => {
+    render(
+      <DonutChart
+        title="Legend Hover"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    const legendRow = screen.getByTestId("donut-legend-0");
+    fireEvent.mouseEnter(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "true");
+
+    fireEvent.mouseLeave(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "false");
+  });
+
+  it("highlights the matching legend row when a pie slice is hovered", () => {
+    const { container } = render(
+      <DonutChart
+        title="Slice Hover"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    const sectors = container.querySelectorAll(".recharts-pie-sector");
+    const legendRow = screen.getByTestId("donut-legend-0");
+
+    fireEvent.mouseEnter(sectors[0]!);
+    expect(legendRow).toHaveAttribute("data-active", "true");
+  });
+
+  it("limits the legend list to four visible rows before scrolling", () => {
+    render(
+      <DonutChart
+        title="Many Legends"
+        total={1000}
+        items={Array.from({ length: 5 }, (_, index) => ({
+          label: `Account ${index + 1}`,
+          value: 100,
+          color: `#00000${index}`,
+        }))}
+      />,
+    );
+
+    expect(screen.getByTestId("donut-legend-list")).toHaveStyle({
+      maxHeight: "calc(4 * 1.75rem + 0.375rem)",
+    });
+  });
+
+  it("scrolls the hovered pie item into view in the legend list", async () => {
+    const items = Array.from({ length: 5 }, (_, index) => ({
+      label: `Account ${index + 1}`,
+      value: 100,
+      color: `#12345${index}`,
+    }));
+    const { container } = render(
+      <DonutChart title="Scrollable Legends" total={1000} items={items} />,
+    );
+
+    const sectors = container.querySelectorAll(".recharts-pie-sector");
+    const lastLegendRow = screen.getByTestId("donut-legend-4");
+
+    fireEvent.mouseEnter(sectors[4]!);
+
+    await waitFor(() => {
+      expect(lastLegendRow).toHaveAttribute("data-active", "true");
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+    });
   });
 
   it("renders empty state when total is zero", () => {

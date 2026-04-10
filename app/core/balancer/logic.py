@@ -177,13 +177,17 @@ def select_account(
         available.append(state)
 
     if not available:
-        # If any account is in error backoff, try the one closest to
-        # backoff expiry — it may have recovered.  Hard-blocked accounts
-        # (paused/deactivated/rate-limited/quota-exceeded) can't serve
-        # traffic regardless, so they shouldn't prevent trying recoverable
-        # accounts.  This prevents #140: all accounts locked out during
-        # a widespread upstream outage.
-        if len(in_error_backoff) > 1 and allow_backoff_fallback:
+        hard_blocked_exists = any(
+            state.status
+            in (
+                AccountStatus.PAUSED,
+                AccountStatus.DEACTIVATED,
+                AccountStatus.RATE_LIMITED,
+                AccountStatus.QUOTA_EXCEEDED,
+            )
+            for state in all_states
+        )
+        if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
 
             def _backoff_expires_at(s: AccountState) -> float:
                 backoff = min(300, 30 * (2 ** (s.error_count - 3)))

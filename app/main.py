@@ -15,8 +15,8 @@ from urllib.parse import urlparse
 import aiohttp
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import _bridge_advertise_hostname_is_replica_specific, get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -28,6 +28,7 @@ from app.core.middleware import (
     add_request_decompression_middleware,
     add_request_id_middleware,
 )
+from app.core.middleware.inflight import InFlightMiddleware
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
 from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
@@ -83,25 +84,6 @@ def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
     return False
 
 
-class InFlightMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # Graceful drain waits for finite HTTP request lifetimes only. Long-lived
-        # websocket sessions are handled independently and must not pin drain.
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        shutdown_state = import_module("app.core.shutdown")
-        shutdown_state.increment_in_flight()
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            shutdown_state.decrement_in_flight()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
@@ -127,6 +109,9 @@ async def lifespan(app: FastAPI):
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
     await init_db()
     init_background_db()
+    _auto_bootstrap_token = await ensure_auto_bootstrap_token()
+    if _auto_bootstrap_token:
+        log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
     await _ensure_bridge_durable_schema_ready(settings)
     startup_module.mark_bridge_durable_schema_ready()

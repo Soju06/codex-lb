@@ -173,7 +173,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest -q -ra ${{ matrix.slice.extra_args }} -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --durations=20 ${{ matrix.slice.paths }}
+        run: uv run pytest -q -ra ${{ matrix.slice.extra_args }} -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --timeout=180 --timeout-method=thread --durations=20 ${{ matrix.slice.paths }}
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)
@@ -222,7 +222,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --durations=20
+        run: uv run pytest -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --timeout=180 --timeout-method=thread --durations=20
 
   migration-check:
     name: Migration check (alembic)

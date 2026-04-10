@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.12.0](https://github.com/Soju06/codex-lb/compare/v1.11.0...v1.12.0) (2026-04-08)
+
+
+### Features
+
+* add accounts as pools for api to use ([#338](https://github.com/Soju06/codex-lb/issues/338)) ([659f7dc](https://github.com/Soju06/codex-lb/commit/659f7dcdb7156c6f384053d4734394da69ca0886))
+* **config:** add model_context_window_overrides setting ([#340](https://github.com/Soju06/codex-lb/issues/340)) ([04da855](https://github.com/Soju06/codex-lb/commit/04da8553f764646bfcd52d087ea0a20a91c3995a))
+* enable import-without-overwrite by default ([#362](https://github.com/Soju06/codex-lb/issues/362)) ([af9af6d](https://github.com/Soju06/codex-lb/commit/af9af6db3893e691842a8af43892adda4f9e9ccf))
+
+
+### Bug Fixes
+
+* **dashboard:** clarify donut usage breakdown ([#344](https://github.com/Soju06/codex-lb/issues/344)) ([87af885](https://github.com/Soju06/codex-lb/commit/87af8852c5d2e8bd3fdfe9d6e207745be7408c9c))
+* **dashboard:** restore capacity-based usage donut totals ([#336](https://github.com/Soju06/codex-lb/issues/336)) ([1bcdcaa](https://github.com/Soju06/codex-lb/commit/1bcdcaacc1a51d3ce4f794b479383f6a9fe1158a))
+
+
+### Documentation
+
+* add comprehensive docstrings to select_account in logic.py ([#350](https://github.com/Soju06/codex-lb/issues/350)) ([36a4e7c](https://github.com/Soju06/codex-lb/commit/36a4e7cbd70fdb95d772d16aeded35ec1ae9a80d))
+* add Daeroni as a contributor for doc ([#356](https://github.com/Soju06/codex-lb/issues/356)) ([15c4e54](https://github.com/Soju06/codex-lb/commit/15c4e54087089092478aaafe4bbfb6390fac0d84))
+* add embogomolov as a contributor for code, and test ([#361](https://github.com/Soju06/codex-lb/issues/361)) ([d82cdf4](https://github.com/Soju06/codex-lb/commit/d82cdf4cdc8fd42ea5dfc3b43455ad857ab5421e))
+* add Felix201209 as a contributor for code ([#360](https://github.com/Soju06/codex-lb/issues/360)) ([5e8cf21](https://github.com/Soju06/codex-lb/commit/5e8cf214f8e8ce8c516e15f7f3545cab6807aa7c))
+* add Felix201209 as a contributor for doc ([#357](https://github.com/Soju06/codex-lb/issues/357)) ([6a7b8b2](https://github.com/Soju06/codex-lb/commit/6a7b8b27af6cc23b3f1a19802cc7b377489b2f49))
+
 ## [1.11.0](https://github.com/Soju06/codex-lb/compare/v1.10.1...v1.11.0) (2026-04-06)
 
 

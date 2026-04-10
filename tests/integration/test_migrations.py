@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from anyio import to_thread
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -25,6 +26,7 @@ from app.db.migrate import (
     check_schema_drift,
     inspect_migration_state,
     run_startup_migrations,
+    run_upgrade,
 )
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -594,5 +596,124 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert usage_count == 1
             assert logs_count == 1
             assert sticky_count == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_default_flip_migration_does_not_infer_intent_from_updated_at(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-settings-defaults.sqlite'}"
+    base_revision = "20260408_010000_merge_import_without_overwrite_and_assignment_heads"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, base_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET sticky_threads_enabled = 0,
+                        prefer_earlier_reset_accounts = 0,
+                        password_hash = 'bcrypt$demo',
+                        updated_at = '2026-02-01 00:00:00'
+                    WHERE id = 1
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(
+            lambda: run_upgrade(
+                db_url,
+                "20260409_000000_switch_sticky_threads_and_prefer_earlier_reset_defaults_to_true",
+                bootstrap_legacy=False,
+            )
+        )
+
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT sticky_threads_enabled, prefer_earlier_reset_accounts
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert row[0] in (False, 0)
+            assert row[1] in (False, 0)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_default_flip_migration_updates_fresh_seeded_row(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-settings-defaults-fresh.sqlite'}"
+
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260409_000000_switch_sticky_threads_and_prefer_earlier_reset_defaults_to_true",
+            bootstrap_legacy=True,
+        )
+    )
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT sticky_threads_enabled, prefer_earlier_reset_accounts
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert row[0] in (True, 1)
+            assert row[1] in (True, 1)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_db_upgraded_in_steps(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-settings-defaults-staged-fresh.sqlite'}"
+
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260408_010000_merge_import_without_overwrite_and_assignment_heads",
+            bootstrap_legacy=True,
+        )
+    )
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT sticky_threads_enabled, prefer_earlier_reset_accounts
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert row[0] in (True, 1)
+            assert row[1] in (True, 1)
     finally:
         await engine.dispose()

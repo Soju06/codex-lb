@@ -245,7 +245,10 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
         metrics_enabled=False,
         shutdown_drain_timeout_seconds=0,
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
@@ -273,6 +276,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
     monkeypatch.setattr(main, "init_db", init_db)
@@ -318,7 +322,10 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         shutdown_drain_timeout_seconds=0,
         http_responses_session_bridge_instance_id="pod-a",
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
@@ -419,6 +426,7 @@ async def test_lifespan_waits_for_advertise_endpoint_before_active_register(monk
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
     monkeypatch.setattr(main, "init_db", AsyncMock())

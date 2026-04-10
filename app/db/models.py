@@ -191,14 +191,16 @@ class DashboardSettings(Base):
     __tablename__ = "dashboard_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     upstream_stream_transport: Mapped[str] = mapped_column(
         String,
         default="default",
         server_default=text("'default'"),
         nullable=False,
     )
-    prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
     routing_strategy: Mapped[str] = mapped_column(
         String,
         default="capacity_weighted",
@@ -223,6 +225,8 @@ class DashboardSettings(Base):
         nullable=False,
     )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bootstrap_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    bootstrap_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     api_key_auth_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

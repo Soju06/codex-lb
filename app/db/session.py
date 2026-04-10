@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,7 @@ from anyio import to_thread
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config.settings import get_settings
 from app.db.sqlite_utils import SqliteIntegrityCheckMode, check_sqlite_integrity, sqlite_db_path_from_url
@@ -32,6 +34,26 @@ def _is_sqlite_url(url: str) -> bool:
 
 def _is_sqlite_memory_url(url: str) -> bool:
     return _is_sqlite_url(url) and ":memory:" in url
+
+
+def _postgres_async_connect_args(url: str) -> dict[str, int] | None:
+    if not url.startswith("postgresql+asyncpg://"):
+        return None
+    if not os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
+        return None
+    return {"prepared_statement_cache_size": 0}
+
+
+def _postgres_async_engine_kwargs(url: str, *, background: bool) -> dict[str, object]:
+    connect_args = _postgres_async_connect_args(url)
+    kwargs: dict[str, object] = {"connect_args": connect_args or {}}
+    if os.environ.get("CODEX_LB_TEST_DATABASE_URL") and url.startswith("postgresql+asyncpg://"):
+        kwargs["poolclass"] = NullPool
+    else:
+        kwargs["pool_size"] = 3 if background else _settings.database_pool_size
+        kwargs["max_overflow"] = 2 if background else _settings.database_max_overflow
+        kwargs["pool_timeout"] = _settings.database_pool_timeout_seconds
+    return kwargs
 
 
 def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
@@ -70,9 +92,7 @@ else:
     engine = create_async_engine(
         _settings.database_url,
         echo=False,
-        pool_size=_settings.database_pool_size,
-        max_overflow=_settings.database_max_overflow,
-        pool_timeout=_settings.database_pool_timeout_seconds,
+        **_postgres_async_engine_kwargs(_settings.database_url, background=False),
     )
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -114,9 +134,9 @@ def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None
     return SqliteIntegrityCheckMode(raw_mode)
 
 
-async def _shielded(awaitable: Awaitable[_T]) -> _T:
+async def _shielded(awaitable: Awaitable[object]) -> None:
     with anyio.CancelScope(shield=True):
-        return await awaitable
+        await awaitable
 
 
 async def _safe_rollback(session: AsyncSession) -> None:
@@ -183,9 +203,7 @@ def init_background_db(url: str | None = None) -> None:
         _background_engine = create_async_engine(
             db_url,
             echo=False,
-            pool_size=3,
-            max_overflow=2,
-            pool_timeout=_settings.database_pool_timeout_seconds,
+            **_postgres_async_engine_kwargs(db_url, background=True),
         )
 
     _background_session_factory = async_sessionmaker(_background_engine, expire_on_commit=False, class_=AsyncSession)

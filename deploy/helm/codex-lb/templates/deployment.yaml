@@ -144,6 +144,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "codex-lb.databaseUrlSecretName" . }}
                   key: {{ .Values.auth.secretKeys.databaseUrl }}
+            - name: CODEX_LB_ENCRYPTION_KEY_FILE
+              value: /var/lib/codex-lb/encryption.key
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -173,6 +175,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "codex-lb.databaseUrlSecretName" . }}
                   key: {{ .Values.auth.secretKeys.databaseUrl }}
+            - name: CODEX_LB_ENCRYPTION_KEY_FILE
+              value: /var/lib/codex-lb/encryption.key
           volumeMounts:
             - name: tmp
               mountPath: /tmp

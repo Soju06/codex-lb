@@ -6770,8 +6770,9 @@ def _http_bridge_owner_check_required(
     *,
     gateway_safe_mode: bool,
 ) -> bool:
-    del gateway_safe_mode
-    return key.strength == "hard"
+    if key.strength == "hard":
+        return True
+    return gateway_safe_mode and key.affinity_kind == "sticky_thread"
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

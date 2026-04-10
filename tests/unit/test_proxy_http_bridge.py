@@ -193,6 +193,13 @@ def test_http_bridge_owner_check_required_keeps_prompt_cache_soft() -> None:
     assert proxy_service._http_bridge_owner_check_required(key, gateway_safe_mode=True) is False
 
 
+def test_http_bridge_owner_check_required_enables_sticky_thread_in_gateway_safe_mode() -> None:
+    key = proxy_service._HTTPBridgeSessionKey("sticky_thread", "thread-key", None)
+
+    assert proxy_service._http_bridge_owner_check_required(key, gateway_safe_mode=False) is False
+    assert proxy_service._http_bridge_owner_check_required(key, gateway_safe_mode=True) is True
+
+
 @pytest.mark.asyncio
 async def test_select_account_with_budget_prefers_durable_account_id_when_available(
     monkeypatch: pytest.MonkeyPatch,
@@ -1678,6 +1685,39 @@ async def test_get_or_create_http_bridge_session_prompt_cache_mismatch_stays_loc
     )
 
     assert resolved is created_session
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_sticky_thread_mismatch_forwards_in_gateway_safe_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("sticky_thread", "thread-key", None)
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+    service._ring_membership = cast(Any, SimpleNamespace(resolve_endpoint=AsyncMock(return_value="http://instance-b")))
+
+    resolved = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="thread-key", kind=proxy_service.StickySessionKind.STICKY_THREAD),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        allow_forward_to_owner=True,
+        gateway_safe_mode=True,
+    )
+
+    assert isinstance(resolved, proxy_service._HTTPBridgeOwnerForward)
+    assert resolved.owner_instance == "instance-b"
+    assert resolved.owner_endpoint == "http://instance-b"
 
 
 @pytest.mark.asyncio

@@ -130,3 +130,33 @@ async def test_collect_responses_payload_preserves_apply_patch_call_output_item(
             "patch": "*** Begin Patch\n*** End Patch\n",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_preserves_mcp_approval_request_output_item() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            (
+                'data: {"type":"response.output_item.done","output_index":0,'
+                '"item":{"id":"mcp_1","type":"mcp_approval_request","status":"in_progress",'
+                '"request_id":"req_1","server_label":"github","tool_name":"repos/list"}}\n\n'
+            ),
+            (
+                'data: {"type":"response.completed","response":{"id":"resp_2","object":"response",'
+                '"status":"completed","output":[]}}\n\n'
+            ),
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["id"] == "resp_2"
+    assert body["output"] == [
+        {
+            "id": "mcp_1",
+            "type": "mcp_approval_request",
+            "status": "in_progress",
+            "request_id": "req_1",
+            "server_label": "github",
+            "tool_name": "repos/list",
+        }
+    ]

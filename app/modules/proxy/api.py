@@ -97,6 +97,7 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
         "file_search_call",
         "computer_call",
         "code_interpreter_call",
+        "mcp_approval_request",
         "mcp_list_tools",
     }
 )

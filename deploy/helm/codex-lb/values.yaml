@@ -443,7 +443,7 @@ dbInit:
 migration:
   # @param migration.enabled Run database migration Job on install/upgrade
   enabled: true
-  # @param migration.serviceSelectorMode Public Service selector mode during controller migration (auto=legacy during live cutover, workload after cutover, shared-selector fallback for client-side renders)
+  # @param migration.serviceSelectorMode Public Service selector mode during controller migration (auto=legacy during live cutover, workload after cutover, explicit mode required for ambiguous client-rendered upgrades)
   serviceSelectorMode: auto
   # @param migration.backoffLimit Maximum retries before marking Job failed
   backoffLimit: 3

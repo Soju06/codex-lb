@@ -317,6 +317,7 @@ class Settings(BaseSettings):
             if not _bridge_advertise_hostname_is_replica_specific(
                 hostname,
                 instance_id=self.http_responses_session_bridge_instance_id,
+                multi_replica_intent=len(ring) > 1,
             ):
                 raise ValueError(
                     "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
@@ -335,7 +336,12 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def _bridge_advertise_hostname_is_replica_specific(hostname: str, *, instance_id: str) -> bool:
+def _bridge_advertise_hostname_is_replica_specific(
+    hostname: str,
+    *,
+    instance_id: str,
+    multi_replica_intent: bool = False,
+) -> bool:
     pod_ip = os.getenv("POD_IP")
     if pod_ip and hostname == pod_ip:
         return True
@@ -343,4 +349,4 @@ def _bridge_advertise_hostname_is_replica_specific(hostname: str, *, instance_id
         parsed_ip = ip_address(hostname)
     except ValueError:
         return instance_id in hostname.split(".")
-    return parsed_ip.is_loopback
+    return parsed_ip.is_loopback and not multi_replica_intent

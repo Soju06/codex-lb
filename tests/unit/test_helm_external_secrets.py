@@ -137,18 +137,31 @@ def test_public_service_can_render_workload_selector_after_cutover() -> None:
     assert "codex-lb.soju.dev/traffic: workload" in rendered
 
 
-def test_public_service_auto_mode_renders_shared_selector_on_upgrade_without_lookup() -> None:
-    rendered = _helm_template(
-        "--is-upgrade",
-        "--show-only",
-        "templates/service.yaml",
-        "--set",
-        "migration.serviceSelectorMode=auto",
+def test_public_service_auto_mode_requires_explicit_mode_on_upgrade_without_lookup() -> None:
+    if shutil.which("helm") is None:
+        pytest.skip("helm is required for chart rendering tests")
+    _ensure_chart_dependencies()
+
+    completed = subprocess.run(
+        [
+            "helm",
+            "template",
+            "codex-lb",
+            str(_CHART_DIR),
+            "--is-upgrade",
+            "--show-only",
+            "templates/service.yaml",
+            "--set",
+            "migration.serviceSelectorMode=auto",
+        ],
+        cwd=_REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
-    assert "app.kubernetes.io/name: codex-lb" in rendered
-    assert "app.kubernetes.io/instance: codex-lb" in rendered
-    assert "codex-lb.soju.dev/traffic:" not in rendered
+    assert completed.returncode != 0
+    assert "migration.serviceSelectorMode=auto is ambiguous during client-rendered upgrades" in completed.stderr
 
 
 def test_public_service_auto_mode_renders_workload_selector_on_install() -> None:

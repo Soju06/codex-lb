@@ -1578,7 +1578,7 @@ def test_http_bridge_can_recover_during_drain_for_session_header_bootstrap() -> 
             previous_response_id=None,
             durable_lookup=None,
         )
-        is True
+        is False
     )
 
 

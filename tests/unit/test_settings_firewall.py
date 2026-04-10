@@ -108,3 +108,15 @@ def test_settings_allows_loopback_http_bridge_advertise_base_url(monkeypatch):
     settings = Settings()
 
     assert settings.http_responses_session_bridge_advertise_base_url == "http://127.0.0.1:2455"
+
+
+def test_settings_rejects_loopback_http_bridge_advertise_base_url_for_multi_replica(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "instance-a")
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING", "instance-a, instance-b")
+    monkeypatch.setenv(
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL",
+        "http://127.0.0.1:2455",
+    )
+
+    with pytest.raises(ValidationError):
+        Settings()

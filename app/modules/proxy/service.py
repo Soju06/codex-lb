@@ -6498,9 +6498,7 @@ def _http_bridge_can_recover_during_drain(
     previous_response_id: str | None,
     durable_lookup: DurableBridgeLookup | None,
 ) -> bool:
-    return _http_bridge_can_local_recover_without_ring(
-        key=key,
-        headers=headers,
+    return _http_bridge_has_durable_recovery_anchor(
         previous_response_id=previous_response_id,
         durable_lookup=durable_lookup,
     )

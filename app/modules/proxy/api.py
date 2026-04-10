@@ -97,6 +97,7 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
         "file_search_call",
         "computer_call",
         "code_interpreter_call",
+        "mcp_list_tools",
     }
 )
 _PUBLIC_RESPONSE_TEXT_PART_TYPES = frozenset({"output_text", "input_text", "text", "refusal"})
@@ -1409,7 +1410,7 @@ def _normalize_public_stream_payload(
         normalized_payload["item"] = normalized_item
         violation_kind = None
         item_type = item.get("type")
-        if isinstance(item_type, str) and item_type not in _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES:
+        if isinstance(item_type, str) and not _is_public_passthrough_output_item_type(item_type):
             violation_kind = "invalid_output_item"
         return normalized_payload, violation_kind
     return payload, None
@@ -1447,7 +1448,7 @@ def _normalize_public_response_mapping(
 
 def _normalize_public_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
     item_type = item.get("type")
-    if isinstance(item_type, str) and item_type in _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES:
+    if isinstance(item_type, str) and _is_public_passthrough_output_item_type(item_type):
         return dict(item)
     text_value = _extract_public_output_item_text(item)
     if text_value is None:
@@ -1462,6 +1463,12 @@ def _normalize_public_output_item(item: Mapping[str, JsonValue]) -> dict[str, Js
     if isinstance(item_id, str) and item_id:
         normalized["id"] = item_id
     return normalized
+
+
+def _is_public_passthrough_output_item_type(item_type: str) -> bool:
+    if item_type in _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES:
+        return True
+    return item_type.endswith("_call") or item_type.endswith("_call_output")
 
 
 def _extract_public_output_item_text(item: Mapping[str, JsonValue]) -> str | None:

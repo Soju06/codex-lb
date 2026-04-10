@@ -101,3 +101,32 @@ async def test_normalize_public_responses_stream_normalizes_unknown_terminal_out
             "content": [{"type": "output_text", "text": "normalized"}],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_preserves_apply_patch_call_output_item() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            (
+                'data: {"type":"response.output_item.done","output_index":0,'
+                '"item":{"id":"apc_1","type":"apply_patch_call","status":"completed",'
+                '"call_id":"call_1","patch":"*** Begin Patch\\n*** End Patch\\n"}}\n\n'
+            ),
+            (
+                'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
+                '"status":"completed","output":[]}}\n\n'
+            ),
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["id"] == "resp_1"
+    assert body["output"] == [
+        {
+            "id": "apc_1",
+            "type": "apply_patch_call",
+            "status": "completed",
+            "call_id": "call_1",
+            "patch": "*** Begin Patch\n*** End Patch\n",
+        }
+    ]

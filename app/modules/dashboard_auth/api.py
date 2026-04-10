@@ -377,6 +377,7 @@ async def verify_totp(
     payload: TotpVerifyRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> DashboardAuthSessionResponse | JSONResponse:
+    _ensure_password_management_enabled(request)
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_verify")
     current_session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)

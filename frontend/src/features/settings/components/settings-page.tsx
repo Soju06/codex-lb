@@ -25,6 +25,7 @@ export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
+  const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
 
   const settings = settingsQuery.data;
   const busy = updateSettingsMutation.isPending;
@@ -75,7 +76,7 @@ export function SettingsPage() {
             />
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
-            {passwordManagementEnabled ? (
+            {passwordManagementEnabled && passwordSessionActive ? (
               <Suspense fallback={null}>
                 <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
               </Suspense>

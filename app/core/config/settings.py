@@ -379,5 +379,18 @@ def _bridge_advertise_hostname_is_replica_specific(
     try:
         parsed_ip = ip_address(hostname)
     except ValueError:
-        return instance_id in hostname.split(".")
+        labels = set(hostname.split("."))
+        pod_name = os.getenv("POD_NAME", "").strip()
+        host_name = os.getenv("HOSTNAME", "").strip()
+        allowed_labels = {
+            label
+            for label in {
+                instance_id.strip(),
+                pod_name,
+                host_name,
+                socket.gethostname().strip(),
+            }
+            if label
+        }
+        return bool(labels & allowed_labels)
     return parsed_ip.is_loopback and not multi_replica_intent

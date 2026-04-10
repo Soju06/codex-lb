@@ -132,7 +132,6 @@ from app.modules.proxy.request_policy import (
     validate_model_access,
 )
 from app.modules.proxy.ring_membership import (
-    RING_HEARTBEAT_INTERVAL_SECONDS,
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
 )
@@ -2244,10 +2243,7 @@ class ProxyService:
                                         )
                                 else:
                                     assert owner_instance is not None
-                                    owner_endpoint = await self._ring_membership.resolve_endpoint(
-                                        owner_instance,
-                                        stale_threshold_seconds=RING_HEARTBEAT_INTERVAL_SECONDS,
-                                    )
+                                    owner_endpoint = await self._ring_membership.resolve_endpoint(owner_instance)
                                     if owner_endpoint is None:
                                         if _http_bridge_has_durable_recovery_anchor(
                                             previous_response_id=previous_response_id,

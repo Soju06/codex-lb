@@ -157,7 +157,7 @@ class RingMembershipService:
             stmt = (
                 update(BridgeRingMember)
                 .where(BridgeRingMember.instance_id == instance_id)
-                .values(last_heartbeat_at=stale_time)
+                .values(last_heartbeat_at=stale_time, metadata_json=None)
             )
             await session.execute(stmt)
             await session.commit()

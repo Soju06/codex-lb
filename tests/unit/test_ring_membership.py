@@ -183,3 +183,17 @@ async def test_resolve_endpoint_ignores_stale_member_metadata(ring_service: Ring
     endpoint = await ring_service.resolve_endpoint("pod-stale-endpoint", stale_threshold_seconds=1)
 
     assert endpoint is None
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_clears_endpoint_even_within_grace_window(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-grace-endpoint", endpoint_base_url="http://10.0.0.15:8080")
+    await ring_service.mark_stale(
+        "pod-grace-endpoint",
+        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+        grace_seconds=RING_STALE_GRACE_SECONDS,
+    )
+
+    endpoint = await ring_service.resolve_endpoint("pod-grace-endpoint")
+
+    assert endpoint is None

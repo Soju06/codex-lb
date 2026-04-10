@@ -1159,10 +1159,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_retry_when_owner_
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.payload["error"]["code"] == "bridge_instance_mismatch"
-    service._ring_membership.resolve_endpoint.assert_awaited_once_with(
-        "instance-b",
-        stale_threshold_seconds=proxy_service.RING_HEARTBEAT_INTERVAL_SECONDS,
-    )
+    service._ring_membership.resolve_endpoint.assert_awaited_once_with("instance-b")
 
 
 @pytest.mark.asyncio

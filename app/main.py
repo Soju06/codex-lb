@@ -421,7 +421,7 @@ async def _wait_for_bridge_advertise_endpoint(
         attempt += 1
         try:
             async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                async with session.get(probe_url, ssl=False if probe_scheme == "https" else None) as response:
+                async with session.get(probe_url, ssl=None if probe_scheme == "https" else None) as response:
                     if response.status == 200:
                         return
         except Exception:

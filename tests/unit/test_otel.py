@@ -575,7 +575,7 @@ async def test_wait_for_bridge_advertise_endpoint_probes_configured_url(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_wait_for_bridge_advertise_endpoint_skips_tls_verification_for_https_probe(
+async def test_wait_for_bridge_advertise_endpoint_uses_default_tls_verification_for_https_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import app.main as main
@@ -611,7 +611,7 @@ async def test_wait_for_bridge_advertise_endpoint_skips_tls_verification_for_htt
     )
 
     assert seen["url"] == "https://pod-a.bridge.default.svc.cluster.local:2455/health/live"
-    assert seen["ssl"] is False
+    assert seen["ssl"] is None
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,6 @@ spec:
   {{- end }}
   selector:
     {{- $selectorMode := .Values.migration.serviceSelectorMode | default "auto" }}
-    {{- $legacyDeployment := lookup "apps/v1" "Deployment" .Release.Namespace (include "codex-lb.fullname" .) }}
     {{- $existingService := lookup "v1" "Service" .Release.Namespace (include "codex-lb.fullname" .) }}
     {{- $existingSelector := dict }}
     {{- if $existingService }}
@@ -33,14 +32,12 @@ spec:
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
     {{- else if not .Release.IsUpgrade }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
-    {{- else if $legacyDeployment }}
-    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- else if eq $existingTrafficLane "workload" }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
     {{- else if eq $existingTrafficLane "legacy" }}
     {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- else }}
-    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
+    {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
     {{- end }}
   ports:
     - name: http

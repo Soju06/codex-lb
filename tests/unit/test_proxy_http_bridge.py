@@ -1159,6 +1159,10 @@ async def test_get_or_create_http_bridge_session_falls_back_to_retry_when_owner_
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.payload["error"]["code"] == "bridge_instance_mismatch"
+    service._ring_membership.resolve_endpoint.assert_awaited_once_with(
+        "instance-b",
+        stale_threshold_seconds=proxy_service.RING_HEARTBEAT_INTERVAL_SECONDS,
+    )
 
 
 @pytest.mark.asyncio
@@ -1451,6 +1455,54 @@ async def test_claim_durable_http_bridge_session_falls_back_when_tables_are_miss
 
     assert session.durable_session_id is None
     assert session.durable_owner_epoch is None
+
+
+@pytest.mark.asyncio
+async def test_claim_durable_http_bridge_session_rejects_remote_owner_without_takeover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+        headers={"x-codex-session-id": "sid-123"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-123",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "claim_live_session",
+        AsyncMock(
+            return_value=proxy_service.DurableBridgeLookup(
+                session_id="durable-1",
+                canonical_kind="session_header",
+                canonical_key="sid-123",
+                api_key_scope="__anonymous__",
+                account_id="acc-1",
+                owner_instance_id="instance-b",
+                owner_epoch=2,
+                lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+                state=HttpBridgeSessionState.ACTIVE,
+                latest_turn_state=None,
+                latest_response_id=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    with pytest.raises(RuntimeError, match="still owned by another instance"):
+        await service._claim_durable_http_bridge_session(session, allow_takeover=False)
 
 
 @pytest.mark.asyncio

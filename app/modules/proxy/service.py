@@ -79,7 +79,14 @@ from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    DashboardSettings,
+    HttpBridgeSessionState,
+    StickySessionKind,
+    UsageHistory,
+)
 from app.db.session import SessionLocal
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import (
@@ -124,7 +131,11 @@ from app.modules.proxy.request_policy import (
     openai_validation_error,
     validate_model_access,
 )
-from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS, RingMembershipService
+from app.modules.proxy.ring_membership import (
+    RING_HEARTBEAT_INTERVAL_SECONDS,
+    RING_STALE_THRESHOLD_SECONDS,
+    RingMembershipService,
+)
 from app.modules.proxy.types import (
     AdditionalRateLimitData,
     RateLimitStatusDetailsData,
@@ -2233,7 +2244,10 @@ class ProxyService:
                                         )
                                 else:
                                     assert owner_instance is not None
-                                    owner_endpoint = await self._ring_membership.resolve_endpoint(owner_instance)
+                                    owner_endpoint = await self._ring_membership.resolve_endpoint(
+                                        owner_instance,
+                                        stale_threshold_seconds=RING_HEARTBEAT_INTERVAL_SECONDS,
+                                    )
                                     if owner_endpoint is None:
                                         if _http_bridge_has_durable_recovery_anchor(
                                             previous_response_id=previous_response_id,
@@ -2592,7 +2606,7 @@ class ProxyService:
                 )
                 await self._claim_durable_http_bridge_session(
                     created_session,
-                    allow_takeover=True,
+                    allow_takeover=_http_bridge_allow_durable_takeover(durable_lookup),
                 )
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -2828,12 +2842,13 @@ class ProxyService:
         *,
         allow_takeover: bool,
     ) -> None:
+        current_instance = get_settings().http_responses_session_bridge_instance_id
         try:
             lookup = await self._durable_bridge.claim_live_session(
                 session_key_kind=session.key.affinity_kind,
                 session_key_value=session.key.affinity_key,
                 api_key_id=session.key.api_key_id,
-                instance_id=get_settings().http_responses_session_bridge_instance_id,
+                instance_id=current_instance,
                 lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
                 account_id=session.account.id,
                 model=session.request_model,
@@ -2842,6 +2857,8 @@ class ProxyService:
                 latest_response_id=None,
                 allow_takeover=allow_takeover,
             )
+            if lookup.owner_instance_id != current_instance:
+                raise RuntimeError("Durable bridge session is still owned by another instance; refusing local takeover")
             session.durable_session_id = lookup.session_id
             session.durable_owner_epoch = lookup.owner_epoch
             session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
@@ -6460,6 +6477,18 @@ def _durable_bridge_lookup_allows_local_reuse(
     if lookup is None:
         return True
     return _durable_bridge_lookup_active_owner(lookup) == current_instance
+
+
+def _http_bridge_allow_durable_takeover(lookup: DurableBridgeLookup | None) -> bool:
+    owner_instance = _durable_bridge_lookup_active_owner(lookup)
+    if owner_instance is None:
+        return True
+    if lookup is None:
+        return False
+    return lookup.state in {
+        HttpBridgeSessionState.DRAINING,
+        HttpBridgeSessionState.CLOSED,
+    }
 
 
 def _http_bridge_has_durable_recovery_anchor(

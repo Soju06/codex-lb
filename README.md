@@ -73,7 +73,7 @@ docker logs codex-lb
 # ============================================
 ```
 
-Open the dashboard → enter the token + new password → done. The token is shared across replicas and remains valid until a password is set.
+Open the dashboard → enter the token + new password → done. The token is shared across replicas and remains valid until a password is set. In multi-replica setups, replicas must share the same encryption key (the Helm chart default) for restart recovery to work.
 
 **Manual token:** To use a fixed token instead, set the env var before starting:
 

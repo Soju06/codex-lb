@@ -25,7 +25,7 @@ Bootstrap validation resolves using: manual env var → shared DB-backed encrypt
 
 **Restart behavior:**
 
-If the server restarts before a password is set, the restarting replica reuses the same shared bootstrap token and can log it again for recovery without invalidating previously issued tokens. If an authenticated admin removes the dashboard password later, a new bootstrap token is generated immediately and logged so remote setup continues to work without restart.
+If the server restarts before a password is set, the restarting replica reuses the same shared bootstrap token and can log it again for recovery without invalidating previously issued tokens. This recovery path assumes replicas share the same encryption key. If an authenticated admin removes the dashboard password later, a new bootstrap token is generated immediately and logged so remote setup continues to work without restart.
 
 ### Manual Override
 

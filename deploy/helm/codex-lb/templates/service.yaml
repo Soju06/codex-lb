@@ -25,16 +25,7 @@ spec:
     {{- else if eq $selectorMode "workload" }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
     {{- else }}
-    {{- $existingService := lookup "v1" "Service" .Release.Namespace (include "codex-lb.fullname" .) }}
-    {{- $existingSelector := dig "spec" "selector" dict $existingService }}
-    {{- $existingTraffic := get $existingSelector "codex-lb.soju.dev/traffic" }}
-    {{- if eq $existingTraffic "workload" }}
     {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
-    {{- else if .Release.IsUpgrade }}
-    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
-    {{- else }}
-    {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
-    {{- end }}
     {{- end }}
   ports:
     - name: http

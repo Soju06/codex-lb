@@ -50,8 +50,15 @@ async def _reset_db_state():
 
 
 @pytest_asyncio.fixture
-async def app_instance(_reset_db_state):
+async def app_instance(_reset_db_state, monkeypatch):
     del _reset_db_state
+    import app.main as main_module
+
+    async def _noop_init_db() -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "init_db", _noop_init_db)
+    monkeypatch.setattr(main_module, "init_background_db", lambda: None)
     app = create_app()
     return app
 

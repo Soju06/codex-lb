@@ -14,10 +14,10 @@ networkPolicy:
   enabled: false
 
 config:
-  databaseMigrateOnStartup: true
+  databaseMigrateOnStartup: false
   logFormat: text
 
 migration:
   enabled: true
   schemaGate:
-    enabled: false
+    enabled: true

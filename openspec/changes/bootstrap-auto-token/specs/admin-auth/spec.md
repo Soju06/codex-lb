@@ -2,12 +2,12 @@
 
 ### Requirement: Auto-generated bootstrap token
 
-The system SHALL auto-generate a cryptographically random bootstrap token on startup when ALL of the following conditions are true: (1) no dashboard password is configured (`password_hash` is NULL), (2) no manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set. The token MUST be generated using `secrets.token_urlsafe(32)` (256 bits entropy). The system MUST store only a SHA-256 hash of the token in the shared `dashboard_settings` row so every replica can validate the same token without persisting the reusable secret at rest.
+The system SHALL auto-generate a cryptographically random bootstrap token on startup when ALL of the following conditions are true: (1) no dashboard password is configured (`password_hash` is NULL), (2) no manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set. The token MUST be generated using `secrets.token_urlsafe(32)` (256 bits entropy). The system MUST store an encrypted copy and a SHA-256 hash of the token in the shared `dashboard_settings` row so every replica can validate and recover the same token without persisting the reusable secret in plaintext at rest.
 
 #### Scenario: Auto-generation on fresh install without env var
 
 - **WHEN** the server starts with no configured password and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var
-- **THEN** the system generates a random token, stores only its hash in shared database-backed state, and logs the plaintext token once
+- **THEN** the system generates a random token, stores its encrypted copy plus hash in shared database-backed state, and logs the plaintext token
 
 #### Scenario: Auto-generation skipped when env var is set
 
@@ -35,7 +35,7 @@ The system SHALL print the auto-generated bootstrap token to server logs on star
 
 ### Requirement: Bootstrap token priority chain
 
-The system SHALL resolve bootstrap validation using the following priority: (1) manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var, (2) shared auto-generated token hash from `dashboard_settings`, (3) None. Dedicated helpers MUST expose (a) whether a bootstrap token is configured and (b) whether a submitted token matches the configured value.
+The system SHALL resolve bootstrap validation using the following priority: (1) manual `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var, (2) shared auto-generated encrypted+hashed token from `dashboard_settings`, (3) None. Dedicated helpers MUST expose (a) whether a bootstrap token is configured and (b) whether a submitted token matches the configured value.
 
 #### Scenario: Env var takes priority over auto-generated token
 
@@ -44,7 +44,7 @@ The system SHALL resolve bootstrap validation using the following priority: (1) 
 
 #### Scenario: Auto-generated token used when no env var
 
-- **WHEN** no env var is set and a shared token hash exists
+- **WHEN** no env var is set and a shared encrypted token + hash exists
 - **THEN** the system accepts only submitted tokens whose hash matches the stored shared hash
 
 #### Scenario: None returned when neither exists
@@ -76,11 +76,11 @@ The system SHALL make the same auto-generated bootstrap token valid across all r
 
 The system SHALL log an auto-generated bootstrap token only when it creates or explicitly regenerates a new token, not on ordinary restarts that reuse an existing stored hash.
 
-#### Scenario: Restart rotates and logs a fresh bootstrap token
+#### Scenario: Restart reuses and can re-log the stored bootstrap token
 
-- **WHEN** a shared auto-generated bootstrap token hash already exists and no password is configured
-- **THEN** startup rotates the stored hash to a new token
-- **AND** logs the new plaintext token for operator recovery
+- **WHEN** a shared auto-generated bootstrap token already exists and no password is configured
+- **THEN** startup reuses the stored token
+- **AND** it MAY log the same plaintext token again for operator recovery without invalidating it
 
 ### Requirement: Password removal regenerates bootstrap access
 

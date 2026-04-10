@@ -7,7 +7,7 @@
 - [x] 1.5 Add `dashboard_settings.bootstrap_token_encrypted` migration for shared storage
 - [x] 1.6 Harden bootstrap token handling for non-ASCII manual tokens and immediate regeneration after password removal
 - [x] 1.7 Persist only a hash of the auto-generated bootstrap token and avoid re-logging stored tokens on restart
-- [x] 1.8 Read shared bootstrap state uncached across replicas, rotate-and-log a fresh token on restart, and make frontend copy source-agnostic
+- [x] 1.8 Read shared bootstrap state uncached across replicas, reuse the same token on restart, preserve conflict semantics, and make frontend copy source-agnostic
 
 ## 2. Tests
 

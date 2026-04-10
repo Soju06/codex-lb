@@ -10,11 +10,11 @@ The bootstrap token secures the initial remote password setup flow. Without it, 
 
 **Auto-generation (default path):**
 
-On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy), stores a SHA-256 hash of it in the shared `dashboard_settings` row, and prints the plaintext token to server logs. If a replica restarts while passwordless bootstrap is still pending, it rotates the stored hash to a new token and logs the new plaintext token.
+On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy), stores an encrypted copy plus a SHA-256 hash in the shared `dashboard_settings` row, and prints the plaintext token to server logs. If a replica restarts while passwordless bootstrap is still pending, it decrypts and reuses the same shared token instead of rotating it.
 
 **Priority chain:**
 
-Bootstrap validation resolves using: manual env var → shared DB-backed token hash → None. The session endpoint exposes only whether a bootstrap token is configured; password setup verifies the submitted token against the stored hash.
+Bootstrap validation resolves using: manual env var → shared DB-backed encrypted+hashed token → None. The session endpoint exposes only whether a bootstrap token is configured; password setup verifies the submitted token against the stored hash while startup can recover the same plaintext token from the encrypted copy.
 
 **Lifecycle:**
 
@@ -25,7 +25,7 @@ Bootstrap validation resolves using: manual env var → shared DB-backed token h
 
 **Restart behavior:**
 
-If the server restarts before a password is set, the restarting replica rotates the bootstrap token to a fresh value, stores the new hash, and logs the new plaintext token so setup stays recoverable. If an authenticated admin removes the dashboard password later, a new bootstrap token is generated immediately and logged so remote setup continues to work without restart.
+If the server restarts before a password is set, the restarting replica reuses the same shared bootstrap token and can log it again for recovery without invalidating previously issued tokens. If an authenticated admin removes the dashboard password later, a new bootstrap token is generated immediately and logged so remote setup continues to work without restart.
 
 ### Manual Override
 
@@ -42,7 +42,7 @@ Requests from localhost (127.0.0.1, ::1) bypass bootstrap entirely — no token 
 ### Threat Model
 
 - **Token in logs**: Acceptable risk (same pattern as Grafana/GitLab/Portainer). `docker logs` requires container access. Token is one-time — useless after password is set.
-- **Token in shared DB storage**: Only the SHA-256 hash is stored, shared across replicas, and cleared as soon as password setup succeeds.
+- **Token in shared DB storage**: The plaintext token is encrypted at rest for recovery/logging and separately hashed for validation, shared across replicas, and cleared as soon as password setup succeeds.
 - **Replica safety**: Any pod can validate the same bootstrap token, avoiding load-balancer flakiness during first-run setup.
 
 ## Session Management

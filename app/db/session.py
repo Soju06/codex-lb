@@ -44,14 +44,14 @@ def _postgres_async_connect_args(url: str) -> dict[str, int] | None:
     return {"prepared_statement_cache_size": 0}
 
 
-def _postgres_async_engine_kwargs(url: str) -> dict[str, object]:
+def _postgres_async_engine_kwargs(url: str, *, background: bool) -> dict[str, object]:
     connect_args = _postgres_async_connect_args(url)
     kwargs: dict[str, object] = {"connect_args": connect_args or {}}
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL") and url.startswith("postgresql+asyncpg://"):
         kwargs["poolclass"] = NullPool
     else:
-        kwargs["pool_size"] = _settings.database_pool_size
-        kwargs["max_overflow"] = _settings.database_max_overflow
+        kwargs["pool_size"] = 3 if background else _settings.database_pool_size
+        kwargs["max_overflow"] = 2 if background else _settings.database_max_overflow
         kwargs["pool_timeout"] = _settings.database_pool_timeout_seconds
     return kwargs
 
@@ -92,7 +92,7 @@ else:
     engine = create_async_engine(
         _settings.database_url,
         echo=False,
-        **_postgres_async_engine_kwargs(_settings.database_url),
+        **_postgres_async_engine_kwargs(_settings.database_url, background=False),
     )
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -203,7 +203,7 @@ def init_background_db(url: str | None = None) -> None:
         _background_engine = create_async_engine(
             db_url,
             echo=False,
-            **_postgres_async_engine_kwargs(db_url),
+            **_postgres_async_engine_kwargs(db_url, background=True),
         )
 
     _background_session_factory = async_sessionmaker(_background_engine, expire_on_commit=False, class_=AsyncSession)

@@ -6673,7 +6673,6 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
         "bridge_owner_unreachable",
         "previous_response_not_found",
         "bridge_instance_mismatch",
-        "bridge_forward_loop_prevented",
     }
 
 
@@ -6700,7 +6699,6 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
     return code in {
         "bridge_owner_unreachable",
         "bridge_instance_mismatch",
-        "bridge_forward_loop_prevented",
     }
 
 

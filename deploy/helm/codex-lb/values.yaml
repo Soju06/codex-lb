@@ -307,8 +307,8 @@ ingress:
       - /v1/responses
       - /backend-api/codex/responses
     nginx:
-      # @param ingress.responses.nginx.upstreamHashBy Continuity-aware sticky key for responses traffic
-      upstreamHashBy: "$http_x_codex_session_id"
+      # @param ingress.responses.nginx.upstreamHashBy Continuity-aware sticky key for responses traffic with Authorization fallback when the session header is absent
+      upstreamHashBy: "$http_x_codex_session_id$http_authorization"
       # @param ingress.responses.nginx.upstreamHashBySubset Enable subset mode for responses ingress
       upstreamHashBySubset: false
       # @param ingress.responses.nginx.upstreamHashBySubsetSize Subset size for responses ingress

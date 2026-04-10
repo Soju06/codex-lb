@@ -328,7 +328,7 @@ def test_ingress_renders_dedicated_responses_ingress_with_session_hash() -> None
 
     assert rendered.count("kind: Ingress") == 2
     assert "name: codex-lb-responses" in rendered
-    assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_x_codex_session_id" in rendered
+    assert ("nginx.ingress.kubernetes.io/upstream-hash-by: $http_x_codex_session_id$http_authorization") in rendered
     assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_authorization" in rendered
     assert "nginx.ingress.kubernetes.io/proxy-next-upstream: error timeout http_502 http_503 http_504" in rendered
     assert "invalid_header" in rendered

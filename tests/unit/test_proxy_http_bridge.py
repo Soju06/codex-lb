@@ -689,6 +689,66 @@ async def test_stream_via_http_bridge_does_not_rebind_after_forwarded_bytes(
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_fails_closed_on_forward_loop_prevented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+    )
+
+    async def fake_forward(**kwargs: object):
+        del kwargs
+        raise ProxyResponseError(503, proxy_service.openai_error("bridge_forward_loop_prevented", "loop"))
+        yield ""
+
+    get_or_create = AsyncMock(return_value=owner_forward)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", fake_forward)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            {"x-codex-session-id": "sid-123"},
+            codex_session_affinity=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            propagate_http_errors=False,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_forward_loop_prevented"
+    get_or_create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_returns_owner_forward_for_hard_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

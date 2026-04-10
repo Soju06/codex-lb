@@ -682,3 +682,38 @@ async def test_dashboard_settings_default_flip_migration_updates_fresh_seeded_ro
             assert row[1] in (True, 1)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_db_upgraded_in_steps(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-settings-defaults-staged-fresh.sqlite'}"
+
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260408_010000_merge_import_without_overwrite_and_assignment_heads",
+            bootstrap_legacy=True,
+        )
+    )
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT sticky_threads_enabled, prefer_earlier_reset_accounts
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert row[0] in (True, 1)
+            assert row[1] in (True, 1)
+    finally:
+        await engine.dispose()

@@ -4028,8 +4028,10 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         "input": "hello",
         "prompt_cache_key": "http-bridge-reconnect-thread-1",
     }
-    first = await async_client.post("/v1/responses", json=payload)
-    second = await async_client.post("/v1/responses", json=payload)
+    first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    second = await asyncio.wait_for(
+        async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS
+    )
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -4108,27 +4110,33 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
-    first = await async_client.post(
-        "/v1/responses",
-        json={
-            "model": "gpt-5.1",
-            "instructions": "Return exactly OK.",
-            "input": "hello",
-            "prompt_cache_key": "http-bridge-previous-response-reconnect",
-        },
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-previous-response-reconnect",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
     assert first.status_code == 200
     first_body = first.json()
 
-    second = await async_client.post(
-        "/v1/responses",
-        json={
-            "model": "gpt-5.1",
-            "instructions": "Return exactly OK.",
-            "input": "hello-again",
-            "prompt_cache_key": "http-bridge-previous-response-reconnect",
-            "previous_response_id": first_body["id"],
-        },
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello-again",
+                "prompt_cache_key": "http-bridge-previous-response-reconnect",
+                "previous_response_id": first_body["id"],
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
 
     assert second.status_code == 200

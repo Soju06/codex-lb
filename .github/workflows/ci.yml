@@ -138,10 +138,13 @@ jobs:
             paths: "tests/unit tests/test_request_logs_options_api.py"
           - name: integration-core
             paths: "tests/integration --ignore=tests/integration/test_http_responses_bridge.py --ignore=tests/integration/test_proxy_websocket_responses.py"
+            extra_args: ""
           - name: integration-bridge
             paths: "tests/integration/test_http_responses_bridge.py tests/integration/test_proxy_websocket_responses.py"
+            extra_args: "-vv"
           - name: e2e
             paths: "tests/e2e"
+            extra_args: ""
     env:
       PYTHONFAULTHANDLER: "1"
 
@@ -170,7 +173,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --durations=20 ${{ matrix.slice.paths }}
+        run: uv run pytest -q -ra ${{ matrix.slice.extra_args }} -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --durations=20 ${{ matrix.slice.paths }}
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)

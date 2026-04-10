@@ -136,8 +136,12 @@ jobs:
         slice:
           - name: unit
             paths: "tests/unit tests/test_request_logs_options_api.py"
-          - name: integration
-            paths: "tests/integration tests/e2e"
+          - name: integration-core
+            paths: "tests/integration --ignore=tests/integration/test_http_responses_bridge.py --ignore=tests/integration/test_proxy_websocket_responses.py"
+          - name: integration-bridge
+            paths: "tests/integration/test_http_responses_bridge.py tests/integration/test_proxy_websocket_responses.py"
+          - name: e2e
+            paths: "tests/e2e"
     env:
       PYTHONFAULTHANDLER: "1"
 

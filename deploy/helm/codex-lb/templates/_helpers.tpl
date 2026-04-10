@@ -104,8 +104,9 @@ This is used in secret.yaml to populate the database-url secret key.
 
 {{/*
 Migration hook phases — default to pre-install when DB credentials are already available without ExternalSecrets materialization.
+Bundled PostgreSQL also uses pre-install because the migration job computes the database URL directly and waits for PostgreSQL readiness itself.
 */}}
-{{- define "codex-lb.migrationHookPhases" -}}{{- if .Values.externalSecrets.enabled -}}post-install,pre-upgrade{{- else if .Values.postgresql.enabled -}}pre-upgrade{{- else -}}pre-install,pre-upgrade{{- end -}}{{- end }}
+{{- define "codex-lb.migrationHookPhases" -}}{{- if .Values.externalSecrets.enabled -}}post-install,pre-upgrade{{- else -}}pre-install,pre-upgrade{{- end -}}{{- end }}
 
 {{/*
 Migration job service account — pre-install hooks cannot rely on chart-created ServiceAccounts.

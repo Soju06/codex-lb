@@ -40,7 +40,7 @@ spec:
     {{- else if eq $existingTrafficLane "legacy" }}
     {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- else }}
-    {{- fail "migration.serviceSelectorMode=auto is ambiguous during client-rendered upgrades; set migration.serviceSelectorMode=legacy or workload explicitly" }}
+    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- end }}
   ports:
     - name: http

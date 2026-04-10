@@ -5,6 +5,13 @@ from importlib import import_module
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+_DRAIN_ALLOWED_HTTP_PATHS = frozenset(
+    {
+        "/health/live",
+        "/internal/bridge/responses",
+    }
+)
+
 
 class InFlightMiddleware:
     def __init__(self, app: ASGIApp) -> None:
@@ -21,7 +28,7 @@ class InFlightMiddleware:
 
         # Return 503 when draining, except for health checks
         path = scope.get("path", "")
-        if shutdown_state.is_draining() and path != "/health/live":
+        if shutdown_state.is_draining() and path not in _DRAIN_ALLOWED_HTTP_PATHS:
             response = JSONResponse(
                 status_code=503,
                 content={

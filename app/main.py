@@ -70,7 +70,7 @@ class _MetricsServer(Protocol):
 
 
 class _RingMembershipReader(Protocol):
-    def list_active(self) -> Awaitable[list[str]]: ...
+    def list_active(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> Awaitable[list[str]]: ...
 
 
 def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
@@ -491,7 +491,7 @@ async def _validate_bridge_advertise_endpoint_for_multi_replica(
                 "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
             )
         try:
-            active_instances = await svc.list_active()
+            active_instances = await svc.list_active(stale_threshold_seconds=RING_HEARTBEAT_INTERVAL_SECONDS)
         except Exception:
             active_instances = []
         if any(active_instance != instance_id for active_instance in active_instances):

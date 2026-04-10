@@ -11,20 +11,12 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 
-def _postgres_test_database_url() -> str:
-    database_url = os.environ.get("CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}")
-    if not database_url.startswith("postgresql+asyncpg://"):
-        return database_url
-    separator = "&" if "?" in database_url else "?"
-    if "prepared_statement_cache_size=" in database_url:
-        return database_url
-    return f"{database_url}{separator}prepared_statement_cache_size=0"
-
-
 TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
 TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
 
-os.environ["CODEX_LB_DATABASE_URL"] = _postgres_test_database_url()
+os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
+    "CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}"
+)
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
 os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"

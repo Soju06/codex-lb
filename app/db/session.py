@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -32,6 +33,14 @@ def _is_sqlite_url(url: str) -> bool:
 
 def _is_sqlite_memory_url(url: str) -> bool:
     return _is_sqlite_url(url) and ":memory:" in url
+
+
+def _postgres_async_connect_args(url: str) -> dict[str, int] | None:
+    if not url.startswith("postgresql+asyncpg://"):
+        return None
+    if not os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
+        return None
+    return {"prepared_statement_cache_size": 0}
 
 
 def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
@@ -67,12 +76,14 @@ if _is_sqlite_url(_settings.database_url):
         )
     _configure_sqlite_engine(engine.sync_engine, enable_wal=not is_sqlite_memory)
 else:
+    postgres_connect_args = _postgres_async_connect_args(_settings.database_url)
     engine = create_async_engine(
         _settings.database_url,
         echo=False,
         pool_size=_settings.database_pool_size,
         max_overflow=_settings.database_max_overflow,
         pool_timeout=_settings.database_pool_timeout_seconds,
+        connect_args=postgres_connect_args or {},
     )
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -114,9 +125,9 @@ def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None
     return SqliteIntegrityCheckMode(raw_mode)
 
 
-async def _shielded(awaitable: Awaitable[_T]) -> _T:
+async def _shielded(awaitable: Awaitable[object]) -> None:
     with anyio.CancelScope(shield=True):
-        return await awaitable
+        await awaitable
 
 
 async def _safe_rollback(session: AsyncSession) -> None:
@@ -180,12 +191,14 @@ def init_background_db(url: str | None = None) -> None:
             )
         _configure_sqlite_engine(_background_engine.sync_engine, enable_wal=not is_sqlite_memory)
     else:
+        postgres_connect_args = _postgres_async_connect_args(db_url)
         _background_engine = create_async_engine(
             db_url,
             echo=False,
             pool_size=3,
             max_overflow=2,
             pool_timeout=_settings.database_pool_timeout_seconds,
+            connect_args=postgres_connect_args or {},
         )
 
     _background_session_factory = async_sessionmaker(_background_engine, expire_on_commit=False, class_=AsyncSession)

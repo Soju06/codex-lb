@@ -99,11 +99,22 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
+            - name: encryption-key
+              mountPath: /var/lib/codex-lb/encryption.key
+              subPath: encryption.key
+              readOnly: true
             - name: tmp
               mountPath: /tmp
           resources:
             {{- toYaml .Values.migration.resources | nindent 12 }}
       volumes:
+        - name: encryption-key
+          secret:
+            secretName: {{ include "codex-lb.secretName" . }}
+            items:
+              - key: {{ .Values.auth.secretKeys.encryptionKey }}
+                path: encryption.key
+            defaultMode: 0444
         - name: tmp
           emptyDir: {}
 {{- end }}

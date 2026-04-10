@@ -172,7 +172,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
             {bootstrapRequired ? (
               <AlertMessage variant="error">
                 {bootstrapTokenConfigured
-                  ? "Remote setup requires the bootstrap token from your server logs."
+                  ? "Remote setup requires the configured bootstrap token (from server logs or CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN)."
                   : "Remote setup is blocked. Set CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN on the server or restart to auto-generate a token."}
               </AlertMessage>
             ) : null}

@@ -84,6 +84,19 @@ class DashboardAuthRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def replace_bootstrap_token_hash(self, current_hash: bytes, new_hash: bytes) -> bool:
+        await self._settings_repository.get_or_create()
+        result = await self._session.execute(
+            update(DashboardSettings)
+            .where(DashboardSettings.id == _SETTINGS_ID)
+            .where(DashboardSettings.password_hash.is_(None))
+            .where(DashboardSettings.bootstrap_token_hash == current_hash)
+            .values(bootstrap_token_hash=new_hash)
+            .returning(DashboardSettings.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def try_advance_totp_last_verified_step(self, step: int) -> bool:
         await self._settings_repository.get_or_create()
         result = await self._session.execute(

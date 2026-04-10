@@ -40,13 +40,19 @@ async def get_active_bootstrap_token() -> str | None:
     return _get_manual_bootstrap_token()
 
 
+async def _get_shared_bootstrap_state() -> tuple[str | None, bytes | None]:
+    async with SessionLocal() as session:
+        settings = await DashboardAuthRepository(session).get_settings()
+        return settings.password_hash, settings.bootstrap_token_hash
+
+
 async def has_active_bootstrap_token() -> bool:
     manual = _get_manual_bootstrap_token()
     if manual:
         return True
 
-    settings = await get_settings_cache().get()
-    return settings.password_hash is None and settings.bootstrap_token_hash is not None
+    password_hash, bootstrap_token_hash = await _get_shared_bootstrap_state()
+    return password_hash is None and bootstrap_token_hash is not None
 
 
 async def validate_bootstrap_token(submitted_token: str) -> bool:
@@ -54,10 +60,10 @@ async def validate_bootstrap_token(submitted_token: str) -> bool:
     if manual is not None:
         return compare_digest(submitted_token.encode("utf-8"), manual.encode("utf-8"))
 
-    settings = await get_settings_cache().get()
-    if settings.password_hash is not None or settings.bootstrap_token_hash is None:
+    password_hash, bootstrap_token_hash = await _get_shared_bootstrap_state()
+    if password_hash is not None or bootstrap_token_hash is None:
         return False
-    return compare_digest(_hash_bootstrap_token(submitted_token), settings.bootstrap_token_hash)
+    return compare_digest(_hash_bootstrap_token(submitted_token), bootstrap_token_hash)
 
 
 async def ensure_auto_bootstrap_token() -> str | None:
@@ -74,6 +80,14 @@ async def ensure_auto_bootstrap_token() -> str | None:
             return None
 
         if settings.bootstrap_token_hash is not None:
+            token = secrets.token_urlsafe(32)
+            rotated = await repository.replace_bootstrap_token_hash(
+                settings.bootstrap_token_hash,
+                _hash_bootstrap_token(token),
+            )
+            if rotated:
+                await get_settings_cache().invalidate()
+                return token
             return None
 
         token = secrets.token_urlsafe(32)

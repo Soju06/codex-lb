@@ -14,13 +14,15 @@ from app.core.config.settings_cache import get_settings_cache
 pytestmark = pytest.mark.integration
 
 _AUTO_BOOTSTRAP_TOKEN = "generated-bootstrap-token"
+_ROTATED_BOOTSTRAP_TOKEN = "rotated-bootstrap-token"
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_bootstrap_runtime(_reset_db_state, monkeypatch: pytest.MonkeyPatch):
     del _reset_db_state
     monkeypatch.delenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", raising=False)
-    monkeypatch.setattr(bootstrap_module.secrets, "token_urlsafe", lambda _size: _AUTO_BOOTSTRAP_TOKEN)
+    tokens = iter([_AUTO_BOOTSTRAP_TOKEN, _ROTATED_BOOTSTRAP_TOKEN, _AUTO_BOOTSTRAP_TOKEN, _ROTATED_BOOTSTRAP_TOKEN])
+    monkeypatch.setattr(bootstrap_module.secrets, "token_urlsafe", lambda _size: next(tokens))
     get_settings.cache_clear()
     await get_settings_cache().invalidate()
     await bootstrap_module.clear_auto_generated_token()
@@ -166,10 +168,33 @@ async def test_auto_generated_token_is_shared_across_app_instances(monkeypatch: 
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
                 "/api/dashboard-auth/password/setup",
-                json={"password": "password123", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
+                json={"password": "password123", "bootstrapToken": _ROTATED_BOOTSTRAP_TOKEN},
             )
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_existing_auto_token_rotates_and_relogs_on_restart(monkeypatch: pytest.MonkeyPatch):
+    _force_remote(monkeypatch)
+
+    async def _noop_init_db() -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "init_db", _noop_init_db)
+    monkeypatch.setattr(main_module, "init_background_db", lambda: None)
+
+    first_app = main_module.create_app()
+    second_app = main_module.create_app()
+
+    async with first_app.router.lifespan_context(first_app):
+        pass
+
+    assert await bootstrap_module.validate_bootstrap_token(_AUTO_BOOTSTRAP_TOKEN) is True
+
+    async with second_app.router.lifespan_context(second_app):
+        assert await bootstrap_module.validate_bootstrap_token(_AUTO_BOOTSTRAP_TOKEN) is False
+        assert await bootstrap_module.validate_bootstrap_token(_ROTATED_BOOTSTRAP_TOKEN) is True
 
 
 @pytest.mark.asyncio
@@ -196,6 +221,6 @@ async def test_remove_password_regenerates_bootstrap_token(async_client, monkeyp
 
     resetup = await async_client.post(
         "/api/dashboard-auth/password/setup",
-        json={"password": "new-password-456", "bootstrapToken": _AUTO_BOOTSTRAP_TOKEN},
+        json={"password": "new-password-456", "bootstrapToken": _ROTATED_BOOTSTRAP_TOKEN},
     )
     assert resetup.status_code == 200

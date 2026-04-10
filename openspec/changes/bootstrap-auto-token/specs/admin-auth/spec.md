@@ -76,10 +76,11 @@ The system SHALL make the same auto-generated bootstrap token valid across all r
 
 The system SHALL log an auto-generated bootstrap token only when it creates or explicitly regenerates a new token, not on ordinary restarts that reuse an existing stored hash.
 
-#### Scenario: Restart does not republish stored bootstrap token
+#### Scenario: Restart rotates and logs a fresh bootstrap token
 
 - **WHEN** a shared auto-generated bootstrap token hash already exists and no password is configured
-- **THEN** startup does not log the old plaintext token again
+- **THEN** startup rotates the stored hash to a new token
+- **AND** logs the new plaintext token for operator recovery
 
 ### Requirement: Password removal regenerates bootstrap access
 

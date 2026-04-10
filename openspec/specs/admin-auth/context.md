@@ -10,7 +10,7 @@ The bootstrap token secures the initial remote password setup flow. Without it, 
 
 **Auto-generation (default path):**
 
-On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy), stores a SHA-256 hash of it in the shared `dashboard_settings` row, and prints the plaintext token to server logs exactly once at creation time.
+On server startup, if no dashboard password is configured and no `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` env var is set, the system generates a cryptographically random token (`secrets.token_urlsafe(32)`, 256 bits entropy), stores a SHA-256 hash of it in the shared `dashboard_settings` row, and prints the plaintext token to server logs. If a replica restarts while passwordless bootstrap is still pending, it rotates the stored hash to a new token and logs the new plaintext token.
 
 **Priority chain:**
 
@@ -25,7 +25,7 @@ Bootstrap validation resolves using: manual env var → shared DB-backed token h
 
 **Restart behavior:**
 
-If the server restarts before a password is set, the same stored token remains valid and any replica can validate it. The token is not re-logged on restart because only the hash is persisted. If an authenticated admin removes the dashboard password later, a new bootstrap token is generated immediately and logged so remote setup continues to work without restart.
+If the server restarts before a password is set, the restarting replica rotates the bootstrap token to a fresh value, stores the new hash, and logs the new plaintext token so setup stays recoverable. If an authenticated admin removes the dashboard password later, a new bootstrap token is generated immediately and logged so remote setup continues to work without restart.
 
 ### Manual Override
 

@@ -21,7 +21,7 @@ Remote dashboard bootstrap currently requires `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKE
 
 **D1: Shared hashed token in `dashboard_settings`**
 
-Persist a SHA-256 hash of the auto-generated bootstrap token in `DashboardSettings.bootstrap_token_hash` as shared DB state. `has_active_bootstrap_token()` exposes availability, `validate_bootstrap_token()` verifies submitted tokens, and `ensure_auto_bootstrap_token()` only returns plaintext when it created a new token that should be logged.
+Persist a SHA-256 hash of the auto-generated bootstrap token in `DashboardSettings.bootstrap_token_hash` as shared DB state. `has_active_bootstrap_token()` and `validate_bootstrap_token()` read the shared state directly from DB (not `SettingsCache`) so cross-replica bootstrap is not delayed by per-process TTL. `ensure_auto_bootstrap_token()` returns plaintext when it creates a new token or rotates an existing stored hash during restart recovery.
 
 Alternative: module-global in-memory token → rejected because Helm defaults are multi-replica and the token must validate across pods.
 
@@ -49,7 +49,7 @@ Bootstrap validation checks env var first (via `get_settings().dashboard_bootstr
 
 **R1: Token visible in logs** → By design. Same pattern as Grafana/GitLab/Portainer. Mitigated by: token is one-time (useless after password set), `docker logs` requires container access.
 
-**R2: Token persists across restarts until consumed** → Intentional. Multi-replica and restarted pods must validate the same token until setup completes.
+**R2: Restart recovery rotates the token** → Intentional. Because only the hash is stored, a restarting passwordless replica rotates to a fresh token and logs it so remote setup stays recoverable without reusing an unrecoverable plaintext token.
 
 **R3: Password removal re-bootstrap** → After an authenticated password removal, the API immediately recreates and logs a new bootstrap token so remote-only operators do not need a restart.
 

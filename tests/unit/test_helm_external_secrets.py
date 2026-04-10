@@ -223,9 +223,9 @@ def test_bundled_mode_overlay_enables_startup_migration_and_skips_schema_gate() 
         "postgresql.auth.password=local-password",
     )
 
-    assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
+    assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"' in rendered
     assert "name: wait-for-schema-head" not in rendered
-    assert "name: wait-for-database" not in rendered
+    assert "name: wait-for-database" in rendered
     assert '"helm.sh/hook": "pre-upgrade"' in rendered
 
 
@@ -294,9 +294,20 @@ def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:
     assert "--set-string 'ingress.hosts[0].host=codex-lb.localtest.me'" in script
     assert "--set-string 'ingress.hosts[0].paths[0].path=/'" in script
     assert "--set-string 'ingress.hosts[0].paths[0].pathType=Prefix'" in script
-    assert 'run_bundled_migration "${release}" "${namespace}"' in script
-    assert 'python", "-m", "app.db.migrate", "upgrade"' in script
-    assert "rollout status \\" in script
+    assert 'run_bundled_migration "${release}" "${namespace}"' not in script
+    assert "config.databaseMigrateOnStartup=false" not in script
+    assert "--wait \\" in script
+
+
+def test_auto_advertise_bridge_url_uses_service_port() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "service.port=3456",
+    )
+
+    assert "svc.cluster.local:3456" in rendered
 
 
 def test_migration_job_image_does_not_duplicate_registry_prefix() -> None:

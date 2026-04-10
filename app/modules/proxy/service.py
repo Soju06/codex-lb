@@ -470,6 +470,7 @@ class ProxyService:
             preferred_account_id=request_state.preferred_account_id,
         )
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
+            forwarded_any = False
             try:
                 async for line in self._forward_http_bridge_request_to_owner(
                     owner_forward=session_or_forward,
@@ -481,9 +482,12 @@ class ProxyService:
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,
                 ):
+                    forwarded_any = True
                     yield line
                 return
             except ProxyResponseError as exc:
+                if forwarded_any:
+                    raise
                 should_attempt_previous_response_recovery = (
                     effective_payload.previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
@@ -2545,6 +2549,10 @@ class ProxyService:
                     request_stage=request_stage,
                     preferred_account_id=preferred_account_id,
                 )
+                await self._claim_durable_http_bridge_session(
+                    created_session,
+                    allow_takeover=True,
+                )
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
                     if current_future is inflight_future:
@@ -2568,14 +2576,6 @@ class ProxyService:
                     await self._close_http_bridge_session(created_session)
                 raise
             assert created_session is not None
-            try:
-                await self._claim_durable_http_bridge_session(
-                    created_session,
-                    allow_takeover=True,
-                )
-            except Exception:
-                await self._close_http_bridge_session(created_session)
-                raise
             _log_http_bridge_event(
                 "create",
                 key,
@@ -2787,36 +2787,42 @@ class ProxyService:
         *,
         allow_takeover: bool,
     ) -> None:
-        lookup = await self._durable_bridge.claim_live_session(
-            session_key_kind=session.key.affinity_kind,
-            session_key_value=session.key.affinity_key,
-            api_key_id=session.key.api_key_id,
-            instance_id=get_settings().http_responses_session_bridge_instance_id,
-            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-            account_id=session.account.id,
-            model=session.request_model,
-            service_tier=None,
-            latest_turn_state=session.downstream_turn_state,
-            latest_response_id=None,
-            allow_takeover=allow_takeover,
-        )
-        session.durable_session_id = lookup.session_id
-        session.durable_owner_epoch = lookup.owner_epoch
-        session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
-        if (
-            PROMETHEUS_AVAILABLE
-            and bridge_durable_recover_total is not None
-            and allow_takeover
-            and lookup.owner_epoch > 1
-        ):
-            bridge_durable_recover_total.labels(path="restart_takeover").inc()
-            _record_bridge_reattach(path="restart_takeover", outcome="success")
-        if session.key.affinity_kind == "session_header":
-            await self._durable_bridge.register_session_header(
-                session_id=lookup.session_id,
+        try:
+            lookup = await self._durable_bridge.claim_live_session(
+                session_key_kind=session.key.affinity_kind,
+                session_key_value=session.key.affinity_key,
                 api_key_id=session.key.api_key_id,
-                session_header=session.key.affinity_key,
+                instance_id=get_settings().http_responses_session_bridge_instance_id,
+                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                account_id=session.account.id,
+                model=session.request_model,
+                service_tier=None,
+                latest_turn_state=session.downstream_turn_state,
+                latest_response_id=None,
+                allow_takeover=allow_takeover,
             )
+            session.durable_session_id = lookup.session_id
+            session.durable_owner_epoch = lookup.owner_epoch
+            session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
+            if (
+                PROMETHEUS_AVAILABLE
+                and bridge_durable_recover_total is not None
+                and allow_takeover
+                and lookup.owner_epoch > 1
+            ):
+                bridge_durable_recover_total.labels(path="restart_takeover").inc()
+                _record_bridge_reattach(path="restart_takeover", outcome="success")
+            if session.key.affinity_kind == "session_header":
+                await self._durable_bridge.register_session_header(
+                    session_id=lookup.session_id,
+                    api_key_id=session.key.api_key_id,
+                    session_header=session.key.affinity_key,
+                )
+        except Exception as exc:
+            if _is_missing_durable_bridge_table_error(exc):
+                logger.warning("Durable bridge tables missing; using in-memory bridge session fallback", exc_info=True)
+                return
+            raise
 
     async def _refresh_durable_http_bridge_session(
         self,
@@ -6487,6 +6493,13 @@ def _record_bridge_first_turn_timeout() -> None:
 def _record_bridge_drain_recovery_allowed() -> None:
     if PROMETHEUS_AVAILABLE and bridge_drain_recovery_allowed_total is not None:
         bridge_drain_recovery_allowed_total.inc()
+
+
+def _is_missing_durable_bridge_table_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if "http_bridge_sessions" not in message and "http_bridge_session_aliases" not in message:
+        return False
+    return "no such table" in message or "does not exist" in message or "undefinedtable" in message
 
 
 def _http_bridge_durable_lease_ttl_seconds() -> float:

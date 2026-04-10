@@ -20,45 +20,6 @@ wait_for_release() {
   helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}"
 }
 
-run_bundled_migration() {
-  local release="$1"
-  local namespace="$2"
-  local job_name="${release}-manual-migrate"
-
-  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" wait \
-    --for=condition=ready pod \
-    -l app.kubernetes.io/instance="${release}",app.kubernetes.io/name=postgresql \
-    --timeout=120s
-
-  cat <<EOF | kubectl --context "${KUBE_CONTEXT}" apply -n "${namespace}" -f -
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: ${job_name}
-spec:
-  backoffLimit: 0
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: migrate
-          image: ${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_TAG}
-          imagePullPolicy: IfNotPresent
-          command: ["python", "-m", "app.db.migrate", "upgrade"]
-          env:
-            - name: CODEX_LB_DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: ${release}
-                  key: database-url
-EOF
-
-  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" wait \
-    --for=condition=complete \
-    job/${job_name} \
-    --timeout=300s
-}
-
 install_bundled() {
   local namespace="codex-lb-smoke-bundled"
   local release="codex-lb-bundled"
@@ -73,7 +34,6 @@ install_bundled() {
     --set image.tag="${IMAGE_TAG}" \
     --set image.pullPolicy=IfNotPresent \
     --set postgresql.auth.password="${DB_PASSWORD}" \
-    --set config.databaseMigrateOnStartup=false \
     --set config.sessionBridgeCodexPrewarmEnabled=false \
     --set ingress.enabled=true \
     --set ingress.ingressClassName=nginx \
@@ -81,12 +41,8 @@ install_bundled() {
     --set-string 'ingress.hosts[0].host=codex-lb.localtest.me' \
     --set-string 'ingress.hosts[0].paths[0].path=/' \
     --set-string 'ingress.hosts[0].paths[0].pathType=Prefix' \
+    --wait \
     --timeout 10m
-
-  run_bundled_migration "${release}" "${namespace}"
-  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" rollout status \
-    statefulset/"${release}-workload" \
-    --timeout=600s
 
   wait_for_release "${release}" "${namespace}"
 }

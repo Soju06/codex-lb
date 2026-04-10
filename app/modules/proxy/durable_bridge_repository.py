@@ -251,7 +251,6 @@ class DurableBridgeRepository:
         now = utcnow()
         for row in rows:
             row.state = HttpBridgeSessionState.DRAINING
-            row.lease_expires_at = now
             row.last_seen_at = now
         await self._session.commit()
         return len(rows)

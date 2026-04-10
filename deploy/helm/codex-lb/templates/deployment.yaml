@@ -235,7 +235,7 @@ spec:
             - name: CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID
               value: "$(POD_NAME)"
             - name: CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL
-              value: {{ default (printf "http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.%s:2455" (include "codex-lb.bridgeHeadlessServiceName" .) .Values.clusterDomain) .Values.config.sessionBridgeAdvertiseBaseUrl | quote }}
+              value: {{ default (printf "http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.%s:%v" (include "codex-lb.bridgeHeadlessServiceName" .) .Values.clusterDomain .Values.service.port) .Values.config.sessionBridgeAdvertiseBaseUrl | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

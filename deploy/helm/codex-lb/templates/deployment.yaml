@@ -12,6 +12,10 @@ metadata:
 spec:
   serviceName: {{ include "codex-lb.bridgeHeadlessServiceName" . }}
   {{- $httpPort := .Values.service.port | default 2455 }}
+  {{- $statefulSetUpdateStrategyType := .Values.updateStrategy.type }}
+  {{- if eq $statefulSetUpdateStrategyType "Recreate" }}
+  {{- $statefulSetUpdateStrategyType = "RollingUpdate" }}
+  {{- end }}
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
@@ -21,8 +25,8 @@ spec:
     matchLabels:
       {{- include "codex-lb.workloadSelectorLabels" . | nindent 6 }}
   updateStrategy:
-    type: {{ .Values.updateStrategy.type }}
-    {{- if eq .Values.updateStrategy.type "RollingUpdate" }}
+    type: {{ $statefulSetUpdateStrategyType }}
+    {{- if eq $statefulSetUpdateStrategyType "RollingUpdate" }}
     rollingUpdate:
       partition: {{ .Values.updateStrategy.rollingUpdate.partition }}
     {{- end }}

@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import WebSocket
@@ -14,7 +15,7 @@ import app.modules.proxy.api as proxy_api_module
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
 from app.core.openai.requests import ResponsesRequest
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 
 pytestmark = pytest.mark.unit
 
@@ -234,3 +235,73 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
 
     assert captured["downstream_turn_state"] == "http_turn_forwarded_value"
     assert response.headers["x-codex-turn-state"] == "http_turn_forwarded_value"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_does_not_release_forwarded_reservation_on_internal_bridge_error(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    release_reservation = AsyncMock()
+    forwarded_reservation = ApiKeyUsageReservationData(
+        reservation_id="res_1",
+        key_id="key_1",
+        model="gpt-5.4",
+    )
+
+    def fake_apply_api_key_enforcement(_payload, _api_key):
+        return None
+
+    def fake_validate_model_access(_api_key, _model):
+        return None
+
+    async def fake_rate_limit_headers():
+        return {}
+
+    async def fake_stream_http_responses(*args, **kwargs):
+        del args, kwargs
+        raise proxy_api_module.ProxyResponseError(
+            503,
+            openai_error("bridge_owner_unreachable", "owner unavailable", error_type="server_error"),
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_api_module, "apply_api_key_enforcement", fake_apply_api_key_enforcement)
+    monkeypatch.setattr(proxy_api_module, "validate_model_access", fake_validate_model_access)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+    monkeypatch.setattr(
+        proxy_api_module.proxy_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+    )
+
+    context = cast(
+        proxy_api_module.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                rate_limit_headers=fake_rate_limit_headers,
+                stream_http_responses=fake_stream_http_responses,
+            )
+        ),
+    )
+
+    response = await proxy_api_module._stream_responses(
+        request,
+        payload,
+        context,
+        None,
+        prefer_http_bridge=True,
+        skip_limit_enforcement=True,
+        api_key_reservation_override=forwarded_reservation,
+        forwarded_request=True,
+    )
+
+    assert response.status_code == 503
+    release_reservation.assert_not_awaited()

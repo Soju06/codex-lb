@@ -157,6 +157,7 @@ class DurableBridgeRepository:
                 HttpBridgeSessionState.DRAINING,
                 HttpBridgeSessionState.CLOSED,
             }
+            previous_state = existing.state
             owner_changed = existing.owner_instance_id != instance_id
             if not owner_changed:
                 next_epoch = existing.owner_epoch
@@ -174,8 +175,10 @@ class DurableBridgeRepository:
             existing.model = model
             existing.service_tier = service_tier
             if owner_changed:
-                existing.latest_turn_state = latest_turn_state
-                existing.latest_response_id = latest_response_id
+                if latest_turn_state is not None or previous_state == HttpBridgeSessionState.CLOSED:
+                    existing.latest_turn_state = latest_turn_state
+                if latest_response_id is not None or previous_state == HttpBridgeSessionState.CLOSED:
+                    existing.latest_response_id = latest_response_id
             else:
                 if latest_turn_state is not None:
                     existing.latest_turn_state = latest_turn_state

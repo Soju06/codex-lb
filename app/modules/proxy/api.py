@@ -775,6 +775,7 @@ async def _stream_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    owns_reservation = api_key_reservation_override is None
     reservation = (
         api_key_reservation_override
         if skip_limit_enforcement
@@ -837,7 +838,8 @@ async def _stream_responses(
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
     except ProxyResponseError as exc:
-        await _release_reservation(reservation)
+        if owns_reservation:
+            await _release_reservation(reservation)
         return _logged_error_json_response(
             request,
             exc.status_code,

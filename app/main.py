@@ -157,7 +157,22 @@ async def lifespan(app: FastAPI):
         logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
 
     async def _complete_bridge_registration(svc: RingMembershipService, iid: str) -> None:
-        await _activate_bridge_membership(svc, iid)
+        if bridge_endpoint_base_url is None:
+            await _activate_bridge_membership(svc, iid)
+            startup_module.mark_bridge_registration_complete()
+            return
+        await _validate_bridge_advertise_endpoint_for_multi_replica(
+            svc=svc,
+            settings=settings,
+            instance_id=iid,
+            endpoint_base_url=bridge_endpoint_base_url,
+        )
+        await svc.register(iid, endpoint_base_url=None)
+        await _wait_for_bridge_advertise_endpoint(
+            bridge_endpoint_base_url,
+            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+        )
+        await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
         startup_module.mark_bridge_registration_complete()
 
     async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
@@ -186,12 +201,6 @@ async def lifespan(app: FastAPI):
         if bridge_endpoint_base_url is None:
             await svc.register(iid, endpoint_base_url=None)
             return
-        await _validate_bridge_advertise_endpoint_for_multi_replica(
-            svc=svc,
-            settings=settings,
-            instance_id=iid,
-            endpoint_base_url=bridge_endpoint_base_url,
-        )
         await svc.register(iid, endpoint_base_url=bridge_endpoint_base_url)
 
     from app.core.auth.api_key_cache import get_api_key_cache

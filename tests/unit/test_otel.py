@@ -454,9 +454,16 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     async with main.lifespan(main.app):
         assert startup_module._startup_complete is True
         await asyncio.sleep(0)
-        wait_for_reachable.assert_not_awaited()
+        wait_for_reachable.assert_awaited_once_with(
+            "http://pod-a.bridge.default.svc.cluster.local:2455",
+            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+        )
         validate_advertise.assert_awaited_once()
         ring_service.register.assert_awaited_once_with(
+            "pod-a",
+            endpoint_base_url=None,
+        )
+        ring_service.heartbeat.assert_awaited_once_with(
             "pod-a",
             endpoint_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
         )

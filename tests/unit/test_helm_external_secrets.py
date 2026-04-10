@@ -149,6 +149,20 @@ def test_public_service_auto_mode_renders_legacy_selector_on_upgrade_without_loo
     assert "codex-lb.soju.dev/traffic: legacy" in rendered
 
 
+def test_statefulset_translates_legacy_recreate_strategy_to_rolling_update() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "updateStrategy.type=Recreate",
+    )
+
+    assert "kind: StatefulSet" in rendered
+    assert "updateStrategy:" in rendered
+    assert "type: RollingUpdate" in rendered
+    assert "type: Recreate" not in rendered
+
+
 def test_public_service_auto_mode_renders_workload_selector_on_install() -> None:
     rendered = _helm_template(
         "--show-only",

@@ -514,68 +514,6 @@ def _manual_schema_drift_diffs(connection: Connection) -> tuple[str, ...]:
     return tuple(diffs)
 
 
-def _normalize_boolean_server_default(value: object) -> bool | None:
-    candidate = value
-    if hasattr(candidate, "arg"):
-        candidate = getattr(candidate, "arg")
-    if hasattr(candidate, "text"):
-        candidate = getattr(candidate, "text")
-    if isinstance(candidate, bool):
-        return candidate
-    rendered = str(candidate).strip().strip("()").strip("'\"").lower()
-    if rendered in {"0", "false"}:
-        return False
-    if rendered in {"1", "true"}:
-        return True
-    return None
-
-
-def _metadata_boolean_default(table_name: str, column_name: str) -> bool | None:
-    table = Base.metadata.tables.get(table_name)
-    if table is None:
-        return None
-    column = table.c.get(column_name)
-    if column is None or column.server_default is None:
-        return None
-    try:
-        python_type = column.type.python_type
-    except Exception:
-        return None
-    if python_type is not bool:
-        return None
-    return _normalize_boolean_server_default(column.server_default)
-
-
-def _reflected_boolean_default(connection: Connection, table_name: str, column_name: str) -> bool | None:
-    inspector = inspect(connection)
-    if not inspector.has_table(table_name):
-        return None
-    for column in inspector.get_columns(table_name):
-        if column.get("name") != column_name:
-            continue
-        column_type = column.get("type")
-        try:
-            python_type = column_type.python_type if column_type is not None else None
-        except Exception:
-            python_type = None
-        if python_type is not bool:
-            return None
-        return _normalize_boolean_server_default(column.get("default"))
-    return None
-
-
-def _is_semantic_boolean_default_drift(diff: object, connection: Connection) -> bool:
-    if not isinstance(diff, tuple) or len(diff) < 7 or diff[0] != "modify_default":
-        return False
-    table_name = diff[2]
-    column_name = diff[3]
-    if not isinstance(table_name, str) or not isinstance(column_name, str):
-        return False
-    reflected_default = _reflected_boolean_default(connection, table_name, column_name)
-    metadata_default = _metadata_boolean_default(table_name, column_name)
-    return reflected_default is not None and metadata_default is not None and reflected_default == metadata_default
-
-
 def check_schema_drift(database_url: str) -> tuple[str, ...]:
     config = _build_alembic_config(database_url)
     sync_database_url = _required_sqlalchemy_url(config)
@@ -598,8 +536,7 @@ def check_schema_drift(database_url: str) -> tuple[str, ...]:
                 "ignore",
                 message=r"autogenerate skipping metadata-specified expression-based index .*",
             )
-            raw_diffs = compare_metadata(migration_context, Base.metadata)
-            diffs = [diff for diff in raw_diffs if not _is_semantic_boolean_default_drift(diff, connection)]
+            diffs = compare_metadata(migration_context, Base.metadata)
         manual_diffs = _manual_schema_drift_diffs(connection)
 
     return tuple(repr(diff) for diff in diffs) + manual_diffs

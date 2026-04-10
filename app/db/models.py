@@ -20,6 +20,7 @@ from sqlalchemy import (
     func,
     literal_column,
     text,
+    true,
 )
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -210,11 +211,10 @@ class DashboardSettings(Base):
         server_default=text("1800"),
         nullable=False,
     )
-    # Account imports overwrite by default unless operators explicitly opt into copy-on-import.
     import_without_overwrite: Mapped[bool] = mapped_column(
         Boolean,
-        default=False,
-        server_default=false(),
+        default=True,
+        server_default=true(),
         nullable=False,
     )
     totp_required_on_login: Mapped[bool] = mapped_column(

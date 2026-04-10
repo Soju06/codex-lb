@@ -1,6 +1,6 @@
-"""restore import_without_overwrite default to false
+"""restore import_without_overwrite default to true
 
-Revision ID: 20260410_020000_restore_import_without_overwrite_default_false
+Revision ID: 20260410_030000_restore_import_without_overwrite_default_true
 Revises: 20260409_020000_fix_http_bridge_last_seen_index
 Create Date: 2026-04-10
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260410_020000_restore_import_without_overwrite_default_false"
+revision = "20260410_030000_restore_import_without_overwrite_default_true"
 down_revision = "20260409_020000_fix_http_bridge_last_seen_index"
 branch_labels = None
 depends_on = None
@@ -41,7 +41,7 @@ def upgrade() -> None:
         batch_op.alter_column(
             "import_without_overwrite",
             existing_type=sa.Boolean(),
-            server_default=sa.false(),
+            server_default=sa.true(),
         )
 
     if {"created_at", "updated_at"}.issubset(columns):
@@ -49,8 +49,8 @@ def upgrade() -> None:
             sa.text(
                 """
                 UPDATE dashboard_settings
-                SET import_without_overwrite = FALSE
-                WHERE import_without_overwrite = TRUE
+                SET import_without_overwrite = TRUE
+                WHERE import_without_overwrite = FALSE
                   AND updated_at = created_at
                 """
             )
@@ -69,5 +69,5 @@ def downgrade() -> None:
         batch_op.alter_column(
             "import_without_overwrite",
             existing_type=sa.Boolean(),
-            server_default=sa.true(),
+            server_default=sa.false(),
         )

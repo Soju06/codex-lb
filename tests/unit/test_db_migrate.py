@@ -75,66 +75,6 @@ def test_check_schema_drift_disposes_sync_engine(monkeypatch) -> None:
     assert fake_engine.disposed is True
 
 
-def test_check_schema_drift_ignores_semantically_equal_boolean_defaults(monkeypatch) -> None:
-    class _FakeConnectionContext:
-        def __init__(self) -> None:
-            self.connection = object()
-
-        def __enter__(self) -> object:
-            return self.connection
-
-        def __exit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-    class _FakeEngine:
-        def __init__(self) -> None:
-            self.connection_context = _FakeConnectionContext()
-            self.disposed = False
-
-        def connect(self) -> _FakeConnectionContext:
-            return self.connection_context
-
-        def dispose(self) -> None:
-            self.disposed = True
-
-    class _FakeInspector:
-        def has_table(self, table_name: str) -> bool:
-            return table_name == "dashboard_settings"
-
-        def get_columns(self, table_name: str) -> list[dict[str, object]]:
-            assert table_name == "dashboard_settings"
-            return [{"name": "import_without_overwrite", "type": SimpleNamespace(python_type=bool), "default": "0"}]
-
-    fake_engine = _FakeEngine()
-
-    monkeypatch.setattr(migrate_module, "create_engine", lambda *args, **kwargs: fake_engine)
-    monkeypatch.setattr(
-        migrate_module.MigrationContext,
-        "configure",
-        lambda *, connection, opts: SimpleNamespace(connection=connection, opts=opts),
-    )
-    monkeypatch.setattr(
-        migrate_module,
-        "compare_metadata",
-        lambda context, metadata: [
-            (
-                "modify_default",
-                None,
-                "dashboard_settings",
-                "import_without_overwrite",
-                {},
-                "0",
-                "1",
-            )
-        ],
-    )
-    monkeypatch.setattr(migrate_module, "inspect", lambda connection: _FakeInspector())
-    monkeypatch.setattr(migrate_module, "_manual_schema_drift_diffs", lambda connection: ())
-
-    assert check_schema_drift("sqlite+aiosqlite:///tmp/drift.db") == ()
-    assert fake_engine.disposed is True
-
-
 def test_inspect_migration_state_requires_upgrade_when_uninitialized(tmp_path: Path) -> None:
     db_path = tmp_path / "fresh.db"
     state = inspect_migration_state(_db_url(db_path))

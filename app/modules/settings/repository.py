@@ -25,6 +25,7 @@ class SettingsRepository:
             prefer_earlier_reset_accounts=False,
             routing_strategy="capacity_weighted",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
+            # Keep bootstrap defaults aligned with the overwrite-by-default import contract.
             import_without_overwrite=False,
             totp_required_on_login=False,
             password_hash=None,

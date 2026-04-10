@@ -210,6 +210,7 @@ class DashboardSettings(Base):
         server_default=text("1800"),
         nullable=False,
     )
+    # Account imports overwrite by default unless operators explicitly opt into copy-on-import.
     import_without_overwrite: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

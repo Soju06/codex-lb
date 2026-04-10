@@ -65,8 +65,18 @@ install_external_db() {
   local namespace="codex-lb-smoke-external"
   local release="codex-lb-external"
   local db_release="codex-lb-smoke-db"
+  local app_secret="codex-lb-external-secrets"
+  local encryption_key
 
   trap 'dump_namespace_debug "${namespace}"' ERR
+
+  encryption_key=$(python - <<'PY'
+import base64
+import os
+
+print(base64.urlsafe_b64encode(os.urandom(32)).decode())
+PY
+)
 
   helm upgrade --install "${db_release}" oci://registry-1.docker.io/bitnamicharts/postgresql \
     --kube-context "${KUBE_CONTEXT}" \
@@ -79,6 +89,11 @@ install_external_db() {
     --wait \
     --timeout 10m
 
+  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" delete secret "${app_secret}" --ignore-not-found
+  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" create secret generic "${app_secret}" \
+    --from-literal=database-url="postgresql+asyncpg://codexlb:${DB_PASSWORD}@${db_release}-postgresql:5432/codexlb" \
+    --from-literal=encryption-key="${encryption_key}"
+
   helm upgrade --install "${release}" "${CHART_DIR}" \
     --kube-context "${KUBE_CONTEXT}" \
     --namespace "${namespace}" \
@@ -88,7 +103,7 @@ install_external_db() {
     --set image.repository="${IMAGE_REPOSITORY}" \
     --set image.tag="${IMAGE_TAG}" \
     --set image.pullPolicy=IfNotPresent \
-    --set externalDatabase.url="postgresql+asyncpg://codexlb:${DB_PASSWORD}@${db_release}-postgresql:5432/codexlb" \
+    --set auth.existingSecret="${app_secret}" \
     --wait \
     --timeout 10m
 

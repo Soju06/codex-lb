@@ -26,6 +26,7 @@ from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy.load_balancer import AccountSelection
 
 pytestmark = pytest.mark.integration
+_TEST_SYNC_TIMEOUT_SECONDS = 5.0
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -109,6 +110,10 @@ async def _get_account(account_id: str) -> Account:
         account = result.scalar_one()
         session.expunge(account)
         return account
+
+
+async def _wait_for_event(event: asyncio.Event, *, timeout: float = _TEST_SYNC_TIMEOUT_SECONDS) -> None:
+    await asyncio.wait_for(event.wait(), timeout=timeout)
 
 
 class _SettingsCache:
@@ -2417,7 +2422,7 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
     blocker = asyncio.Event()
 
     async def blocking_reader_task() -> None:
-        await blocker.wait()
+        await _wait_for_event(blocker)
 
     blocking_reader = asyncio.create_task(blocking_reader_task())
     bridge_session.upstream_reader = blocking_reader
@@ -5003,7 +5008,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
         create_attempts.append(key.affinity_key)
         if key.affinity_key == "bridge-capacity-a":
             first_create_started.set()
-            await release_first_create.wait()
+            await _wait_for_event(release_first_create)
             raise RuntimeError("first create failed")
         return _make_dummy_bridge_session(key)
 
@@ -5023,7 +5028,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
             max_sessions=1,
         )
     )
-    await first_create_started.wait()
+    await _wait_for_event(first_create_started)
 
     second = asyncio.create_task(
         service._get_or_create_http_bridge_session(
@@ -5085,7 +5090,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
     ):
         del self, headers, affinity, request_model, idle_ttl_seconds
         create_started.set()
-        await release_create.wait()
+        await _wait_for_event(release_create)
         session = _make_dummy_bridge_session(key)
         session.request_model = "gpt-5.1"
         return session
@@ -5109,7 +5114,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
                 max_sessions=8,
             )
         )
-        await create_started.wait()
+        await _wait_for_event(create_started)
         follower = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
@@ -5184,7 +5189,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         create_calls.append(list(api_key.assigned_account_ids if api_key is not None else []))
         if len(create_calls) == 1:
             create_started.set()
-            await release_create.wait()
+            await _wait_for_event(release_create)
             session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
             cast(Any, session).account = SimpleNamespace(id=stale_account_id, status=AccountStatus.ACTIVE)
             return session
@@ -5213,7 +5218,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
                 max_sessions=8,
             )
         )
-        await create_started.wait()
+        await _wait_for_event(create_started)
         follower = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
@@ -5356,7 +5361,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         create_attempts += 1
         if create_attempts == 1:
             first_create_started.set()
-            await asyncio.Event().wait()
+            await _wait_for_event(asyncio.Event())
         return _make_dummy_bridge_session(key)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
@@ -5374,10 +5379,10 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
             max_sessions=8,
         )
     )
-    await first_create_started.wait()
+    await _wait_for_event(first_create_started)
     creator.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await creator
+        await asyncio.wait_for(creator, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
     replacement = await asyncio.wait_for(
         service._get_or_create_http_bridge_session(
@@ -5437,7 +5442,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         create_attempts += 1
         if create_attempts == 1:
             create_finished.set()
-            await allow_return.wait()
+            await _wait_for_event(allow_return)
         return _make_dummy_bridge_session(key)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
@@ -5454,14 +5459,14 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
             max_sessions=8,
         )
     )
-    await create_finished.wait()
+    await _wait_for_event(create_finished)
     async with service._http_bridge_lock:
         allow_return.set()
         await asyncio.sleep(0)
         creator.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        await creator
+        await asyncio.wait_for(creator, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
     replacement = await asyncio.wait_for(
         service._get_or_create_http_bridge_session(
@@ -5515,7 +5520,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
     ):
         del self, headers, affinity, request_model, idle_ttl_seconds
         create_started.set()
-        await release_create.wait()
+        await _wait_for_event(release_create)
         return _make_dummy_bridge_session(key)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
@@ -5533,7 +5538,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
             max_sessions=8,
         )
     )
-    await create_started.wait()
+    await _wait_for_event(create_started)
 
     follower = asyncio.create_task(
         service._get_or_create_http_bridge_session(
@@ -5991,13 +5996,13 @@ async def test_retry_http_bridge_precreated_request_releases_pending_lock_before
     async def fake_reconnect(self, target_session, *, request_state, restart_reader=False):
         del self, request_state, restart_reader
         reconnect_started.set()
-        await allow_reconnect_finish.wait()
+        await _wait_for_event(allow_reconnect_finish)
         target_session.upstream = replacement_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
 
     retry_task = asyncio.create_task(service._retry_http_bridge_precreated_request(session))
-    await reconnect_started.wait()
+    await _wait_for_event(reconnect_started)
 
     async def acquire_pending_lock() -> None:
         async with session.pending_lock:

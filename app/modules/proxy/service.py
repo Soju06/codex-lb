@@ -3002,6 +3002,13 @@ class ProxyService:
         queue_limit: int,
     ) -> None:
         if session.closed:
+            recovered = await self._retry_http_bridge_request_on_fresh_upstream(
+                session,
+                request_state=request_state,
+                text_data=text_data,
+            )
+            if recovered:
+                return
             _log_http_bridge_event(
                 "submit_on_closed",
                 session.key,

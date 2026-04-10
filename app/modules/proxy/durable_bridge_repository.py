@@ -10,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import HttpBridgeSessionAlias, HttpBridgeSessionRecord, HttpBridgeSessionState
 
 _ANONYMOUS_API_KEY_SCOPE = "__anonymous__"
@@ -161,7 +161,7 @@ class DurableBridgeRepository:
             if not owner_changed:
                 next_epoch = existing.owner_epoch
             else:
-                lease_expired = existing.lease_expires_at is None or existing.lease_expires_at <= now
+                lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
                 if not allow_takeover and not lease_expired and not state_allows_takeover:
                     return _to_snapshot_required(existing)
                 next_epoch = existing.owner_epoch + 1

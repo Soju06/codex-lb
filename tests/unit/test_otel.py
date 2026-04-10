@@ -546,8 +546,9 @@ async def test_wait_for_bridge_advertise_endpoint_probes_configured_url(monkeypa
         async def __aexit__(self, exc_type, exc, tb) -> None:
             return None
 
-        def get(self, url: str) -> _FakeResponse:
+        def get(self, url: str, *, ssl: bool | None = None) -> _FakeResponse:
             seen["url"] = url
+            seen["ssl"] = ssl
             return _FakeResponse()
 
     monkeypatch.setattr(main.aiohttp, "ClientSession", _FakeSession)
@@ -558,6 +559,7 @@ async def test_wait_for_bridge_advertise_endpoint_probes_configured_url(monkeypa
     )
 
     assert seen["url"] == "http://pod-a.bridge.default.svc.cluster.local:2455/health/live"
+    assert seen["ssl"] is None
     assert seen["trust_env"] is False
 
 

@@ -148,6 +148,7 @@ async def test_get_or_create_http_bridge_session_replaces_live_session_when_acco
         "_create_http_bridge_session",
         AsyncMock(return_value=replacement_session),
     )
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
@@ -726,6 +727,7 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
     monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
     monkeypatch.setattr(
@@ -798,6 +800,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
     monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
     monkeypatch.setattr(
@@ -910,6 +913,8 @@ async def test_get_or_create_http_bridge_session_allows_local_rebind_for_previou
     )
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
     monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
     monkeypatch.setattr(
@@ -962,6 +967,7 @@ async def test_get_or_create_http_bridge_session_allows_local_rebind_for_bootstr
     )
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
     monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
     monkeypatch.setattr(
@@ -1071,6 +1077,7 @@ async def test_get_or_create_http_bridge_session_recovers_locally_when_owner_end
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
     monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
     monkeypatch.setattr(
@@ -1155,6 +1162,7 @@ async def test_get_or_create_http_bridge_session_discards_local_session_when_dur
     monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
     monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
@@ -1496,6 +1504,7 @@ async def test_get_or_create_http_bridge_session_soft_mismatch_rebinds_locally(
     )
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
     monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
@@ -1553,6 +1562,7 @@ async def test_get_or_create_http_bridge_session_prompt_cache_mismatch_stays_loc
         idle_ttl_seconds=120.0,
     )
     monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
 
     resolved = await service._get_or_create_http_bridge_session(
         key,
@@ -1648,6 +1658,7 @@ async def test_get_or_create_http_bridge_session_replaces_live_session_when_scop
         "_create_http_bridge_session",
         AsyncMock(return_value=replacement_session),
     )
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(
         proxy_service,
         "get_settings",

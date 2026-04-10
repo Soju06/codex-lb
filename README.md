@@ -294,7 +294,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:2455/v1",
-    api_key="sk-clb-...",  # from dashboard when auth is enabled; local-only requests may omit it when disabled
+    api_key="sk-clb-...",  # from dashboard, or any non-empty string if auth is disabled
 )
 
 response = client.chat.completions.create(
@@ -321,7 +321,7 @@ Authorization: Bearer sk-clb-...
 
 The protected proxy routes covered by this setting are:
 
-- `/v1/*`
+- `/v1/*` (except `/v1/usage`, which always requires a valid key)
 - `/backend-api/codex/*`
 - `/backend-api/transcribe`
 

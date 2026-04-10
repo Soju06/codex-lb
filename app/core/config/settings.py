@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -60,6 +61,35 @@ def _validate_context_window_entries(data: dict) -> dict[str, int]:
             raise ValueError(f"model_context_window_overrides value for '{k}' must be a positive integer, got {v}")
         result[str(k)] = v
     return result
+
+
+def _parse_port_value(raw: str) -> int | None:
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    if port <= 0:
+        return None
+    return port
+
+
+def _configured_http_port() -> int:
+    raw_env_port = os.getenv("PORT")
+    if raw_env_port is not None:
+        parsed_env_port = _parse_port_value(raw_env_port.strip())
+        if parsed_env_port is not None:
+            return parsed_env_port
+    args = tuple(sys.argv[1:])
+    for index, value in enumerate(args):
+        if value == "--port" and index + 1 < len(args):
+            parsed_arg_port = _parse_port_value(args[index + 1])
+            if parsed_arg_port is not None:
+                return parsed_arg_port
+        if value.startswith("--port="):
+            parsed_arg_port = _parse_port_value(value.split("=", 1)[1])
+            if parsed_arg_port is not None:
+                return parsed_arg_port
+    return 2455
 
 
 class Settings(BaseSettings):
@@ -326,8 +356,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_metrics_port(self) -> "Settings":
-        if self.metrics_port == 2455:
-            raise ValueError("metrics_port must not be 2455 (main application port)")
+        http_port = _configured_http_port()
+        if self.metrics_port == http_port:
+            raise ValueError(f"metrics_port must not match the main application port ({http_port})")
         return self
 
 

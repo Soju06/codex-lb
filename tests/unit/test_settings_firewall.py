@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 from pydantic import ValidationError
 
@@ -119,4 +121,21 @@ def test_settings_rejects_loopback_http_bridge_advertise_base_url_for_multi_repl
     )
 
     with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_rejects_metrics_port_matching_http_port_env(monkeypatch):
+    monkeypatch.setenv("PORT", "9090")
+    monkeypatch.setenv("CODEX_LB_METRICS_PORT", "9090")
+
+    with pytest.raises(ValidationError, match="metrics_port must not match the main application port"):
+        Settings()
+
+
+def test_settings_rejects_metrics_port_matching_http_port_argv(monkeypatch):
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setenv("CODEX_LB_METRICS_PORT", "9091")
+    monkeypatch.setattr(sys, "argv", ["uvicorn", "app.main:app", "--port", "9091"])
+
+    with pytest.raises(ValidationError, match="metrics_port must not match the main application port"):
         Settings()

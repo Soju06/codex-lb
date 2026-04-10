@@ -129,7 +129,7 @@ jobs:
   test:
     name: Tests (pytest)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       PYTHONFAULTHANDLER: "1"
 
@@ -158,12 +158,12 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: timeout --signal=SIGKILL 25m uv run pytest -vv --maxfail=1 --durations=20
+        run: uv run pytest -q -ra -o faulthandler_timeout=300 --durations=20
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -207,7 +207,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: timeout --signal=SIGKILL 25m uv run pytest -vv --maxfail=1 --durations=20
+        run: uv run pytest -q -ra -o faulthandler_timeout=300 --durations=20
 
   migration-check:
     name: Migration check (alembic)

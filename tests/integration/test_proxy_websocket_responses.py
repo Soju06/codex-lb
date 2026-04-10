@@ -15,6 +15,15 @@ import app.modules.proxy.service as proxy_module
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _stub_request_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+        return None
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+
 class _FakeUpstreamMessage:
     def __init__(
         self,

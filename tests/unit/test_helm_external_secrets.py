@@ -137,7 +137,7 @@ def test_public_service_can_render_workload_selector_after_cutover() -> None:
     assert "codex-lb.soju.dev/traffic: workload" in rendered
 
 
-def test_public_service_auto_mode_renders_workload_selector_on_upgrade_without_lookup() -> None:
+def test_public_service_auto_mode_renders_legacy_selector_on_upgrade_without_lookup() -> None:
     rendered = _helm_template(
         "--is-upgrade",
         "--show-only",
@@ -146,7 +146,7 @@ def test_public_service_auto_mode_renders_workload_selector_on_upgrade_without_l
         "migration.serviceSelectorMode=auto",
     )
 
-    assert "codex-lb.soju.dev/traffic: workload" in rendered
+    assert "codex-lb.soju.dev/traffic: legacy" in rendered
 
 
 def test_public_service_auto_mode_renders_workload_selector_on_install() -> None:

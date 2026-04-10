@@ -37,7 +37,7 @@ spec:
     {{- else if eq $existingTrafficLane "legacy" }}
     {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- else }}
-    {{- include "codex-lb.workloadSelectorLabels" . | nindent 4 }}
+    {{- include "codex-lb.legacySelectorLabels" . | nindent 4 }}
     {{- end }}
   ports:
     - name: http

@@ -393,7 +393,9 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_lifespan_waits_for_advertise_endpoint_before_active_register(monkeypatch: pytest.MonkeyPatch):
+async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
     import app.core.startup as startup_module
     import app.main as main
 
@@ -452,10 +454,7 @@ async def test_lifespan_waits_for_advertise_endpoint_before_active_register(monk
     async with main.lifespan(main.app):
         assert startup_module._startup_complete is True
         await asyncio.sleep(0)
-        wait_for_reachable.assert_awaited_once_with(
-            "http://pod-a.bridge.default.svc.cluster.local:2455",
-            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-        )
+        wait_for_reachable.assert_not_awaited()
         validate_advertise.assert_awaited_once()
         ring_service.register.assert_awaited_once_with(
             "pod-a",

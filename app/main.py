@@ -157,11 +157,6 @@ async def lifespan(app: FastAPI):
         logger.warning("Metrics endpoint enabled but prometheus-client is not installed")
 
     async def _complete_bridge_registration(svc: RingMembershipService, iid: str) -> None:
-        if bridge_endpoint_base_url is not None:
-            await _wait_for_bridge_advertise_endpoint(
-                bridge_endpoint_base_url,
-                connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-            )
         await _activate_bridge_membership(svc, iid)
         startup_module.mark_bridge_registration_complete()
 

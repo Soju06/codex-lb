@@ -44,6 +44,9 @@ def _reset_test_database(sync_conn) -> None:
 
 @pytest_asyncio.fixture
 async def _reset_db_state():
+    from app.db.session import close_db
+
+    await close_db()
     async with engine.begin() as conn:
         await conn.run_sync(_reset_test_database)
     return True

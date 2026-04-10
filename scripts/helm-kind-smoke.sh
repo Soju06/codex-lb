@@ -20,9 +20,29 @@ wait_for_release() {
   helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}"
 }
 
+dump_namespace_debug() {
+  local namespace="$1"
+  echo "[helm-kind-smoke] dumping namespace state for ${namespace}" >&2
+  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" get all || true
+  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" get events --sort-by=.lastTimestamp || true
+
+  local pod_names
+  pod_names=$(kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" get pods -o name 2>/dev/null || true)
+  if [[ -n "${pod_names}" ]]; then
+    while IFS= read -r pod; do
+      [[ -z "${pod}" ]] && continue
+      kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" describe "${pod}" || true
+      kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" logs "${pod}" --all-containers=true --tail=200 || true
+      kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" logs "${pod}" --all-containers=true --previous --tail=200 || true
+    done <<< "${pod_names}"
+  fi
+}
+
 install_bundled() {
   local namespace="codex-lb-smoke-bundled"
   local release="codex-lb-bundled"
+
+  trap 'dump_namespace_debug "${namespace}"' ERR
 
   helm upgrade --install "${release}" "${CHART_DIR}" \
     --kube-context "${KUBE_CONTEXT}" \
@@ -38,12 +58,15 @@ install_bundled() {
     --timeout 10m
 
   wait_for_release "${release}" "${namespace}"
+  trap - ERR
 }
 
 install_external_db() {
   local namespace="codex-lb-smoke-external"
   local release="codex-lb-external"
   local db_release="codex-lb-smoke-db"
+
+  trap 'dump_namespace_debug "${namespace}"' ERR
 
   helm upgrade --install "${db_release}" oci://registry-1.docker.io/bitnamicharts/postgresql \
     --kube-context "${KUBE_CONTEXT}" \
@@ -70,6 +93,7 @@ install_external_db() {
     --timeout 10m
 
   wait_for_release "${release}" "${namespace}"
+  trap - ERR
 }
 
 case "${MODE}" in

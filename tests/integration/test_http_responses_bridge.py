@@ -374,8 +374,9 @@ def _make_dummy_bridge_session(session_key: proxy_module._HTTPBridgeSessionKey) 
 
     return SimpleNamespace(
         key=session_key,
+        headers={},
         closed=False,
-        account=SimpleNamespace(id=f"acct_{session_key.affinity_key}", status=AccountStatus.ACTIVE),
+        account=SimpleNamespace(id=None, status=AccountStatus.ACTIVE),
         request_model="gpt-5.4",
         pending_lock=anyio.Lock(),
         pending_requests=deque(),

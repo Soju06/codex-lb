@@ -1852,6 +1852,24 @@ class ProxyService:
         supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
         return await select_account_any(deadline, **supported_kwargs)
 
+    async def _create_http_bridge_session_compatible(
+        self,
+        key: "_HTTPBridgeSessionKey",
+        **kwargs: object,
+    ) -> "_HTTPBridgeSession":
+        create_session = self._create_http_bridge_session
+        create_session_any = cast(Any, create_session)
+        try:
+            signature = inspect.signature(create_session)
+        except (TypeError, ValueError):
+            return await create_session_any(key, **kwargs)
+
+        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+            return await create_session_any(key, **kwargs)
+
+        supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
+        return await create_session_any(key, **supported_kwargs)
+
     @overload
     async def _get_or_create_http_bridge_session(
         self,
@@ -2557,7 +2575,7 @@ class ProxyService:
             created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
-                created_session = await self._create_http_bridge_session(
+                created_session = await self._create_http_bridge_session_compatible(
                     key,
                     headers=headers,
                     affinity=affinity,

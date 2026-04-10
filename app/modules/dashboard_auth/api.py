@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
 from app.core.auth.dependencies import set_dashboard_error_format
-from app.core.config.settings import get_settings
+from app.core.bootstrap import (
+    ensure_auto_bootstrap_token,
+    get_bootstrap_validation_status,
+    has_active_bootstrap_token,
+    log_bootstrap_token,
+)
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
     DashboardAuthError,
@@ -46,6 +53,8 @@ router = APIRouter(
     dependencies=[Depends(set_dashboard_error_format)],
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _session_client_key(request: Request, *, prefix: str) -> str:
     return f"{prefix}:{request.client.host if request.client else 'unknown'}"
@@ -82,7 +91,7 @@ async def get_dashboard_auth_session(
     response = await context.service.get_session_state(session_id)
     if response.password_required or is_local_request(request):
         return response
-    bootstrap_token_configured = bool((get_settings().dashboard_bootstrap_token or "").strip())
+    bootstrap_token_configured = await has_active_bootstrap_token()
     return response.model_copy(
         update={
             "authenticated": False,
@@ -100,14 +109,16 @@ async def setup_password(
 ) -> DashboardAuthSessionResponse | JSONResponse:
     current_settings = await context.repository.get_settings()
     if current_settings.password_hash is None and not is_local_request(request):
-        configured_bootstrap_token = (get_settings().dashboard_bootstrap_token or "").strip()
-        if not configured_bootstrap_token:
+        submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
+        validation_status = await get_bootstrap_validation_status(submitted_bootstrap_token)
+        if validation_status == "unavailable":
             raise DashboardAuthError(
                 "Remote bootstrap is disabled until CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN is configured.",
                 code="bootstrap_unavailable",
             )
-        submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
-        if submitted_bootstrap_token != configured_bootstrap_token:
+        if validation_status == "password_already_configured":
+            raise DashboardConflictError("Password is already configured", code="password_already_configured")
+        if validation_status != "valid":
             raise DashboardAuthError("Invalid dashboard bootstrap token.", code="invalid_bootstrap_token")
     password = payload.password.strip()
     if len(password) < 8:
@@ -204,6 +215,9 @@ async def remove_password(
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
 
     await get_settings_cache().invalidate()
+    bootstrap_token = await ensure_auto_bootstrap_token()
+    if bootstrap_token:
+        log_bootstrap_token(logger, bootstrap_token, reason="password-removed")
     response = JSONResponse(status_code=200, content={"status": "ok"})
     response.delete_cookie(key=DASHBOARD_SESSION_COOKIE, path="/")
     return response

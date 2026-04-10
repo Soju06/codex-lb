@@ -10,9 +10,9 @@ async def test_settings_api_get_and_update(async_client):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["stickyThreadsEnabled"] is False
+    assert payload["stickyThreadsEnabled"] is True
     assert payload["upstreamStreamTransport"] == "default"
-    assert payload["preferEarlierResetAccounts"] is False
+    assert payload["preferEarlierResetAccounts"] is True
     assert payload["routingStrategy"] == "capacity_weighted"
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
@@ -26,9 +26,9 @@ async def test_settings_api_get_and_update(async_client):
     response = await async_client.put(
         "/api/settings",
         json={
-            "stickyThreadsEnabled": True,
+            "stickyThreadsEnabled": False,
             "upstreamStreamTransport": "websocket",
-            "preferEarlierResetAccounts": True,
+            "preferEarlierResetAccounts": False,
             "routingStrategy": "round_robin",
             "openaiCacheAffinityMaxAgeSeconds": 180,
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
@@ -41,9 +41,9 @@ async def test_settings_api_get_and_update(async_client):
     )
     assert response.status_code == 200
     updated = response.json()
-    assert updated["stickyThreadsEnabled"] is True
+    assert updated["stickyThreadsEnabled"] is False
     assert updated["upstreamStreamTransport"] == "websocket"
-    assert updated["preferEarlierResetAccounts"] is True
+    assert updated["preferEarlierResetAccounts"] is False
     assert updated["routingStrategy"] == "round_robin"
     assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
@@ -57,9 +57,9 @@ async def test_settings_api_get_and_update(async_client):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["stickyThreadsEnabled"] is True
+    assert payload["stickyThreadsEnabled"] is False
     assert payload["upstreamStreamTransport"] == "websocket"
-    assert payload["preferEarlierResetAccounts"] is True
+    assert payload["preferEarlierResetAccounts"] is False
     assert payload["routingStrategy"] == "round_robin"
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800

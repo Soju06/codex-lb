@@ -155,7 +155,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest --timeout=180 --timeout-method=thread
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)
@@ -202,7 +202,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest --timeout=180 --timeout-method=thread
 
   migration-check:
     name: Migration check (alembic)

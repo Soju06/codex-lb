@@ -20,14 +20,16 @@ class SettingsRepository:
 
         row = DashboardSettings(
             id=_SETTINGS_ID,
-            sticky_threads_enabled=False,
+            sticky_threads_enabled=True,
             upstream_stream_transport="default",
-            prefer_earlier_reset_accounts=False,
+            prefer_earlier_reset_accounts=True,
             routing_strategy="capacity_weighted",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
+            bootstrap_token_encrypted=None,
+            bootstrap_token_hash=None,
             api_key_auth_enabled=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,

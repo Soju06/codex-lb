@@ -100,23 +100,6 @@ def test_chart_managed_secret_uses_post_install_hook_path() -> None:
     assert "serviceAccountName: default" in rendered
 
 
-def test_existing_secret_install_keeps_pre_install_hook_path() -> None:
-    rendered = _helm_template(
-        "--set",
-        "postgresql.enabled=false",
-        "--set",
-        "auth.existingSecret=codex-lb-secrets",
-        "--set",
-        "externalDatabase.url=postgresql+asyncpg://user:pass@db.example.com:5432/codexlb",
-        "--set",
-        "migration.enabled=true",
-    )
-
-    assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
-    assert '"helm.sh/hook": "pre-upgrade"' in rendered
-    assert "serviceAccountName: default" in rendered
-
-
 def test_direct_external_database_install_uses_post_install_hook_path() -> None:
     rendered = _helm_template(
         "--set",

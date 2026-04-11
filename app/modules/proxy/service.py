@@ -2551,6 +2551,18 @@ class ProxyService:
                 if terminal_request_state is not None:
                     session.queued_request_count = max(0, session.queued_request_count - 1)
 
+        if event_type == "error":
+            (
+                event_block,
+                payload,
+                event,
+                event_type,
+            ) = _normalize_http_bridge_error_event(
+                event=event,
+                payload=payload,
+                request_state=terminal_request_state or matched_request_state,
+            )
+
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
@@ -4618,6 +4630,67 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     if isinstance(payload_type, str):
         return payload_type
     return None
+
+
+def _normalize_http_bridge_error_event(
+    *,
+    event: OpenAIEvent | None,
+    payload: dict[str, JsonValue] | None,
+    request_state: _WebSocketRequestState | None,
+) -> tuple[str, dict[str, JsonValue] | None, OpenAIEvent | None, str]:
+    error_code_value: str | None = None
+    error_type_value: str | None = None
+    error_message_value: str | None = None
+    error_param_value: str | None = None
+
+    if event is not None and event.error is not None:
+        error_code_value = event.error.code
+        error_type_value = event.error.type
+        error_message_value = event.error.message
+        error_param_value = event.error.param
+    elif isinstance(payload, dict):
+        payload_error = payload.get("error")
+        if isinstance(payload_error, dict):
+            code_value = payload_error.get("code")
+            if isinstance(code_value, str):
+                stripped = code_value.strip()
+                if stripped:
+                    error_code_value = stripped
+            type_value = payload_error.get("type")
+            if isinstance(type_value, str):
+                stripped = type_value.strip()
+                if stripped:
+                    error_type_value = stripped
+            message_value = payload_error.get("message")
+            if isinstance(message_value, str):
+                stripped = message_value.strip()
+                if stripped:
+                    error_message_value = stripped
+            param_value = payload_error.get("param")
+            if isinstance(param_value, str):
+                stripped = param_value.strip()
+                if stripped:
+                    error_param_value = stripped
+
+    normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
+    normalized_error_type = error_type_value or "server_error"
+    normalized_error_message = error_message_value or "Upstream error"
+
+    normalized_response_id = None
+    if request_state is not None:
+        normalized_response_id = request_state.response_id or request_state.request_id
+
+    normalized_event = response_failed_event(
+        normalized_error_code,
+        normalized_error_message,
+        error_type=normalized_error_type,
+        response_id=normalized_response_id,
+        error_param=error_param_value,
+    )
+    normalized_event_block = format_sse_event(normalized_event)
+    normalized_payload = parse_sse_data_json(normalized_event_block)
+    parsed_event = parse_sse_event(normalized_event_block)
+    return normalized_event_block, normalized_payload, parsed_event, "response.failed"
 
 
 def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

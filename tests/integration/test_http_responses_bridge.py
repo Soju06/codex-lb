@@ -5671,7 +5671,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_normalizes_upstream_error_event(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_surfaces_upstream_error_event_as_http_400(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -5734,10 +5734,9 @@ async def test_v1_responses_http_bridge_normalizes_upstream_error_event(async_cl
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
-    events = await _collect_sse_events(
-        async_client,
+    response = await async_client.post(
         "/v1/responses",
-        json_body={
+        json={
             "model": "gpt-5.3-codex-spark",
             "instructions": "Return exactly OK.",
             "input": "hello",
@@ -5746,12 +5745,14 @@ async def test_v1_responses_http_bridge_normalizes_upstream_error_event(async_cl
         },
     )
 
-    assert [event["type"] for event in events] == ["response.failed"]
-    assert events[0]["response"]["error"]["code"] == "invalid_request_error"
-    assert (
-        events[0]["response"]["error"]["message"]
-        == "The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account."
-    )
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "message": "The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account.",
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+        }
+    }
 
 
 @pytest.mark.asyncio

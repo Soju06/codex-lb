@@ -299,7 +299,7 @@ class ProxyService:
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
     ) -> AsyncIterator[str]:
-        del propagate_http_errors, suppress_text_done_events
+        del suppress_text_done_events
         request_id = ensure_request_id()
         settings = await get_settings_cache().get()
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -371,16 +371,28 @@ class ProxyService:
         try:
             event_queue = request_state.event_queue
             assert event_queue is not None
+            yielded_any = False
             while True:
                 event_block = await event_queue.get()
                 if event_block is None:
                     break
-                if request_state.latency_first_token_ms is None:
-                    block_payload = parse_sse_data_json(event_block)
-                    block_event_type = _event_type_from_payload(None, block_payload)
-                    if block_event_type in _TEXT_DELTA_EVENT_TYPES:
-                        request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
+                block_payload = parse_sse_data_json(event_block)
+                block_event_type = _event_type_from_payload(None, block_payload)
+                if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
+                    request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
+                if (
+                    not yielded_any
+                    and propagate_http_errors
+                    and block_event_type == "response.failed"
+                    and request_state.error_http_status_override is not None
+                    and request_state.error_http_status_override >= 400
+                ):
+                    raise ProxyResponseError(
+                        request_state.error_http_status_override,
+                        _openai_error_envelope_from_response_failed_payload(block_payload),
+                    )
                 yield event_block
+                yielded_any = True
         finally:
             with anyio.CancelScope(shield=True):
                 await self._detach_http_bridge_request(session, request_state=request_state)
@@ -2552,6 +2564,10 @@ class ProxyService:
                     session.queued_request_count = max(0, session.queued_request_count - 1)
 
         if event_type == "error":
+            http_status = _http_error_status_from_payload(payload)
+            status_request_state = terminal_request_state or matched_request_state
+            if status_request_state is not None:
+                status_request_state.error_http_status_override = http_status
             (
                 event_block,
                 payload,
@@ -4563,6 +4579,7 @@ class _WebSocketRequestState:
     error_message_override: str | None = None
     error_type_override: str | None = None
     error_param_override: str | None = None
+    error_http_status_override: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4630,6 +4647,47 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     if isinstance(payload_type, str):
         return payload_type
     return None
+
+
+def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    if isinstance(status, int):
+        return status
+    return None
+
+
+def _openai_error_envelope_from_response_failed_payload(
+    payload: dict[str, JsonValue] | None,
+) -> OpenAIErrorEnvelope:
+    default_envelope = openai_error("upstream_error", "Upstream error")
+    if not isinstance(payload, dict):
+        return default_envelope
+    response_payload = payload.get("response")
+    if not isinstance(response_payload, dict):
+        return default_envelope
+    error_payload = response_payload.get("error")
+    if not isinstance(error_payload, dict):
+        return default_envelope
+
+    message_value = error_payload.get("message")
+    if isinstance(message_value, str) and message_value.strip():
+        message = message_value.strip()
+    else:
+        message = "Upstream error"
+
+    code_value = error_payload.get("code")
+    code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else "upstream_error"
+
+    type_value = error_payload.get("type")
+    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
+
+    envelope = openai_error(code, message, error_type)
+    param_value = error_payload.get("param")
+    if isinstance(param_value, str) and param_value.strip():
+        envelope["error"]["param"] = param_value.strip()
+    return envelope
 
 
 def _normalize_http_bridge_error_event(

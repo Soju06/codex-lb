@@ -4053,14 +4053,15 @@ def test_slim_response_create_payload_rewrites_top_level_historical_input_image(
     }
 
     slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
 
     assert summary is not None
     assert summary["historical_images_slimmed"] == 1
-    assert slimmed_payload["input"][0] == {
+    assert slimmed_input[0] == {
         "role": "user",
         "content": [{"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}],
     }
-    assert slimmed_payload["input"][-1] == {"role": "user", "content": [{"type": "input_text", "text": "ping"}]}
+    assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "ping"}]}
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):

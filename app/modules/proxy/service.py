@@ -6183,7 +6183,7 @@ def _enforce_response_create_size_limit(request_state: _WebSocketRequestState) -
         request_state,
         account_id_value=None,
         error_code=cast(str, error.get("code") or "payload_too_large"),
-        error_message=cast(str | None, error.get("message")),
+        error_message=error.get("message"),
         log_prefix="guarded",
     )
     raise ProxyResponseError(
@@ -6385,13 +6385,14 @@ def _summarize_response_create_input(input_value: JsonValue) -> dict[str, JsonVa
         largest_items.append(item_summary)
 
     largest_items.sort(key=lambda item: int(item["size_bytes"]), reverse=True)
-    return {
+    summary: dict[str, JsonValue] = {
         "count": len(input_value),
-        "role_counts": role_counts,
-        "item_type_counts": item_type_counts,
-        "content_part_type_counts": content_part_type_counts,
-        "largest_items": largest_items[:_OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS],
+        "role_counts": cast(JsonValue, role_counts),
+        "item_type_counts": cast(JsonValue, item_type_counts),
+        "content_part_type_counts": cast(JsonValue, content_part_type_counts),
+        "largest_items": cast(JsonValue, largest_items[:_OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS]),
     }
+    return summary
 
 
 def _json_size_bytes(value: JsonValue) -> int:

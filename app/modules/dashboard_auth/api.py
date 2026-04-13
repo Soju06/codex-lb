@@ -79,7 +79,9 @@ def _decorate_session_response(
     sid = password_session_id or request.cookies.get(DASHBOARD_SESSION_COOKIE)
     session_state = store.get(sid) if sid else None
     has_pwd = session_state is not None and session_state.password_verified
-    totp_pending = has_pwd and response.totp_required_on_login and not session_state.totp_verified
+    totp_pending = (
+        has_pwd and session_state is not None and response.totp_required_on_login and not session_state.totp_verified
+    )
     fully_authorized = has_pwd and not totp_pending and response.password_required
 
     if request_auth is None:

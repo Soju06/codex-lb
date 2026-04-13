@@ -3740,6 +3740,7 @@ async def test_connect_proxy_websocket_surfaces_local_connect_overload_without_p
     record_error.assert_not_awaited()
     connect_upstream.assert_not_awaited()
     release_reservation.assert_awaited_once_with(None)
+    assert websocket_send.await_args is not None
     sent_payload = json.loads(websocket_send.await_args.args[0])
     assert sent_payload["status"] == 429
     assert sent_payload["error"]["code"] == "proxy_overloaded"

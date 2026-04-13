@@ -81,6 +81,7 @@ class _RefreshSingleflight:
                 task = asyncio.create_task(factory())
                 self._inflight[key] = task
                 task.add_done_callback(lambda done, *, cache_key=key: self._schedule_complete(cache_key, done))
+        assert task is not None
         return await asyncio.shield(task)
 
     def _schedule_complete(self, key: _RefreshSingleflightKey, task: asyncio.Task[Account]) -> None:

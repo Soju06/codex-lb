@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from ipaddress import ip_address, ip_network
 from typing import cast
 
 from fastapi import Request, Security
@@ -11,6 +12,7 @@ from starlette.requests import HTTPConnection
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
 from app.core.clients.usage import UsageFetchError, fetch_usage
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
 from app.core.request_locality import is_local_request
@@ -56,7 +58,8 @@ async def validate_proxy_api_key_authorization(
     settings = await get_settings_cache().get()
     if not settings.api_key_auth_enabled:
         if request is not None and not is_local_request(request):
-            raise ProxyAuthError("Proxy authentication must be configured before remote access is allowed")
+            if not _is_proxy_unauthenticated_socket_peer_allowed(request):
+                raise ProxyAuthError("Proxy authentication must be configured before remote access is allowed")
         return None
 
     token = _extract_bearer_token(authorization)
@@ -150,6 +153,20 @@ def get_dashboard_request_auth_mode() -> DashboardAuthMode:
     from app.core.config.settings import get_settings
 
     return get_settings().dashboard_auth_mode
+
+
+def _is_proxy_unauthenticated_socket_peer_allowed(request: HTTPConnection) -> bool:
+    socket_host = request.client.host if request.client else None
+    if socket_host is None:
+        return False
+
+    try:
+        socket_ip = ip_address(socket_host)
+    except ValueError:
+        return False
+
+    configured_cidrs = get_settings().proxy_unauthenticated_client_cidrs
+    return any(socket_ip in ip_network(cidr, strict=False) for cidr in configured_cidrs)
 
 
 # --- Codex usage caller identity auth ---

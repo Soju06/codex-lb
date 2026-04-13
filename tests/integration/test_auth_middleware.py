@@ -77,6 +77,15 @@ def _set_dashboard_auth_env(
     get_settings.cache_clear()
 
 
+def _set_proxy_unauthenticated_client_cidrs_env(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cidrs: str,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS", cidrs)
+    get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_session_branch_allows_without_password_and_blocks_without_session(async_client):
     public_mode = await async_client.get("/api/settings")
@@ -106,6 +115,43 @@ async def test_session_branch_allows_without_password_and_blocks_without_session
 async def test_remote_proxy_denied_before_auth_is_configured(app_instance):
     async with app_instance.router.lifespan_context(app_instance):
         transport = ASGITransport(app=app_instance, client=("203.0.113.11", 50001))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as remote_client:
+            response = await remote_client.get("/v1/models")
+            assert response.status_code == 401
+            assert response.json()["error"]["code"] == "invalid_api_key"
+
+            spoofed = await remote_client.get("/v1/models", headers={"Host": "localhost"})
+            assert spoofed.status_code == 401
+            assert spoofed.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_proxy_unauthenticated_client_cidr_allows_explicit_remote_proxy_peer(app_instance, monkeypatch):
+    _set_proxy_unauthenticated_client_cidrs_env(
+        monkeypatch,
+        cidrs="192.168.65.1/32",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("192.168.65.1", 50001))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as allowlisted_client:
+            proxy_response = await allowlisted_client.get("/v1/models")
+            assert proxy_response.status_code == 200
+
+            dashboard_response = await allowlisted_client.get("/api/settings")
+            assert dashboard_response.status_code == 401
+            assert dashboard_response.json()["error"]["code"] == "bootstrap_required"
+
+
+@pytest.mark.asyncio
+async def test_proxy_unauthenticated_client_cidr_does_not_allow_other_remote_peers(app_instance, monkeypatch):
+    _set_proxy_unauthenticated_client_cidrs_env(
+        monkeypatch,
+        cidrs="192.168.65.1/32",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("192.168.65.2", 50001))
         async with AsyncClient(transport=transport, base_url="http://lb.example") as remote_client:
             response = await remote_client.get("/v1/models")
             assert response.status_code == 401

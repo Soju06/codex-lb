@@ -84,6 +84,31 @@ def _configured_http_port() -> int:
     return 2455
 
 
+def _normalize_cidr_list(value: StringListInput, *, field_name: str, invalid_label: str) -> list[str]:
+    if value is None:
+        return []
+
+    cidrs: list[str] = []
+    if isinstance(value, str):
+        entries = [entry.strip() for entry in value.split(",")]
+        cidrs = [entry for entry in entries if entry]
+    elif isinstance(value, list):
+        for entry in value:
+            if isinstance(entry, str):
+                cidr = entry.strip()
+                if cidr:
+                    cidrs.append(cidr)
+    else:
+        raise TypeError(f"{field_name} must be a list or comma-separated string")
+
+    for cidr in cidrs:
+        try:
+            ip_network(cidr, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"Invalid {invalid_label}: {cidr}") from exc
+    return cidrs
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
@@ -155,6 +180,7 @@ class Settings(BaseSettings):
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
+    proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
@@ -259,27 +285,20 @@ class Settings(BaseSettings):
     @field_validator("firewall_trusted_proxy_cidrs", mode="before")
     @classmethod
     def _normalize_firewall_trusted_proxy_cidrs(cls, value: StringListInput) -> list[str]:
-        if value is None:
-            return []
-        cidrs: list[str] = []
-        if isinstance(value, str):
-            entries = [entry.strip() for entry in value.split(",")]
-            cidrs = [entry for entry in entries if entry]
-        elif isinstance(value, list):
-            for entry in value:
-                if isinstance(entry, str):
-                    cidr = entry.strip()
-                    if cidr:
-                        cidrs.append(cidr)
-        else:
-            raise TypeError("firewall_trusted_proxy_cidrs must be a list or comma-separated string")
+        return _normalize_cidr_list(
+            value,
+            field_name="firewall_trusted_proxy_cidrs",
+            invalid_label="firewall trusted proxy CIDR",
+        )
 
-        for cidr in cidrs:
-            try:
-                ip_network(cidr, strict=False)
-            except ValueError as exc:
-                raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
-        return cidrs
+    @field_validator("proxy_unauthenticated_client_cidrs", mode="before")
+    @classmethod
+    def _normalize_proxy_unauthenticated_client_cidrs(cls, value: StringListInput) -> list[str]:
+        return _normalize_cidr_list(
+            value,
+            field_name="proxy_unauthenticated_client_cidrs",
+            invalid_label="proxy unauthenticated client CIDR",
+        )
 
     @field_validator("dashboard_auth_proxy_header", mode="before")
     @classmethod

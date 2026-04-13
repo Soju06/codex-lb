@@ -3246,6 +3246,25 @@ class ProxyService:
         queue_limit: int,
     ) -> None:
         if session.closed:
+            # When previous_response_id is present, reconnecting the upstream
+            # websocket creates a fresh server-side session that won't recognise
+            # the old response id.  Rather than silently falling back to a full
+            # conversation replay (which inflates per-turn context by ~20x), raise
+            # a 502 so the client can retry the original request on a new session
+            # with previous_response_id intact.
+            if request_state.previous_response_id is not None:
+                _log_http_bridge_event(
+                    "submit_on_closed_with_previous_response",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                )
             recovered = await self._retry_http_bridge_request_on_fresh_upstream(
                 session,
                 request_state=request_state,
@@ -3358,21 +3377,11 @@ class ProxyService:
                 await session.upstream.close()
             except Exception:
                 logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
-            if request_state.previous_response_id is not None:
-                payload = openai_error(
-                    request_state.error_code_override or "previous_response_not_found",
-                    request_state.error_message_override
-                    or (
-                        f"Previous response with id '{request_state.previous_response_id}' not found. "
-                        "HTTP bridge continuity was lost before the request reached upstream."
-                    ),
-                    error_type=request_state.error_type_override or "invalid_request_error",
-                )
-                payload["error"]["param"] = request_state.error_param_override or "previous_response_id"
-                raise ProxyResponseError(
-                    400,
-                    payload,
-                ) from exc
+            # Always raise 502 so the client can retry with
+            # previous_response_id intact.  Returning 400
+            # previous_response_not_found causes the client to drop
+            # previous_response_id and resend the full conversation
+            # history, inflating per-turn context by ~20x.
             raise ProxyResponseError(
                 502,
                 openai_error("upstream_unavailable", str(exc) or "Upstream websocket closed"),
@@ -3582,13 +3591,10 @@ class ProxyService:
         send_request: bool = True,
     ) -> bool:
         if request_state.previous_response_id is not None and send_request:
-            _mark_request_state_previous_response_not_found(
-                request_state,
-                (
-                    "HTTP bridge continuity was lost before the request reached upstream. "
-                    "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-                ),
-            )
+            # Do not mark previous_response_not_found here — that causes the
+            # client to drop previous_response_id and resend the full
+            # conversation history, inflating per-turn context by ~20x.
+            # Instead, return False so the caller raises a retriable 502.
             return False
         if request_state.replay_count >= 1:
             return False
@@ -3629,14 +3635,8 @@ class ProxyService:
                 return False
             request_state = retryable_requests[0]
             if request_state.previous_response_id is not None:
-                _mark_request_state_previous_response_not_found(
-                    request_state,
-                    (
-                        "HTTP bridge continuity was lost before upstream created the next "
-                        "response. Replay x-codex-turn-state or retry with a stable "
-                        "prompt_cache_key."
-                    ),
-                )
+                # Same as above — avoid marking previous_response_not_found
+                # so the client retries with previous_response_id preserved.
                 return False
             if request_state.replay_count >= 1:
                 return False

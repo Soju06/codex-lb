@@ -42,7 +42,7 @@ def test_settings_rejects_metrics_port_2455(monkeypatch):
     monkeypatch.setenv("CODEX_LB_METRICS_PORT", "2455")
     with pytest.raises(ValidationError) as exc_info:
         Settings()
-    assert "metrics_port must not be 2455" in str(exc_info.value)
+    assert "metrics_port must not match the main application port (2455)" in str(exc_info.value)
 
 
 def test_settings_log_format_from_env(monkeypatch):

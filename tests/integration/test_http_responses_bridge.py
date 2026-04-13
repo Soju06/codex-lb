@@ -4489,7 +4489,7 @@ async def test_v1_responses_http_bridge_slims_historical_inline_artifacts_and_su
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
     monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64)
-    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 512)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 640)
     account_id = await _import_account(async_client, "acc_http_bridge_slim", "http-bridge-slim@example.com")
     account = await _get_account(account_id)
     fake_upstream = _FakeBridgeUpstreamWebSocket()

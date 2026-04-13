@@ -4195,17 +4195,19 @@ class ProxyService:
             remaining = list(pending_requests)
             pending_requests.clear()
 
-        for request_state in remaining:
+        last_index = len(remaining) - 1
+        for index, request_state in enumerate(remaining):
             request_error_code = request_state.error_code_override or error_code
             request_error_message = request_state.error_message_override or error_message
             request_error_type = request_state.error_type_override or "server_error"
             request_error_param = request_state.error_param_override
-            _maybe_dump_oversized_response_create_request(
-                request_state,
-                account_id_value=account_id_value,
-                error_code=request_error_code,
-                error_message=request_error_message,
-            )
+            if index == last_index:
+                _maybe_dump_oversized_response_create_request(
+                    request_state,
+                    account_id_value=account_id_value,
+                    error_code=request_error_code,
+                    error_message=request_error_message,
+                )
             if response_create_gate is not None:
                 _release_websocket_response_create_gate(request_state, response_create_gate)
             if request_state.event_queue is not None:
@@ -6021,31 +6023,12 @@ def _slim_response_create_payload_for_upstream(
 
     candidate_payload = dict(payload)
     candidate_payload["input"] = slimmed_historical + recent
-    if _json_size_bytes(candidate_payload) <= max_bytes:
-        return candidate_payload, {
-            "historical_items_dropped": historical_items_dropped,
-            "historical_tool_outputs_slimmed": tool_outputs_slimmed,
-            "historical_images_slimmed": images_slimmed,
-        }
 
-    retained_historical = list(slimmed_historical)
-    while retained_historical and _json_size_bytes(candidate_payload) > max_bytes:
-        retained_historical.pop(0)
-        historical_items_dropped += 1
-        candidate_payload["input"] = retained_historical + recent
-
-    if historical_items_dropped > 0:
-        notice_item = _response_create_history_omission_notice_item(historical_items_dropped)
-        noticed_payload = dict(candidate_payload)
-        noticed_payload["input"] = [notice_item, *cast(list[JsonValue], candidate_payload["input"])]
-        if _json_size_bytes(noticed_payload) <= max_bytes:
-            candidate_payload = noticed_payload
-
-    if tool_outputs_slimmed == 0 and images_slimmed == 0 and historical_items_dropped == 0:
+    if tool_outputs_slimmed == 0 and images_slimmed == 0:
         return payload, None
 
     return candidate_payload, {
-        "historical_items_dropped": historical_items_dropped,
+        "historical_items_dropped": 0,
         "historical_tool_outputs_slimmed": tool_outputs_slimmed,
         "historical_images_slimmed": images_slimmed,
     }

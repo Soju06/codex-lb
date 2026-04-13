@@ -1,8 +1,8 @@
 """add blocked_at to accounts
 
-Revision ID: 20260408_020000_add_accounts_blocked_at
-Revises: 20260408_010000_merge_import_without_overwrite_and_assignment_heads
-Create Date: 2026-04-08
+Revision ID: 20260413_000000_add_accounts_blocked_at
+Revises: 20260410_040000_merge_dashboard_defaults_and_import_default_heads
+Create Date: 2026-04-13
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260408_020000_add_accounts_blocked_at"
-down_revision = "20260408_010000_merge_import_without_overwrite_and_assignment_heads"
+revision = "20260413_000000_add_accounts_blocked_at"
+down_revision = "20260410_040000_merge_dashboard_defaults_and_import_default_heads"
 branch_labels = None
 depends_on = None
 

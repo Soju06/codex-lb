@@ -1,0 +1,5 @@
+- [x] Treat `account_deactivated` as a permanent failure classification in the balancer/runtime logic.
+- [x] Preserve usage API `error.code` values in the usage client.
+- [x] Deactivate accounts on usage-path deactivation signals instead of treating them as generic 401s.
+- [x] Add regression coverage for request-path, websocket-handshake, and usage-path deactivation handling.
+- [x] Update the OpenSpec requirements to document fail-closed behavior for deactivated upstream accounts.

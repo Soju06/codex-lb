@@ -308,6 +308,25 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "SHAREN",
+      "name": "Renat Sharipov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6128858?v=4",
+      "profile": "https://github.com/SHAREN",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "aruis",
+      "name": "Liu Rui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1785495?v=4",
+      "profile": "https://ximatai.net",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

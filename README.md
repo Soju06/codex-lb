@@ -312,7 +312,8 @@ opencode
 }
 ```
 
-Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled, any value works.
+Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled,
+local requests can omit the key, but non-local requests are still rejected until proxy authentication is configured.
 
 </details>
 
@@ -325,7 +326,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:2455/v1",
-    api_key="sk-clb-...",  # from dashboard, or any string if auth is disabled
+    api_key="sk-clb-...",  # from dashboard, or any non-empty string if auth is disabled
 )
 
 response = client.chat.completions.create(
@@ -339,7 +340,10 @@ print(response.choices[0].message.content)
 
 ## API Key Authentication
 
-API key auth is **disabled by default** — the proxy is open to any client. Enable it in **Settings → API Key Auth** on the dashboard.
+API key auth is **disabled by default**. In that mode, only local requests to the protected proxy routes can
+proceed without a key; non-local requests are rejected until proxy authentication is configured. Enable it in
+**Settings → API Key Auth** on the dashboard when clients connect remotely or through Docker, VM, or container
+networking that appears non-local to the service.
 
 When enabled, clients must pass a valid API key as a Bearer token:
 
@@ -347,13 +351,63 @@ When enabled, clients must pass a valid API key as a Bearer token:
 Authorization: Bearer sk-clb-...
 ```
 
+The protected proxy routes covered by this setting are:
+
+- `/v1/*` (except `/v1/usage`, which always requires a valid key)
+- `/backend-api/codex/*`
+- `/backend-api/transcribe`
+
 **Creating keys**: Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
 
 ## Configuration
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
-Dashboard auth is configured in Settings.
 SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
+
+### Dashboard authentication modes
+
+`codex-lb` supports three dashboard auth modes via environment variables:
+
+- `CODEX_LB_DASHBOARD_AUTH_MODE=standard` — built-in dashboard password with optional TOTP from the Settings page.
+- `CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header` — trust a reverse-proxy auth header such as Authelia's `Remote-User`, but only from `CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS`. Built-in password/TOTP remain available as an optional fallback, and password/TOTP management still requires a fallback password session.
+- `CODEX_LB_DASHBOARD_AUTH_MODE=disabled` — fully bypass dashboard auth. Use only behind network restrictions or external auth. Built-in password/TOTP management is disabled in this mode.
+
+`trusted_header` mode also requires:
+
+```bash
+CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true
+CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16
+CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User
+```
+
+If the trusted header is missing and no fallback password is configured, the dashboard fails closed and shows a reverse-proxy-required message instead of loading the UI.
+
+### Docker examples
+
+**Authelia / trusted header**
+
+```bash
+docker run -d --name codex-lb \
+  -p 2455:2455 -p 1455:1455 \
+  -e CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header \
+  -e CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User \
+  -e CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true \
+  -e CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16 \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
+**Hard override / no app-level dashboard auth**
+
+```bash
+docker run -d --name codex-lb \
+  -p 2455:2455 -p 1455:1455 \
+  -e CODEX_LB_DASHBOARD_AUTH_MODE=disabled \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
+For Helm, pass the same values through `extraEnv`.
 
 ## Data
 
@@ -435,6 +489,10 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Daeroni"><img src="https://avatars.githubusercontent.com/u/1648961?v=4?s=100" width="100px;" alt="Teemu Koskinen"/><br /><sub><b>Teemu Koskinen</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Daeroni" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="http://felixypz.me"><img src="https://avatars.githubusercontent.com/u/151984457?v=4?s=100" width="100px;" alt="Yu Peng Zheng"/><br /><sub><b>Yu Peng Zheng</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Felix201209" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Felix201209" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/embogomolov"><img src="https://avatars.githubusercontent.com/u/185256086?v=4?s=100" width="100px;" alt="embogomolov"/><br /><sub><b>embogomolov</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=embogomolov" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=embogomolov" title="Tests">⚠️</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/SHAREN"><img src="https://avatars.githubusercontent.com/u/6128858?v=4?s=100" width="100px;" alt="Renat Sharipov"/><br /><sub><b>Renat Sharipov</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=SHAREN" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=SHAREN" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://ximatai.net"><img src="https://avatars.githubusercontent.com/u/1785495?v=4?s=100" width="100px;" alt="Liu Rui"/><br /><sub><b>Liu Rui</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aruis" title="Documentation">📖</a></td>
     </tr>
   </tbody>
 </table>

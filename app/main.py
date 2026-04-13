@@ -26,6 +26,7 @@ from app.core.metrics.middleware import MetricsMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
     add_api_firewall_middleware,
+    add_dashboard_auth_proxy_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
 )
@@ -309,6 +310,7 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(cast(Any, InFlightMiddleware))
+    add_dashboard_auth_proxy_middleware(app)
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)

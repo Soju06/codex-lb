@@ -140,6 +140,7 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
 _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({426})
 _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
 _WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
+    ("account_deactivated", "account has been deactivated"),
     ("usage_not_included", "usage not included"),
     ("insufficient_quota", "insufficient quota"),
     ("quota_exceeded", "quota exceeded"),

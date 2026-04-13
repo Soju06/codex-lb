@@ -5,6 +5,11 @@ import logging
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
+from app.core.auth.dashboard_mode import (
+    DashboardAuthMode,
+    get_dashboard_request_auth,
+    password_management_enabled,
+)
 from app.core.auth.dependencies import set_dashboard_error_format
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
@@ -12,6 +17,7 @@ from app.core.bootstrap import (
     has_active_bootstrap_token,
     log_bootstrap_token,
 )
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import (
     DashboardAuthError,
@@ -60,6 +66,47 @@ def _session_client_key(request: Request, *, prefix: str) -> str:
     return f"{prefix}:{request.client.host if request.client else 'unknown'}"
 
 
+def _decorate_session_response(
+    response: DashboardAuthSessionResponse,
+    *,
+    request: Request,
+    force_authenticated: bool = False,
+    password_session_id: str | None = None,
+) -> DashboardAuthSessionResponse:
+    request_auth = get_dashboard_request_auth(request)
+    auth_mode = get_settings().dashboard_auth_mode
+    store = get_dashboard_session_store()
+    sid = password_session_id or request.cookies.get(DASHBOARD_SESSION_COOKIE)
+    session_state = store.get(sid) if sid else None
+    has_pwd = session_state is not None and session_state.password_verified
+    totp_pending = has_pwd and response.totp_required_on_login and not session_state.totp_verified
+    fully_authorized = has_pwd and not totp_pending and response.password_required
+
+    if request_auth is None:
+        update: dict[str, object] = {
+            "auth_mode": auth_mode,
+            "password_management_enabled": password_management_enabled(auth_mode),
+            "password_session_active": fully_authorized,
+        }
+        if (
+            auth_mode == DashboardAuthMode.TRUSTED_HEADER
+            and not response.password_required
+            and not response.totp_required_on_login
+        ):
+            update["authenticated"] = False
+        return response.model_copy(update=update)
+
+    return response.model_copy(
+        update={
+            "authenticated": force_authenticated or response.authenticated,
+            "totp_required_on_login": totp_pending,
+            "auth_mode": request_auth.mode,
+            "password_management_enabled": password_management_enabled(request_auth.mode),
+            "password_session_active": fully_authorized,
+        }
+    )
+
+
 async def _has_active_password_session(request: Request, context: DashboardAuthContext) -> bool:
     settings = await context.repository.get_settings()
     if settings.password_hash is None:
@@ -69,6 +116,8 @@ async def _has_active_password_session(request: Request, context: DashboardAuthC
 
 
 async def _validate_password_management_session(request: Request) -> None:
+    _ensure_password_management_enabled(request)
+
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     session_state = get_dashboard_session_store().get(session_id)
     if session_state is None or not session_state.password_verified:
@@ -82,6 +131,15 @@ async def _validate_password_management_session(request: Request) -> None:
         )
 
 
+def _ensure_password_management_enabled(request: Request) -> None:
+    request_auth = get_dashboard_request_auth(request)
+    if request_auth is not None and not password_management_enabled(request_auth.mode):
+        raise DashboardBadRequestError(
+            "Password and TOTP management is disabled while dashboard auth is bypassed",
+            code="password_management_disabled",
+        )
+
+
 @router.get("/session", response_model=DashboardAuthSessionResponse)
 async def get_dashboard_auth_session(
     request: Request,
@@ -89,10 +147,13 @@ async def get_dashboard_auth_session(
 ) -> DashboardAuthSessionResponse:
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     response = await context.service.get_session_state(session_id)
-    if response.password_required or is_local_request(request):
-        return response
+    decorated = _decorate_session_response(response, request=request, force_authenticated=True)
+    if decorated.auth_mode != DashboardAuthMode.STANDARD:
+        return decorated
+    if decorated.password_required or is_local_request(request):
+        return decorated
     bootstrap_token_configured = await has_active_bootstrap_token()
-    return response.model_copy(
+    return decorated.model_copy(
         update={
             "authenticated": False,
             "bootstrap_required": True,
@@ -107,8 +168,25 @@ async def setup_password(
     payload: PasswordSetupRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> DashboardAuthSessionResponse | JSONResponse:
+    settings = get_settings()
+    request_auth = get_dashboard_request_auth(request)
     current_settings = await context.repository.get_settings()
-    if current_settings.password_hash is None and not is_local_request(request):
+    if settings.dashboard_auth_mode == DashboardAuthMode.DISABLED:
+        raise DashboardBadRequestError(
+            "Password management is disabled while dashboard auth is bypassed",
+            code="password_management_disabled",
+        )
+    if (
+        settings.dashboard_auth_mode == DashboardAuthMode.TRUSTED_HEADER
+        and request_auth is None
+        and current_settings.password_hash is None
+    ):
+        raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
+    if (
+        current_settings.password_hash is None
+        and settings.dashboard_auth_mode != DashboardAuthMode.TRUSTED_HEADER
+        and not is_local_request(request)
+    ):
         submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
         validation_status = await get_bootstrap_validation_status(submitted_bootstrap_token)
         if validation_status == "unavailable":
@@ -130,7 +208,11 @@ async def setup_password(
 
     await get_settings_cache().invalidate()
     session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
-    response = await context.service.get_session_state(session_id)
+    response = _decorate_session_response(
+        await context.service.get_session_state(session_id),
+        request=request,
+        password_session_id=session_id,
+    )
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
     _set_session_cookie(json_response, session_id, request)
     return json_response
@@ -142,6 +224,12 @@ async def login_password(
     payload: PasswordLoginRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> DashboardAuthSessionResponse | JSONResponse:
+    if get_settings().dashboard_auth_mode == DashboardAuthMode.DISABLED:
+        raise DashboardBadRequestError(
+            "Password login is disabled while dashboard auth is bypassed",
+            code="password_management_disabled",
+        )
+
     settings = await get_settings_cache().get()
     if settings.password_hash is None:
         raise DashboardBadRequestError("Password is not configured", code="password_not_configured")
@@ -170,7 +258,11 @@ async def login_password(
     await limiter.clear_for_key(rate_key, context.session)
 
     session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
-    response = await context.service.get_session_state(session_id)
+    response = _decorate_session_response(
+        await context.service.get_session_state(session_id),
+        request=request,
+        password_session_id=session_id,
+    )
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
     _set_session_cookie(json_response, session_id, request)
     return json_response
@@ -228,6 +320,7 @@ async def start_totp_setup(
     request: Request,
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> TotpSetupStartResponse:
+    _ensure_password_management_enabled(request)
     if not await _has_active_password_session(request, context):
         raise DashboardAuthError("Authentication is required")
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
@@ -245,6 +338,7 @@ async def confirm_totp_setup(
     payload: TotpSetupConfirmRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
+    _ensure_password_management_enabled(request)
     if not await _has_active_password_session(request, context):
         raise DashboardAuthError("Authentication is required")
 
@@ -287,6 +381,7 @@ async def verify_totp(
     payload: TotpVerifyRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> DashboardAuthSessionResponse | JSONResponse:
+    _ensure_password_management_enabled(request)
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_verify")
     current_session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
@@ -316,7 +411,11 @@ async def verify_totp(
         raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
 
     await limiter.clear_for_key(rate_key, context.session)
-    response = await context.service.get_session_state(session_id)
+    response = _decorate_session_response(
+        await context.service.get_session_state(session_id),
+        request=request,
+        password_session_id=session_id,
+    )
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
     _set_session_cookie(json_response, session_id, request)
     return json_response
@@ -328,6 +427,7 @@ async def disable_totp(
     payload: TotpVerifyRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
+    _ensure_password_management_enabled(request)
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_disable")
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)

@@ -274,6 +274,13 @@ def test_handle_permanent_failure_sets_reason():
     assert state.deactivation_reason is not None
 
 
+def test_handle_permanent_failure_sets_reason_for_account_deactivated():
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_permanent_failure(state, "account_deactivated")
+    assert state.status == AccountStatus.DEACTIVATED
+    assert state.deactivation_reason == "Account has been deactivated"
+
+
 def test_apply_usage_quota_respects_runtime_reset_for_quota_exceeded(monkeypatch):
     now = 1_700_000_000.0
     future = now + 3600.0

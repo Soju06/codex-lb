@@ -13,6 +13,10 @@ function setAuthState(
     passwordRequired: true,
     authenticated: false,
     totpRequiredOnLogin: false,
+    bootstrapRequired: false,
+    bootstrapTokenConfigured: false,
+    authMode: "standard",
+    passwordManagementEnabled: true,
     error: null,
     ...patch,
   });
@@ -81,6 +85,27 @@ describe("AuthGate", () => {
 
     expect(screen.getByText("Two-factor verification")).toBeInTheDocument();
     expect(screen.queryByText("Dashboard Login")).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows reverse proxy notice when trusted header auth is required", async () => {
+    const refreshSession = vi.fn().mockResolvedValue(undefined);
+    setAuthState({
+      refreshSession,
+      passwordRequired: false,
+      authenticated: false,
+      totpRequiredOnLogin: false,
+      authMode: "trusted_header",
+    });
+
+    render(
+      <AuthGate>
+        <div>Protected content</div>
+      </AuthGate>,
+    );
+
+    expect(screen.getByText("Reverse proxy authentication required")).toBeInTheDocument();
+    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
     await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
   });
 

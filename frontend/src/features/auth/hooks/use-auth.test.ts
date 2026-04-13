@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
   getAuthSession,
@@ -23,6 +23,9 @@ const sessionBase: AuthSession = {
   totpConfigured: true,
   bootstrapRequired: false,
   bootstrapTokenConfigured: false,
+  authMode: "standard",
+  passwordManagementEnabled: true,
+  passwordSessionActive: false,
 };
 
 function resetAuthStore(): void {
@@ -33,6 +36,8 @@ function resetAuthStore(): void {
     totpConfigured: false,
     bootstrapRequired: false,
     bootstrapTokenConfigured: false,
+    authMode: "standard",
+    passwordManagementEnabled: true,
     loading: false,
     initialized: false,
     error: null,
@@ -46,7 +51,7 @@ describe("useAuthStore actions", () => {
   });
 
   it("refreshSession updates auth state", async () => {
-    vi.mocked(getAuthSession).mockResolvedValue({
+    (getAuthSession as Mock).mockResolvedValue({
       ...sessionBase,
       authenticated: false,
       totpRequiredOnLogin: true,
@@ -62,7 +67,7 @@ describe("useAuthStore actions", () => {
   });
 
   it("login updates session state", async () => {
-    vi.mocked(loginPassword).mockResolvedValue(sessionBase);
+    (loginPassword as Mock).mockResolvedValue(sessionBase);
 
     await useAuthStore.getState().login("secret-pass");
 
@@ -79,8 +84,8 @@ describe("useAuthStore actions", () => {
       initialized: true,
     });
 
-    vi.mocked(logoutRequest).mockResolvedValue({ status: "ok" });
-    vi.mocked(getAuthSession).mockResolvedValue({
+    (logoutRequest as Mock).mockResolvedValue({ status: "ok" });
+    (getAuthSession as Mock).mockResolvedValue({
       ...sessionBase,
       authenticated: false,
       totpRequiredOnLogin: false,
@@ -96,7 +101,7 @@ describe("useAuthStore actions", () => {
   });
 
   it("verifyTotp updates state transitions", async () => {
-    vi.mocked(verifyTotpRequest).mockResolvedValue({
+    (verifyTotpRequest as Mock).mockResolvedValue({
       ...sessionBase,
       authenticated: true,
       totpRequiredOnLogin: false,

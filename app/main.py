@@ -71,7 +71,12 @@ class _MetricsServer(Protocol):
 
 
 class _RingMembershipReader(Protocol):
-    def list_active(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> Awaitable[list[str]]: ...
+    def list_active(
+        self,
+        stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS,
+        *,
+        require_endpoint: bool = False,
+    ) -> Awaitable[list[str]]: ...
 
 
 def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
@@ -115,8 +120,9 @@ async def lifespan(app: FastAPI):
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
-    await _ensure_bridge_durable_schema_ready(settings)
-    startup_module.mark_bridge_durable_schema_ready()
+    bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
+    if bridge_durable_schema_ready:
+        startup_module.mark_bridge_durable_schema_ready()
     usage_scheduler = build_usage_refresh_scheduler()
     model_scheduler = build_model_refresh_scheduler()
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
@@ -385,18 +391,24 @@ def create_app() -> FastAPI:
     return app
 
 
-async def _ensure_bridge_durable_schema_ready(settings) -> None:
+async def _ensure_bridge_durable_schema_ready(settings) -> bool:
     if not settings.http_responses_session_bridge_enabled:
-        return
+        return False
     session = SessionLocal()
     try:
         missing_tables = await missing_durable_bridge_tables(session)
     finally:
         await session.close()
     if not missing_tables:
-        return
+        return True
     missing = ", ".join(missing_tables)
-    raise RuntimeError(f"HTTP bridge durable schema is missing required tables: {missing}")
+    if settings.database_migrations_fail_fast:
+        raise RuntimeError(f"HTTP bridge durable schema is missing required tables: {missing}")
+    logger.warning(
+        "HTTP bridge durable schema is missing required tables but startup fail-fast is disabled",
+        extra={"missing_tables": missing_tables},
+    )
+    return False
 
 
 async def _wait_for_bridge_advertise_endpoint(

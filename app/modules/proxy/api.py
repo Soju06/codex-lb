@@ -99,6 +99,7 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
         "code_interpreter_call",
         "mcp_approval_request",
         "mcp_list_tools",
+        "output_image",
     }
 )
 _PUBLIC_RESPONSE_TEXT_PART_TYPES = frozenset({"output_text", "input_text", "text", "refusal"})

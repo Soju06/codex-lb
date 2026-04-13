@@ -53,6 +53,16 @@ async def test_register_and_list_active(ring_service: RingMembershipService) -> 
 
 
 @pytest.mark.asyncio
+async def test_list_active_can_require_advertised_endpoint(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.12:8080")
+    await ring_service.register("pod-b", endpoint_base_url=None)
+
+    active = await ring_service.list_active(require_endpoint=True)
+
+    assert active == ["pod-a"]
+
+
+@pytest.mark.asyncio
 async def test_unregister(ring_service: RingMembershipService) -> None:
     """Register then unregister, list_active() returns empty."""
     await ring_service.register("pod-1")
@@ -186,7 +196,7 @@ async def test_resolve_endpoint_ignores_stale_member_metadata(ring_service: Ring
 
 
 @pytest.mark.asyncio
-async def test_mark_stale_clears_endpoint_even_within_grace_window(ring_service: RingMembershipService) -> None:
+async def test_mark_stale_preserves_endpoint_within_grace_window(ring_service: RingMembershipService) -> None:
     await ring_service.register("pod-grace-endpoint", endpoint_base_url="http://10.0.0.15:8080")
     await ring_service.mark_stale(
         "pod-grace-endpoint",
@@ -196,4 +206,4 @@ async def test_mark_stale_clears_endpoint_even_within_grace_window(ring_service:
 
     endpoint = await ring_service.resolve_endpoint("pod-grace-endpoint")
 
-    assert endpoint is None
+    assert endpoint == "http://10.0.0.15:8080"

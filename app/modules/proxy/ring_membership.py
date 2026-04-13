@@ -157,22 +157,26 @@ class RingMembershipService:
             stmt = (
                 update(BridgeRingMember)
                 .where(BridgeRingMember.instance_id == instance_id)
-                .values(last_heartbeat_at=stale_time, metadata_json=None)
+                .values(last_heartbeat_at=stale_time)
             )
             await session.execute(stmt)
             await session.commit()
 
-    async def list_active(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> list[str]:
+    async def list_active(
+        self,
+        stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS,
+        *,
+        require_endpoint: bool = False,
+    ) -> list[str]:
         """Return sorted list of pods whose heartbeat is within threshold."""
         from datetime import timedelta
 
         cutoff = utcnow() - timedelta(seconds=stale_threshold_seconds)
+        statement = select(BridgeRingMember.instance_id).where(BridgeRingMember.last_heartbeat_at >= cutoff)
+        if require_endpoint:
+            statement = statement.where(BridgeRingMember.metadata_json.is_not(None))
         async with self._session() as session:
-            result = await session.execute(
-                select(BridgeRingMember.instance_id)
-                .where(BridgeRingMember.last_heartbeat_at >= cutoff)
-                .order_by(BridgeRingMember.instance_id)
-            )
+            result = await session.execute(statement.order_by(BridgeRingMember.instance_id))
             return list(result.scalars().all())
 
     async def resolve_endpoint(

@@ -6747,12 +6747,12 @@ async def _active_http_bridge_instance_ring(
     if ring_membership is None:
         return instance_id, static_ring
     try:
-        active_members = await ring_membership.list_active()
+        active_members = await ring_membership.list_active(require_endpoint=True)
     except Exception:
         logger.warning("Bridge ring lookup failed — refusing to fall back to static ring", exc_info=True)
         raise
     if not active_members:
-        return instance_id, static_ring
+        return instance_id, (instance_id,)
     normalized_members = tuple(
         sorted({member.strip() for member in active_members if isinstance(member, str) and member.strip()})
     )

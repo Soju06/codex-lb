@@ -69,6 +69,9 @@ spec:
 {{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset" "true" }}
 {{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset-size" (.Values.ingress.responses.nginx.upstreamHashBySubsetSize | toString) }}
 {{- end }}
+{{- if .Values.ingress.responses.nginx.configurationSnippet }}
+{{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/configuration-snippet" .Values.ingress.responses.nginx.configurationSnippet }}
+{{- end }}
 {{- if .Values.ingress.responses.nginx.proxyNextUpstream }}
 {{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream" .Values.ingress.responses.nginx.proxyNextUpstream }}
 {{- end }}

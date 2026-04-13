@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import socket
-import sys
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -81,16 +80,6 @@ def _configured_http_port() -> int:
         parsed_env_port = _parse_port_value(raw_env_port.strip())
         if parsed_env_port is not None:
             return parsed_env_port
-    args = tuple(sys.argv[1:])
-    for index, value in enumerate(args):
-        if value == "--port" and index + 1 < len(args):
-            parsed_arg_port = _parse_port_value(args[index + 1])
-            if parsed_arg_port is not None:
-                return parsed_arg_port
-        if value.startswith("--port="):
-            parsed_arg_port = _parse_port_value(value.split("=", 1)[1])
-            if parsed_arg_port is not None:
-                return parsed_arg_port
     return 2455
 
 

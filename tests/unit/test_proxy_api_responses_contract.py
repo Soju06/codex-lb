@@ -160,3 +160,29 @@ async def test_collect_responses_payload_preserves_mcp_approval_request_output_i
             "tool_name": "repos/list",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_preserves_output_image_item() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            (
+                'data: {"type":"response.output_item.done","output_index":0,'
+                '"item":{"id":"img_1","type":"output_image","image_url":"https://example.com/a.png"}}\n\n'
+            ),
+            (
+                'data: {"type":"response.completed","response":{"id":"resp_3","object":"response",'
+                '"status":"completed","output":[]}}\n\n'
+            ),
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["id"] == "resp_3"
+    assert body["output"] == [
+        {
+            "id": "img_1",
+            "type": "output_image",
+            "image_url": "https://example.com/a.png",
+        }
+    ]

@@ -520,6 +520,56 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
             pass
 
 
+@pytest.mark.asyncio
+async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(monkeypatch: pytest.MonkeyPatch):
+    import app.core.startup as startup_module
+    import app.main as main
+
+    settings = Settings(
+        otel_enabled=False,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        shutdown_drain_timeout_seconds=0,
+        database_migrations_fail_fast=False,
+    )
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace(password_hash=None))
+    )
+    rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
+    usage_scheduler = _DummyScheduler()
+    model_scheduler = _DummyScheduler()
+    sticky_scheduler = _DummyScheduler()
+    ring_service = SimpleNamespace(
+        register=AsyncMock(), mark_stale=AsyncMock(), unregister=AsyncMock(), heartbeat=AsyncMock()
+    )
+    cache_poller = SimpleNamespace(on_invalidation=Mock(), start=AsyncMock(), stop=AsyncMock())
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
+    monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "init_background_db", Mock())
+    monkeypatch.setattr(main, "init_http_client", AsyncMock())
+    monkeypatch.setattr(main, "close_http_client", AsyncMock())
+    monkeypatch.setattr(main, "close_db", AsyncMock())
+    monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
+    monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
+    monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock(return_value=False))
+    monkeypatch.setattr(main, "mark_process_dead", Mock())
+    monkeypatch.setattr(
+        "app.core.cache.invalidation.CacheInvalidationPoller",
+        lambda session_factory: cache_poller,
+    )
+
+    async with main.lifespan(main.app):
+        await asyncio.sleep(0)
+        assert startup_module._bridge_durable_schema_ready is False
+
+
 def test_local_api_port_uses_port_env(monkeypatch: pytest.MonkeyPatch):
     import app.main as main
 
@@ -698,7 +748,13 @@ async def test_validate_bridge_advertise_endpoint_rejects_shared_hostname():
     import app.main as main
 
     class _RingReader:
-        async def list_active(self, stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS) -> list[str]:
+        async def list_active(
+            self,
+            stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS,
+            *,
+            require_endpoint: bool = False,
+        ) -> list[str]:
+            del require_endpoint
             return ["instance-a"]
 
     settings = Settings(
@@ -719,7 +775,13 @@ async def test_validate_bridge_advertise_endpoint_allows_loopback_for_single_rep
     import app.main as main
 
     class _RingReader:
-        async def list_active(self, stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS) -> list[str]:
+        async def list_active(
+            self,
+            stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS,
+            *,
+            require_endpoint: bool = False,
+        ) -> list[str]:
+            del require_endpoint
             return ["instance-a"]
 
     settings = Settings(
@@ -740,7 +802,13 @@ async def test_validate_bridge_advertise_endpoint_rejects_loopback_when_peer_exi
     import app.main as main
 
     class _RingReader:
-        async def list_active(self, stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS) -> list[str]:
+        async def list_active(
+            self,
+            stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS,
+            *,
+            require_endpoint: bool = False,
+        ) -> list[str]:
+            del require_endpoint
             return ["instance-a", "instance-b"]
 
     settings = Settings(
@@ -764,7 +832,13 @@ async def test_validate_bridge_advertise_endpoint_ignores_stale_grace_peer_for_l
     seen: dict[str, int] = {}
 
     class _RingReader:
-        async def list_active(self, stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS) -> list[str]:
+        async def list_active(
+            self,
+            stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS,
+            *,
+            require_endpoint: bool = False,
+        ) -> list[str]:
+            del require_endpoint
             seen["threshold"] = stale_threshold_seconds
             if stale_threshold_seconds <= main.RING_HEARTBEAT_INTERVAL_SECONDS:
                 return ["instance-a"]
@@ -790,7 +864,13 @@ async def test_validate_bridge_advertise_endpoint_rejects_loopback_for_multi_rep
     import app.main as main
 
     class _RingReader:
-        async def list_active(self, stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS) -> list[str]:
+        async def list_active(
+            self,
+            stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS,
+            *,
+            require_endpoint: bool = False,
+        ) -> list[str]:
+            del require_endpoint
             return ["instance-a"]
 
     settings = Settings.model_construct(

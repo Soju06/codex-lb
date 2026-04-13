@@ -328,6 +328,16 @@
       "contributions": [
         "doc"
       ]
+    },
+    {
+      "login": "OverHash",
+      "name": "OverHash",
+      "avatar_url": "https://avatars.githubusercontent.com/u/46231745?v=4",
+      "profile": "https://github.com/OverHash",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

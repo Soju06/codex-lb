@@ -1332,19 +1332,24 @@ class ProxyService:
                         idle_timeout_seconds=downstream_idle_timeout_seconds,
                     ):
                         continue
+                    idle_close = False
                     async with client_send_lock:
-                        if not await self._downstream_websocket_is_idle(
+                        if await self._downstream_websocket_is_idle(
                             pending_requests,
                             pending_lock=pending_lock,
                             downstream_activity=downstream_activity,
                             idle_timeout_seconds=downstream_idle_timeout_seconds,
                         ):
-                            continue
-                        try:
-                            await websocket.close(code=1001, reason=_DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON)
-                        except Exception:
-                            logger.debug("Failed to close idle downstream websocket", exc_info=True)
-                    break
+                            try:
+                                message = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+                            except asyncio.TimeoutError:
+                                try:
+                                    await websocket.close(code=1001, reason=_DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON)
+                                except Exception:
+                                    logger.debug("Failed to close idle downstream websocket", exc_info=True)
+                                idle_close = True
+                    if idle_close:
+                        break
                 downstream_activity.mark()
                 message_type = message["type"]
 

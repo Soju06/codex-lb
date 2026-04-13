@@ -75,7 +75,7 @@ class _RefreshSingleflight:
                     raise RefreshError(code, message, is_permanent)
                 self._recent_failures.pop(key, None)
             task = self._inflight.get(key)
-            if task is None or task.done():
+            if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
                 task = asyncio.create_task(factory())
                 self._inflight[key] = task
                 task.add_done_callback(lambda done, *, cache_key=key: self._schedule_complete(cache_key, done))

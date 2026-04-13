@@ -4064,6 +4064,49 @@ def test_slim_response_create_payload_rewrites_top_level_historical_input_image(
     assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "ping"}]}
 
 
+def test_slim_response_create_preserves_all_items_when_no_user_message():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "function_call_output", "call_id": "call_1", "output": "A" * 2000},
+            {"type": "function_call_output", "call_id": "call_2", "output": "B" * 2000},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+    assert len(slimmed_input) == 2
+    assert slimmed_input[0]["call_id"] == "call_1"
+    assert slimmed_input[1]["call_id"] == "call_2"
+    assert summary is None
+
+
+def test_slim_response_create_handles_object_valued_content_image():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "role": "user",
+                "content": {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1500)},
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "describe this"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=4096)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_images_slimmed"] == 1
+    assert len(slimmed_input) == 2
+    first_content = slimmed_input[0]["content"]
+    assert isinstance(first_content, dict)
+    assert first_content["type"] == "input_text"
+
+
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
 

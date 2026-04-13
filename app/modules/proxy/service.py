@@ -6060,7 +6060,7 @@ def _response_create_recent_suffix_start(input_items: list[JsonValue]) -> int:
             last_user_index = index
     if last_user_index is not None:
         return last_user_index
-    return max(0, len(input_items) - 8)
+    return 0
 
 
 def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, int, int]:
@@ -6094,6 +6094,8 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
 
 
 def _slim_historical_response_content(content: JsonValue) -> tuple[JsonValue, int]:
+    if is_json_mapping(content):
+        return _slim_historical_response_content_part(content)
     if not isinstance(content, list):
         return content, 0
 

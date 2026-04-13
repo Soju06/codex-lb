@@ -1642,7 +1642,7 @@ class ProxyService:
                 logger.warning(
                     (
                         "Slimmed response.create request_id=%s request_log_id=%s transport=%s "
-                        "original_bytes=%s slimmed_bytes=%s historical_items_dropped=%s "
+                        "original_bytes=%s slimmed_bytes=%s "
                         "historical_tool_outputs_slimmed=%s historical_images_slimmed=%s"
                     ),
                     request_state.request_id,
@@ -1650,7 +1650,6 @@ class ProxyService:
                     transport,
                     payload_size,
                     len(text_data.encode("utf-8")),
-                    slim_summary["historical_items_dropped"],
                     slim_summary["historical_tool_outputs_slimmed"],
                     slim_summary["historical_images_slimmed"],
                 )

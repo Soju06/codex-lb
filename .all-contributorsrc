@@ -205,7 +205,8 @@
         "code",
         "bug",
         "question",
-        "maintenance"
+        "maintenance",
+        "test"
       ]
     },
     {

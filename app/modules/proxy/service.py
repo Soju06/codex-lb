@@ -5849,10 +5849,11 @@ def _openai_error_envelope_from_response_failed_payload(
     param_value = error_payload.get("param")
     if isinstance(param_value, str) and param_value.strip():
         envelope["error"]["param"] = param_value.strip()
+    error_detail = envelope["error"]
     for key in ("plan_type", "resets_at", "resets_in_seconds"):
         value = error_payload.get(key)
         if value is not None:
-            envelope["error"][key] = value  # type: ignore[literal-required]
+            cast(dict[str, object], error_detail)[key] = value
     return envelope
 
 
@@ -5921,7 +5922,7 @@ def _normalize_http_bridge_error_event(
         error_param=error_param_value,
     )
     if rate_limit_metadata:
-        normalized_event["response"]["error"].update(rate_limit_metadata)  # type: ignore[typeddict-item]
+        cast(dict[str, object], normalized_event["response"]["error"]).update(rate_limit_metadata)
     normalized_event_block = format_sse_event(normalized_event)
     normalized_payload = parse_sse_data_json(normalized_event_block)
     parsed_event = parse_sse_event(normalized_event_block)
@@ -6012,7 +6013,6 @@ def _slim_response_create_payload_for_upstream(
 
     tool_outputs_slimmed = 0
     images_slimmed = 0
-    historical_items_dropped = 0
 
     slimmed_historical: list[JsonValue] = []
     for item in historical:
@@ -6028,7 +6028,6 @@ def _slim_response_create_payload_for_upstream(
         return payload, None
 
     return candidate_payload, {
-        "historical_items_dropped": 0,
         "historical_tool_outputs_slimmed": tool_outputs_slimmed,
         "historical_images_slimmed": images_slimmed,
     }

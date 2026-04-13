@@ -4078,8 +4078,10 @@ def test_slim_response_create_preserves_all_items_when_no_user_message():
 
     slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
     assert len(slimmed_input) == 2
-    assert slimmed_input[0]["call_id"] == "call_1"
-    assert slimmed_input[1]["call_id"] == "call_2"
+    first = slimmed_input[0]
+    second = slimmed_input[1]
+    assert isinstance(first, dict) and first["call_id"] == "call_1"
+    assert isinstance(second, dict) and second["call_id"] == "call_2"
     assert summary is None
 
 
@@ -4099,10 +4101,12 @@ def test_slim_response_create_handles_object_valued_content_image():
     slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=4096)
     slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
 
-    assert summary is not None
+    assert isinstance(summary, dict)
     assert summary["historical_images_slimmed"] == 1
     assert len(slimmed_input) == 2
-    first_content = slimmed_input[0]["content"]
+    first_item = slimmed_input[0]
+    assert isinstance(first_item, dict)
+    first_content = first_item["content"]
     assert isinstance(first_content, dict)
     assert first_content["type"] == "input_text"
 

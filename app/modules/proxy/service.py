@@ -371,6 +371,7 @@ class ProxyService:
         try:
             event_queue = request_state.event_queue
             assert event_queue is not None
+            yielded_any = False
             while True:
                 event_block = await event_queue.get()
                 if event_block is None:
@@ -380,7 +381,8 @@ class ProxyService:
                 if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
                     request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
                 if (
-                    propagate_http_errors
+                    not yielded_any
+                    and propagate_http_errors
                     and block_event_type == "response.failed"
                     and request_state.error_http_status_override is not None
                     and request_state.error_http_status_override >= 400
@@ -390,6 +392,7 @@ class ProxyService:
                         _openai_error_envelope_from_response_failed_payload(block_payload),
                     )
                 yield event_block
+                yielded_any = True
         finally:
             with anyio.CancelScope(shield=True):
                 await self._detach_http_bridge_request(session, request_state=request_state)

@@ -4687,6 +4687,10 @@ def _openai_error_envelope_from_response_failed_payload(
     param_value = error_payload.get("param")
     if isinstance(param_value, str) and param_value.strip():
         envelope["error"]["param"] = param_value.strip()
+    for key in ("plan_type", "resets_at", "resets_in_seconds"):
+        value = error_payload.get(key)
+        if value is not None:
+            envelope["error"][key] = value  # type: ignore[literal-required]
     return envelope
 
 
@@ -4700,6 +4704,7 @@ def _normalize_http_bridge_error_event(
     error_type_value: str | None = None
     error_message_value: str | None = None
     error_param_value: str | None = None
+    rate_limit_metadata: dict[str, object] = {}
 
     if event is not None and event.error is not None:
         error_code_value = event.error.code
@@ -4730,6 +4735,14 @@ def _normalize_http_bridge_error_event(
                 if stripped:
                     error_param_value = stripped
 
+    if isinstance(payload, dict):
+        raw_error = payload.get("error")
+        if isinstance(raw_error, dict):
+            for key in ("plan_type", "resets_at", "resets_in_seconds"):
+                value = raw_error.get(key)
+                if value is not None:
+                    rate_limit_metadata[key] = value
+
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     normalized_error_type = error_type_value or "server_error"
     normalized_error_message = error_message_value or "Upstream error"
@@ -4745,6 +4758,8 @@ def _normalize_http_bridge_error_event(
         response_id=normalized_response_id,
         error_param=error_param_value,
     )
+    if rate_limit_metadata:
+        normalized_event["response"]["error"].update(rate_limit_metadata)  # type: ignore[typeddict-item]
     normalized_event_block = format_sse_event(normalized_event)
     normalized_payload = parse_sse_data_json(normalized_event_block)
     parsed_event = parse_sse_event(normalized_event_block)

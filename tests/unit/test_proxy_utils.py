@@ -146,8 +146,8 @@ class _RingMembershipStub:
     def __init__(self, members: list[str]) -> None:
         self.members = members
 
-    async def list_active(self, stale_threshold_seconds: int = 120) -> list[str]:
-        del stale_threshold_seconds
+    async def list_active(self, stale_threshold_seconds: int = 120, *, require_endpoint: bool = False) -> list[str]:
+        del stale_threshold_seconds, require_endpoint
         return list(self.members)
 
 

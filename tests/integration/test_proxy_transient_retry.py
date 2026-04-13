@@ -20,6 +20,8 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
+from app.db.models import Account, AccountStatus
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -308,6 +310,39 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
+    """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
+    await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
+    await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_429_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_stream_429_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    assert len(completed) == 1
+    assert len(failed) == 0
+    assert seen_account_ids[:2] == ["acc_stream_429_a", "acc_stream_429_b"]
+
+
+@pytest.mark.asyncio
 async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_client, monkeypatch):
     await _import_account(async_client, "acc_h502_a", "h502_a@example.com")
     await _import_account(async_client, "acc_h502_b", "h502_b@example.com")
@@ -419,6 +454,43 @@ async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_clie
     last_event = events[-1] if events else {}
     error = last_event.get("response", {}).get("error", {})
     assert error.get("code") != "no_accounts", "Client received generic no_accounts instead of actual error"
+
+
+@pytest.mark.asyncio
+async def test_stream_mid_stream_error_is_surfaced_without_failover(async_client, monkeypatch):
+    """Once bytes/events are emitted downstream, failover is forbidden; surface the mid-stream error."""
+    await _import_account(async_client, "acc_midstream_a", "midstreama@example.com")
+    await _import_account(async_client, "acc_midstream_b", "midstreamb@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_midstream_a":
+            yield _sse_event({"type": "response.in_progress", "response": {"id": "resp_midstream"}})
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": "rate_limit_exceeded", "message": "mid-stream limit"}},
+                }
+            )
+            return
+        yield _success_sse_event("resp_should_not_happen")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    assert len(failed) == 1
+    assert failed[0].get("response", {}).get("error", {}).get("code") == "rate_limit_exceeded"
+    assert len(completed) == 0
+    assert seen_account_ids == ["acc_midstream_a"]
 
 
 @pytest.mark.asyncio
@@ -548,6 +620,40 @@ async def test_compact_500_exhausts_retries_then_failover(async_client, monkeypa
     b_calls = [aid for aid in seen_account_ids if aid == "acc_cfo_b"]
     assert len(a_calls) == 3
     assert len(b_calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_compact_quota_exceeded_transparent_failover(async_client, monkeypatch):
+    """quota_exceeded on A should fail over to B before response write."""
+    await _import_account(async_client, "acc_compact_quota_a", "compactquotaa@example.com")
+    await _import_account(async_client, "acc_compact_quota_b", "compactquotab@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_compact_quota_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.json()["object"] == "response.compaction"
+    assert seen_account_ids[:2] == ["acc_compact_quota_a", "acc_compact_quota_b"]
+
+    async with SessionLocal() as session:
+        account_id = generate_unique_account_id("acc_compact_quota_a", "compactquotaa@example.com")
+        account_a = await session.get(Account, account_id)
+        assert account_a is not None
+        await session.refresh(account_a)
+        assert account_a.status == AccountStatus.QUOTA_EXCEEDED
 
 
 @pytest.mark.asyncio

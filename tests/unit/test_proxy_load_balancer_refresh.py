@@ -119,10 +119,7 @@ class StubAccountsRepository(AccountsRepository):
             account.status != expected_status
             or account.deactivation_reason != expected_deactivation_reason
             or account.reset_at != expected_reset_at
-            or (
-                expected_blocked_at is not _UNSET
-                and account.blocked_at != expected_blocked_at
-            )
+            or (expected_blocked_at is not _UNSET and account.blocked_at != expected_blocked_at)
         ):
             return False
         return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)

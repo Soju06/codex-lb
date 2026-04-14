@@ -109,6 +109,7 @@ def _websocket_settings(**overrides):
         "proxy_request_budget_seconds": 75.0,
         "stream_idle_timeout_seconds": 300.0,
         "proxy_downstream_websocket_idle_timeout_seconds": 120.0,
+        "http_responses_session_bridge_instance_id": "test-instance",
         "log_proxy_request_shape": False,
         "log_proxy_request_shape_raw_cache_key": False,
         "proxy_token_refresh_limit": 32,
@@ -1761,7 +1762,7 @@ def test_backend_responses_websocket_does_not_expire_downstream_while_request_pe
                 ),
             ),
         ],
-        delays=[0.05, 0.05],
+        delays=[0.12, 0.12],
     )
     log_calls: list[dict[str, object]] = []
 
@@ -1770,7 +1771,7 @@ def test_backend_responses_websocket_does_not_expire_downstream_while_request_pe
             return _websocket_settings()
 
     runtime_settings = _websocket_settings(
-        proxy_downstream_websocket_idle_timeout_seconds=0.02,
+        proxy_downstream_websocket_idle_timeout_seconds=0.1,
         stream_idle_timeout_seconds=0.2,
     )
 

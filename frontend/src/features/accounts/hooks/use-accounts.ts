@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import {
   deleteAccount,
+  exportAccount,
   getAccountTrends,
   importAccount,
   listAccounts,
@@ -67,7 +68,26 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  const exportMutation = useMutation({
+    mutationFn: exportAccount,
+    onSuccess: (data) => {
+      const blob = new Blob([data.authJson], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "auth.json";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      toast.success("Account exported");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Export failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, exportMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

@@ -30,6 +30,7 @@ import pytest
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.errors import openai_error
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 
@@ -295,17 +296,13 @@ class TestContextGrowthScenarios:
         400 previous_response_not_found -> CLI drops it -> broken growth"""
         error_502 = ProxyResponseError(
             502,
-            {"error": {"code": "upstream_unavailable", "message": "closed"}},
+            openai_error("upstream_unavailable", "closed"),
         )
         assert error_502.status_code == 502
 
-        error_400_body = {
-            "error": {
-                "code": "previous_response_not_found",
-                "message": "Previous response not found",
-                "param": "previous_response_id",
-            }
-        }
-        error_400 = ProxyResponseError(400, error_400_body)
+        error_400 = ProxyResponseError(
+            400,
+            openai_error("previous_response_not_found", "Previous response not found"),
+        )
         assert error_400.status_code == 400
         assert error_400.payload["error"]["code"] == "previous_response_not_found"

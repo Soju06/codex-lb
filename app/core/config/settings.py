@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import os
 import socket
+from collections.abc import Mapping
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 

@@ -3246,25 +3246,14 @@ class ProxyService:
         queue_limit: int,
     ) -> None:
         if session.closed:
-            # When previous_response_id is present, reconnecting the upstream
-            # websocket creates a fresh server-side session that won't recognise
-            # the old response id.  Rather than silently falling back to a full
-            # conversation replay (which inflates per-turn context by ~20x), raise
-            # a 502 so the client can retry the original request on a new session
-            # with previous_response_id intact.
-            if request_state.previous_response_id is not None:
-                _log_http_bridge_event(
-                    "submit_on_closed_with_previous_response",
-                    session.key,
-                    account_id=session.account.id,
-                    model=session.request_model,
-                    cache_key_family=session.key.affinity_kind,
-                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                )
-                raise ProxyResponseError(
-                    502,
-                    openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
-                )
+            # Try reconnecting the upstream websocket first.  For requests
+            # carrying previous_response_id we only reconnect (send_request=
+            # False) because the fresh upstream won't recognise the old
+            # response id.  If reconnection itself fails, raise 502 so the
+            # client retries with previous_response_id intact rather than
+            # receiving 400 previous_response_not_found (which causes the
+            # CLI to drop previous_response_id and resend the full
+            # conversation history, inflating per-turn context by ~20x).
             recovered = await self._retry_http_bridge_request_on_fresh_upstream(
                 session,
                 request_state=request_state,
@@ -3590,12 +3579,7 @@ class ProxyService:
         text_data: str,
         send_request: bool = True,
     ) -> bool:
-        if request_state.previous_response_id is not None and send_request:
-            # Do not mark previous_response_not_found here — that causes the
-            # client to drop previous_response_id and resend the full
-            # conversation history, inflating per-turn context by ~20x.
-            # Instead, return False so the caller raises a retriable 502.
-            return False
+        effective_send = send_request and request_state.previous_response_id is None
         if request_state.replay_count >= 1:
             return False
         request_state.replay_count += 1
@@ -3614,7 +3598,7 @@ class ProxyService:
                 request_state=request_state,
                 restart_reader=True,
             )
-            if send_request:
+            if effective_send:
                 await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
             return True
@@ -3635,8 +3619,6 @@ class ProxyService:
                 return False
             request_state = retryable_requests[0]
             if request_state.previous_response_id is not None:
-                # Same as above — avoid marking previous_response_not_found
-                # so the client retries with previous_response_id preserved.
                 return False
             if request_state.replay_count >= 1:
                 return False

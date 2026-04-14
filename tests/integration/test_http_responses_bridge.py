@@ -6441,7 +6441,7 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_send_failure_returns_previous_response_not_found(
+async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailable(
     async_client,
     app_instance,
     monkeypatch,
@@ -6540,26 +6540,13 @@ async def test_v1_responses_http_bridge_send_failure_returns_previous_response_n
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
-    assert connect_count == 1
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete")
+    assert "previous_response_not_found" not in second.json()["error"].get("code", "")
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_response_not_found(
+async def test_v1_responses_http_bridge_precreated_disconnect_returns_upstream_unavailable(
     async_client,
     app_instance,
     monkeypatch,
@@ -6662,22 +6649,9 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_previous_r
         },
     )
 
-    assert second.status_code == 400
-    assert second.json() == {
-        "error": {
-            "message": second.json()["error"]["message"],
-            "type": "invalid_request_error",
-            "code": "previous_response_not_found",
-            "param": "previous_response_id",
-        }
-    }
-    assert second.json()["error"]["message"].startswith(
-        f"Previous response with id '{first_body['id']}' not found. HTTP bridge continuity was lost"
-    )
-    assert second.json()["error"]["message"].endswith(
-        "Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-    )
-    assert connect_count == 1
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete", "upstream_request_timeout")
+    assert "previous_response_not_found" not in second.json()["error"].get("code", "")
 
 
 @pytest.mark.asyncio

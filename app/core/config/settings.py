@@ -14,6 +14,7 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
+from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -40,6 +41,10 @@ def _default_oauth_callback_host() -> str:
 def _default_http_bridge_instance_id() -> str:
     hostname = socket.gethostname().strip()
     return hostname or "codex-lb"
+
+
+def _default_upstream_websocket_trust_env() -> bool:
+    return outbound_proxy_env_configured()
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
@@ -130,7 +135,7 @@ class Settings(BaseSettings):
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
-    upstream_websocket_trust_env: bool = False
+    upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0

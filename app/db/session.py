@@ -189,15 +189,14 @@ def init_background_db(url: str | None = None) -> None:
             _background_engine = engine
             _background_session_factory = SessionLocal
             return
-        else:
-            _background_engine = create_async_engine(
-                db_url,
-                echo=False,
-                pool_size=3,
-                max_overflow=2,
-                pool_timeout=_settings.database_pool_timeout_seconds,
-                connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
-            )
+        _background_engine = create_async_engine(
+            db_url,
+            echo=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_timeout=_settings.database_pool_timeout_seconds,
+            connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
+        )
         _configure_sqlite_engine(_background_engine.sync_engine, enable_wal=not is_sqlite_memory)
     else:
         _background_engine = create_async_engine(

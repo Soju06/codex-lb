@@ -2316,7 +2316,7 @@ class ProxyService:
                             error_type="server_error",
                         ),
                     )
-                elif shutdown_state.is_bridge_drain_active():
+                if shutdown_state.is_bridge_drain_active():
                     _record_bridge_drain_recovery_allowed()
 
                 owner_check_required = _http_bridge_owner_check_required(

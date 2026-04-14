@@ -152,5 +152,4 @@ async def health_startup() -> HealthCheckResponse:
 
     if startup_module._startup_complete:
         return HealthCheckResponse(status="ok")
-    else:
-        raise HTTPException(status_code=503, detail="Service is starting")
+    raise HTTPException(status_code=503, detail="Service is starting")

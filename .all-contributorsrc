@@ -338,6 +338,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "balakumardev",
+      "name": "Bala Kumar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/20134279?v=4",
+      "profile": "http://balakumar.dev",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

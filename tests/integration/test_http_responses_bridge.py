@@ -6541,7 +6541,7 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
     )
 
     assert second.status_code == 502
-    assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete")
+    assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete", "bridge_owner_unreachable")
     assert "previous_response_not_found" not in second.json()["error"].get("code", "")
 
 

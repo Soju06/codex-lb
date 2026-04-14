@@ -190,7 +190,7 @@ class TestMidRequestFailurePreservesPreviousResponseId:
         session.upstream = cast(
             Any,
             SimpleNamespace(
-                send=failing_send,
+                send_text=failing_send,
                 close=AsyncMock(),
             ),
         )

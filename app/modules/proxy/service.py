@@ -3579,7 +3579,8 @@ class ProxyService:
         text_data: str,
         send_request: bool = True,
     ) -> bool:
-        effective_send = send_request and request_state.previous_response_id is None
+        if request_state.previous_response_id is not None and send_request:
+            return False
         if request_state.replay_count >= 1:
             return False
         request_state.replay_count += 1
@@ -3598,7 +3599,7 @@ class ProxyService:
                 request_state=request_state,
                 restart_reader=True,
             )
-            if effective_send:
+            if send_request:
                 await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
             return True

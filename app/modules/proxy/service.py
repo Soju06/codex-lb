@@ -56,7 +56,13 @@ from app.core.clients.proxy_websocket import (
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.errors import OpenAIErrorEnvelope, ResponseFailedEvent, openai_error, response_failed_event
+from app.core.errors import (
+    OpenAIErrorDetail,
+    OpenAIErrorEnvelope,
+    ResponseFailedEvent,
+    openai_error,
+    response_failed_event,
+)
 from app.core.exceptions import AppError, ProxyAuthError, ProxyRateLimitError
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -6105,10 +6111,15 @@ def _openai_error_envelope_from_response_failed_payload(
     if isinstance(param_value, str) and param_value.strip():
         envelope["error"]["param"] = param_value.strip()
     error_detail = envelope["error"]
-    for key in ("plan_type", "resets_at", "resets_in_seconds"):
-        value = error_payload.get(key)
-        if value is not None:
-            cast(dict[str, object], error_detail)[key] = value
+    plan_type = error_payload.get("plan_type")
+    if plan_type is not None:
+        error_detail["plan_type"] = str(plan_type)
+    resets_at = error_payload.get("resets_at")
+    if isinstance(resets_at, int | float):
+        error_detail["resets_at"] = resets_at
+    resets_in = error_payload.get("resets_in_seconds")
+    if isinstance(resets_in, int | float):
+        error_detail["resets_in_seconds"] = resets_in
     return envelope
 
 
@@ -6122,7 +6133,7 @@ def _normalize_http_bridge_error_event(
     error_type_value: str | None = None
     error_message_value: str | None = None
     error_param_value: str | None = None
-    rate_limit_metadata: dict[str, object] = {}
+    rate_limit_metadata: OpenAIErrorDetail = {}
 
     if event is not None and event.error is not None:
         error_code_value = event.error.code
@@ -6156,10 +6167,15 @@ def _normalize_http_bridge_error_event(
     if isinstance(payload, dict):
         raw_error = payload.get("error")
         if isinstance(raw_error, dict):
-            for key in ("plan_type", "resets_at", "resets_in_seconds"):
-                value = raw_error.get(key)
-                if value is not None:
-                    rate_limit_metadata[key] = value
+            plan_type = raw_error.get("plan_type")
+            if isinstance(plan_type, str):
+                rate_limit_metadata["plan_type"] = plan_type
+            resets_at = raw_error.get("resets_at")
+            if isinstance(resets_at, int | float):
+                rate_limit_metadata["resets_at"] = resets_at
+            resets_in = raw_error.get("resets_in_seconds")
+            if isinstance(resets_in, int | float):
+                rate_limit_metadata["resets_in_seconds"] = resets_in
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     normalized_error_type = error_type_value or "server_error"
@@ -6177,7 +6193,7 @@ def _normalize_http_bridge_error_event(
         error_param=error_param_value,
     )
     if rate_limit_metadata:
-        cast(dict[str, object], normalized_event["response"]["error"]).update(rate_limit_metadata)
+        normalized_event["response"]["error"].update(rate_limit_metadata)
     normalized_event_block = format_sse_event(normalized_event)
     normalized_payload = parse_sse_data_json(normalized_event_block)
     parsed_event = parse_sse_event(normalized_event_block)

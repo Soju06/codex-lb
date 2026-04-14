@@ -6,6 +6,7 @@ import socket
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
@@ -49,7 +50,7 @@ type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
 
 
-def _validate_context_window_entries(data: dict) -> dict[str, int]:
+def _validate_context_window_entries(data: Mapping[str, object]) -> dict[str, int]:
     result: dict[str, int] = {}
     for k, v in data.items():
         if isinstance(v, bool):

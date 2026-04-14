@@ -14,6 +14,7 @@ Real-world scenario (from codex session logs):
 
 These tests are LOCAL ONLY — not pushed upstream.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,14 +23,13 @@ from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import anyio
 import pytest
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
-from app.core.config.settings import Settings
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 
@@ -60,7 +60,8 @@ def _make_session(*, closed: bool = False) -> proxy_service._HTTPBridgeSession:
 
 
 def _make_request_state(
-    *, previous_response_id: str | None = None,
+    *,
+    previous_response_id: str | None = None,
 ) -> proxy_service._WebSocketRequestState:
     """Create a request state, optionally with previous_response_id."""
     return proxy_service._WebSocketRequestState(
@@ -109,7 +110,8 @@ class TestSubmitClosedSessionWithPreviousResponseId:
         assert "previous_response_not_found" not in str(error_payload)
 
     async def test_closed_session_without_previous_response_id_attempts_recovery(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """POSITIVE: closed session WITHOUT previous_response_id can attempt
         websocket reconnect since there's no server-side state to preserve."""
@@ -120,11 +122,15 @@ class TestSubmitClosedSessionWithPreviousResponseId:
         # Mock the retry to succeed (reconnect works)
         retry_mock = AsyncMock(return_value=True)
         monkeypatch.setattr(
-            service, "_retry_http_bridge_request_on_fresh_upstream", retry_mock,
+            service,
+            "_retry_http_bridge_request_on_fresh_upstream",
+            retry_mock,
         )
         # Mock prewarm and actual send to avoid full flow
         monkeypatch.setattr(
-            service, "_maybe_prewarm_http_bridge_session", AsyncMock(),
+            service,
+            "_maybe_prewarm_http_bridge_session",
+            AsyncMock(),
         )
 
         # Should NOT raise 502 - should attempt recovery
@@ -152,7 +158,6 @@ class TestSubmitClosedSessionWithPreviousResponseId:
         assert first_call.kwargs.get("send_request") is False
 
 
-
 class TestMidRequestFailurePreservesPreviousResponseId:
     """When the upstream websocket dies MID-REQUEST and previous_response_id
     is present, the bridge MUST raise 502, not 400 previous_response_not_found.
@@ -162,7 +167,8 @@ class TestMidRequestFailurePreservesPreviousResponseId:
     telling the CLI to drop previous_response_id and resend full conversation."""
 
     async def test_mid_request_failure_with_previous_response_id_raises_502(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """BUG REGRESSION: mid-request websocket failure + previous_response_id.
 
@@ -181,13 +187,18 @@ class TestMidRequestFailurePreservesPreviousResponseId:
         async def failing_send(*args, **kwargs):
             raise ConnectionError("upstream websocket died")
 
-        session.upstream = cast(Any, SimpleNamespace(
-            send=failing_send,
-            close=AsyncMock(),
-        ))
+        session.upstream = cast(
+            Any,
+            SimpleNamespace(
+                send=failing_send,
+                close=AsyncMock(),
+            ),
+        )
         # Mock _fail_pending_websocket_requests to avoid side effects
         monkeypatch.setattr(
-            service, "_fail_pending_websocket_requests", AsyncMock(),
+            service,
+            "_fail_pending_websocket_requests",
+            AsyncMock(),
         )
 
         with pytest.raises(ProxyResponseError) as exc_info:

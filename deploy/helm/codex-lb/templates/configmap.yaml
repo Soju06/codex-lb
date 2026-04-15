@@ -47,7 +47,6 @@ data:
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS: {{ .Values.config.sessionBridgeIdleTtlSeconds | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS: {{ .Values.config.sessionBridgeCodexIdleTtlSeconds | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED: {{ .Values.config.sessionBridgeCodexPrewarmEnabled | toString | quote }}
-  CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_RESPONSE_CREATE_CONCURRENCY: {{ .Values.config.sessionBridgeResponseCreateConcurrency | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_MAX_SESSIONS: {{ .Values.config.sessionBridgeMaxSessions | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT: {{ .Values.config.sessionBridgeQueueLimit | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: {{ .Values.config.sessionBridgeInstanceRing | quote }}

@@ -10,11 +10,6 @@ from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 pytestmark = pytest.mark.unit
 
 
-def test_session_bridge_response_create_concurrency_default_is_1() -> None:
-    s = Settings()
-    assert s.http_responses_session_bridge_response_create_concurrency == 1
-
-
 def test_ring_stale_threshold_is_30_seconds() -> None:
     assert RING_STALE_THRESHOLD_SECONDS == 30
 

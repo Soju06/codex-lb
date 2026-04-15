@@ -3402,16 +3402,7 @@ class ProxyService:
             upstream_control=_WebSocketUpstreamControl(),
             pending_requests=deque(),
             pending_lock=anyio.Lock(),
-            response_create_gate=asyncio.Semaphore(
-                max(
-                    1,
-                    getattr(
-                        get_settings(),
-                        "http_responses_session_bridge_response_create_concurrency",
-                        1,
-                    ),
-                )
-            ),
+            response_create_gate=asyncio.Semaphore(1),
             queued_request_count=0,
             last_used_at=time.monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,

@@ -3756,8 +3756,6 @@ class ProxyService:
         text_data: str,
         send_request: bool = True,
     ) -> bool:
-        if request_state.previous_response_id is not None and send_request:
-            return False
         if request_state.replay_count >= 1:
             return False
         request_state.replay_count += 1
@@ -3796,8 +3794,6 @@ class ProxyService:
             if len(retryable_requests) != 1:
                 return False
             request_state = retryable_requests[0]
-            if request_state.previous_response_id is not None:
-                return False
             if request_state.replay_count >= 1:
                 return False
             request_text = request_state.request_text

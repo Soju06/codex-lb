@@ -1,0 +1,5 @@
+- [ ] 1. Add spec deltas for active bridged `previous_response_id` reconnect behavior and failure semantics.
+- [ ] 2. Add/adjust failing integration coverage for send-failure and precreated-timeout continuation requests.
+- [ ] 3. Update HTTP bridge retry paths so active bridged continuations retry once on a fresh upstream websocket.
+- [ ] 4. Ensure failed reconnects surface fast upstream-unavailable errors instead of `previous_response_not_found` after idle timeout.
+- [ ] 5. Run targeted tests and OpenSpec validation.

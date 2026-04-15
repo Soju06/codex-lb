@@ -14,6 +14,12 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **THEN** the service reconnects the bridged session once with continuity headers intact
 - **AND** it replays the pending request on that fresh upstream websocket instead of waiting for the idle timeout
 
+#### Scenario: durable continuation prefers local recovery before owner handoff
+- **WHEN** an HTTP continuation request includes `previous_response_id`
+- **AND** durable bridge lookup resolves a matching hard-affinity session whose latest response id matches that `previous_response_id`
+- **THEN** the service attempts local continuation recovery before owner-forward handoff
+- **AND** it MUST NOT wait for owner-forward idle timeout before trying that local recovery path
+
 #### Scenario: active bridged continuation surfaces upstream failure after reconnect retry
 - **WHEN** an HTTP continuation request with `previous_response_id` exhausts its single fresh-upstream reconnect attempt
 - **THEN** the service fails the request as an upstream availability error

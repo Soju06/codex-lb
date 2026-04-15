@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import sys
 import time
 from collections.abc import Awaitable
@@ -495,7 +496,9 @@ def _shutdown_should_unregister_ring_member(instance_id: str, advertise_base_url
     if not advertise_base_url:
         return False
     pod_name = os.getenv("POD_NAME", "").strip()
-    if pod_name and instance_id == pod_name:
+    host_name = os.getenv("HOSTNAME", "").strip()
+    local_hostname = socket.gethostname().strip()
+    if instance_id in {value for value in (pod_name, host_name, local_hostname) if value}:
         return False
     return True
 

@@ -66,8 +66,8 @@ from app.modules.api_keys.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import service as proxy_service_module
-from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.helpers import _rate_limit_details
+from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     openai_invalid_payload_error,
@@ -85,7 +85,11 @@ from app.modules.proxy.schemas import (
     V1UsageLimitResponse,
     V1UsageResponse,
 )
-from app.modules.proxy.types import CreditStatusDetailsData, RateLimitStatusPayloadData, RateLimitWindowSnapshotData
+from app.modules.proxy.types import (
+    CreditStatusDetailsData,
+    RateLimitStatusPayloadData,
+    RateLimitWindowSnapshotData,
+)
 from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)

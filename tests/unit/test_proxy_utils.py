@@ -540,6 +540,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
+        proxy_admission_wait_timeout_seconds=10.0,
     )
 
 
@@ -4954,6 +4955,7 @@ async def test_compact_responses_records_transient_error_for_generic_upstream_fa
 async def test_compact_responses_surfaces_local_create_overload_without_penalizing_account(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.proxy_compact_response_create_limit = 1
+    settings.proxy_admission_wait_timeout_seconds = 0.05
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_compact_local_overload")
@@ -5096,6 +5098,7 @@ async def test_ensure_fresh_releases_token_refresh_admission_when_repo_factory_e
 async def test_response_create_admission_failure_releases_session_gate(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.proxy_response_create_limit = 1
+    settings.proxy_admission_wait_timeout_seconds = 0.05
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_gate_release",

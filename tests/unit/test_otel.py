@@ -15,7 +15,6 @@ import pytest
 import app.core.tracing.otel as otel
 from app.core.config.settings import Settings
 from app.core.runtime_logging import JsonFormatter
-from app.modules.proxy.ring_membership import RING_STALE_GRACE_SECONDS, RING_STALE_THRESHOLD_SECONDS
 
 pytestmark = pytest.mark.unit
 
@@ -384,12 +383,8 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     wait_for_reachable.assert_not_awaited()
     validate_advertise.assert_not_awaited()
     ring_service.heartbeat.assert_not_awaited()
-    ring_service.mark_stale.assert_awaited_once_with(
-        "pod-a",
-        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
-        grace_seconds=RING_STALE_GRACE_SECONDS,
-    )
-    ring_service.unregister.assert_not_called()
+    ring_service.unregister.assert_awaited_once_with("pod-a")
+    ring_service.mark_stale.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -1321,9 +1321,7 @@ class ProxyService:
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
         client_send_lock = anyio.Lock()
-        response_create_gate = asyncio.Semaphore(
-            max(1, getattr(get_settings(), "http_responses_session_bridge_response_create_concurrency", 1))
-        )
+        response_create_gate = asyncio.Semaphore(1)
         upstream: UpstreamResponsesWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None

@@ -67,6 +67,7 @@ from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
+from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     openai_invalid_payload_error,
@@ -84,6 +85,7 @@ from app.modules.proxy.schemas import (
     V1UsageLimitResponse,
     V1UsageResponse,
 )
+from app.modules.proxy.types import CreditStatusDetailsData, RateLimitStatusPayloadData, RateLimitWindowSnapshotData
 from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
@@ -125,7 +127,7 @@ v1_ws_router = APIRouter(
 )
 usage_router = APIRouter(
     tags=["proxy"],
-    dependencies=[Depends(validate_codex_usage_identity), Depends(set_openai_error_format)],
+    dependencies=[Depends(set_openai_error_format)],
 )
 transcribe_router = APIRouter(
     prefix="/backend-api",
@@ -409,6 +411,74 @@ def _apply_credit_override(
         model_filter=None,
         reset_at=aggregate_limit.reset_at,
         source="api_key_override",
+    )
+
+
+async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLimitStatusPayloadData:
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        usage = await service.get_key_usage_summary_for_self(api_key.id)
+        aggregate_limits = await _build_aggregate_credit_limits(session)
+
+    if usage is None:
+        raise ProxyAuthError("Invalid API key")
+
+    merged_limits = _build_v1_usage_limits(usage, aggregate_limits)
+    primary_credit_limit = _select_codex_usage_limit(merged_limits, "5h")
+    secondary_credit_limit = _select_codex_usage_limit(merged_limits, "7d")
+
+    return RateLimitStatusPayloadData(
+        plan_type="api_key",
+        rate_limit=_rate_limit_details(
+            _codex_usage_window_snapshot(primary_credit_limit),
+            _codex_usage_window_snapshot(secondary_credit_limit),
+        ),
+        credits=_codex_usage_credit_snapshot(primary_credit_limit, secondary_credit_limit),
+    )
+
+
+def _select_codex_usage_limit(
+    limits: list[V1UsageLimitResponse],
+    window: str,
+) -> V1UsageLimitResponse | None:
+    candidates = [limit for limit in limits if limit.limit_window == window and limit.model_filter is None]
+    if not candidates:
+        return None
+    for limit in candidates:
+        if limit.limit_type == "credits":
+            return limit
+    return candidates[0]
+
+
+def _codex_usage_window_snapshot(limit: V1UsageLimitResponse | None) -> RateLimitWindowSnapshotData | None:
+    if limit is None or limit.max_value <= 0:
+        return None
+    reset_at = datetime.fromisoformat(limit.reset_at.replace("Z", "+00:00"))
+    reset_epoch = int(reset_at.timestamp())
+    now_epoch = int(time.time())
+    used_percent = int(max(0, min(100, round((limit.current_value / limit.max_value) * 100))))
+    window_seconds = 18000 if limit.limit_window == "5h" else 604800 if limit.limit_window == "7d" else None
+    return RateLimitWindowSnapshotData(
+        used_percent=used_percent,
+        limit_window_seconds=window_seconds,
+        reset_after_seconds=max(0, reset_epoch - now_epoch),
+        reset_at=reset_epoch,
+    )
+
+
+def _codex_usage_credit_snapshot(
+    primary_limit: V1UsageLimitResponse | None,
+    secondary_limit: V1UsageLimitResponse | None,
+) -> CreditStatusDetailsData | None:
+    preferred = secondary_limit or primary_limit
+    if preferred is None or preferred.limit_type != "credits":
+        return None
+    return CreditStatusDetailsData(
+        has_credits=True,
+        unlimited=False,
+        balance=str(preferred.remaining_value),
+        approx_local_messages=None,
+        approx_cloud_messages=None,
     )
 
 
@@ -1081,8 +1151,13 @@ async def _transcribe_request(
 @usage_router.get("/api/codex/usage/", response_model=RateLimitStatusPayload, include_in_schema=False)
 async def codex_usage(
     context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
 ) -> RateLimitStatusPayload:
-    payload = await context.service.get_rate_limit_payload()
+    payload = (
+        await _build_codex_usage_payload_for_api_key(api_key)
+        if api_key is not None
+        else await context.service.get_rate_limit_payload()
+    )
     return RateLimitStatusPayload.from_data(payload)
 
 

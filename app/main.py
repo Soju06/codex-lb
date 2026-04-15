@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
 import sys
 import time
 from collections.abc import Awaitable
@@ -264,46 +263,21 @@ async def lifespan(app: FastAPI):
                 pass
 
         if ring_service is not None and instance_id is not None:
-            if _shutdown_should_unregister_ring_member(instance_id, bridge_endpoint_base_url):
-                try:
-                    await asyncio.wait_for(ring_service.unregister(instance_id), timeout=3)
-                    logger.info(
-                        "Unregistered bridge ring membership for shutdown",
-                        extra={"instance_id": instance_id},
-                    )
-                except Exception:
-                    logger.warning("Failed to unregister bridge ring membership during shutdown", exc_info=True)
-                    try:
-                        await asyncio.wait_for(
-                            ring_service.mark_stale(
-                                instance_id,
-                                stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
-                                grace_seconds=RING_STALE_GRACE_SECONDS,
-                            ),
-                            timeout=3,
-                        )
-                        logger.info(
-                            "Marked bridge ring membership stale for shutdown fallback",
-                            extra={"instance_id": instance_id},
-                        )
-                    except Exception:
-                        logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
-            else:
-                try:
-                    await asyncio.wait_for(
-                        ring_service.mark_stale(
-                            instance_id,
-                            stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
-                            grace_seconds=RING_STALE_GRACE_SECONDS,
-                        ),
-                        timeout=3,
-                    )
-                    logger.info(
-                        "Marked bridge ring membership stale for shutdown",
-                        extra={"instance_id": instance_id},
-                    )
-                except Exception:
-                    logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
+            try:
+                await asyncio.wait_for(
+                    ring_service.mark_stale(
+                        instance_id,
+                        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+                        grace_seconds=RING_STALE_GRACE_SECONDS,
+                    ),
+                    timeout=3,
+                )
+                logger.info(
+                    "Marked bridge ring membership stale for shutdown",
+                    extra={"instance_id": instance_id},
+                )
+            except Exception:
+                logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
 
         if metrics_server is not None:
             metrics_server.should_exit = True
@@ -490,17 +464,6 @@ async def _wait_for_bridge_advertise_endpoint(
     raise RuntimeError(
         f"Bridge advertise endpoint did not become reachable before registration probe deadline: {probe_url}"
     )
-
-
-def _shutdown_should_unregister_ring_member(instance_id: str, advertise_base_url: str | None) -> bool:
-    if not advertise_base_url:
-        return False
-    pod_name = os.getenv("POD_NAME", "").strip()
-    host_name = os.getenv("HOSTNAME", "").strip()
-    local_hostname = socket.gethostname().strip()
-    if instance_id in {value for value in (pod_name, host_name, local_hostname) if value}:
-        return False
-    return True
 
 
 def _local_api_port() -> int | None:

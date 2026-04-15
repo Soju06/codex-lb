@@ -266,6 +266,7 @@ class ProxyService:
                 websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
                 response_create_limit=settings.proxy_response_create_limit,
                 compact_response_create_limit=settings.proxy_compact_response_create_limit,
+                admission_wait_timeout_seconds=settings.proxy_admission_wait_timeout_seconds,
             )
         return self._work_admission
 
@@ -1316,7 +1317,9 @@ class ProxyService:
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
         client_send_lock = anyio.Lock()
-        response_create_gate = asyncio.Semaphore(1)
+        response_create_gate = asyncio.Semaphore(
+            max(1, get_settings().http_responses_session_bridge_response_create_concurrency)
+        )
         upstream: UpstreamResponsesWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None
@@ -3397,7 +3400,9 @@ class ProxyService:
             upstream_control=_WebSocketUpstreamControl(),
             pending_requests=deque(),
             pending_lock=anyio.Lock(),
-            response_create_gate=asyncio.Semaphore(1),
+            response_create_gate=asyncio.Semaphore(
+                max(1, get_settings().http_responses_session_bridge_response_create_concurrency)
+            ),
             queued_request_count=0,
             last_used_at=time.monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,

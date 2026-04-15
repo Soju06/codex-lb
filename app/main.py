@@ -264,20 +264,28 @@ async def lifespan(app: FastAPI):
 
         if ring_service is not None and instance_id is not None:
             try:
-                await asyncio.wait_for(
-                    ring_service.mark_stale(
-                        instance_id,
-                        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
-                        grace_seconds=RING_STALE_GRACE_SECONDS,
-                    ),
-                    timeout=3,
-                )
+                await asyncio.wait_for(ring_service.unregister(instance_id), timeout=3)
                 logger.info(
-                    "Marked bridge ring membership stale for shutdown",
+                    "Unregistered bridge ring membership for shutdown",
                     extra={"instance_id": instance_id},
                 )
             except Exception:
-                logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
+                logger.warning("Failed to unregister bridge ring membership during shutdown", exc_info=True)
+                try:
+                    await asyncio.wait_for(
+                        ring_service.mark_stale(
+                            instance_id,
+                            stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+                            grace_seconds=RING_STALE_GRACE_SECONDS,
+                        ),
+                        timeout=3,
+                    )
+                    logger.info(
+                        "Marked bridge ring membership stale for shutdown fallback",
+                        extra={"instance_id": instance_id},
+                    )
+                except Exception:
+                    logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
 
         if metrics_server is not None:
             metrics_server.should_exit = True

@@ -11,12 +11,13 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.asyncio
-async def test_work_admission_rejects_concurrent_race_without_waiting() -> None:
+async def test_work_admission_rejects_after_wait_timeout() -> None:
     controller = WorkAdmissionController(
         token_refresh_limit=1,
         websocket_connect_limit=0,
         response_create_limit=0,
         compact_response_create_limit=0,
+        admission_wait_timeout_seconds=0.3,
     )
     started = asyncio.Event()
     release = asyncio.Event()
@@ -33,7 +34,7 @@ async def test_work_admission_rejects_concurrent_race_without_waiting() -> None:
     await started.wait()
 
     with pytest.raises(ProxyResponseError) as exc_info:
-        await asyncio.wait_for(controller.acquire_token_refresh(), timeout=0.1)
+        await controller.acquire_token_refresh()
 
     release.set()
     await first

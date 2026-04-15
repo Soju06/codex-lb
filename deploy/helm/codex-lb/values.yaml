@@ -154,6 +154,8 @@ config:
   sessionBridgeCodexIdleTtlSeconds: 900
   # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions
   sessionBridgeCodexPrewarmEnabled: true
+  # @param config.sessionBridgeResponseCreateConcurrency Max concurrent response.create operations per bridge session
+  sessionBridgeResponseCreateConcurrency: 1
   # @param config.sessionBridgeMaxSessions Max in-memory bridge sessions per pod
   sessionBridgeMaxSessions: 256
   # @param config.sessionBridgeQueueLimit Max pending requests per bridge session

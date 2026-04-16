@@ -3758,6 +3758,12 @@ class ProxyService:
     ) -> bool:
         if request_state.replay_count >= 1:
             return False
+        if (
+            request_state.previous_response_id is not None
+            and send_request
+            and _preferred_http_bridge_reconnect_turn_state(session) is None
+        ):
+            return False
         request_state.replay_count += 1
         _log_http_bridge_event(
             "retry_fresh_upstream",
@@ -3795,6 +3801,11 @@ class ProxyService:
                 return False
             request_state = retryable_requests[0]
             if request_state.replay_count >= 1:
+                return False
+            if (
+                request_state.previous_response_id is not None
+                and _preferred_http_bridge_reconnect_turn_state(session) is None
+            ):
                 return False
             request_text = request_state.request_text
             assert isinstance(request_text, str)

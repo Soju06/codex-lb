@@ -427,8 +427,10 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
         raise ProxyAuthError("Invalid API key")
 
     key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
-    primary_credit_limit = _select_codex_usage_limit(key_limits, "5h")
-    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d")
+    primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
+    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d") or _select_codex_usage_limit(
+        key_limits, "weekly"
+    )
 
     return RateLimitStatusPayloadData(
         plan_type="api_key",
@@ -459,7 +461,9 @@ def _codex_usage_window_snapshot(limit: V1UsageLimitResponse | None) -> RateLimi
     reset_epoch = int(reset_at.timestamp())
     now_epoch = int(time.time())
     used_percent = max(0, min(100, int((limit.current_value / limit.max_value) * 100)))
-    window_seconds = 18000 if limit.limit_window == "5h" else 604800 if limit.limit_window == "7d" else None
+    window_seconds = {"5h": 18000, "daily": 86400, "7d": 604800, "weekly": 604800, "monthly": 2592000}.get(
+        limit.limit_window
+    )
     return RateLimitWindowSnapshotData(
         used_percent=used_percent,
         limit_window_seconds=window_seconds,

@@ -509,7 +509,6 @@ class ProxyService:
             key=bridge_session_key,
             previous_response_id=request_state.previous_response_id,
             durable_lookup=durable_lookup,
-            local_instance_id=get_settings().http_responses_session_bridge_instance_id,
         )
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
@@ -7560,7 +7559,7 @@ def _cap_post_retry_continuation_budget(request_state: _WebSocketRequestState) -
         return
     budget = get_settings().proxy_request_budget_seconds
     now = time.monotonic()
-    request_state.started_at = max(
+    request_state.started_at = min(
         request_state.started_at,
         now - budget + _POST_RETRY_CONTINUATION_BUDGET_SECONDS,
     )
@@ -7571,14 +7570,12 @@ def _http_bridge_should_prefer_local_previous_response_recovery(
     key: _HTTPBridgeSessionKey,
     previous_response_id: str | None,
     durable_lookup: DurableBridgeLookup | None,
-    local_instance_id: str,
 ) -> bool:
     if previous_response_id is None or durable_lookup is None:
         return False
     if durable_lookup.latest_response_id != previous_response_id:
         return False
-    active_owner = _durable_bridge_lookup_active_owner(durable_lookup)
-    if active_owner != local_instance_id:
+    if _durable_bridge_lookup_active_owner(durable_lookup) is not None:
         return False
     return key.affinity_kind in {"session_header", "turn_state_header"}
 

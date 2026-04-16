@@ -22,14 +22,9 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 pytestmark = pytest.mark.unit
 
 
-def _make_app_settings(
-    *,
-    bridge_enabled: bool = True,
-    instance_id: str = "test-instance",
-) -> Settings:
+def _make_app_settings(*, bridge_enabled: bool = True) -> Settings:
     return Settings(
         http_responses_session_bridge_enabled=bridge_enabled,
-        http_responses_session_bridge_instance_id=instance_id,
     )
 
 
@@ -586,9 +581,9 @@ async def test_stream_via_http_bridge_sets_initial_local_recovery_rebind_for_mat
                 canonical_key="sid-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
-                owner_instance_id="test-instance",
+                owner_instance_id="instance-b",
                 owner_epoch=1,
-                lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
                 state=HttpBridgeSessionState.ACTIVE,
                 latest_turn_state="http_turn_1",
                 latest_response_id="resp_prev_1",

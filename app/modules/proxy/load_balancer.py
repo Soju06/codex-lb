@@ -170,10 +170,11 @@ class LoadBalancer:
                     runtime=self._runtime,
                 )
 
-                result = select_account(
+                result = _select_account_preferring_budget_safe(
                     states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
+                    budget_threshold_pct=budget_threshold_pct,
                 )
 
                 selected_account_map = account_map
@@ -645,10 +646,11 @@ class LoadBalancer:
         sticky_repo: StickySessionsRepository | None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
-            return select_account(
+            return _select_account_preferring_budget_safe(
                 states,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
+                budget_threshold_pct=budget_threshold_pct,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -670,14 +672,16 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                # Check if pinned account has insufficient budget (< 5% remaining)
-                # or rate limit is far away (reset_at more than 10 minutes away)
+                # Proactively rebind durable session affinity once the pinned
+                # account is already above the configured budget threshold.
+                # That preserves continuity below the threshold while avoiding
+                # obvious short-window failures once the session is skating on
+                # the edge of exhaustion.
                 now = time.time()
                 budget_exhausted = (
-                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                    sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
                     and pinned.status != AccountStatus.RATE_LIMITED
-                    and pinned.used_percent is not None
-                    and pinned.used_percent > budget_threshold_pct
+                    and _state_above_budget_threshold(pinned, budget_threshold_pct)
                 )
                 rate_limit_far_away = (
                     sticky_kind == StickySessionKind.PROMPT_CACHE
@@ -703,18 +707,16 @@ class LoadBalancer:
                     # wastes DB writes and destroys prompt-cache locality
                     # (thrashing).
                     if budget_exhausted:
-                        pool_best = select_account(
+                        pool_best = _select_account_preferring_budget_safe(
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
                             deterministic_probe=True,
+                            budget_threshold_pct=budget_threshold_pct,
                         )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
-                            or (
-                                pool_best.account.used_percent is not None
-                                and pool_best.account.used_percent > budget_threshold_pct
-                            )
+                            or _state_above_budget_threshold(pool_best.account, budget_threshold_pct)
                         )
                         if pool_also_exhausted:
                             pinned_result = select_account(
@@ -769,10 +771,11 @@ class LoadBalancer:
             else:
                 await sticky_repo.delete(sticky_key, kind=sticky_kind)
 
-        chosen = select_account(
+        chosen = _select_account_preferring_budget_safe(
             states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
+            budget_threshold_pct=budget_threshold_pct,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -1293,6 +1296,43 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
     if entry.reset_at is not None and int(entry.reset_at) <= int(time.time()):
         return False
     return float(entry.used_percent) >= 100.0
+
+
+def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
+    return any(
+        used_percent is not None and used_percent > budget_threshold_pct
+        for used_percent in (state.used_percent, state.secondary_used_percent)
+    )
+
+
+def _select_account_preferring_budget_safe(
+    states: Iterable[AccountState],
+    *,
+    prefer_earlier_reset: bool,
+    routing_strategy: RoutingStrategy,
+    budget_threshold_pct: float,
+    allow_backoff_fallback: bool = True,
+    deterministic_probe: bool = False,
+) -> SelectionResult:
+    state_list = list(states)
+    preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
+    if preferred_states and len(preferred_states) != len(state_list):
+        preferred = select_account(
+            preferred_states,
+            prefer_earlier_reset=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+        )
+        if preferred.account is not None:
+            return preferred
+    return select_account(
+        state_list,
+        prefer_earlier_reset=prefer_earlier_reset,
+        routing_strategy=routing_strategy,
+        allow_backoff_fallback=allow_backoff_fallback,
+        deterministic_probe=deterministic_probe,
+    )
 
 
 def _is_upstream_circuit_breaker_open() -> bool:

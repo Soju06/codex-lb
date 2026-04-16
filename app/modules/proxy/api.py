@@ -422,14 +422,13 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         usage = await service.get_key_usage_summary_for_self(api_key.id)
-        aggregate_limits = await _build_aggregate_credit_limits(session)
 
     if usage is None:
         raise ProxyAuthError("Invalid API key")
 
-    merged_limits = _build_v1_usage_limits(usage, aggregate_limits)
-    primary_credit_limit = _select_codex_usage_limit(merged_limits, "5h")
-    secondary_credit_limit = _select_codex_usage_limit(merged_limits, "7d")
+    key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
+    primary_credit_limit = _select_codex_usage_limit(key_limits, "5h")
+    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d")
 
     return RateLimitStatusPayloadData(
         plan_type="api_key",

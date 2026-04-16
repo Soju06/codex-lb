@@ -1,0 +1,4 @@
+- [x] 1. Update the API key edit dialog's Assigned accounts picker to display account status plus remaining 5h and 7d availability for each account option.
+- [x] 2. Keep the picker rows compact by omitting model-specific additional quota badges from the inline account summary.
+- [x] 3. Add or update frontend tests covering the richer Assigned accounts rows and selection behavior.
+- [ ] 4. Run `openspec validate --specs` once the OpenSpec CLI is available in the local environment.

@@ -444,13 +444,12 @@ def _select_codex_usage_limit(
     limits: list[V1UsageLimitResponse],
     window: str,
 ) -> V1UsageLimitResponse | None:
-    candidates = [limit for limit in limits if limit.limit_window == window and limit.model_filter is None]
-    if not candidates:
-        return None
-    for limit in candidates:
-        if limit.limit_type == "credits":
-            return limit
-    return candidates[0]
+    candidates = [
+        limit
+        for limit in limits
+        if limit.limit_window == window and limit.model_filter is None and limit.limit_type == "credits"
+    ]
+    return candidates[0] if candidates else None
 
 
 def _codex_usage_window_snapshot(limit: V1UsageLimitResponse | None) -> RateLimitWindowSnapshotData | None:
@@ -459,7 +458,7 @@ def _codex_usage_window_snapshot(limit: V1UsageLimitResponse | None) -> RateLimi
     reset_at = datetime.fromisoformat(limit.reset_at.replace("Z", "+00:00"))
     reset_epoch = int(reset_at.timestamp())
     now_epoch = int(time.time())
-    used_percent = int(max(0, min(100, round((limit.current_value / limit.max_value) * 100))))
+    used_percent = max(0, min(100, int((limit.current_value / limit.max_value) * 100)))
     window_seconds = 18000 if limit.limit_window == "5h" else 604800 if limit.limit_window == "7d" else None
     return RateLimitWindowSnapshotData(
         used_percent=used_percent,

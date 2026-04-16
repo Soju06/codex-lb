@@ -505,11 +505,6 @@ class ProxyService:
             durable_lookup=durable_lookup,
         )
         request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
-        allow_initial_previous_response_recovery_rebind = _http_bridge_should_prefer_local_previous_response_recovery(
-            key=bridge_session_key,
-            previous_response_id=request_state.previous_response_id,
-            durable_lookup=durable_lookup,
-        )
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),
@@ -532,7 +527,6 @@ class ProxyService:
             durable_lookup=durable_lookup,
             request_stage=request_state.request_stage,
             preferred_account_id=request_state.preferred_account_id,
-            allow_previous_response_recovery_rebind=allow_initial_previous_response_recovery_rebind,
         )
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
             forwarded_any = False
@@ -7563,21 +7557,6 @@ def _cap_post_retry_continuation_budget(request_state: _WebSocketRequestState) -
         request_state.started_at,
         now - budget + _POST_RETRY_CONTINUATION_BUDGET_SECONDS,
     )
-
-
-def _http_bridge_should_prefer_local_previous_response_recovery(
-    *,
-    key: _HTTPBridgeSessionKey,
-    previous_response_id: str | None,
-    durable_lookup: DurableBridgeLookup | None,
-) -> bool:
-    if previous_response_id is None or durable_lookup is None:
-        return False
-    if durable_lookup.latest_response_id != previous_response_id:
-        return False
-    if _durable_bridge_lookup_active_owner(durable_lookup) is not None:
-        return False
-    return key.affinity_kind in {"session_header", "turn_state_header"}
 
 
 def _http_bridge_can_local_recover_without_ring(

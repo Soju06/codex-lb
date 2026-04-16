@@ -246,6 +246,27 @@ class TestRetryHelperPreservesPreviousResponseId:
         assert request_state.error_code_override != "previous_response_not_found"
         assert request_state.error_code_override is None
 
+    async def test_reconnect_only_recovery_with_previous_response_id_skips_resend(self, monkeypatch):
+        service = proxy_service.ProxyService(cast(Any, nullcontext()))
+        session = _make_session(closed=True)
+        send_text = AsyncMock()
+        session.upstream = cast(Any, SimpleNamespace(send_text=send_text))
+        request_state = _make_request_state(previous_response_id="resp_xyz789")
+
+        reconnect_mock = AsyncMock()
+        monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect_mock)
+
+        result = await service._retry_http_bridge_request_on_fresh_upstream(
+            session=session,
+            request_state=request_state,
+            text_data='{"type":"response.create","previous_response_id":"resp_xyz789"}',
+            send_request=False,
+        )
+
+        assert result is True
+        reconnect_mock.assert_awaited_once()
+        send_text.assert_not_awaited()
+
 
 class TestContextGrowthScenarios:
     """Scenario tests modelling real Codex session data.

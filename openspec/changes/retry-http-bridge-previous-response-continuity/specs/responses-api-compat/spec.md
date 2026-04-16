@@ -7,12 +7,13 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **WHEN** a client sends a later HTTP `/v1/responses` request with `previous_response_id` that references a response created earlier on the same bridged session
 - **THEN** the service forwards that request through the same upstream websocket session so upstream can resolve the referenced prior response
 
-#### Scenario: active bridged continuation retries once after upstream drop
+#### Scenario: active bridged continuation fails fast without replay after upstream drop
 - **WHEN** an HTTP `/v1/responses` or `/backend-api/codex/responses` request includes `previous_response_id`
 - **AND** the matching bridged session still exists locally
 - **AND** the upstream websocket drops before `response.created` arrives for that request
 - **THEN** the service reconnects the bridged session once with continuity headers intact
-- **AND** it replays the pending request on that fresh upstream websocket instead of waiting for the idle timeout
+- **AND** it MUST NOT replay the pending `response.create` on that fresh upstream websocket without an upstream idempotency guarantee
+- **AND** it fails the in-flight request quickly with an upstream-availability style error instead of waiting for the idle timeout
 
 #### Scenario: durable continuation prefers local recovery before owner handoff
 - **WHEN** an HTTP continuation request includes `previous_response_id`

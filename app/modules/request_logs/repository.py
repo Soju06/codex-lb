@@ -8,6 +8,7 @@ import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
@@ -29,6 +30,47 @@ class RequestLogsRepository:
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(select(RequestLog).where(RequestLog.requested_at >= since))
         return list(result.scalars().all())
+
+    async def find_latest_account_id_for_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_id: str | None,
+        session_id: str | None = None,
+    ) -> str | None:
+        response_id_value = response_id.strip()
+        if not response_id_value:
+            return None
+
+        base_conditions = [
+            RequestLog.request_id == response_id_value,
+            RequestLog.status == "success",
+            RequestLog.account_id.is_not(None),
+        ]
+        if api_key_id is not None:
+            base_conditions.append(RequestLog.api_key_id == api_key_id)
+
+        async def _lookup_account_id(conditions: list[ColumnElement[bool]]) -> str | None:
+            stmt = (
+                select(RequestLog.account_id)
+                .where(and_(*conditions))
+                .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+                .limit(1)
+            )
+            result = await self._session.execute(stmt)
+            account_id = result.scalar_one_or_none()
+            if not isinstance(account_id, str):
+                return None
+            stripped = account_id.strip()
+            return stripped or None
+
+        session_id_value = session_id.strip() if isinstance(session_id, str) else ""
+        if session_id_value:
+            scoped_owner = await _lookup_account_id([*base_conditions, RequestLog.session_id == session_id_value])
+            if scoped_owner is not None:
+                return scoped_owner
+
+        return await _lookup_account_id(base_conditions)
 
     async def aggregate_by_bucket(
         self,
@@ -139,11 +181,13 @@ class RequestLogsRepository:
         actual_service_tier: str | None = None,
         transport: str | None = None,
         api_key_id: str | None = None,
+        session_id: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         log = RequestLog(
             account_id=account_id,
             api_key_id=api_key_id,
+            session_id=session_id,
             request_id=resolved_request_id,
             model=model,
             transport=transport,

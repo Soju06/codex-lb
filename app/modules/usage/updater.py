@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import math
@@ -154,9 +155,24 @@ class _UsageRefreshSingleflight:
         current = self._inflight.get(account_id)
         if current is task:
             self._inflight.pop(account_id, None)
+        if task.cancelled():
+            return
+        with contextlib.suppress(BaseException):
+            task.exception()
 
     def clear(self) -> None:
         self._inflight.clear()
+
+    async def cancel_all(self) -> None:
+        async with self._lock:
+            tasks = list(self._inflight.values())
+            self._inflight.clear()
+        for task in tasks:
+            task.cancel()
+        if not tasks:
+            return
+        with contextlib.suppress(BaseException):
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 _USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()

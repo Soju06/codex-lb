@@ -134,7 +134,7 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
         )
         log = result.scalars().first()
         assert log is not None
-        assert log.request_id == request_id
+        assert log.request_id == "resp_1"
         assert log.input_tokens == 10
         assert log.output_tokens == 5
         assert log.cached_input_tokens == 3

@@ -12,6 +12,7 @@ import os
 import socket
 import time
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import (
     AsyncContextManager,
@@ -56,6 +57,7 @@ from app.core.resilience.circuit_breaker import (
     get_circuit_breaker_for_account,
 )
 from app.core.types import JsonObject, JsonValue
+from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 
@@ -87,6 +89,12 @@ _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
 _BLOCKED_LITERAL_HOSTS = {"localhost", "localhost.localdomain"}
+_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = 12 * 1024 * 1024
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = 15 * 1024 * 1024
+_RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
+    "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
+)
+_RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
 _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
     {
         "accept",
@@ -1195,7 +1203,7 @@ async def _stream_responses_via_websocket(
 ) -> AsyncIterator[str]:
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
-    request_payload = _build_websocket_response_create_payload(payload_dict)
+    request_payload = _prepare_websocket_response_create_payload(payload_dict)
     websocket_cm: AsyncContextManager[aiohttp.ClientWebSocketResponse] | None = None
     websocket: aiohttp.ClientWebSocketResponse | None = None
     circuit_breaker = None
@@ -1286,6 +1294,193 @@ def _build_websocket_response_create_payload(payload_dict: JsonObject) -> JsonOb
     }
     request_payload["type"] = "response.create"
     return request_payload
+
+
+def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> JsonObject:
+    request_payload = _build_websocket_response_create_payload(payload_dict)
+    payload_text = json.dumps(request_payload, ensure_ascii=True, separators=(",", ":"))
+    payload_size = len(payload_text.encode("utf-8"))
+    if payload_size > _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+        slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
+            request_payload,
+            max_bytes=_UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
+        )
+        if slim_summary is not None:
+            request_payload = cast(JsonObject, slimmed_payload)
+            slimmed_text = json.dumps(request_payload, ensure_ascii=True, separators=(",", ":"))
+            logger.warning(
+                (
+                    "Slimmed response.create before upstream websocket connect request_id=%s "
+                    "original_bytes=%s slimmed_bytes=%s historical_tool_outputs_slimmed=%s "
+                    "historical_images_slimmed=%s"
+                ),
+                get_request_id(),
+                payload_size,
+                len(slimmed_text.encode("utf-8")),
+                slim_summary["historical_tool_outputs_slimmed"],
+                slim_summary["historical_images_slimmed"],
+            )
+            payload_text = slimmed_text
+            payload_size = len(payload_text.encode("utf-8"))
+    if payload_size > _UPSTREAM_RESPONSE_CREATE_WARN_BYTES:
+        previous_response_id = request_payload.get("previous_response_id")
+        logger.warning(
+            "Large response.create prepared request_id=%s bytes=%s previous_response_id=%s",
+            get_request_id(),
+            payload_size,
+            previous_response_id if isinstance(previous_response_id, str) else None,
+        )
+    if payload_size <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+        return request_payload
+    raise ProxyResponseError(
+        413,
+        _response_create_too_large_error_envelope(payload_size, _UPSTREAM_RESPONSE_CREATE_MAX_BYTES),
+        failure_phase="validation",
+        failure_detail=f"response.create_bytes={payload_size}",
+    )
+
+
+def _response_create_too_large_error_envelope(actual_bytes: int, max_bytes: int) -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "payload_too_large",
+        (
+            "response.create is too large for upstream websocket "
+            f"({actual_bytes} bytes > {max_bytes} bytes). "
+            "Reduce historical images/screenshots or compact the thread."
+        ),
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "input"
+    return payload
+
+
+def _slim_response_create_payload_for_upstream(
+    payload: JsonObject,
+    *,
+    max_bytes: int,
+) -> tuple[JsonObject, dict[str, int] | None]:
+    del max_bytes
+    input_value = payload.get("input")
+    if not isinstance(input_value, list) or not input_value:
+        return payload, None
+
+    input_items = cast(list[JsonValue], deepcopy(input_value))
+    preserve_from = _response_create_recent_suffix_start(input_items)
+    historical = input_items[:preserve_from]
+    recent = input_items[preserve_from:]
+
+    tool_outputs_slimmed = 0
+    images_slimmed = 0
+
+    slimmed_historical: list[JsonValue] = []
+    for item in historical:
+        slimmed_item, item_tool_outputs_slimmed, item_images_slimmed = _slim_historical_response_input_item(item)
+        tool_outputs_slimmed += item_tool_outputs_slimmed
+        images_slimmed += item_images_slimmed
+        slimmed_historical.append(slimmed_item)
+
+    if tool_outputs_slimmed == 0 and images_slimmed == 0:
+        return payload, None
+
+    candidate_payload = dict(payload)
+    candidate_payload["input"] = slimmed_historical + recent
+    return candidate_payload, {
+        "historical_tool_outputs_slimmed": tool_outputs_slimmed,
+        "historical_images_slimmed": images_slimmed,
+    }
+
+
+def _response_create_recent_suffix_start(input_items: list[JsonValue]) -> int:
+    last_user_index: int | None = None
+    for index, item in enumerate(input_items):
+        if not is_json_mapping(item):
+            continue
+        if item.get("role") == "user":
+            last_user_index = index
+    if last_user_index is not None:
+        return last_user_index
+    return 0
+
+
+def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, int, int]:
+    if not is_json_mapping(item):
+        return item, 0, 0
+
+    item_mapping = dict(cast(dict[str, JsonValue], deepcopy(item)))
+    tool_outputs_slimmed = 0
+    images_slimmed = 0
+
+    if item_mapping.get("type") == "function_call_output":
+        output = item_mapping.get("output")
+        output_text = output if isinstance(output, str) else None
+        if output_text is not None and _should_slim_historical_tool_output(output_text):
+            item_mapping["output"] = _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
+                bytes=len(output_text.encode("utf-8"))
+            )
+            tool_outputs_slimmed += 1
+
+    content = item_mapping.get("content")
+    slimmed_content, content_images_slimmed = _slim_historical_response_content(content)
+    if content_images_slimmed > 0:
+        item_mapping["content"] = slimmed_content
+        images_slimmed += content_images_slimmed
+
+    if item_mapping.get("type") == "input_image" and _is_inline_image_reference(item_mapping.get("image_url")):
+        return _response_create_inline_image_notice_item(), tool_outputs_slimmed, images_slimmed + 1
+
+    return item_mapping, tool_outputs_slimmed, images_slimmed
+
+
+def _slim_historical_response_content(content: JsonValue) -> tuple[JsonValue, int]:
+    if is_json_mapping(content):
+        return _slim_historical_response_content_part(content)
+    if not isinstance(content, list):
+        return content, 0
+
+    slimmed_parts: list[JsonValue] = []
+    images_slimmed = 0
+    for part in content:
+        slimmed_part, part_images_slimmed = _slim_historical_response_content_part(part)
+        slimmed_parts.append(slimmed_part)
+        images_slimmed += part_images_slimmed
+    return slimmed_parts, images_slimmed
+
+
+def _slim_historical_response_content_part(part: JsonValue) -> tuple[JsonValue, int]:
+    if not is_json_mapping(part):
+        return part, 0
+
+    part_mapping = dict(cast(dict[str, JsonValue], deepcopy(part)))
+    part_type = part_mapping.get("type")
+    if part_type == "input_image" and _is_inline_image_reference(part_mapping.get("image_url")):
+        return _response_create_inline_image_notice_part(), 1
+
+    if part_type == "image_url":
+        image_url_value = part_mapping.get("image_url")
+        if is_json_mapping(image_url_value):
+            image_url = image_url_value.get("url")
+        else:
+            image_url = image_url_value
+        if _is_inline_image_reference(image_url):
+            return _response_create_inline_image_notice_part(), 1
+
+    return part_mapping, 0
+
+
+def _response_create_inline_image_notice_part() -> JsonObject:
+    return {"type": "input_text", "text": _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+
+
+def _response_create_inline_image_notice_item() -> JsonObject:
+    return {"role": "user", "content": [_response_create_inline_image_notice_part()]}
+
+
+def _is_inline_image_reference(value: JsonValue) -> bool:
+    return isinstance(value, str) and value.startswith("data:image/")
+
+
+def _should_slim_historical_tool_output(output: str) -> bool:
+    return "data:image/" in output or len(output.encode("utf-8")) > 32 * 1024
 
 
 async def _inline_input_image_urls(

@@ -122,6 +122,7 @@ class RequestLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
@@ -619,6 +620,23 @@ Index(
     "idx_logs_status_error_time",
     RequestLog.status,
     RequestLog.error_code,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
+Index(
+    "idx_logs_request_status_api_key_time",
+    RequestLog.request_id,
+    RequestLog.status,
+    RequestLog.api_key_id,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
+Index(
+    "idx_logs_request_status_api_key_session_time",
+    RequestLog.request_id,
+    RequestLog.status,
+    RequestLog.api_key_id,
+    RequestLog.session_id,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
 )

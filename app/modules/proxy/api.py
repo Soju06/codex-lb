@@ -428,8 +428,10 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
 
     key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
     primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
-    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d") or _select_codex_usage_limit(
-        key_limits, "weekly"
+    secondary_credit_limit = (
+        _select_codex_usage_limit(key_limits, "7d")
+        or _select_codex_usage_limit(key_limits, "weekly")
+        or _select_codex_usage_limit(key_limits, "monthly")
     )
 
     return RateLimitStatusPayloadData(

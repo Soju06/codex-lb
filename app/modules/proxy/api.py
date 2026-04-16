@@ -478,7 +478,7 @@ def _codex_usage_credit_snapshot(
     primary_limit: V1UsageLimitResponse | None,
     secondary_limit: V1UsageLimitResponse | None,
 ) -> CreditStatusDetailsData | None:
-    preferred = primary_limit or secondary_limit
+    preferred = secondary_limit or primary_limit
     if preferred is None or preferred.limit_type != "credits":
         return None
     return CreditStatusDetailsData(

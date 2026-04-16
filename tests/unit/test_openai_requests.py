@@ -216,6 +216,39 @@ def test_openai_compatible_reasoning_aliases_are_normalized():
     assert "reasoningSummary" not in dumped
 
 
+def test_provider_thinking_aliases_are_normalized():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+        "enable_thinking": True,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["reasoning"] == {"effort": "medium"}
+    assert "thinking" not in dumped
+    assert "enable_thinking" not in dumped
+
+
+def test_explicit_reasoning_wins_over_provider_thinking_aliases():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "reasoning": {"effort": "high"},
+        "thinking": {"type": "enabled"},
+        "enable_thinking": True,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+    assert dumped["reasoning"] == {"effort": "high"}
+    assert "thinking" not in dumped
+    assert "enable_thinking" not in dumped
+
+
 def test_openai_compatible_text_verbosity_alias_is_normalized():
     payload = {
         "model": "gpt-5.1",

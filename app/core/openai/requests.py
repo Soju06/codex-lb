@@ -522,18 +522,11 @@ def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:
     payload["input"] = _sanitize_input_items(input_items)
 
 
-def _normalize_openai_compatible_aliases(payload: MutableJsonObject) -> None:
+def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     reasoning_effort = payload.pop("reasoningEffort", None)
     reasoning_summary = payload.pop("reasoningSummary", None)
-    text_verbosity = payload.pop("textVerbosity", None)
-    top_level_verbosity = payload.pop("verbosity", None)
-    prompt_cache_key = payload.pop("promptCacheKey", None)
-    prompt_cache_retention = payload.pop("promptCacheRetention", None)
-
-    if isinstance(prompt_cache_key, str) and "prompt_cache_key" not in payload:
-        payload["prompt_cache_key"] = prompt_cache_key
-    if isinstance(prompt_cache_retention, str) and "prompt_cache_retention" not in payload:
-        payload["prompt_cache_retention"] = prompt_cache_retention
+    provider_thinking = payload.pop("thinking", None)
+    provider_enable_thinking = payload.pop("enable_thinking", None)
 
     reasoning_payload = _json_mapping_or_none(payload.get("reasoning"))
     if reasoning_payload is not None:
@@ -545,8 +538,75 @@ def _normalize_openai_compatible_aliases(payload: MutableJsonObject) -> None:
         reasoning_map["effort"] = reasoning_effort
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary
+
+    provider_reasoning = _normalize_thinking_alias(
+        provider_thinking,
+        enable_thinking=provider_enable_thinking,
+    )
+    if provider_reasoning is not None:
+        if "effort" not in reasoning_map and "effort" in provider_reasoning:
+            reasoning_map["effort"] = provider_reasoning["effort"]
+        if "summary" not in reasoning_map and "summary" in provider_reasoning:
+            reasoning_map["summary"] = provider_reasoning["summary"]
+
     if reasoning_map:
         payload["reasoning"] = reasoning_map
+
+
+def _normalize_thinking_alias(
+    thinking: JsonValue,
+    *,
+    enable_thinking: JsonValue,
+) -> MutableJsonObject | None:
+    if isinstance(thinking, bool):
+        return {"effort": "medium"} if thinking else None
+    if isinstance(thinking, str):
+        normalized = thinking.strip().lower()
+        if normalized in {"low", "medium", "high", "xhigh"}:
+            return {"effort": normalized}
+        if normalized in {"enabled", "true", "on"}:
+            return {"effort": "medium"}
+        if normalized in {"disabled", "false", "off"}:
+            return None
+    thinking_mapping = _json_mapping_or_none(thinking)
+    if thinking_mapping is not None:
+        normalized: MutableJsonObject = {}
+        effort = thinking_mapping.get("effort")
+        summary = thinking_mapping.get("summary")
+        if isinstance(effort, str) and effort.strip():
+            normalized["effort"] = effort.strip().lower()
+        if isinstance(summary, str) and summary.strip():
+            normalized["summary"] = summary.strip()
+        if normalized:
+            return normalized
+        thinking_type = thinking_mapping.get("type")
+        if isinstance(thinking_type, str):
+            normalized_type = thinking_type.strip().lower()
+            if normalized_type == "enabled":
+                return {"effort": "medium"}
+            if normalized_type == "disabled":
+                return None
+        enabled = thinking_mapping.get("enabled")
+        if isinstance(enabled, bool):
+            return {"effort": "medium"} if enabled else None
+
+    if isinstance(enable_thinking, bool):
+        return {"effort": "medium"} if enable_thinking else None
+    return None
+
+
+def _normalize_openai_compatible_aliases(payload: MutableJsonObject) -> None:
+    text_verbosity = payload.pop("textVerbosity", None)
+    top_level_verbosity = payload.pop("verbosity", None)
+    prompt_cache_key = payload.pop("promptCacheKey", None)
+    prompt_cache_retention = payload.pop("promptCacheRetention", None)
+
+    if isinstance(prompt_cache_key, str) and "prompt_cache_key" not in payload:
+        payload["prompt_cache_key"] = prompt_cache_key
+    if isinstance(prompt_cache_retention, str) and "prompt_cache_retention" not in payload:
+        payload["prompt_cache_retention"] = prompt_cache_retention
+
+    normalize_reasoning_aliases(payload)
 
     text_payload = _json_mapping_or_none(payload.get("text"))
     if text_payload is not None:

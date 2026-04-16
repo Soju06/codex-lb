@@ -82,6 +82,10 @@ class Account(Base):
         back_populates="account",
         cascade="all, delete-orphan",
     )
+    request_logs: Mapped[list["RequestLog"]] = relationship(
+        "RequestLog",
+        back_populates="account",
+    )
 
 
 class UsageHistory(Base):
@@ -140,6 +144,10 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    account: Mapped[Account | None] = relationship(
+        "Account",
+        back_populates="request_logs",
+    )
 
 
 class AuditLog(Base):

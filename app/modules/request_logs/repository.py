@@ -8,6 +8,7 @@ import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
@@ -206,7 +207,11 @@ class RequestLogsRepository:
         )
 
         total_col = func.count().over().label("_total")
-        stmt = select(RequestLog, total_col).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+        stmt = (
+            select(RequestLog, total_col)
+            .options(selectinload(RequestLog.account))
+            .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+        )
         stmt = self._apply_related_search_joins(stmt, filters.needs_related_search_joins)
         if filters.conditions:
             stmt = stmt.where(and_(*filters.conditions))

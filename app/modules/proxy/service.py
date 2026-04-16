@@ -4126,7 +4126,7 @@ class ProxyService:
             # history, inflating per-turn context by ~20x.
             raise ProxyResponseError(
                 502,
-                openai_error("bridge_owner_unreachable", str(exc) or "Upstream websocket closed"),
+                openai_error("upstream_unavailable", str(exc) or "Upstream websocket closed"),
             ) from exc
 
     async def _maybe_prewarm_http_bridge_session(

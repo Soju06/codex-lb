@@ -434,6 +434,14 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
         or _select_codex_usage_limit(key_limits, "monthly")
     )
 
+    if primary_credit_limit is None and secondary_credit_limit is None:
+        async with get_background_session() as session:
+            aggregate_limits = await _build_aggregate_credit_limits(session)
+        if aggregate_limits:
+            agg_limits = list(aggregate_limits.values())
+            primary_credit_limit = _select_codex_usage_limit(agg_limits, "5h")
+            secondary_credit_limit = _select_codex_usage_limit(agg_limits, "7d")
+
     return RateLimitStatusPayloadData(
         plan_type="api_key",
         rate_limit=_rate_limit_details(

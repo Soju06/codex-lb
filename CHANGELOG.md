@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.1](https://github.com/Soju06/codex-lb/compare/v1.13.0...v1.13.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **auth:** accept API keys on /api/codex/usage ([#417](https://github.com/Soju06/codex-lb/issues/417)) ([d75981d](https://github.com/Soju06/codex-lb/commit/d75981dde5a33098e674431847e29205322aa31d))
+* replace reject-fast admission with wait-then-reject and tune HA defaults ([#413](https://github.com/Soju06/codex-lb/issues/413)) ([8d6d7c0](https://github.com/Soju06/codex-lb/commit/8d6d7c0c358fdc4b2a7cc83d94c3f2f7f413fbdf))
+
 ## [1.13.0](https://github.com/Soju06/codex-lb/compare/v1.12.0...v1.13.0) (2026-04-14)
 
 

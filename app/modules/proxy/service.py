@@ -201,6 +201,7 @@ _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
+_POST_RETRY_CONTINUATION_BUDGET_SECONDS = 30.0
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
         "rate_limit_exceeded",
@@ -3784,6 +3785,7 @@ class ProxyService:
             if send_request:
                 await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
+            _cap_post_retry_continuation_budget(request_state)
             return True
         except Exception:
             logger.warning("HTTP bridge retry on fresh upstream failed", exc_info=True)
@@ -3819,6 +3821,7 @@ class ProxyService:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             await session.upstream.send_text(request_text)
             session.last_used_at = time.monotonic()
+            _cap_post_retry_continuation_budget(request_state)
             return True
         except Exception:
             logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
@@ -7550,6 +7553,17 @@ def _http_bridge_has_durable_recovery_anchor(
     if previous_response_id is not None:
         return True
     return durable_lookup is not None and durable_lookup.latest_response_id is not None
+
+
+def _cap_post_retry_continuation_budget(request_state: _WebSocketRequestState) -> None:
+    if request_state.previous_response_id is None:
+        return
+    budget = get_settings().proxy_request_budget_seconds
+    now = time.monotonic()
+    request_state.started_at = max(
+        request_state.started_at,
+        now - budget + _POST_RETRY_CONTINUATION_BUDGET_SECONDS,
+    )
 
 
 def _http_bridge_should_prefer_local_previous_response_recovery(

@@ -10,6 +10,6 @@
 
 ## 3. Implementation
 
-- [x] 3.1 Load related account plan data for request-log listing without changing legacy row behavior
-- [x] 3.2 Expose `planType` from `/api/request-logs`
+- [x] 3.1 Persist request-log `planType` snapshots without changing legacy row behavior
+- [x] 3.2 Expose persisted `planType` from `/api/request-logs`
 - [x] 3.3 Show account plan badges in the dashboard recent requests table

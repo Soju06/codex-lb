@@ -483,6 +483,11 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             request_log_columns_rows = (await session.execute(text("PRAGMA table_info(request_logs)"))).fetchall()
             request_log_columns = {str(row[1]) for row in request_log_columns_rows if len(row) > 1}
             assert "transport" in request_log_columns
+            assert "plan_type" in request_log_columns
+            legacy_plan_type = (
+                await session.execute(text("SELECT plan_type FROM request_logs WHERE id=1"))
+            ).scalar_one()
+            assert legacy_plan_type is None
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))

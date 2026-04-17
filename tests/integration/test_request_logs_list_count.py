@@ -54,8 +54,7 @@ async def test_list_recent_returns_rows_and_total(db_setup):
         logs, total = await repo.list_recent(limit=3, offset=0)
         assert len(logs) == 3
         assert total == 5
-        assert logs[0].account is not None
-        assert logs[0].account.plan_type == "plus"
+        assert logs[0].plan_type == "plus"
 
 
 @pytest.mark.asyncio

@@ -277,7 +277,7 @@ async def test_request_logs_expose_account_plan_type(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
-        await accounts_repo.upsert(_make_account("acc_plan", "plan@example.com", plan_type="team"))
+        await accounts_repo.upsert(_make_account("acc_plan", "plan@example.com", plan_type="free"))
 
         await logs_repo.add_log(
             account_id="acc_plan",
@@ -290,11 +290,15 @@ async def test_request_logs_expose_account_plan_type(async_client, db_setup):
             error_code=None,
             requested_at=now,
         )
+        await session.execute(
+            update(Account).where(Account.id == "acc_plan").values(plan_type="team")
+        )
+        await session.commit()
 
     response = await async_client.get("/api/request-logs")
     assert response.status_code == 200
     payload = response.json()["requests"]
-    assert payload[0]["planType"] == "team"
+    assert payload[0]["planType"] == "free"
 
 
 @pytest.mark.asyncio

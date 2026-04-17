@@ -82,6 +82,10 @@ class Account(Base):
         back_populates="account",
         cascade="all, delete-orphan",
     )
+    request_logs: Mapped[list["RequestLog"]] = relationship(
+        "RequestLog",
+        back_populates="account",
+    )
 
 
 class UsageHistory(Base):
@@ -125,6 +129,7 @@ class RequestLog(Base):
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
+    plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -140,6 +145,10 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    account: Mapped[Account | None] = relationship(
+        "Account",
+        back_populates="request_logs",
+    )
 
 
 class AuditLog(Base):

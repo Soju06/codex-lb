@@ -8,7 +8,6 @@ import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
@@ -139,13 +138,18 @@ class RequestLogsRepository:
         actual_service_tier: str | None = None,
         transport: str | None = None,
         api_key_id: str | None = None,
+        plan_type: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
+        resolved_plan_type = plan_type
+        if resolved_plan_type is None and account_id:
+            resolved_plan_type = await self._resolve_account_plan_type(account_id)
         log = RequestLog(
             account_id=account_id,
             api_key_id=api_key_id,
             request_id=resolved_request_id,
             model=model,
+            plan_type=resolved_plan_type,
             transport=transport,
             service_tier=service_tier,
             requested_service_tier=requested_service_tier,
@@ -206,7 +210,10 @@ class RequestLogsRepository:
         )
 
         total_col = func.count().over().label("_total")
-        stmt = select(RequestLog, total_col).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+        stmt = (
+            select(RequestLog, total_col)
+            .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+        )
         stmt = self._apply_related_search_joins(stmt, filters.needs_related_search_joins)
         if filters.conditions:
             stmt = stmt.where(and_(*filters.conditions))
@@ -229,6 +236,12 @@ class RequestLogsRepository:
             count_stmt = count_stmt.where(and_(*filters.conditions))
         result = await self._session.execute(count_stmt)
         return int(result.scalar_one())
+
+    async def _resolve_account_plan_type(self, account_id: str) -> str | None:
+        result = await self._session.execute(
+            select(Account.plan_type).where(Account.id == account_id).limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def list_filter_options(
         self,

@@ -1,0 +1,4 @@
+- [x] 1. Allow Responses-family validators to accept built-in tool definitions instead of rejecting them locally.
+- [x] 2. Preserve stricter Chat Completions validation for unsupported built-in tools.
+- [x] 3. Add unit and integration coverage for HTTP and websocket Responses flows carrying built-in tools.
+- [x] 4. Validate targeted pytest coverage and prepare a focused PR for issue #426.

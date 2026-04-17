@@ -10,6 +10,19 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
 
+_BUILTIN_RESPONSE_TOOL_PAYLOADS = [
+    {"type": "file_search", "vector_store_ids": ["vs_dummy"]},
+    {"type": "code_interpreter", "container": {"type": "auto"}},
+    {
+        "type": "computer_use_preview",
+        "display_width": 1024,
+        "display_height": 768,
+        "environment": "browser",
+    },
+    {"type": "computer_use", "display_width": 1024, "display_height": 768, "environment": "browser"},
+    {"type": "image_generation", "output_format": "png"},
+]
+
 
 def test_responses_requires_instructions():
     with pytest.raises(ValidationError):
@@ -484,10 +497,12 @@ def test_v1_input_string_passthrough():
     assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
 
 
-def test_v1_rejects_builtin_tools():
-    payload = {"model": "gpt-5.1", "input": [], "tools": [{"type": "image_generation"}]}
-    with pytest.raises(ValidationError, match="Unsupported tool type"):
-        V1ResponsesRequest.model_validate(payload)
+@pytest.mark.parametrize("tool_payload", _BUILTIN_RESPONSE_TOOL_PAYLOADS)
+def test_v1_accepts_builtin_response_tools(tool_payload):
+    payload = {"model": "gpt-5.1", "input": [], "tools": [tool_payload]}
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    assert request.tools == [tool_payload]
 
 
 def test_v1_compact_messages_convert():

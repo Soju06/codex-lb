@@ -9,6 +9,19 @@ import app.modules.proxy.service as proxy_module
 
 pytestmark = pytest.mark.integration
 
+_BUILTIN_RESPONSE_TOOL_PAYLOADS = [
+    {"type": "file_search", "vector_store_ids": ["vs_dummy"]},
+    {"type": "code_interpreter", "container": {"type": "auto"}},
+    {
+        "type": "computer_use_preview",
+        "display_width": 1024,
+        "display_height": 768,
+        "environment": "browser",
+    },
+    {"type": "computer_use", "display_width": 1024, "display_height": 768, "environment": "browser"},
+    {"type": "image_generation", "output_format": "png"},
+]
+
 
 def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -123,21 +136,18 @@ async def test_v1_responses_accepts_previous_response_id(async_client, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "tool_payload",
-    [
-        {"type": "file_search", "vector_store_ids": ["vs_dummy"]},
-        {"type": "code_interpreter", "container": {"type": "auto"}},
-        {
-            "type": "computer_use_preview",
-            "display_width": 1024,
-            "display_height": 768,
-            "environment": "browser",
-        },
-        {"type": "image_generation"},
-    ],
-)
-async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
+@pytest.mark.parametrize("tool_payload", _BUILTIN_RESPONSE_TOOL_PAYLOADS)
+async def test_v1_responses_allows_builtin_tools(async_client, monkeypatch, tool_payload):
+    await _import_account(async_client, "acc_builtin_tools", "builtin-tools@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_builtin_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     request_payload = {
         "model": "gpt-5.2",
         "input": [
@@ -150,8 +160,42 @@ async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
     }
 
     resp = await async_client.post("/v1/responses", json=request_payload)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "invalid_request_error"
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [tool_payload]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_payload", _BUILTIN_RESPONSE_TOOL_PAYLOADS)
+async def test_backend_responses_allows_builtin_tools(async_client, monkeypatch, tool_payload):
+    await _import_account(
+        async_client,
+        f"acc_backend_{tool_payload['type']}",
+        f"backend-{tool_payload['type']}@example.com",
+    )
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_builtin_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Run tool."}],
+            }
+        ],
+        "tools": [tool_payload],
+    }
+
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [tool_payload]
 
 
 @pytest.mark.asyncio

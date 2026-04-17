@@ -137,7 +137,18 @@ async def test_v1_responses_accepts_previous_response_id(async_client, monkeypat
         {"type": "image_generation"},
     ],
 )
-async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
+async def test_v1_responses_forwards_builtin_tools(async_client, monkeypatch, tool_payload):
+    await _import_account(async_client, "acc_builtin_tools", "builtin-tools@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del headers, access_token, account_id, base_url, raise_for_status
+        seen["payload"] = payload
+        yield _completed_event("resp_builtin_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     request_payload = {
         "model": "gpt-5.2",
         "input": [
@@ -150,8 +161,8 @@ async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
     }
 
     resp = await async_client.post("/v1/responses", json=request_payload)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "invalid_request_error"
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [tool_payload]
 
 
 @pytest.mark.asyncio

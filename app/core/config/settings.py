@@ -135,7 +135,11 @@ class Settings(BaseSettings):
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
-    max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    # Applies to both upstream SSE event buffering and upstream websocket message
+    # frames. Keep the default aligned with the common 16 MiB websocket ceiling so
+    # large built-in tool payloads (for example image_generation outputs) do not
+    # fail locally with a 1009 before upstream completion.
+    max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_originator: str = "codex_chatgpt_desktop"

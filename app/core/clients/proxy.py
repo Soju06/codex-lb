@@ -944,17 +944,33 @@ def _is_native_codex_originator(originator: str | None) -> bool:
     return stripped in _NATIVE_CODEX_ORIGINATORS
 
 
+def _payload_uses_image_generation_tool(payload: Mapping[str, JsonValue]) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = tool.get("type")
+        if tool_type == "image_generation":
+            return True
+    return False
+
+
 def _resolve_stream_transport(
     *,
     transport: str,
     transport_override: str | None,
     model: str | None,
     headers: Mapping[str, str],
+    has_image_generation_tool: bool = False,
 ) -> str:
     configured = _configured_stream_transport(transport=transport, transport_override=transport_override)
     if configured == "websocket":
         return "websocket"
     if configured == "http":
+        return "http"
+    if has_image_generation_tool:
         return "http"
     if _has_native_codex_transport_headers(headers):
         return "websocket"
@@ -1598,6 +1614,7 @@ async def stream_responses(
         transport_override=upstream_stream_transport_override,
         model=payload.model,
         headers=headers,
+        has_image_generation_tool=_payload_uses_image_generation_tool(payload_dict),
     )
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)

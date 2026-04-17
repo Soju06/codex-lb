@@ -275,6 +275,42 @@ def test_resolve_stream_transport_does_not_force_websocket_for_custom_codex_orig
     assert transport == "http"
 
 
+def test_resolve_stream_transport_prefers_http_for_image_generation_even_with_native_codex_headers(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+
+    transport = proxy_module._resolve_stream_transport(
+        transport="auto",
+        transport_override=None,
+        model="gpt-5.4",
+        headers={"originator": "codex_chatgpt_desktop"},
+        has_image_generation_tool=True,
+    )
+
+    assert transport == "http"
+
+
+def test_resolve_stream_transport_keeps_explicit_websocket_override_for_image_generation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda _model: False),
+    )
+
+    transport = proxy_module._resolve_stream_transport(
+        transport="auto",
+        transport_override="websocket",
+        model="gpt-5.4",
+        headers={},
+        has_image_generation_tool=True,
+    )
+
+    assert transport == "websocket"
+
+
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():
     payload = {
         "client_metadata": {
@@ -2320,6 +2356,56 @@ async def test_stream_responses_auto_transport_uses_bootstrap_model_preference_w
     assert events == [
         'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_auto_bootstrap"}}\n\n'
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_auto_transport_prefers_http_for_image_generation_tool(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "auto"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    session = _SseSession(
+        _SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_http_image_tool"}}\n\n'])
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "draw",
+            "input": [{"role": "user", "content": "draw"}],
+            "tools": [{"type": "image_generation"}],
+        }
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={"originator": "codex_chatgpt_desktop"},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert session.calls
+    assert not getattr(session, "ws_calls", [])
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_http_image_tool"}}\n\n']
 
 
 @pytest.mark.asyncio

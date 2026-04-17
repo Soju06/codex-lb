@@ -312,6 +312,68 @@ async def test_select_account_reads_cached_usage_once_per_window() -> None:
 
 
 @pytest.mark.asyncio
+async def test_select_account_prefers_budget_safe_account_when_any_exist() -> None:
+    safe_account = _make_account("acc-safe", "safe@example.com")
+    pressured_account = _make_account("acc-pressured", "pressured@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        safe_account.id: UsageHistory(
+            id=1,
+            account_id=safe_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        pressured_account.id: UsageHistory(
+            id=2,
+            account_id=pressured_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=99.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        safe_account.id: UsageHistory(
+            id=3,
+            account_id=safe_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=80.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        pressured_account.id: UsageHistory(
+            id=4,
+            account_id=pressured_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=5.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([safe_account, pressured_account])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == safe_account.id
+
+
+@pytest.mark.asyncio
 async def test_select_account_filters_to_assigned_account_ids() -> None:
     preferred = _make_account("acc-preferred", "preferred@example.com")
     assigned = _make_account("acc-assigned", "assigned@example.com")

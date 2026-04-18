@@ -118,6 +118,16 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             />
           </div>
 
+          <div className="flex items-center justify-between p-3">
+            <div>
+              <p className="text-sm font-medium">Enable image generation</p>
+              <p className="text-xs text-muted-foreground">
+                Allow `image_generation` tool calls on incoming OpenAI-compatible requests.
+              </p>
+            </div>
+            <Switch checked={false} disabled />
+          </div>
+
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-sm font-medium">Prompt-cache affinity TTL</p>

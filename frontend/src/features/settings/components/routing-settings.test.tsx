@@ -97,4 +97,15 @@ describe("RoutingSettings", () => {
     expect(screen.getByText("Upstream stream transport")).toBeInTheDocument();
     expect(screen.getByText("Server default")).toBeInTheDocument();
   });
+
+  it("renders the image generation toggle as disabled", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    const imageGenerationLabel = screen.getByText("Enable image generation");
+    expect(imageGenerationLabel).toBeInTheDocument();
+
+    const row = imageGenerationLabel.closest("div")?.parentElement;
+    expect(row).not.toBeNull();
+    expect(row ? row.querySelector('[role="switch"]') : null).toBeDisabled();
+  });
 });

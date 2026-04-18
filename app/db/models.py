@@ -253,6 +253,12 @@ class DashboardSettings(Base):
         server_default=text("95.0"),
         nullable=False,
     )
+    image_generation_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

@@ -77,6 +77,7 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
         http_responses_session_bridge_gateway_safe_mode=False,
         sticky_reallocation_budget_threshold_pct=95.0,
+        image_generation_enabled=True,
     )
 
     class _SettingsCache:

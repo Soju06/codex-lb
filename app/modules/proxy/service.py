@@ -138,6 +138,7 @@ from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    enforce_image_generation_enabled,
     normalize_responses_request_payload,
     openai_invalid_payload_error,
     openai_validation_error,
@@ -1642,6 +1643,11 @@ class ProxyService:
         client_metadata = _response_create_client_metadata(payload, headers=headers)
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        dashboard_settings = await get_settings_cache().get()
+        enforce_image_generation_enabled(
+            responses_payload,
+            image_generation_enabled=dashboard_settings.image_generation_enabled,
+        )
         validate_model_access(refreshed_api_key, responses_payload.model)
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,

@@ -118,7 +118,9 @@ function createTrendPoints(
 	bucketSeconds = 6 * 3600,
 ): Array<{ t: string; v: number }> {
 	return Array.from({ length: count }, (_, i) => ({
-		t: new Date(BASE_TIME.getTime() - (count - i) * bucketSeconds * 1000).toISOString(),
+		t: new Date(
+			BASE_TIME.getTime() - (count - i) * bucketSeconds * 1000,
+		).toISOString(),
 		v: Math.max(0, baseValue + Math.sin(i) * baseValue * 0.3),
 	}));
 }
@@ -214,10 +216,26 @@ export function createDashboardOverview(
 			},
 		},
 		trends: {
-			requests: createTrendPoints(8, timeframe.bucketCount, timeframe.bucketSeconds),
-			tokens: createTrendPoints(1600, timeframe.bucketCount, timeframe.bucketSeconds),
-			cost: createTrendPoints(0.065, timeframe.bucketCount, timeframe.bucketSeconds),
-			errorRate: createTrendPoints(0.03, timeframe.bucketCount, timeframe.bucketSeconds),
+			requests: createTrendPoints(
+				8,
+				timeframe.bucketCount,
+				timeframe.bucketSeconds,
+			),
+			tokens: createTrendPoints(
+				1600,
+				timeframe.bucketCount,
+				timeframe.bucketSeconds,
+			),
+			cost: createTrendPoints(
+				0.065,
+				timeframe.bucketCount,
+				timeframe.bucketSeconds,
+			),
+			errorRate: createTrendPoints(
+				0.03,
+				timeframe.bucketCount,
+				timeframe.bucketSeconds,
+			),
 		},
 		depletionPrimary: {
 			risk: 0.55,
@@ -343,6 +361,7 @@ export function createDashboardSettings(
 		preferEarlierResetAccounts: false,
 		routingStrategy: "usage_weighted",
 		openaiCacheAffinityMaxAgeSeconds: 300,
+		imageGenerationEnabled: true,
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
 		totpConfigured: true,

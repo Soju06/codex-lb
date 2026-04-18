@@ -30,6 +30,12 @@ class ProxyModelNotAllowed(AppError):
     error_type = "permission_error"
 
 
+class ProxyInvalidRequestError(AppError):
+    status_code = 400
+    code = "invalid_request_error"
+    error_type = "invalid_request_error"
+
+
 class ProxyRateLimitError(AppError):
     status_code = 429
     code = "rate_limit_exceeded"

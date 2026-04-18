@@ -48,6 +48,7 @@ async def _set_migration_inconsistent_totp_only_mode() -> None:
                 id=1,
                 sticky_threads_enabled=False,
                 prefer_earlier_reset_accounts=False,
+                image_generation_enabled=True,
                 totp_required_on_login=True,
                 password_hash=None,
                 api_key_auth_enabled=False,

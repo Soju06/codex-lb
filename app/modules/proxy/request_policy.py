@@ -5,14 +5,35 @@ import logging
 from pydantic import ValidationError
 
 from app.core.errors import OpenAIErrorEnvelope, openai_error
-from app.core.exceptions import ProxyModelNotAllowed
+from app.core.exceptions import ProxyInvalidRequestError, ProxyModelNotAllowed
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.modules.api_keys.service import ApiKeyData
 
 logger = logging.getLogger(__name__)
+
+
+def has_image_generation_tool(payload: ResponsesRequest | ResponsesCompactRequest) -> bool:
+    for tool in payload.tools:
+        if not is_json_mapping(tool):
+            continue
+        if tool.get("type") == "image_generation":
+            return True
+    return False
+
+
+def enforce_image_generation_enabled(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    image_generation_enabled: bool,
+) -> None:
+    if image_generation_enabled:
+        return
+    if has_image_generation_tool(payload):
+        raise ProxyInvalidRequestError("Image generation is disabled in dashboard settings")
 
 
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:

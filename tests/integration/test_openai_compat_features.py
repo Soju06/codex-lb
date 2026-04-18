@@ -166,6 +166,26 @@ async def test_v1_responses_forwards_builtin_tools(async_client, monkeypatch, to
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_rejects_image_generation_when_disabled(async_client):
+    current = await async_client.get("/api/settings")
+    assert current.status_code == 200
+    settings_payload = current.json()
+    settings_payload["imageGenerationEnabled"] = False
+    updated = await async_client.put("/api/settings", json=settings_payload)
+    assert updated.status_code == 200
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Draw"}]}],
+        "tools": [{"type": "image_generation"}],
+    }
+
+    resp = await async_client.post("/v1/responses", json=request_payload)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_forwards_input_string(async_client, monkeypatch):
     await _import_account(async_client, "acc_input_string", "input-string@example.com")
 

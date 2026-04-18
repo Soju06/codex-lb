@@ -69,6 +69,7 @@ from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    enforce_image_generation_enabled,
     openai_invalid_payload_error,
     openai_validation_error,
     validate_model_access,
@@ -776,6 +777,11 @@ async def _stream_responses(
     forwarded_affinity_key: str | None = None,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
+    dashboard_settings = await get_settings_cache().get()
+    enforce_image_generation_enabled(
+        payload,
+        image_generation_enabled=dashboard_settings.image_generation_enabled,
+    )
     validate_model_access(api_key, payload.model)
     owns_reservation = api_key_reservation_override is None
     reservation = (
@@ -871,6 +877,11 @@ async def _collect_responses(
     prefer_http_bridge: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
+    dashboard_settings = await get_settings_cache().get()
+    enforce_image_generation_enabled(
+        payload,
+        image_generation_enabled=dashboard_settings.image_generation_enabled,
+    )
     validate_model_access(api_key, payload.model)
     reservation = await _enforce_request_limits(
         api_key,

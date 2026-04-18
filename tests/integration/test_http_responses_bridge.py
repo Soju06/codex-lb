@@ -194,6 +194,7 @@ def _make_dashboard_settings(
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=int(prompt_cache_idle_ttl_seconds),
         http_responses_session_bridge_gateway_safe_mode=gateway_safe_mode,
         sticky_reallocation_budget_threshold_pct=95.0,
+        image_generation_enabled=True,
     )
 
 

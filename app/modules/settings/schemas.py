@@ -14,6 +14,7 @@ class DashboardSettingsResponse(DashboardModel):
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
+    image_generation_enabled: bool
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
@@ -32,6 +33,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool | None = None
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    image_generation_enabled: bool | None = None
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None

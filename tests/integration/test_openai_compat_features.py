@@ -152,6 +152,7 @@ async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
     resp = await async_client.post("/v1/responses", json=request_payload)
     assert resp.status_code == 400
     assert resp.json()["error"]["type"] == "invalid_request_error"
+    assert resp.json()["error"]["param"] == "tools"
 
 
 @pytest.mark.asyncio
@@ -371,6 +372,34 @@ async def test_backend_responses_allows_web_search(async_client, monkeypatch, to
     resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
     assert resp.status_code == 200
     assert seen["payload"].tools == [{"type": "web_search"}]
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_strip_image_generation_tool_advertisement(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_image_gen", "backend-image-gen@example.com")
+
+    seen = {}
+    function_tool = {
+        "type": "function",
+        "name": "lookup_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_image_generation")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Weather?"}]}],
+        "tools": [{"type": "image_generation", "output_format": "png"}, function_tool],
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [function_tool]
 
 
 @pytest.mark.asyncio

@@ -1640,7 +1640,11 @@ class ProxyService:
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
-        responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
+        responses_payload = normalize_responses_request_payload(
+            payload,
+            openai_compat=openai_cache_affinity,
+            codex_tool_compat=codex_session_affinity,
+        )
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
         reservation = await self._reserve_websocket_api_key_usage(

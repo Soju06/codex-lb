@@ -13,6 +13,7 @@ import anyio
 import pytest
 from aiohttp.client_reqrep import RequestInfo
 from fastapi import WebSocket
+from pydantic import ValidationError
 from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
@@ -141,6 +142,45 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     proxy_request_policy.apply_api_key_enforcement(payload, api_key)
 
     assert payload.service_tier == "priority"
+
+
+def test_normalize_responses_request_payload_strips_backend_codex_image_generation_tools():
+    function_tool = {
+        "type": "function",
+        "name": "lookup_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+    payload = {
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [],
+        "tools": [{"type": "image_generation", "output_format": "png"}, function_tool],
+    }
+
+    request = proxy_request_policy.normalize_responses_request_payload(
+        payload,
+        openai_compat=True,
+        codex_tool_compat=True,
+    )
+
+    assert request.tools == [function_tool]
+    assert payload["tools"] == [{"type": "image_generation", "output_format": "png"}, function_tool]
+
+
+def test_normalize_responses_request_payload_without_codex_compat_still_rejects_image_generation():
+    payload = {
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [],
+        "tools": [{"type": "image_generation", "output_format": "png"}],
+    }
+
+    with pytest.raises(ValidationError, match="Unsupported tool type: image_generation"):
+        proxy_request_policy.normalize_responses_request_payload(
+            payload,
+            openai_compat=True,
+            codex_tool_compat=False,
+        )
 
 
 class _RingMembershipStub:

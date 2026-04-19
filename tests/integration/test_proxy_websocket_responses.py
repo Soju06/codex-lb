@@ -261,6 +261,123 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["output_tokens"] == 5
 
 
+def test_backend_responses_websocket_strips_image_generation_tool_advertisement(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_ws_tools", "object": "response", "status": "in_progress"},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_tools",
+                        "object": "response",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None):
+        assert authorization == "Bearer external-token"
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    function_tool = {
+        "type": "function",
+        "name": "lookup_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [{"type": "image_generation", "output_format": "png"}, function_tool],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={"Authorization": "Bearer external-token"},
+        ) as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first = json.loads(websocket.receive_text())
+            second = json.loads(websocket.receive_text())
+
+    assert first["type"] == "response.created"
+    assert second["type"] == "response.completed"
+    assert [json.loads(message) for message in fake_upstream.sent_text] == [
+        {
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "tools": [function_tool],
+            "store": False,
+            "include": [],
+            "type": "response.create",
+        }
+    ]
+
+
 def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

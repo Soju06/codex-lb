@@ -70,6 +70,7 @@ from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    normalize_responses_request_payload,
     openai_invalid_payload_error,
     openai_validation_error,
     validate_model_access,
@@ -167,13 +168,26 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
 )
 async def responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: dict[str, JsonValue] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    try:
+        responses_payload = normalize_responses_request_payload(
+            payload,
+            openai_compat=True,
+            codex_tool_compat=True,
+        )
+    except ClientPayloadError as exc:
+        error = openai_invalid_payload_error(exc.param)
+        return _logged_error_json_response(request, 400, error)
+    except ValidationError as exc:
+        error = openai_validation_error(exc)
+        return _logged_error_json_response(request, 400, error)
+
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=True,

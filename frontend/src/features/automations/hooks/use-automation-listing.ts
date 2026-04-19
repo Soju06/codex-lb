@@ -251,27 +251,35 @@ export function useAutomationListing() {
   });
 
   const updateJobsFilters = (patch: Partial<AutomationJobsFilterState>) => {
-    const next = {
-      ...jobsFilters,
-      ...patch,
-    };
-    setSearchParams(writeJobsState(next, searchParams));
+    setSearchParams((current) => {
+      const next = {
+        ...parseJobsState(current),
+        ...patch,
+      };
+      return writeJobsState(next, current);
+    });
   };
 
   const updateRunsFilters = (patch: Partial<AutomationRunsFilterState>) => {
-    const next = {
-      ...runsFilters,
-      ...patch,
-    };
-    setSearchParams(writeRunsState(next, searchParams));
+    setSearchParams((current) => {
+      const next = {
+        ...parseRunsState(current),
+        ...patch,
+      };
+      return writeRunsState(next, current);
+    });
   };
 
   const resetJobsFilters = () => {
-    setSearchParams(writeJobsState(DEFAULT_JOBS_FILTER_STATE, searchParams));
+    setSearchParams((current) =>
+      writeJobsState(DEFAULT_JOBS_FILTER_STATE, current),
+    );
   };
 
   const resetRunsFilters = () => {
-    setSearchParams(writeRunsState(DEFAULT_RUNS_FILTER_STATE, searchParams));
+    setSearchParams((current) =>
+      writeRunsState(DEFAULT_RUNS_FILTER_STATE, current),
+    );
   };
 
   return {

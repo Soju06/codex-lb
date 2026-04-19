@@ -175,7 +175,7 @@ async def responses(
     try:
         responses_payload = normalize_responses_request_payload(
             payload,
-            openai_compat=True,
+            openai_compat=False,
             codex_tool_compat=True,
         )
     except ClientPayloadError as exc:

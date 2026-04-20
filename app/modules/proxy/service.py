@@ -4827,7 +4827,8 @@ class ProxyService:
                     response_id=response_id,
                     fallback_request_state=matched_request_state,
                     prefer_previous_response_not_found=is_previous_response_not_found_event,
-                    allow_precreated_terminal_fallback=event_type in {
+                    allow_precreated_terminal_fallback=event_type
+                    in {
                         "response.failed",
                         "response.incomplete",
                         "error",
@@ -5308,7 +5309,8 @@ class ProxyService:
                     response_id=response_id,
                     fallback_request_state=request_state,
                     prefer_previous_response_not_found=is_previous_response_not_found_event,
-                    allow_precreated_terminal_fallback=event_type in {
+                    allow_precreated_terminal_fallback=event_type
+                    in {
                         "response.failed",
                         "response.incomplete",
                         "error",

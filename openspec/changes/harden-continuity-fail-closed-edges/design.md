@@ -25,6 +25,11 @@ When a request depends on `previous_response_id` or hard bridge continuity keys,
 
 Alternative considered: continue current degrade-open behavior. Rejected because it allows continuity fragmentation precisely when the proxy has lost the data needed to enforce owner correctness.
 
+### Match multiplexed continuity failures to the referenced anchor
+When one upstream websocket carries multiple pending follow-up requests, fail-closed continuity handling must target the follow-up whose `previous_response_id` anchor is actually referenced by the upstream failure. Matching should prefer structured identifiers when present and otherwise use the referenced anchor from the upstream error payload/message, with conservative fallback only when the target remains unique.
+
+Alternative considered: keep count-based heuristics and treat any single follow-up as the failing request. Rejected because it can rewrite the wrong request, leak raw `previous_response_not_found`, or interrupt unrelated in-flight work when multiple anchors share one upstream session.
+
 ## Risks / Trade-offs
 
 - [Risk] More requests can fail fast during transient owner/ring metadata outages. → Mitigation: failures become retryable and avoid silent continuity forks.

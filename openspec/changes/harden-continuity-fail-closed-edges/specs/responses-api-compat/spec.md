@@ -15,6 +15,13 @@ When a Responses follow-up depends on previously established continuity state, t
 - **THEN** the service returns a retryable OpenAI-format error
 - **AND** the error code is not `previous_response_not_found`
 
+#### Scenario: multiplexed follow-ups fail closed only for the matching continuity anchor
+- **WHEN** a websocket or HTTP bridge session has multiple pending follow-up requests with different `previous_response_id` anchors
+- **AND** continuity loss is detected for exactly one of those anchors
+- **THEN** the service applies the retryable fail-closed continuity error only to the matching follow-up request
+- **AND** it does not expose raw `previous_response_not_found`
+- **AND** unrelated pending requests continue on their own response lifecycle
+
 ### Requirement: Hard continuity owner lookup fails closed
 When a request depends on hard continuity ownership, the service MUST fail closed if owner or ring lookup errors prevent safe pinning. The service MUST NOT continue with local recovery or account selection that bypasses hard owner enforcement.
 

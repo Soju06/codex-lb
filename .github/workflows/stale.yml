@@ -2,7 +2,7 @@ name: Stale issues
 
 on:
   schedule:
-    # 매일 05:00 UTC (Asia/Seoul 14:00)
+    # Daily at 05:00 UTC
     - cron: "0 5 * * *"
   workflow_dispatch:
 
@@ -17,12 +17,12 @@ jobs:
       - name: Mark needs-info issues stale and close after timeout
         uses: actions/stale@v9
         with:
-          # needs-info 라벨 붙고 7일 무응답 → stale 마킹
+          # 7 days with no activity after needs-info is applied -> mark stale
           days-before-issue-stale: 7
-          # stale 마킹 후 7일 더 무응답 → close (총 14일)
+          # 7 more days after stale -> close (14 days total)
           days-before-issue-close: 7
 
-          only-issue-labels: "needs-info"
+          only-labels: "needs-info"
           stale-issue-label: "stale"
           close-issue-reason: "not_planned"
 
@@ -42,14 +42,14 @@ jobs:
 
             Please feel free to reopen with the requested details. 🙏
 
-          # PRs 는 건드리지 않음
+          # Do not touch pull requests
           days-before-pr-stale: -1
           days-before-pr-close: -1
 
-          # 오퍼레이터 보호 라벨
+          # Operator-protected labels
           exempt-issue-labels: "pinned,security,in-progress"
 
-          # 무한 스크롤 방지
+          # Safety cap per run
           operations-per-run: 100
           remove-stale-when-updated: true
           ascending: true

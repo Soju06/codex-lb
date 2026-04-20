@@ -1,0 +1,55 @@
+name: Stale issues
+
+on:
+  schedule:
+    # 매일 05:00 UTC (Asia/Seoul 14:00)
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark needs-info issues stale and close after timeout
+        uses: actions/stale@v9
+        with:
+          # needs-info 라벨 붙고 7일 무응답 → stale 마킹
+          days-before-issue-stale: 7
+          # stale 마킹 후 7일 더 무응답 → close (총 14일)
+          days-before-issue-close: 7
+
+          only-issue-labels: "needs-info"
+          stale-issue-label: "stale"
+          close-issue-reason: "not_planned"
+
+          stale-issue-message: |
+            This issue has been automatically marked as **stale** because it has been open for 7 days with no reporter activity since `needs-info` was applied.
+
+            It will be closed in 7 more days unless additional information is provided.
+
+            If this is still relevant, please:
+            - Reply with the requested details, or
+            - Remove the `stale` label to keep it open
+
+            Thanks for the report 🙏
+
+          close-issue-message: |
+            Closing as **insufficient information** — no response from reporter within the 14-day `needs-info` window.
+
+            Please feel free to reopen with the requested details. 🙏
+
+          # PRs 는 건드리지 않음
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+
+          # 오퍼레이터 보호 라벨
+          exempt-issue-labels: "pinned,security,in-progress"
+
+          # 무한 스크롤 방지
+          operations-per-run: 100
+          remove-stale-when-updated: true
+          ascending: true

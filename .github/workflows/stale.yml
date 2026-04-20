@@ -8,11 +8,11 @@ on:
 
 permissions:
   issues: write
-  pull-requests: write
 
 jobs:
   stale:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Mark needs-info issues stale and close after timeout
         uses: actions/stale@v9

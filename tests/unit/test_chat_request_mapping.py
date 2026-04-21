@@ -53,7 +53,7 @@ def test_chat_user_audio_rejects_invalid_format():
         ChatCompletionsRequest.model_validate(payload)
 
 
-def test_chat_store_true_is_ignored():
+def test_chat_store_true_is_forced():
     payload = {
         "model": "gpt-5.2",
         "messages": [{"role": "user", "content": "hi"}],
@@ -61,7 +61,7 @@ def test_chat_store_true_is_ignored():
     }
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
-    assert responses.store is False
+    assert responses.store is True
 
 
 def test_chat_max_tokens_are_stripped():

@@ -311,10 +311,12 @@ async def test_v1_responses_rejects_invalid_include(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_store_true(async_client):
+async def test_v1_responses_accepts_store_true(async_client):
+    # store=true is now forced by the proxy for context persistence.
+    # Verify it doesn't return 400.
     payload = {"model": "gpt-5.2", "input": "hi", "store": True}
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
+    assert resp.status_code != 400
 
 
 @pytest.mark.asyncio

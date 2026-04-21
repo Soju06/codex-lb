@@ -21,47 +21,46 @@ def test_responses_requires_input():
         ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi"})
 
 
-def test_store_true_is_rejected():
+def test_store_true_is_accepted():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "store": True}
-    with pytest.raises(ValueError, match="store must be false"):
-        ResponsesRequest.model_validate(payload)
+    request = ResponsesRequest.model_validate(payload)
+    assert request.store is True
 
 
-def test_store_omitted_defaults_to_false():
+def test_store_omitted_defaults_to_true():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.store is False
-    assert request.to_payload()["store"] is False
+    assert request.store is True
+    assert request.to_payload()["store"] is True
 
 
-def test_store_false_is_preserved():
+def test_store_false_is_overridden_to_true():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "store": False}
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.to_payload()["store"] is False
+    assert request.store is True
+    assert request.to_payload()["store"] is True
 
 
-def test_compact_store_true_is_rejected():
+def test_compact_store_true_is_accepted():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "store": True}
-    with pytest.raises(ValueError, match="store must be false"):
-        ResponsesCompactRequest.model_validate(payload)
+    request = ResponsesCompactRequest.model_validate(payload)
+    assert request.store is True
 
 
-def test_compact_store_omitted_defaults_to_false():
+def test_compact_store_omitted_defaults_to_true():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     request = ResponsesCompactRequest.model_validate(payload)
 
-    assert request.store is False
-    assert "store" not in request.to_payload()
+    assert request.store is True
 
 
-def test_compact_store_false_is_preserved():
+def test_compact_store_false_is_overridden_to_true():
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "store": False}
     request = ResponsesCompactRequest.model_validate(payload)
 
-    assert request.store is False
-    assert "store" not in request.to_payload()
+    assert request.store is True
 
 
 def test_known_unsupported_upstream_fields_are_stripped():
@@ -597,19 +596,18 @@ def test_v1_compact_reasoning_passthrough():
     assert request.reasoning.effort == "high"
 
 
-def test_v1_compact_store_omitted_defaults_to_false():
+def test_v1_compact_store_omitted_defaults_to_true():
     payload = {"model": "gpt-5.1", "input": "hello"}
     request = V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
 
-    assert request.store is False
-    assert "store" not in request.to_payload()
+    assert request.store is True
 
 
-def test_v1_compact_store_true_is_rejected():
+def test_v1_compact_store_true_is_accepted():
     payload = {"model": "gpt-5.1", "input": "hello", "store": True}
+    request = V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
 
-    with pytest.raises(ValidationError, match="store must be false"):
-        V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
+    assert request.store is True
 
 
 def test_responses_normalizes_assistant_input_text_to_output_text():

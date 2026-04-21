@@ -467,6 +467,7 @@ class ProxyService:
             logger.warning("Durable bridge lookup failed; falling back to non-durable request handling", exc_info=True)
             durable_lookup = None
         effective_payload = payload
+        proxy_injected_previous_response_id = False
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,
@@ -481,6 +482,7 @@ class ProxyService:
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
+                proxy_injected_previous_response_id = True
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_injected",
                     bridge_session_key,
@@ -638,6 +640,45 @@ class ProxyService:
                         session.last_used_at = time.monotonic()
                 return
         session = session_or_forward
+        # --- Context persistence: trim redundant input items ---
+        # When the proxy injected previous_response_id, OpenAI already has the
+        # stored conversation.  The CLI still sends the full input history, so
+        # we strip items that are already part of the stored context to avoid
+        # duplication and dramatically reduce per-request input tokens.
+        if (
+            proxy_injected_previous_response_id
+            and session.last_completed_input_count > 0
+            and isinstance(effective_payload.input, list)
+            and len(effective_payload.input) > session.last_completed_input_count
+        ):
+            original_count = len(effective_payload.input)
+            trimmed_input = effective_payload.input[session.last_completed_input_count:]
+            trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
+            request_state, text_data = self._prepare_http_bridge_request(
+                trimmed_payload,
+                headers,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            )
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.request_stage = _http_bridge_request_stage(
+                headers=headers,
+                payload=trimmed_payload,
+                durable_lookup=durable_lookup,
+            )
+            request_state.preferred_account_id = (
+                durable_lookup.account_id if durable_lookup is not None else None
+            )
+            logger.info(
+                "store_context_input_trimmed request_id=%s original_items=%s "
+                "trimmed_to=%s previous_response_id=%s",
+                request_id,
+                original_count,
+                len(trimmed_input),
+                effective_payload.previous_response_id,
+            )
+        # --- End context persistence trimming ---
         await self._submit_http_bridge_request(
             session,
             request_state=request_state,
@@ -1736,6 +1777,7 @@ class ProxyService:
         if client_metadata:
             upstream_payload["client_metadata"] = client_metadata
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
+        input_item_count = len(payload.input) if isinstance(payload.input, list) else 0
         request_state = _WebSocketRequestState(
             request_id=request_id or f"ws_{uuid4().hex}",
             request_log_id=request_log_id,
@@ -1750,6 +1792,7 @@ class ProxyService:
             transport=transport,
             api_key=api_key,
             previous_response_id=payload.previous_response_id,
+            input_item_count=input_item_count,
         )
         text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
         payload_size = len(text_data.encode("utf-8"))
@@ -3992,6 +4035,14 @@ class ProxyService:
                 )
                 if terminal_request_state is not None:
                     session.queued_request_count = max(0, session.queued_request_count - 1)
+                    # Track input item count for context persistence trimming.
+                    # On the next request, items up to this count are already part
+                    # of the stored conversation and can be stripped.
+                    if (
+                        event_type == "response.completed"
+                        and terminal_request_state.input_item_count > 0
+                    ):
+                        session.last_completed_input_count = terminal_request_state.input_item_count
 
         if event_type == "error":
             http_status = _http_error_status_from_payload(payload)
@@ -6137,6 +6188,7 @@ class _WebSocketRequestState:
     error_http_status_override: int | None = None
     response_create_gate_acquired: bool = False
     response_create_admission: AdmissionLease | None = None
+    input_item_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -6186,6 +6238,7 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
+    last_completed_input_count: int = 0
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None

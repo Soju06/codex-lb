@@ -734,16 +734,15 @@ class ProxyService:
         session = session_or_forward
         # --- Session-level previous_response_id injection ---
         # If the client didn't send previous_response_id and the durable
-        # lookup didn't inject one, but this bridge session has already
-        # completed a request on the *same* WebSocket connection, inject the
-        # session's last completed response ID.  This is reliable because the
-        # upstream conversation state is guaranteed to contain this response
-        # — it was produced on the very connection we are about to use.
-        # Without this, clients like Codex CLI that never send
-        # previous_response_id would bypass the trimming logic below and
-        # cause input tokens to grow monotonically for the whole session.
+        # lookup didn't inject one, but this bridge session is carrying
+        # Codex-style conversational continuity and has already completed a
+        # request on this logical conversation, inject the session's last
+        # completed response ID. Soft affinity reuse (for example prompt
+        # cache / sticky-thread sharing) must stay self-contained, so it
+        # must never inherit a previous_response_id from another request.
         if (
-            not proxy_injected_previous_response_id
+            session.codex_session
+            and not proxy_injected_previous_response_id
             and effective_payload.previous_response_id is None
             and session.last_completed_response_id is not None
         ):

@@ -732,6 +732,44 @@ class ProxyService:
                             session.last_used_at = time.monotonic()
                 return
         session = session_or_forward
+        # --- Session-level previous_response_id injection ---
+        # If the client didn't send previous_response_id and the durable
+        # lookup didn't inject one, but this bridge session has already
+        # completed a request on the *same* WebSocket connection, inject the
+        # session's last completed response ID.  This is reliable because the
+        # upstream conversation state is guaranteed to contain this response
+        # — it was produced on the very connection we are about to use.
+        # Without this, clients like Codex CLI that never send
+        # previous_response_id would bypass the trimming logic below and
+        # cause input tokens to grow monotonically for the whole session.
+        if (
+            not proxy_injected_previous_response_id
+            and effective_payload.previous_response_id is None
+            and session.last_completed_response_id is not None
+        ):
+            effective_payload = effective_payload.model_copy(
+                update={"previous_response_id": session.last_completed_response_id}
+            )
+            proxy_injected_previous_response_id = True
+            request_state, text_data = self._prepare_http_bridge_request(
+                effective_payload,
+                headers,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            )
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.request_stage = _http_bridge_request_stage(
+                headers=headers,
+                payload=effective_payload,
+                durable_lookup=durable_lookup,
+            )
+            request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
+            logger.info(
+                "session_anchor_injected request_id=%s response_id=%s",
+                request_id,
+                session.last_completed_response_id,
+            )
         # Trim already-stored prefix when previous_response_id anchors context.
         has_previous_response_id = (
             proxy_injected_previous_response_id or effective_payload.previous_response_id is not None
@@ -4999,6 +5037,8 @@ class ProxyService:
         ):
             session.last_completed_input_count = terminal_request_state.input_item_count
             session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
+            if response_id is not None:
+                session.last_completed_response_id = response_id
 
         if event_type == "error":
             http_status = _http_error_status_from_payload(payload)
@@ -7721,6 +7761,7 @@ class _HTTPBridgeSession:
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
     last_completed_input_count: int = 0
+    last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None

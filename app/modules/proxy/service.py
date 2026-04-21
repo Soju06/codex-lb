@@ -641,12 +641,17 @@ class ProxyService:
                 return
         session = session_or_forward
         # --- Context persistence: trim redundant input items ---
-        # When the proxy injected previous_response_id, OpenAI already has the
-        # stored conversation.  The CLI still sends the full input history, so
-        # we strip items that are already part of the stored context to avoid
-        # duplication and dramatically reduce per-request input tokens.
-        if (
+        # When a previous_response_id is present (either proxy-injected or
+        # client-supplied), the upstream already has the stored conversation.
+        # The CLI still sends the full input history, so we strip items that
+        # are already part of the stored context to avoid duplication and
+        # dramatically reduce per-request input tokens.
+        has_previous_response_id = (
             proxy_injected_previous_response_id
+            or effective_payload.previous_response_id is not None
+        )
+        if (
+            has_previous_response_id
             and session.last_completed_input_count > 0
             and isinstance(effective_payload.input, list)
             and len(effective_payload.input) > session.last_completed_input_count

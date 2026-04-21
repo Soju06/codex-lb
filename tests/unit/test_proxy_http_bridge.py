@@ -554,8 +554,8 @@ async def test_stream_via_http_bridge_preserves_full_input_count_after_trimming(
             SimpleNamespace(
                 get=AsyncMock(
                     return_value=SimpleNamespace(
-                            sticky_threads_enabled=False,
-                            openai_cache_affinity_max_age_seconds=1800,
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
                         http_responses_session_bridge_enabled=True,
                         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
                         http_responses_session_bridge_gateway_safe_mode=False,
@@ -570,7 +570,7 @@ async def test_stream_via_http_bridge_preserves_full_input_count_after_trimming(
         AsyncMock(
             return_value=proxy_service.DurableBridgeLookup(
                 session_id="durable-1",
-                    canonical_kind="session_header",
+                canonical_kind="session_header",
                 canonical_key="sid-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",

@@ -653,7 +653,7 @@ class ProxyService:
             and len(effective_payload.input) > session.last_completed_input_count
         ):
             original_count = len(effective_payload.input)
-            trimmed_input = effective_payload.input[session.last_completed_input_count:]
+            trimmed_input = effective_payload.input[session.last_completed_input_count :]
             trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
             request_state, text_data = self._prepare_http_bridge_request(
                 trimmed_payload,
@@ -670,12 +670,9 @@ class ProxyService:
                 payload=trimmed_payload,
                 durable_lookup=durable_lookup,
             )
-            request_state.preferred_account_id = (
-                durable_lookup.account_id if durable_lookup is not None else None
-            )
+            request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
             logger.info(
-                "store_context_input_trimmed request_id=%s original_items=%s "
-                "trimmed_to=%s previous_response_id=%s",
+                "store_context_input_trimmed request_id=%s original_items=%s trimmed_to=%s previous_response_id=%s",
                 request_id,
                 original_count,
                 len(trimmed_input),
@@ -4046,10 +4043,7 @@ class ProxyService:
                     # Track input item count for context persistence trimming.
                     # On the next request, items up to this count are already part
                     # of the stored conversation and can be stripped.
-                    if (
-                        event_type == "response.completed"
-                        and terminal_request_state.input_item_count > 0
-                    ):
+                    if event_type == "response.completed" and terminal_request_state.input_item_count > 0:
                         session.last_completed_input_count = terminal_request_state.input_item_count
 
         if event_type == "error":

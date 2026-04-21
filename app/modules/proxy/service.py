@@ -243,7 +243,7 @@ def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | 
     return upstream_stream_transport
 
 
-def _fingerprint_input_items(items: list[JsonValue]) -> str:
+def _fingerprint_input_items(items: Sequence[JsonValue]) -> str:
     """Return a stable SHA-256 fingerprint of an input item list.
 
     Used by the HTTP bridge trim path to verify that a follow-up request's
@@ -670,58 +670,56 @@ class ProxyService:
         has_previous_response_id = (
             proxy_injected_previous_response_id or effective_payload.previous_response_id is not None
         )
-        can_trim = (
+        incoming_input = effective_payload.input
+        stored_count = session.last_completed_input_count
+        stored_fingerprint = session.last_completed_input_prefix_fingerprint
+        if (
             has_previous_response_id
-            and session.last_completed_input_count > 0
-            and session.last_completed_input_prefix_fingerprint is not None
-            and isinstance(effective_payload.input, list)
-            and len(effective_payload.input) > session.last_completed_input_count
-        )
-        if can_trim:
-            stored_count = session.last_completed_input_count
-            incoming_prefix_fingerprint = _fingerprint_input_items(effective_payload.input[:stored_count])
-            prefix_matches = incoming_prefix_fingerprint == session.last_completed_input_prefix_fingerprint
-        else:
-            prefix_matches = False
-
-        if can_trim and prefix_matches:
-            original_count = len(effective_payload.input)
-            trimmed_input = effective_payload.input[session.last_completed_input_count :]
-            trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
-            request_state, text_data = self._prepare_http_bridge_request(
-                trimmed_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                request_id=request_id,
-            )
-            request_state.input_item_count = original_count
-            request_state.transport = _REQUEST_TRANSPORT_HTTP
-            request_state.request_stage = _http_bridge_request_stage(
-                headers=headers,
-                payload=trimmed_payload,
-                durable_lookup=durable_lookup,
-            )
-            request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
-            logger.info(
-                "store_context_input_trimmed request_id=%s original_items=%s trimmed_to=%s previous_response_id=%s",
-                request_id,
-                original_count,
-                len(trimmed_input),
-                effective_payload.previous_response_id,
-            )
-        elif can_trim and not prefix_matches:
-            # Client edited an already-stored prefix item. Forward the full
-            # input so the upstream sees the correction, even though that
-            # costs extra tokens on this turn.
-            logger.warning(
-                "store_context_input_trim_skipped_prefix_mismatch request_id=%s "
-                "incoming_items=%s stored_items=%s previous_response_id=%s",
-                request_id,
-                len(effective_payload.input),
-                session.last_completed_input_count,
-                effective_payload.previous_response_id,
-            )
+            and stored_count > 0
+            and stored_fingerprint is not None
+            and isinstance(incoming_input, list)
+            and len(incoming_input) > stored_count
+        ):
+            incoming_input_list = cast(list[JsonValue], incoming_input)
+            incoming_prefix_fingerprint = _fingerprint_input_items(incoming_input_list[:stored_count])
+            if incoming_prefix_fingerprint == stored_fingerprint:
+                original_count = len(incoming_input_list)
+                trimmed_input = incoming_input_list[stored_count:]
+                trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
+                request_state, text_data = self._prepare_http_bridge_request(
+                    trimmed_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                )
+                request_state.input_item_count = original_count
+                request_state.transport = _REQUEST_TRANSPORT_HTTP
+                request_state.request_stage = _http_bridge_request_stage(
+                    headers=headers,
+                    payload=trimmed_payload,
+                    durable_lookup=durable_lookup,
+                )
+                request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
+                logger.info(
+                    "store_context_input_trimmed request_id=%s original_items=%s trimmed_to=%s previous_response_id=%s",
+                    request_id,
+                    original_count,
+                    len(trimmed_input),
+                    effective_payload.previous_response_id,
+                )
+            else:
+                # Client edited an already-stored prefix item. Forward the full
+                # input so the upstream sees the correction, even though that
+                # costs extra tokens on this turn.
+                logger.warning(
+                    "store_context_input_trim_skipped_prefix_mismatch request_id=%s "
+                    "incoming_items=%s stored_items=%s previous_response_id=%s",
+                    request_id,
+                    len(incoming_input_list),
+                    stored_count,
+                    effective_payload.previous_response_id,
+                )
         # --- End context persistence trimming ---
         await self._submit_http_bridge_request(
             session,
@@ -1825,10 +1823,14 @@ class ProxyService:
         if client_metadata:
             upstream_payload["client_metadata"] = client_metadata
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
-        input_item_count = len(payload.input) if isinstance(payload.input, list) else 0
+        input_item_count = 0
         input_full_fingerprint: str | None = None
-        if isinstance(payload.input, list) and input_item_count > 0:
-            input_full_fingerprint = _fingerprint_input_items(payload.input)
+        payload_input = payload.input
+        if isinstance(payload_input, list):
+            payload_input_list = cast(list[JsonValue], payload_input)
+            input_item_count = len(payload_input_list)
+            if input_item_count > 0:
+                input_full_fingerprint = _fingerprint_input_items(payload_input_list)
         request_state = _WebSocketRequestState(
             request_id=request_id or f"ws_{uuid4().hex}",
             request_log_id=request_log_id,

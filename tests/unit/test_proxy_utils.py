@@ -5879,6 +5879,99 @@ async def test_process_upstream_websocket_text_masks_anonymous_previous_response
     assert list(pending_requests) == [inflight_request]
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "message": "Previous response with id 'resp_anchor' not found.",
+                "param": "previous_response_id",
+            },
+        },
+        {
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "message": "Previous response with id 'resp_anchor' not found.",
+                    "param": "previous_response_id",
+                },
+            },
+        },
+    ],
+)
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_masks_anonymous_previous_response_not_found_for_same_anchor_followups(
+    monkeypatch,
+    payload,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_anonymous_prev_nf_same_anchor")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    followup_request_a = proxy_service._WebSocketRequestState(
+        request_id="ws_req_followup_same_anchor_a",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+    )
+    followup_request_b = proxy_service._WebSocketRequestState(
+        request_id="ws_req_followup_same_anchor_b",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+    )
+    pending_requests = deque([followup_request_a, followup_request_b])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(2),
+    )
+
+    assert "previous_response_not_found" not in downstream_text
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.downstream_texts is not None
+    assert len(upstream_control.downstream_texts) == 2
+    for emitted_text in upstream_control.downstream_texts:
+        assert '"type":"response.failed"' in emitted_text
+        assert '"code":"stream_incomplete"' in emitted_text
+        assert "previous_response_not_found" not in emitted_text
+    assert finalize_request_state.await_count == 2
+    finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]
+    assert finalized_requests == [followup_request_a, followup_request_b]
+    for call in finalize_request_state.await_args_list:
+        assert call.kwargs["event_type"] == "response.failed"
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+
+
 @pytest.mark.asyncio
 async def test_process_upstream_websocket_text_transparently_retries_precreated_usage_limit_failure(
     monkeypatch,
@@ -7179,6 +7272,43 @@ async def test_resolve_websocket_previous_response_owner_prefers_scoped_lookup_o
     assert service._websocket_previous_response_account_index[("resp_prev_shared", api_key.id, "turn_scope_a")] == (
         "acc_owner_scoped"
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_websocket_previous_response_owner_uses_unique_scoped_cache_fallback_on_lookup_failure() -> None:
+    request_logs = _RequestLogsRecorder()
+    request_logs.lookup_error = RuntimeError("request log lookup unavailable")
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = ApiKeyData(
+        id="key_shared",
+        name="shared-key",
+        key_prefix="sk-shared",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    service._remember_websocket_previous_response_owner(
+        previous_response_id="resp_prev_shared",
+        api_key_id=api_key.id,
+        account_id="acc_owner_scoped",
+        session_id="turn_scope_a",
+    )
+
+    owner = await service._resolve_websocket_previous_response_owner(
+        previous_response_id="resp_prev_shared",
+        api_key=api_key,
+        session_id="turn_scope_b",
+        surface="websocket",
+    )
+
+    assert owner == "acc_owner_scoped"
+    assert request_logs.lookup_calls == [("resp_prev_shared", api_key.id, "turn_scope_b")]
 
 
 def test_remember_websocket_previous_response_owner_eviction_keeps_latest_entries():

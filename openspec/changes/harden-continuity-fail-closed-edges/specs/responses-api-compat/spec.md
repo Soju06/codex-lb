@@ -22,6 +22,21 @@ When a Responses follow-up depends on previously established continuity state, t
 - **AND** it does not expose raw `previous_response_not_found`
 - **AND** unrelated pending requests continue on their own response lifecycle
 
+#### Scenario: multiplexed follow-ups sharing one anchor fail closed together without leaking raw continuity errors
+- **WHEN** a websocket or HTTP bridge session has multiple pending follow-up requests that share the same `previous_response_id` anchor
+- **AND** upstream emits an anonymous continuity loss event such as `previous_response_not_found` for that shared anchor
+- **THEN** the service rewrites each affected follow-up into a retryable continuity error
+- **AND** no affected follow-up exposes raw `previous_response_not_found`
+- **AND** the run remains usable for subsequent requests after the rewritten failures
+
+#### Scenario: single pre-created follow-up still fails closed when continuity loss omits explicit response id in message
+- **WHEN** a websocket follow-up request is pending with `previous_response_id` and has not received a stable upstream `response.id` yet
+- **AND** upstream emits `previous_response_not_found` with `param=previous_response_id`
+- **AND** the upstream error message omits the literal previous response identifier
+- **THEN** the service still maps that continuity loss to the pending follow-up
+- **AND** it rewrites the downstream terminal event to a retryable continuity error
+- **AND** it does not surface raw `previous_response_not_found` to the client
+
 ### Requirement: Hard continuity owner lookup fails closed
 When a request depends on hard continuity ownership, the service MUST fail closed if owner or ring lookup errors prevent safe pinning. The service MUST NOT continue with local recovery or account selection that bypasses hard owner enforcement.
 

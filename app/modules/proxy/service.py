@@ -4797,6 +4797,7 @@ class ProxyService:
             matched_request_state = None
             created_request_state = None
             has_other_pending_requests = False
+            grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             if event_type == "response.created":
                 matched_request_state = _assign_websocket_response_id(session.pending_requests, response_id)
                 created_request_state = matched_request_state
@@ -4842,9 +4843,57 @@ class ProxyService:
                 )
                 if terminal_request_state is not None:
                     session.queued_request_count = max(0, session.queued_request_count - 1)
+                elif is_previous_response_not_found_event:
+                    grouped_previous_response_request_states = _pop_matching_websocket_request_states(
+                        session.pending_requests,
+                        _matching_websocket_request_states_for_previous_response_error(
+                            session.pending_requests,
+                            previous_response_id_hint=previous_response_id_hint,
+                            error_message=error_message,
+                        ),
+                    )
+                    if grouped_previous_response_request_states:
+                        session.queued_request_count = max(
+                            0,
+                            session.queued_request_count - len(grouped_previous_response_request_states),
+                        )
                 has_other_pending_requests = bool(session.pending_requests)
 
+        if len(grouped_previous_response_request_states) > 1:
+            session.upstream_control.reconnect_requested = True
+            for grouped_request_state in grouped_previous_response_request_states:
+                grouped_request_state.error_http_status_override = 502
+                (
+                    _grouped_downstream_text,
+                    grouped_event_block,
+                    grouped_event,
+                    grouped_payload,
+                    grouped_event_type,
+                ) = _build_stream_incomplete_terminal_event_for_request(grouped_request_state)
+                if grouped_request_state.event_queue is not None:
+                    await grouped_request_state.event_queue.put(grouped_event_block)
+                    await grouped_request_state.event_queue.put(None)
+                await self._finalize_websocket_request_state(
+                    grouped_request_state,
+                    account=session.account,
+                    account_id_value=session.account.id,
+                    event=grouped_event,
+                    event_type=grouped_event_type,
+                    payload=grouped_payload,
+                    api_key=grouped_request_state.api_key,
+                    upstream_control=session.upstream_control,
+                    response_create_gate=session.response_create_gate,
+                )
+            return
+
+        if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:
+            terminal_request_state = grouped_previous_response_request_states[0]
+
         status_request_state = terminal_request_state or matched_request_state
+        if status_request_state is None and is_previous_response_not_found_event:
+            session.upstream_control.reconnect_requested = True
+            return
+
         if (
             status_request_state is not None
             and status_request_state.previous_response_id is not None
@@ -4953,9 +5002,13 @@ class ProxyService:
         account_id_value = account_id.strip()
         if not account_id_value:
             return
-        cache_key = (response_id, api_key_id, _normalize_session_id(session_id))
-        self._websocket_previous_response_account_index.pop(cache_key, None)
-        self._websocket_previous_response_account_index[cache_key] = account_id_value
+        cache_keys = [(response_id, api_key_id, None)]
+        normalized_session_id = _normalize_session_id(session_id)
+        if normalized_session_id is not None:
+            cache_keys.append((response_id, api_key_id, normalized_session_id))
+        for cache_key in cache_keys:
+            self._websocket_previous_response_account_index.pop(cache_key, None)
+            self._websocket_previous_response_account_index[cache_key] = account_id_value
         while len(self._websocket_previous_response_account_index) > _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT:
             self._websocket_previous_response_account_index.pop(
                 next(iter(self._websocket_previous_response_account_index))
@@ -5167,8 +5220,18 @@ class ProxyService:
                         response_create_gate=response_create_gate,
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
+                    downstream_texts = upstream_control.downstream_texts
                     upstream_control.suppress_downstream_event = False
-                    if not suppress_downstream_event:
+                    upstream_control.downstream_texts = None
+                    if downstream_texts is not None:
+                        for emitted_text in downstream_texts:
+                            await self._send_downstream_websocket_text(
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                text=emitted_text,
+                                downstream_activity=downstream_activity,
+                            )
+                    elif not suppress_downstream_event:
                         await self._send_downstream_websocket_text(
                             websocket,
                             client_send_lock=client_send_lock,
@@ -5287,6 +5350,7 @@ class ProxyService:
             request_state = None
             created_request_state = None
             has_other_pending_requests = False
+            grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             if event_type == "response.created":
                 request_state = _assign_websocket_response_id(pending_requests, response_id)
                 created_request_state = request_state
@@ -5327,6 +5391,15 @@ class ProxyService:
                         "error",
                     },
                 )
+                if request_state is None and is_previous_response_not_found_event:
+                    grouped_previous_response_request_states = _pop_matching_websocket_request_states(
+                        pending_requests,
+                        _matching_websocket_request_states_for_previous_response_error(
+                            pending_requests,
+                            previous_response_id_hint=previous_response_id_hint,
+                            error_message=error_message,
+                        ),
+                    )
                 has_other_pending_requests = bool(pending_requests)
             else:
                 request_state = None
@@ -5334,7 +5407,39 @@ class ProxyService:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, response_create_gate)
 
+        if len(grouped_previous_response_request_states) > 1:
+            upstream_control.reconnect_requested = True
+            downstream_texts: list[str] = []
+            for grouped_request_state in grouped_previous_response_request_states:
+                (
+                    grouped_downstream_text,
+                    _grouped_event_block,
+                    grouped_event,
+                    grouped_payload,
+                    grouped_event_type,
+                ) = _build_stream_incomplete_terminal_event_for_request(grouped_request_state)
+                downstream_texts.append(grouped_downstream_text)
+                await self._finalize_websocket_request_state(
+                    grouped_request_state,
+                    account=account,
+                    account_id_value=account_id_value,
+                    event=grouped_event,
+                    event_type=grouped_event_type,
+                    payload=grouped_payload,
+                    api_key=api_key,
+                    upstream_control=upstream_control,
+                    response_create_gate=response_create_gate,
+                )
+            upstream_control.suppress_downstream_event = True
+            upstream_control.downstream_texts = downstream_texts
+            return downstream_texts[0]
+
+        if len(grouped_previous_response_request_states) == 1 and request_state is None:
+            request_state = grouped_previous_response_request_states[0]
+
         if request_state is None:
+            if is_previous_response_not_found_event:
+                upstream_control.suppress_downstream_event = True
             return text
 
         retry_is_previous_response_not_found = is_previous_response_not_found_event
@@ -7535,6 +7640,7 @@ class _WebSocketUpstreamControl:
     reconnect_requested: bool = False
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
+    downstream_texts: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -8139,30 +8245,93 @@ def _match_websocket_request_state_for_previous_response_error(
     previous_response_id_hint: str | None = None,
     error_message: str | None = None,
 ) -> _WebSocketRequestState | None:
+    matching_requests = _matching_websocket_request_states_for_previous_response_error(
+        pending_requests,
+        previous_response_id_hint=previous_response_id_hint,
+        error_message=error_message,
+    )
+    if len(matching_requests) == 1:
+        return matching_requests[0]
+    return None
+
+
+def _matching_websocket_request_states_for_previous_response_error(
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    previous_response_id_hint: str | None = None,
+    error_message: str | None = None,
+) -> list[_WebSocketRequestState]:
     followup_requests = [
         request_state for request_state in pending_requests if request_state.previous_response_id is not None
     ]
+    if not followup_requests:
+        return []
     if previous_response_id_hint is not None:
         matching_requests = [
             request_state
             for request_state in followup_requests
             if request_state.previous_response_id == previous_response_id_hint
         ]
-        if len(matching_requests) == 1:
-            return matching_requests[0]
-        return None
+        if matching_requests:
+            return matching_requests
     if error_message is not None:
         matching_requests = [
             request_state
             for request_state in followup_requests
             if _message_mentions_previous_response_id(error_message, request_state.previous_response_id)
         ]
-        if len(matching_requests) == 1:
-            return matching_requests[0]
-        return None
-    if len(followup_requests) == 1:
-        return followup_requests[0]
-    return None
+        if matching_requests:
+            return matching_requests
+    unresolved_followups = [request_state for request_state in followup_requests if request_state.response_id is None]
+    if len(unresolved_followups) == 1:
+        return unresolved_followups
+    if len(unresolved_followups) > 1:
+        unique_previous_response_ids = {
+            request_state.previous_response_id
+            for request_state in unresolved_followups
+            if request_state.previous_response_id
+        }
+        if len(unique_previous_response_ids) == 1:
+            return unresolved_followups
+    return []
+
+
+def _pop_matching_websocket_request_states(
+    pending_requests: deque[_WebSocketRequestState],
+    matching_requests: list[_WebSocketRequestState],
+) -> list[_WebSocketRequestState]:
+    popped_requests: list[_WebSocketRequestState] = []
+    for request_state in matching_requests:
+        try:
+            pending_requests.remove(request_state)
+        except ValueError:
+            continue
+        popped_requests.append(request_state)
+    return popped_requests
+
+
+def _build_stream_incomplete_terminal_event_for_request(
+    request_state: _WebSocketRequestState,
+) -> tuple[str, str, OpenAIEvent | None, dict[str, JsonValue] | None, str | None]:
+    event_block, event, payload, event_type = _build_rewritten_stream_response_failed_event(
+        response_id=request_state.response_id or request_state.request_id,
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+    )
+    downstream_text = json.dumps(
+        cast(
+            dict[str, JsonValue],
+            response_failed_event(
+                "stream_incomplete",
+                "Upstream websocket closed before response.completed",
+                error_type="server_error",
+                response_id=request_state.response_id or request_state.request_id,
+            ),
+        ),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return downstream_text, event_block, event, payload, event_type
 
 
 def _release_websocket_response_create_gate(

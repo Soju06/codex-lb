@@ -290,9 +290,7 @@ async def test_request_logs_expose_account_plan_type(async_client, db_setup):
             error_code=None,
             requested_at=now,
         )
-        await session.execute(
-            update(Account).where(Account.id == "acc_plan").values(plan_type="team")
-        )
+        await session.execute(update(Account).where(Account.id == "acc_plan").values(plan_type="team"))
         await session.commit()
 
     response = await async_client.get("/api/request-logs")

@@ -211,10 +211,7 @@ class RequestLogsRepository:
         )
 
         total_col = func.count().over().label("_total")
-        stmt = (
-            select(RequestLog, total_col)
-            .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
-        )
+        stmt = select(RequestLog, total_col).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
         stmt = self._apply_related_search_joins(stmt, filters.needs_related_search_joins)
         if filters.conditions:
             stmt = stmt.where(and_(*filters.conditions))
@@ -239,9 +236,7 @@ class RequestLogsRepository:
         return int(result.scalar_one())
 
     async def _resolve_account_plan_type(self, account_id: str) -> str | None:
-        result = await self._session.execute(
-            select(Account.plan_type).where(Account.id == account_id).limit(1)
-        )
+        result = await self._session.execute(select(Account.plan_type).where(Account.id == account_id).limit(1))
         return result.scalar_one_or_none()
 
     async def list_filter_options(

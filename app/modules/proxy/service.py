@@ -3861,6 +3861,10 @@ class ProxyService:
         send_request: bool = True,
     ) -> bool:
         if request_state.previous_response_id is not None and send_request:
+            # After an ambiguous websocket send failure we cannot prove whether
+            # upstream already accepted the continuation. Re-sending the same
+            # previous_response_id request can fork continuity with duplicate
+            # child responses, so only reconnect-without-resend is allowed.
             return False
         if request_state.replay_count >= 1:
             return False
@@ -3901,6 +3905,9 @@ class ProxyService:
                 return False
             request_state = retryable_requests[0]
             if request_state.previous_response_id is not None:
+                # Once a continuation is pending upstream, reconnecting without
+                # replay cannot complete the current request, while replaying it
+                # is unsafe without upstream idempotency guarantees.
                 return False
             if request_state.replay_count >= 1:
                 return False

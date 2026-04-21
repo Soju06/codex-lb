@@ -7244,11 +7244,19 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
 @pytest.mark.asyncio
 async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_fails(monkeypatch):
     request_logs = _RequestLogsRecorder()
-    api_keys_repo = cast(ApiKeysRepository, AsyncMock())
-    api_keys_repo.get_usage_reservation = AsyncMock(return_value=SimpleNamespace(status="reserved", items=[]))
-    api_keys_repo.transition_usage_reservation_status = AsyncMock(return_value=True)
-    api_keys_repo.settle_usage_reservation = AsyncMock()
-    api_keys_repo.commit = AsyncMock()
+    get_usage_reservation_mock = AsyncMock(return_value=SimpleNamespace(status="reserved", items=[]))
+    transition_usage_reservation_status_mock = AsyncMock(return_value=True)
+    settle_usage_reservation_mock = AsyncMock()
+    commit_mock = AsyncMock()
+    api_keys_repo = cast(
+        ApiKeysRepository,
+        SimpleNamespace(
+            get_usage_reservation=get_usage_reservation_mock,
+            transition_usage_reservation_status=transition_usage_reservation_status_mock,
+            settle_usage_reservation=settle_usage_reservation_mock,
+            commit=commit_mock,
+        ),
+    )
 
     class _RepoContextWithApiKeys:
         def __init__(self) -> None:
@@ -7330,14 +7338,14 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     owner_lookup.assert_awaited_once()
     select_account.assert_not_called()
-    api_keys_repo.get_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
-    api_keys_repo.transition_usage_reservation_status.assert_awaited_once_with(
+    get_usage_reservation_mock.assert_awaited_once_with(reservation.reservation_id)
+    transition_usage_reservation_status_mock.assert_awaited_once_with(
         reservation.reservation_id,
         expected_status="reserved",
         new_status="released",
     )
-    api_keys_repo.settle_usage_reservation.assert_awaited_once()
-    api_keys_repo.commit.assert_awaited_once()
+    settle_usage_reservation_mock.assert_awaited_once()
+    commit_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

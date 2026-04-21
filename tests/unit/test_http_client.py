@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +26,14 @@ async def test_init_http_client_uses_separate_http_and_websocket_sessions() -> N
             "app.core.clients.http.aiohttp.ClientSession",
             side_effect=[http_session, websocket_session],
         ) as client_session_cls,
+        patch(
+            "app.core.clients.http.get_settings",
+            return_value=SimpleNamespace(
+                http_connector_limit=100,
+                http_connector_limit_per_host=50,
+                upstream_websocket_trust_env=False,
+            ),
+        ),
         patch("app.core.clients.http.RetryClient", return_value=retry_client) as retry_client_cls,
     ):
         client = await http_module.init_http_client()
@@ -56,6 +65,14 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
             "app.core.clients.http.aiohttp.ClientSession",
             side_effect=[http_session, websocket_session],
         ) as client_session_cls,
+        patch(
+            "app.core.clients.http.get_settings",
+            return_value=SimpleNamespace(
+                http_connector_limit=100,
+                http_connector_limit_per_host=50,
+                upstream_websocket_trust_env=False,
+            ),
+        ),
         patch("app.core.clients.http.RetryClient", return_value=retry_client),
     ):
         await http_module.init_http_client()

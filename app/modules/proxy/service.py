@@ -489,6 +489,7 @@ class ProxyService:
             durable_lookup = None
         effective_payload = payload
         proxy_injected_previous_response_id = False
+        fresh_upstream_request_text: str | None = None
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,
@@ -513,6 +514,14 @@ class ProxyService:
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
                 proxy_injected_previous_response_id = True
+                _fresh_request_state, fresh_upstream_request_text = self._prepare_http_bridge_request(
+                    payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                )
+                del _fresh_request_state
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_injected",
                     bridge_session_key,
@@ -567,6 +576,9 @@ class ProxyService:
                 session_id=request_state.session_id,
                 surface="http_bridge",
             )
+        if proxy_injected_previous_response_id:
+            request_state.proxy_injected_previous_response_id = True
+            request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),
@@ -746,6 +758,7 @@ class ProxyService:
             and effective_payload.previous_response_id is None
             and session.last_completed_response_id is not None
         ):
+            fresh_upstream_request_text = text_data
             effective_payload = effective_payload.model_copy(
                 update={"previous_response_id": session.last_completed_response_id}
             )
@@ -764,6 +777,8 @@ class ProxyService:
                 durable_lookup=durable_lookup,
             )
             request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
+            request_state.proxy_injected_previous_response_id = True
+            request_state.fresh_upstream_request_text = fresh_upstream_request_text
             logger.info(
                 "session_anchor_injected request_id=%s response_id=%s",
                 request_id,
@@ -808,6 +823,9 @@ class ProxyService:
                 request_state.preferred_account_id = previous_preferred_account_id
                 request_state.input_item_count = original_count
                 request_state.input_full_fingerprint = _fingerprint_input_items(incoming_input_list)
+                if proxy_injected_previous_response_id:
+                    request_state.proxy_injected_previous_response_id = True
+                    request_state.fresh_upstream_request_text = fresh_upstream_request_text
                 logger.info(
                     "store_context_input_trimmed request_id=%s original_items=%s trimmed_to=%s previous_response_id=%s",
                     request_id,
@@ -4692,12 +4710,15 @@ class ProxyService:
         text_data: str,
         send_request: bool = True,
     ) -> bool:
+        retry_text_data = text_data
         if request_state.previous_response_id is not None and send_request:
             # After an ambiguous websocket send failure we cannot prove whether
             # upstream already accepted the continuation. Re-sending the same
             # previous_response_id request can fork continuity with duplicate
             # child responses, so only reconnect-without-resend is allowed.
-            return False
+            if not request_state.proxy_injected_previous_response_id or not request_state.fresh_upstream_request_text:
+                return False
+            retry_text_data = request_state.fresh_upstream_request_text
         if request_state.replay_count >= 1:
             return False
         request_state.replay_count += 1
@@ -4717,7 +4738,11 @@ class ProxyService:
                 restart_reader=True,
             )
             if send_request:
-                await session.upstream.send_text(text_data)
+                if retry_text_data != text_data:
+                    request_state.previous_response_id = None
+                    request_state.proxy_injected_previous_response_id = False
+                    request_state.request_text = retry_text_data
+                await session.upstream.send_text(retry_text_data)
             session.last_used_at = time.monotonic()
             return True
         except Exception:
@@ -7697,6 +7722,8 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    proxy_injected_previous_response_id: bool = False
+    fresh_upstream_request_text: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     error_code_override: str | None = None

@@ -267,6 +267,37 @@ class TestRetryHelperPreservesPreviousResponseId:
         reconnect_mock.assert_awaited_once()
         send_text.assert_not_awaited()
 
+    async def test_retry_with_proxy_injected_previous_response_replays_full_request(self, monkeypatch):
+        """Proxy-injected anchors can fall back to the original full request.
+
+        If the proxy injected previous_response_id for trimming, a websocket
+        send failure should still be able to reconnect and replay the original
+        unanchored request text on a fresh upstream connection.
+        """
+        service = proxy_service.ProxyService(cast(Any, nullcontext()))
+        session = _make_session(closed=False)
+        request_state = _make_request_state(previous_response_id="resp_xyz789")
+        request_state.proxy_injected_previous_response_id = True
+        request_state.fresh_upstream_request_text = '{"type":"response.create","input":"hello"}'
+        request_state.request_text = '{"type":"response.create","previous_response_id":"resp_xyz789","input":"delta"}'
+
+        send_text = AsyncMock()
+        session.upstream = cast(Any, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+        monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+
+        result = await service._retry_http_bridge_request_on_fresh_upstream(
+            session=session,
+            request_state=request_state,
+            text_data='{"type":"response.create","previous_response_id":"resp_xyz789","input":"delta"}',
+            send_request=True,
+        )
+
+        assert result is True
+        send_text.assert_awaited_once_with('{"type":"response.create","input":"hello"}')
+        assert request_state.previous_response_id is None
+        assert request_state.proxy_injected_previous_response_id is False
+        assert request_state.request_text == '{"type":"response.create","input":"hello"}'
+
 
 class TestContextGrowthScenarios:
     """Scenario tests modelling real Codex session data.

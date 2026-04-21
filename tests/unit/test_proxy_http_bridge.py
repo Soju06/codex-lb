@@ -890,6 +890,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
     assert event_queue is not None
     await event_queue.put(None)
     captured: dict[str, object] = {}
+    prepared_input_lengths: list[int] = []
 
     def fake_prepare(
         prepared_payload: proxy_service.ResponsesRequest,
@@ -901,6 +902,8 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
         del api_key, api_key_reservation, request_id
         captured["previous_response_id"] = prepared_payload.previous_response_id
+        inp = prepared_payload.input
+        prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
         return request_state, '{"type":"response.create"}'
 
     session = proxy_service._HTTPBridgeSession(
@@ -984,6 +987,23 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
 
     assert chunks == []
     assert captured["previous_response_id"] is None
+    # Durable anchor injection now preserves the original unanchored request
+    # text for fresh-upstream retries before re-preparing the anchored request
+    # and then the trimmed suffix.
+    assert prepared_input_lengths == [3, 3, 1]
+    assert request_state.input_item_count == 3
+    # After trimming, input_full_fingerprint must reflect the ORIGINAL
+    # full input (all 3 items), not the trimmed suffix. Otherwise the
+    # session would later promote a suffix hash as its prefix fingerprint
+    # and break trimming on every subsequent turn.
+    expected_full_fingerprint = proxy_service._fingerprint_input_items(
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "second"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "third"}]},
+        ]
+    )
+    assert request_state.input_full_fingerprint == expected_full_fingerprint
 
 
 @pytest.mark.asyncio
@@ -2072,6 +2092,8 @@ async def test_stream_via_http_bridge_uses_generated_downstream_turn_state_for_o
         idle_ttl_seconds=120.0,
     )
 
+    prepared_input_lengths: list[int] = []
+
     def fake_prepare(
         _prepared_payload: proxy_service.ResponsesRequest,
         _headers: dict[str, str] | Any,
@@ -2081,6 +2103,8 @@ async def test_stream_via_http_bridge_uses_generated_downstream_turn_state_for_o
         request_id: str,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
         del api_key, api_key_reservation, request_id
+        inp = _prepared_payload.input
+        prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
         return request_state, '{"type":"response.create"}'
 
     async def fake_stream_http_bridge_session_events(
@@ -2149,6 +2173,11 @@ async def test_stream_via_http_bridge_uses_generated_downstream_turn_state_for_o
     )
     assert request_state.session_id == "http_turn_generated"
     assert request_state.preferred_account_id == "acc-owner-from-turn-state"
+    # Durable anchor injection preserves the original unanchored full-input
+    # request for fresh-upstream retries, then prepares the anchored request.
+    # The trim branch itself must still not fire a third prepare with a
+    # 1-item suffix when the prefix fingerprint does not match.
+    assert prepared_input_lengths == [3, 3]
 
 
 @pytest.mark.asyncio

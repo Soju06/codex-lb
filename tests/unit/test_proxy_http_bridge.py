@@ -612,6 +612,18 @@ async def test_stream_via_http_bridge_preserves_full_input_count_after_trimming(
     assert chunks == []
     assert prepared_input_lengths == [3, 1]
     assert request_state.input_item_count == 3
+    # After trimming, input_full_fingerprint must reflect the ORIGINAL
+    # full input (all 3 items), not the trimmed suffix. Otherwise the
+    # session would later promote a suffix hash as its prefix fingerprint
+    # and break trimming on every subsequent turn.
+    expected_full_fingerprint = proxy_service._fingerprint_input_items(
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "second"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "third"}]},
+        ]
+    )
+    assert request_state.input_full_fingerprint == expected_full_fingerprint
 
 
 @pytest.mark.asyncio

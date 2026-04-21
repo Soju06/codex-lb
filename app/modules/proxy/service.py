@@ -694,6 +694,13 @@ class ProxyService:
                     request_id=request_id,
                 )
                 request_state.input_item_count = original_count
+                # Record the fingerprint of the ORIGINAL full input, not of
+                # the trimmed suffix that actually goes upstream. This is
+                # what the session promotes to last_completed_input_prefix_
+                # fingerprint on response.completed; storing the suffix hash
+                # would make every subsequent trim check mismatch and
+                # silently disable trimming for the rest of the session.
+                request_state.input_full_fingerprint = _fingerprint_input_items(incoming_input_list)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
                 request_state.request_stage = _http_bridge_request_stage(
                     headers=headers,

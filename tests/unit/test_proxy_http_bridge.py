@@ -390,11 +390,9 @@ async def test_stream_via_http_bridge_injects_durable_previous_response_anchor(
         api_key: proxy_service.ApiKeyData | None,
         api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
         request_id: str,
-        force_store: bool,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
         del api_key, api_key_reservation, request_id
         captured["previous_response_id"] = prepared_payload.previous_response_id
-        captured["force_store"] = force_store
         return request_state, '{"type":"response.create"}'
 
     session = proxy_service._HTTPBridgeSession(
@@ -478,7 +476,6 @@ async def test_stream_via_http_bridge_injects_durable_previous_response_anchor(
 
     assert chunks == []
     assert captured["previous_response_id"] == "resp_latest"
-    assert captured["force_store"] is True
 
 
 @pytest.mark.asyncio
@@ -519,9 +516,8 @@ async def test_stream_via_http_bridge_preserves_full_input_count_after_trimming(
         api_key: proxy_service.ApiKeyData | None,
         api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
         request_id: str,
-        force_store: bool,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
-        del api_key, api_key_reservation, request_id, force_store
+        del api_key, api_key_reservation, request_id
         assert isinstance(prepared_payload.input, list)
         prepared_input_lengths.append(len(prepared_payload.input))
         return request_state, '{"type":"response.create"}'

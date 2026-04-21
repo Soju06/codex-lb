@@ -498,7 +498,6 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
-            force_store=codex_session_affinity,
         )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
         request_state.request_stage = _http_bridge_request_stage(
@@ -661,7 +660,6 @@ class ProxyService:
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
                 request_id=request_id,
-                force_store=codex_session_affinity,
             )
             request_state.input_item_count = original_count
             request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1744,7 +1742,6 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
-        force_store: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
         return self._prepare_response_bridge_request_state(
             payload,
@@ -1755,7 +1752,6 @@ class ProxyService:
             transport=_REQUEST_TRANSPORT_HTTP,
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
-            force_store=force_store,
         )
 
     def _prepare_response_bridge_request_state(
@@ -1770,13 +1766,14 @@ class ProxyService:
         client_metadata: Mapping[str, JsonValue] | None,
         request_id: str | None = None,
         request_log_id: str | None = None,
-        force_store: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
         upstream_payload = dict(payload.to_payload())
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
-        if force_store:
-            upstream_payload["store"] = True
+        # Note: do NOT force store=True upstream. The ChatGPT backend API
+        # explicitly requires store=false and rejects store=true.
+        # The validator coercion (returning False instead of raising) is
+        # sufficient to accept clients that send store=true.
         if include_type_field:
             upstream_payload["type"] = "response.create"
         if client_metadata:

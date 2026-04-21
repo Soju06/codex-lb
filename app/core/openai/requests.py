@@ -364,9 +364,7 @@ class ResponsesRequest(BaseModel):
     @field_validator("store")
     @classmethod
     def _ensure_store_false(cls, value: bool | None) -> bool:
-        if value is True:
-            raise ValueError("store must be false")
-        return False if value is None else value
+        return False
 
     @field_validator("previous_response_id")
     @classmethod
@@ -446,9 +444,7 @@ class ResponsesCompactRequest(BaseModel):
     @field_validator("store")
     @classmethod
     def _ensure_store_false(cls, value: bool) -> bool:
-        if value is True:
-            raise ValueError("store must be false")
-        return value
+        return False
 
     def to_payload(self) -> JsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)

@@ -321,7 +321,7 @@ class ResponsesRequest(BaseModel):
     tool_choice: str | JsonObject | None = None
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
-    store: bool = True
+    store: bool = False
     stream: bool | None = None
     include: list[str] = Field(default_factory=list)
     service_tier: str | None = None
@@ -363,12 +363,10 @@ class ResponsesRequest(BaseModel):
 
     @field_validator("store")
     @classmethod
-    def _force_store_true(cls, value: bool | None) -> bool:
-        # Always force store=true to enable server-side context persistence.
-        # This allows previous_response_id to reference stored conversations,
-        # dramatically reducing per-request input tokens and preventing
-        # premature context compaction.
-        return True
+    def _ensure_store_false(cls, value: bool | None) -> bool:
+        if value is True:
+            raise ValueError("store must be false")
+        return False if value is None else value
 
     @field_validator("previous_response_id")
     @classmethod
@@ -414,7 +412,7 @@ class ResponsesCompactRequest(BaseModel):
     instructions: str
     input: JsonValue
     reasoning: ResponsesReasoning | None = None
-    store: bool = True
+    store: bool = False
     service_tier: str | None = None
     prompt_cache_key: str | None = None
 
@@ -447,8 +445,10 @@ class ResponsesCompactRequest(BaseModel):
 
     @field_validator("store")
     @classmethod
-    def _force_store_true(cls, value: bool | None) -> bool:
-        return True
+    def _ensure_store_false(cls, value: bool) -> bool:
+        if value is True:
+            raise ValueError("store must be false")
+        return value
 
     def to_payload(self) -> JsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)

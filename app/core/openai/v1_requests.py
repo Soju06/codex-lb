@@ -46,8 +46,10 @@ class V1ResponsesRequest(BaseModel):
 
     @field_validator("store")
     @classmethod
-    def _force_store_true(cls, value: bool | None) -> bool | None:
-        return True
+    def _ensure_store_false(cls, value: bool | None) -> bool | None:
+        if value is True:
+            raise ValueError("store must be false")
+        return value
 
     @field_validator("tools")
     @classmethod

@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.14.0](https://github.com/Soju06/codex-lb/compare/v1.13.1...v1.14.0) (2026-04-21)
+
+
+### Features
+
+* **api-keys:** show assigned account availability in picker ([#422](https://github.com/Soju06/codex-lb/issues/422)) ([81804ab](https://github.com/Soju06/codex-lb/commit/81804ab8b6e372da78018e220984dfcb5c0a7bbf))
+* **dashboard:** show account plan in request logs table ([#425](https://github.com/Soju06/codex-lb/issues/425)) ([dbf4775](https://github.com/Soju06/codex-lb/commit/dbf4775ec7042ee72c1f8932b1a52079aab1c854))
+
+
+### Bug Fixes
+
+* **api-keys:** reuse shared copy button for created keys ([#432](https://github.com/Soju06/codex-lb/issues/432)) ([b59f1c8](https://github.com/Soju06/codex-lb/commit/b59f1c8f1585746440860f319eae0621166de371))
+* **proxy:** prefer budget-safe routing and support image-generation compatibility ("code":"invalid_request_error","param":"tools") ([#421](https://github.com/Soju06/codex-lb/issues/421)) ([e632d94](https://github.com/Soju06/codex-lb/commit/e632d9476ed12df2d9c0d5986eab80b420835ff8))
+* **proxy:** prevent context blowup by trimming input on client-supplied previous_response_id ([#448](https://github.com/Soju06/codex-lb/issues/448)) ([d80fc0c](https://github.com/Soju06/codex-lb/commit/d80fc0c68cdce70a299588daa8ad04cd82f9bfa0))
+
 ## [1.13.1](https://github.com/Soju06/codex-lb/compare/v1.13.0...v1.13.1) (2026-04-16)
 
 

@@ -623,21 +623,30 @@ class AutomationsService:
         triggers: list[str] | None = None,
         job_ids: list[str] | None = None,
     ) -> AutomationRunFilterOptionsData:
+        normalized_statuses = _normalize_run_status_filters(statuses)
+        normalized_triggers = _normalize_run_trigger_filters(triggers)
         options = await self._repository.list_run_filter_options(
+            now_utc=utcnow(),
             search=search,
             account_ids=account_ids,
             models=models,
-            statuses=None,
-            triggers=_normalize_run_trigger_filters(triggers),
+            statuses=normalized_statuses,
+            triggers=normalized_triggers,
             job_ids=job_ids,
         )
-        accounts = await self._accounts_repository.list_accounts()
-        available_account_ids = sorted(
-            {
-                *options.account_ids,
-                *(account.id for account in accounts),
-            }
+        has_active_filters = bool(
+            (search or "").strip() or account_ids or models or normalized_statuses or normalized_triggers or job_ids
         )
+        if has_active_filters:
+            available_account_ids = sorted(options.account_ids)
+        else:
+            accounts = await self._accounts_repository.list_accounts()
+            available_account_ids = sorted(
+                {
+                    *options.account_ids,
+                    *(account.id for account in accounts),
+                }
+            )
         return AutomationRunFilterOptionsData(
             account_ids=available_account_ids,
             models=options.models,
@@ -1029,8 +1038,8 @@ class AutomationsService:
         cycle_cache: dict[str, _AutomationRunCycleSummary] | None = None,
     ) -> _AutomationRunCycleSummary:
         parsed = _parse_manual_cycle_key(run.slot_key)
-        cycle_key = run.cycle_key.strip() if run.cycle_key and run.cycle_key.strip() else None
-        if cycle_key is None and parsed is not None:
+        cycle_key = _normalize_legacy_manual_cycle_key(run.cycle_key)
+        if parsed is not None:
             cycle_id, _slot_key_prefix = parsed
             cycle_key = _manual_cycle_key(job.id, cycle_id)
         if cycle_key is None:
@@ -1060,6 +1069,10 @@ class AutomationsService:
             return cycle_cache[cycle_key]
 
         cycle_runs = await self._repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+        if run.account_id and run.account_id not in {cycle_run.account_id for cycle_run in cycle_runs}:
+            normalized_run_cycle_key = _normalize_legacy_manual_cycle_key(run.cycle_key)
+            if normalized_run_cycle_key == cycle_key:
+                cycle_runs = [run, *cycle_runs]
         cycle = await self._repository.get_run_cycle(cycle_key=cycle_key)
         latest_run_by_account_id: dict[str, AutomationRunRecord] = {}
         for cycle_run in cycle_runs:
@@ -1804,6 +1817,20 @@ def _scheduled_cycle_key(job_id: str, due_slot: datetime) -> str:
 
 def _manual_cycle_key(job_id: str, cycle_id: str) -> str:
     return f"manual:{job_id}:{cycle_id}"
+
+
+def _normalize_legacy_manual_cycle_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    parts = stripped.split(":")
+    if len(parts) == 3 and parts[0] == "manual" and parts[1] and parts[2]:
+        return stripped
+    if len(parts) == 4 and parts[0] == "manual" and parts[1] and parts[2]:
+        return f"manual:{parts[1]}:{parts[2]}"
+    return stripped
 
 
 def _manual_slot_key(job_id: str, cycle_id: str, account_id: str) -> str:

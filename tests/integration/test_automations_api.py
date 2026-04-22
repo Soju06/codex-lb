@@ -304,6 +304,98 @@ async def test_automations_runs_options_include_all_accounts(async_client):
 
 
 @pytest.mark.asyncio
+async def test_automations_runs_options_respect_status_filter(async_client):
+    accounts = await _create_accounts("auto-runs-failed-a", "auto-runs-failed-b")
+    now = utcnow().replace(second=0, microsecond=0)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        success_job = await automations_repository.create_job(
+            name="Success only",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-success",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id],
+        )
+        failed_job = await automations_repository.create_job(
+            name="Failed only",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-failed",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[1].id],
+        )
+        success_run = await automations_repository.claim_run(
+            job_id=success_job.id,
+            trigger="manual",
+            slot_key=f"manual:{success_job.id}:cycle-success:digest-a",
+            cycle_key=f"manual:{success_job.id}:cycle-success",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            scheduled_for=now,
+            started_at=now,
+            account_id=accounts[0].id,
+        )
+        failed_run = await automations_repository.claim_run(
+            job_id=failed_job.id,
+            trigger="manual",
+            slot_key=f"manual:{failed_job.id}:cycle-failed:digest-b",
+            cycle_key=f"manual:{failed_job.id}:cycle-failed",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            scheduled_for=now,
+            started_at=now,
+            account_id=accounts[1].id,
+        )
+        assert success_run is not None
+        assert failed_run is not None
+        await automations_repository.complete_run(
+            success_run.id,
+            status="success",
+            finished_at=now + timedelta(seconds=5),
+            account_id=accounts[0].id,
+            error_code=None,
+            error_message=None,
+            attempt_count=1,
+        )
+        await automations_repository.complete_run(
+            failed_run.id,
+            status="failed",
+            finished_at=now + timedelta(seconds=5),
+            account_id=accounts[1].id,
+            error_code="boom",
+            error_message="boom",
+            attempt_count=1,
+        )
+
+        failed_options = await service.list_run_filter_options(statuses=["failed"])
+
+    assert failed_options.account_ids == [accounts[1].id]
+    assert failed_options.models == ["gpt-failed"]
+
+    options_response = await async_client.get("/api/automations/runs/options", params={"status": "failed"})
+    assert options_response.status_code == 200
+    options_payload = options_response.json()
+    assert options_payload["accountIds"] == [accounts[1].id]
+    assert options_payload["models"] == ["gpt-failed"]
+
+
+@pytest.mark.asyncio
 async def test_automations_run_now_fails_over_to_next_account(async_client, monkeypatch):
     accounts = await _create_accounts("auto-fallback-a", "auto-fallback-b")
     call_order: list[str | None] = []
@@ -1563,3 +1655,85 @@ async def test_automations_manual_cycle_without_eligible_accounts_keeps_zero_tot
     assert details_payload["completedAccounts"] == 0
     assert details_payload["pendingAccounts"] == 0
     assert details_payload["accounts"] == []
+
+
+@pytest.mark.asyncio
+async def test_automations_run_details_normalize_legacy_manual_cycle_key(async_client):
+    accounts = await _create_accounts("auto-legacy-details-a", "auto-legacy-details-b")
+    now = utcnow().replace(second=0, microsecond=0)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Legacy manual details",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=5,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id, accounts[1].id],
+        )
+        cycle_key = f"manual:{job.id}:legacy-cycle"
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="manual",
+            cycle_expected_accounts=2,
+            cycle_window_end=now + timedelta(minutes=5),
+            accounts=[
+                (accounts[0].id, now),
+                (accounts[1].id, now + timedelta(minutes=1)),
+            ],
+        )
+        legacy_slot_key = f"{cycle_key}:digest-a"
+        first_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="manual",
+            slot_key=legacy_slot_key,
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=now,
+            started_at=now,
+            account_id=accounts[0].id,
+        )
+        assert first_run is not None
+        await automations_repository.complete_run(
+            first_run.id,
+            status="success",
+            finished_at=now + timedelta(seconds=5),
+            account_id=accounts[0].id,
+            error_code=None,
+            error_message=None,
+            attempt_count=1,
+        )
+        await session.execute(
+            update(AutomationRun)
+            .where(AutomationRun.id == first_run.id)
+            .values(
+                cycle_key=legacy_slot_key,
+                cycle_expected_accounts=99,
+            )
+        )
+        await session.commit()
+
+        details = await service.get_run_details(first_run.id)
+
+    assert details.total_accounts == 2
+    assert details.completed_accounts == 1
+    assert details.pending_accounts == 1
+    assert sorted(account.status for account in details.accounts) == ["pending", "success"]
+
+    details_response = await async_client.get(f"/api/automations/runs/{first_run.id}/details")
+    assert details_response.status_code == 200
+    payload = details_response.json()
+    assert payload["totalAccounts"] == 2
+    assert payload["completedAccounts"] == 1
+    assert payload["pendingAccounts"] == 1

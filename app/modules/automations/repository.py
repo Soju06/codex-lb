@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
     AutomationJob,
@@ -778,6 +779,7 @@ class AutomationsRepository:
     async def list_run_filter_options(
         self,
         *,
+        now_utc: datetime | None = None,
         search: str | None = None,
         account_ids: Sequence[str] | None = None,
         models: Sequence[str] | None = None,
@@ -785,45 +787,195 @@ class AutomationsRepository:
         triggers: Sequence[str] | None = None,
         job_ids: Sequence[str] | None = None,
     ) -> AutomationRunsFilterOptionsRecord:
-        conditions = self._build_run_conditions(
-            search=search,
-            account_ids=account_ids,
-            models=models,
-            statuses=statuses,
-            triggers=triggers,
-            job_ids=job_ids,
-        )
-        account_stmt = (
-            select(AutomationRun.account_id)
-            .distinct()
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .where(AutomationRun.account_id.is_not(None))
-            .order_by(AutomationRun.account_id.asc())
-        )
-        model_stmt = (
-            select(AutomationJob.model)
-            .distinct()
-            .join(AutomationRun, AutomationRun.job_id == AutomationJob.id)
-            .order_by(AutomationJob.model.asc())
-        )
-        status_stmt = (
-            select(AutomationRun.status)
-            .distinct()
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .order_by(AutomationRun.status.asc())
-        )
-        trigger_stmt = (
-            select(AutomationRun.trigger)
-            .distinct()
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .order_by(AutomationRun.trigger.asc())
-        )
-        if conditions:
-            clause = and_(*conditions)
-            account_stmt = account_stmt.where(clause)
-            model_stmt = model_stmt.where(clause)
-            status_stmt = status_stmt.where(clause)
-            trigger_stmt = trigger_stmt.where(clause)
+        if statuses:
+            conditions = self._build_run_conditions(
+                search=search,
+                account_ids=account_ids,
+                models=models,
+                statuses=None,
+                triggers=triggers,
+                job_ids=job_ids,
+            )
+            filtered_runs_stmt = select(
+                AutomationRun.id.label("run_id"),
+                AutomationRun.cycle_key.label("cycle_key"),
+                AutomationRun.status.label("status"),
+                AutomationRun.account_id.label("account_id"),
+                AutomationRun.started_at.label("started_at"),
+                AutomationRun.scheduled_for.label("scheduled_for"),
+                AutomationRun.cycle_window_end.label("cycle_window_end"),
+                AutomationRun.cycle_expected_accounts.label("cycle_expected_accounts"),
+            ).join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
+            if conditions:
+                filtered_runs_stmt = filtered_runs_stmt.where(and_(*conditions))
+            filtered_runs = filtered_runs_stmt.subquery()
+            candidate_cycles = select(filtered_runs.c.cycle_key).distinct().subquery()
+
+            cycle_runs_stmt = select(
+                AutomationRun.id.label("run_id"),
+                AutomationRun.cycle_key.label("cycle_key"),
+                AutomationRun.status.label("status"),
+                AutomationRun.account_id.label("account_id"),
+                AutomationRun.started_at.label("started_at"),
+                AutomationRun.scheduled_for.label("scheduled_for"),
+                AutomationRun.cycle_window_end.label("cycle_window_end"),
+                AutomationRun.cycle_expected_accounts.label("cycle_expected_accounts"),
+            ).join(candidate_cycles, candidate_cycles.c.cycle_key == AutomationRun.cycle_key)
+            cycle_runs = cycle_runs_stmt.subquery()
+
+            ranked_stmt = select(
+                filtered_runs.c.run_id,
+                filtered_runs.c.cycle_key,
+                filtered_runs.c.status.label("fallback_status"),
+                func.row_number()
+                .over(
+                    partition_by=filtered_runs.c.cycle_key,
+                    order_by=(filtered_runs.c.started_at.desc(), filtered_runs.c.run_id.desc()),
+                )
+                .label("cycle_rank"),
+            )
+            ranked = ranked_stmt.subquery()
+
+            cycle_agg_stmt = select(
+                cycle_runs.c.cycle_key.label("cycle_key"),
+                func.count(
+                    func.distinct(
+                        case(
+                            (cycle_runs.c.status != "running", cycle_runs.c.account_id),
+                            else_=None,
+                        )
+                    )
+                ).label("completed_accounts"),
+                func.sum(case((cycle_runs.c.status == "success", 1), else_=0)).label("success_count"),
+                func.sum(case((cycle_runs.c.status == "failed", 1), else_=0)).label("failed_count"),
+                func.sum(case((cycle_runs.c.status == "partial", 1), else_=0)).label("partial_count"),
+                func.sum(case((cycle_runs.c.status == "running", 1), else_=0)).label("running_count"),
+                func.max(func.coalesce(cycle_runs.c.cycle_expected_accounts, 0)).label("expected_accounts"),
+                func.max(func.coalesce(cycle_runs.c.cycle_window_end, cycle_runs.c.scheduled_for)).label("window_end"),
+            ).group_by(cycle_runs.c.cycle_key)
+            cycle_agg = cycle_agg_stmt.subquery()
+
+            cycle_rows_stmt = (
+                select(
+                    ranked.c.cycle_key,
+                    ranked.c.fallback_status,
+                    cycle_agg.c.completed_accounts,
+                    cycle_agg.c.success_count,
+                    cycle_agg.c.failed_count,
+                    cycle_agg.c.partial_count,
+                    cycle_agg.c.running_count,
+                    cycle_agg.c.expected_accounts,
+                    cycle_agg.c.window_end,
+                )
+                .join(cycle_agg, cycle_agg.c.cycle_key == ranked.c.cycle_key)
+                .where(ranked.c.cycle_rank == 1)
+            )
+            cycle_rows = cycle_rows_stmt.subquery()
+
+            effective_total_expr = case(
+                (cycle_rows.c.expected_accounts > cycle_rows.c.completed_accounts, cycle_rows.c.expected_accounts),
+                else_=cycle_rows.c.completed_accounts,
+            )
+            pending_expr = effective_total_expr - cycle_rows.c.completed_accounts
+            now = now_utc or utcnow()
+            effective_status_expr = case(
+                (cycle_rows.c.running_count > 0, "running"),
+                (and_(pending_expr > 0, now <= cycle_rows.c.window_end), "running"),
+                (pending_expr > 0, case((cycle_rows.c.completed_accounts > 0, "partial"), else_="failed")),
+                (
+                    and_(
+                        cycle_rows.c.success_count > 0,
+                        cycle_rows.c.failed_count == 0,
+                        cycle_rows.c.partial_count == 0,
+                    ),
+                    "success",
+                ),
+                (
+                    and_(
+                        cycle_rows.c.success_count > 0,
+                        or_(cycle_rows.c.failed_count > 0, cycle_rows.c.partial_count > 0),
+                    ),
+                    "partial",
+                ),
+                (
+                    and_(
+                        cycle_rows.c.failed_count > 0,
+                        cycle_rows.c.success_count == 0,
+                        cycle_rows.c.partial_count == 0,
+                    ),
+                    "failed",
+                ),
+                (cycle_rows.c.partial_count > 0, "partial"),
+                else_=cycle_rows.c.fallback_status,
+            )
+            matching_cycles = select(cycle_rows.c.cycle_key).where(effective_status_expr.in_(list(statuses))).subquery()
+
+            account_stmt = (
+                select(AutomationRun.account_id)
+                .distinct()
+                .join(matching_cycles, matching_cycles.c.cycle_key == AutomationRun.cycle_key)
+                .where(AutomationRun.account_id.is_not(None))
+                .order_by(AutomationRun.account_id.asc())
+            )
+            model_stmt = (
+                select(AutomationJob.model)
+                .distinct()
+                .join(AutomationRun, AutomationRun.job_id == AutomationJob.id)
+                .join(matching_cycles, matching_cycles.c.cycle_key == AutomationRun.cycle_key)
+                .order_by(AutomationJob.model.asc())
+            )
+            status_stmt = (
+                select(AutomationRun.status)
+                .distinct()
+                .join(matching_cycles, matching_cycles.c.cycle_key == AutomationRun.cycle_key)
+                .order_by(AutomationRun.status.asc())
+            )
+            trigger_stmt = (
+                select(AutomationRun.trigger)
+                .distinct()
+                .join(matching_cycles, matching_cycles.c.cycle_key == AutomationRun.cycle_key)
+                .order_by(AutomationRun.trigger.asc())
+            )
+        else:
+            conditions = self._build_run_conditions(
+                search=search,
+                account_ids=account_ids,
+                models=models,
+                statuses=statuses,
+                triggers=triggers,
+                job_ids=job_ids,
+            )
+            account_stmt = (
+                select(AutomationRun.account_id)
+                .distinct()
+                .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
+                .where(AutomationRun.account_id.is_not(None))
+                .order_by(AutomationRun.account_id.asc())
+            )
+            model_stmt = (
+                select(AutomationJob.model)
+                .distinct()
+                .join(AutomationRun, AutomationRun.job_id == AutomationJob.id)
+                .order_by(AutomationJob.model.asc())
+            )
+            status_stmt = (
+                select(AutomationRun.status)
+                .distinct()
+                .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
+                .order_by(AutomationRun.status.asc())
+            )
+            trigger_stmt = (
+                select(AutomationRun.trigger)
+                .distinct()
+                .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
+                .order_by(AutomationRun.trigger.asc())
+            )
+            if conditions:
+                clause = and_(*conditions)
+                account_stmt = account_stmt.where(clause)
+                model_stmt = model_stmt.where(clause)
+                status_stmt = status_stmt.where(clause)
+                trigger_stmt = trigger_stmt.where(clause)
 
         account_rows = await self._session.execute(account_stmt)
         model_rows = await self._session.execute(model_stmt)

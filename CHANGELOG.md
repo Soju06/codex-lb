@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.14.1](https://github.com/Soju06/codex-lb/compare/v1.14.0...v1.14.1) (2026-04-22)
+
+
+### Bug Fixes
+
+* **bootstrap:** log first-run token at WARNING, not INFO ([#459](https://github.com/Soju06/codex-lb/issues/459)) ([179cb4a](https://github.com/Soju06/codex-lb/commit/179cb4a825831d91cbd5d5b22b3805c212b44536))
+* **proxy:** harden continuity recovery, safe WS replay, and shutdown/restart bridge lifecycle ([#415](https://github.com/Soju06/codex-lb/issues/415)) ([4fccca1](https://github.com/Soju06/codex-lb/commit/4fccca1e994397a13c885d1a98a24988527df43e))
+
+
+### Documentation
+
+* add stemirkhan as a contributor for code, and test ([#452](https://github.com/Soju06/codex-lb/issues/452)) ([86bf3cd](https://github.com/Soju06/codex-lb/commit/86bf3cd8f9c1814de9268084a9306cd99f8a5937))
+
 ## [1.14.0](https://github.com/Soju06/codex-lb/compare/v1.13.1...v1.14.0) (2026-04-21)
 
 

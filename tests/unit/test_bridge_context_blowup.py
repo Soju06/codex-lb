@@ -279,6 +279,10 @@ class TestRetryHelperPreservesPreviousResponseId:
         request_state = _make_request_state(previous_response_id="resp_xyz789")
         request_state.proxy_injected_previous_response_id = True
         request_state.fresh_upstream_request_text = '{"type":"response.create","input":"hello"}'
+        # Durable-anchor injection captures the full-resend original
+        # payload and opts into fresh-turn replay. Session-level
+        # injections keep this False.
+        request_state.fresh_upstream_request_is_retry_safe = True
         request_state.request_text = '{"type":"response.create","previous_response_id":"resp_xyz789","input":"delta"}'
 
         send_text = AsyncMock()

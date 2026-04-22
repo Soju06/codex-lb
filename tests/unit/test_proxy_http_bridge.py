@@ -4986,6 +4986,133 @@ async def test_retry_http_bridge_request_on_fresh_upstream_refuses_to_resend_pre
     send_text.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_replays_retry_safe_injection_without_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Durable-anchor injections opt in to fresh-turn replay on send failure.
+
+    The proxy captures the original unanchored full-resend payload before
+    injecting ``previous_response_id`` on durable reattach. That text is a
+    safe fresh-turn replay target because it already contains the full
+    history; dropping the anchor and replaying is equivalent to the
+    client's own retry.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-safe", None),
+        headers={"x-codex-session-id": "sid-safe"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-safe",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-retry-safe",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_prev_safe",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text='{"type":"response.create","input":"full-history-fallback"}',
+        fresh_upstream_request_is_retry_safe=True,
+        transport="http",
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    recovered = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data='{"type":"response.create","previous_response_id":"resp_prev_safe","input":"full-history-fallback"}',
+        send_request=True,
+    )
+
+    assert recovered is True
+    assert request_state.replay_count == 1
+    # Replaying should have dropped the anchor metadata so the request
+    # executes as a fresh turn using the captured unanchored payload.
+    assert request_state.previous_response_id is None
+    assert request_state.proxy_injected_previous_response_id is False
+    send_text.assert_awaited_once_with('{"type":"response.create","input":"full-history-fallback"}')
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_refuses_session_level_injection_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session-level injections must not be replayed as fresh turns.
+
+    When the proxy injects ``previous_response_id`` from a bridge session's
+    last completed response, the original payload may have relied on the
+    anchor for context (for example a single-item follow-up whose prior
+    turns live only in the stored conversation). Dropping the anchor and
+    replaying would silently turn the continuation into a context-free
+    fresh turn and return wrong-but-successful output instead of surfacing
+    the retriable send failure.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-unsafe", None),
+        headers={"x-codex-session-id": "sid-unsafe"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-unsafe",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-retry-unsafe",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_prev_unsafe",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text='{"type":"response.create","input":"single-item-followup"}',
+        fresh_upstream_request_is_retry_safe=False,
+        transport="http",
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    recovered = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data='{"type":"response.create","previous_response_id":"resp_prev_unsafe","input":"single-item-followup"}',
+        send_request=True,
+    )
+
+    assert recovered is False
+    assert request_state.replay_count == 0
+    reconnect.assert_not_awaited()
+    send_text.assert_not_awaited()
+
+
 def test_http_bridge_can_recover_during_drain_for_previous_response_anchor() -> None:
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None)
 

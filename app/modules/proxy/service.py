@@ -579,6 +579,10 @@ class ProxyService:
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
+            # Durable-anchor injection only fires for trim-safe full-resend
+            # payloads, so the unanchored request text is a valid fresh-turn
+            # replay target.
+            request_state.fresh_upstream_request_is_retry_safe = True
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),
@@ -801,6 +805,14 @@ class ProxyService:
             request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
+            # Session-level anchor injection may be attached to a payload
+            # that relied on the anchor for context (for example a
+            # single-item follow-up turn whose prior history is only
+            # represented by ``previous_response_id``). Replaying without
+            # the anchor would silently turn it into a fresh turn and drop
+            # conversational context, so opt this path out of fresh-upstream
+            # fresh-turn replay.
+            request_state.fresh_upstream_request_is_retry_safe = False
             logger.info(
                 "session_anchor_injected request_id=%s response_id=%s",
                 request_id,
@@ -848,6 +860,13 @@ class ProxyService:
                 if proxy_injected_previous_response_id:
                     request_state.proxy_injected_previous_response_id = True
                     request_state.fresh_upstream_request_text = fresh_upstream_request_text
+                    # The trim branch only fires when the untrimmed payload
+                    # is a true full resend whose prefix exactly matches the
+                    # already-stored context, so the unanchored request text
+                    # is a safe fresh-turn replay target regardless of
+                    # whether the anchor came from the durable or
+                    # session-level injection path.
+                    request_state.fresh_upstream_request_is_retry_safe = True
                 logger.info(
                     "store_context_input_trimmed request_id=%s original_items=%s trimmed_to=%s previous_response_id=%s",
                     request_id,
@@ -4738,7 +4757,16 @@ class ProxyService:
             # upstream already accepted the continuation. Re-sending the same
             # previous_response_id request can fork continuity with duplicate
             # child responses, so only reconnect-without-resend is allowed.
-            if not request_state.proxy_injected_previous_response_id or not request_state.fresh_upstream_request_text:
+            # The single exception is proxy-injected anchors on trim-safe
+            # full-resend payloads: dropping the anchor and replaying the
+            # original unanchored request is equivalent to the client's own
+            # retry. Session-level injections do not opt in because their
+            # payload may depend on the anchor for context preservation.
+            if (
+                not request_state.proxy_injected_previous_response_id
+                or not request_state.fresh_upstream_request_text
+                or not request_state.fresh_upstream_request_is_retry_safe
+            ):
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
         if request_state.replay_count >= 1:
@@ -7749,6 +7777,16 @@ class _WebSocketRequestState:
     session_id: str | None = None
     proxy_injected_previous_response_id: bool = False
     fresh_upstream_request_text: str | None = None
+    # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
+    # injection form of this request that can be replayed as a fresh turn.
+    # Durable-anchor injection captures the original unanchored full-resend
+    # payload, so dropping the anchor and replaying is equivalent to the
+    # client's own retry. Session-level anchor injection does **not** set
+    # this: the original payload may have omitted history the conversation
+    # depended on (for example a single-item follow-up whose context came
+    # entirely from the injected anchor), and dropping the anchor there
+    # would silently turn a continuation into a context-free fresh turn.
+    fresh_upstream_request_is_retry_safe: bool = False
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     error_code_override: str | None = None

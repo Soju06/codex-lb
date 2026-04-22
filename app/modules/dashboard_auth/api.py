@@ -66,6 +66,17 @@ def _session_client_key(request: Request, *, prefix: str) -> str:
     return f"{prefix}:{request.client.host if request.client else 'unknown'}"
 
 
+async def _create_dashboard_session(*, password_verified: bool, totp_verified: bool) -> tuple[str, int]:
+    settings = await get_settings_cache().get()
+    ttl_seconds = settings.dashboard_session_ttl_seconds
+    session_id = get_dashboard_session_store().create(
+        password_verified=password_verified,
+        totp_verified=totp_verified,
+        ttl_seconds=ttl_seconds,
+    )
+    return session_id, ttl_seconds
+
+
 def _decorate_session_response(
     response: DashboardAuthSessionResponse,
     *,
@@ -209,14 +220,14 @@ async def setup_password(
         raise DashboardConflictError(str(exc), code="password_already_configured") from exc
 
     await get_settings_cache().invalidate()
-    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
+    session_id, session_ttl_seconds = await _create_dashboard_session(password_verified=True, totp_verified=False)
     response = _decorate_session_response(
         await context.service.get_session_state(session_id),
         request=request,
         password_session_id=session_id,
     )
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
-    _set_session_cookie(json_response, session_id, request)
+    _set_session_cookie(json_response, session_id, request, max_age_seconds=session_ttl_seconds)
     return json_response
 
 
@@ -259,14 +270,14 @@ async def login_password(
 
     await limiter.clear_for_key(rate_key, context.session)
 
-    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
+    session_id, session_ttl_seconds = await _create_dashboard_session(password_verified=True, totp_verified=False)
     response = _decorate_session_response(
         await context.service.get_session_state(session_id),
         request=request,
         password_session_id=session_id,
     )
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
-    _set_session_cookie(json_response, session_id, request)
+    _set_session_cookie(json_response, session_id, request, max_age_seconds=session_ttl_seconds)
     return json_response
 
 
@@ -400,9 +411,11 @@ async def verify_totp(
             code="totp_rate_limited",
         ) from exc
     try:
+        session_ttl_seconds = (await get_settings_cache().get()).dashboard_session_ttl_seconds
         session_id = await context.service.verify_totp(
             session_id=current_session_id,
             code=payload.code,
+            ttl_seconds=session_ttl_seconds,
             actor_ip=request.client.host if request.client else None,
         )
     except PasswordSessionRequiredError as exc:
@@ -419,7 +432,7 @@ async def verify_totp(
         password_session_id=session_id,
     )
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
-    _set_session_cookie(json_response, session_id, request)
+    _set_session_cookie(json_response, session_id, request, max_age_seconds=session_ttl_seconds)
     return json_response
 
 
@@ -475,13 +488,13 @@ async def logout_dashboard(
     return response
 
 
-def _set_session_cookie(response: JSONResponse, session_id: str, request: Request) -> None:
+def _set_session_cookie(response: JSONResponse, session_id: str, request: Request, *, max_age_seconds: int) -> None:
     response.set_cookie(
         key=DASHBOARD_SESSION_COOKIE,
         value=session_id,
         httponly=True,
         secure=request.url.scheme == "https",
         samesite="lax",
-        max_age=12 * 60 * 60,
+        max_age=max_age_seconds,
         path="/",
     )

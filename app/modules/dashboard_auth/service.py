@@ -17,7 +17,6 @@ from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
 from app.modules.dashboard_auth.schemas import DashboardAuthSessionResponse, TotpSetupStartResponse
 
 DASHBOARD_SESSION_COOKIE = "codex_lb_dashboard_session"
-_SESSION_TTL_SECONDS = 12 * 60 * 60
 _TOTP_ISSUER = "codex-lb"
 _TOTP_ACCOUNT = "dashboard"
 
@@ -93,8 +92,8 @@ class DashboardSessionStore:
             self._encryptor = TokenEncryptor()
         return self._encryptor
 
-    def create(self, *, password_verified: bool, totp_verified: bool) -> str:
-        expires_at = int(time()) + _SESSION_TTL_SECONDS
+    def create(self, *, password_verified: bool, totp_verified: bool, ttl_seconds: int) -> str:
+        expires_at = int(time()) + ttl_seconds
         payload = json.dumps(
             {"exp": expires_at, "pw": password_verified, "tv": totp_verified},
             separators=(",", ":"),
@@ -248,7 +247,14 @@ class DashboardAuthService:
         await self._repository.set_totp_secret(self._encryptor.encrypt(secret))
         AuditService.log_async("totp_enabled", actor_ip=actor_ip)
 
-    async def verify_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> str:
+    async def verify_totp(
+        self,
+        *,
+        session_id: str | None,
+        code: str,
+        ttl_seconds: int,
+        actor_ip: str | None = None,
+    ) -> str:
         settings = await self._require_active_password_session(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
@@ -268,7 +274,7 @@ class DashboardAuthService:
             AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "totp"})
             raise TotpInvalidCodeError("Invalid TOTP code")
         AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "totp"})
-        return self._session_store.create(password_verified=True, totp_verified=True)
+        return self._session_store.create(password_verified=True, totp_verified=True, ttl_seconds=ttl_seconds)
 
     async def disable_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> None:
         settings = await self._require_totp_verified_session(session_id)

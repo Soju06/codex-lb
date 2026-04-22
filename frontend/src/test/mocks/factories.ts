@@ -343,6 +343,7 @@ export function createDashboardSettings(
 		preferEarlierResetAccounts: false,
 		routingStrategy: "usage_weighted",
 		openaiCacheAffinityMaxAgeSeconds: 300,
+		dashboardSessionTtlSeconds: 43200,
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
 		totpConfigured: true,

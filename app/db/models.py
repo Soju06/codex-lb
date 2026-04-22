@@ -224,6 +224,12 @@ class DashboardSettings(Base):
         server_default=text("1800"),
         nullable=False,
     )
+    dashboard_session_ttl_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=43200,
+        server_default=text("43200"),
+        nullable=False,
+    )
     import_without_overwrite: Mapped[bool] = mapped_column(
         Boolean,
         default=True,

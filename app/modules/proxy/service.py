@@ -579,10 +579,15 @@ class ProxyService:
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
-            # Durable-anchor injection only fires for trim-safe full-resend
-            # payloads, so the unanchored request text is a valid fresh-turn
-            # replay target.
-            request_state.fresh_upstream_request_is_retry_safe = True
+            # Durable-anchor injection actually runs when the incoming
+            # payload is *not* a full resend (see the
+            # ``not _http_bridge_payload_looks_like_full_resend(payload)``
+            # guard above), so the captured unanchored text is typically
+            # just a short follow-up. Replaying it as a fresh turn would
+            # drop the conversational context the anchor was pointing at.
+            # Only the trim branch below (which verifies the stored prefix
+            # fingerprint) is allowed to flip this flag to ``True``.
+            request_state.fresh_upstream_request_is_retry_safe = False
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),

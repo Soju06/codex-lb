@@ -47,7 +47,9 @@ describe("automations page integration", () => {
 		await user.type(within(createDialog).getByPlaceholderText("Automation name"), "Daily smoke ping");
 		await user.click(within(createDialog).getByRole("button", { name: "Accounts" }));
 		const accountsMenu = await screen.findByRole("menu");
-		await user.click(within(accountsMenu).getByRole("menuitemcheckbox", { name: "primary@example.com" }));
+		await user.click(
+			within(accountsMenu).getByRole("menuitemcheckbox", { name: /primary@example\.com/i }),
+		);
 		await user.keyboard("{Escape}");
 		await waitFor(() => {
 			expect(screen.queryByRole("menu")).not.toBeInTheDocument();

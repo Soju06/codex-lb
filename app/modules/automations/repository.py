@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import and_, case, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -504,7 +504,13 @@ class AutomationsRepository:
             for run, job_name, model, reasoning_effort in result.all()
         ]
 
-    async def list_due_manual_runs(self, *, now_utc: datetime, limit: int = 500) -> list[AutomationRunRecord]:
+    async def list_due_manual_runs(
+        self,
+        *,
+        now_utc: datetime,
+        stale_started_before: datetime,
+        limit: int = 500,
+    ) -> list[AutomationRunRecord]:
         result = await self._session.execute(
             select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
             .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
@@ -513,6 +519,12 @@ class AutomationsRepository:
             .where(AutomationRun.finished_at.is_(None))
             .where(AutomationRun.account_id.is_not(None))
             .where(AutomationRun.scheduled_for <= now_utc)
+            .where(
+                or_(
+                    AutomationRun.started_at <= AutomationRun.scheduled_for,
+                    AutomationRun.started_at <= stale_started_before,
+                )
+            )
             .order_by(AutomationRun.scheduled_for.asc(), AutomationRun.started_at.asc(), AutomationRun.id.asc())
             .limit(limit)
         )
@@ -520,6 +532,37 @@ class AutomationsRepository:
             self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
             for run, job_name, model, reasoning_effort in result.all()
         ]
+
+    async def claim_manual_run_execution(
+        self,
+        run_id: str,
+        *,
+        observed_started_at: datetime,
+        claimed_started_at: datetime,
+        stale_started_before: datetime,
+    ) -> AutomationRunRecord | None:
+        result = await self._session.execute(
+            update(AutomationRun)
+            .where(AutomationRun.id == run_id)
+            .where(AutomationRun.trigger == "manual")
+            .where(AutomationRun.status == "running")
+            .where(AutomationRun.finished_at.is_(None))
+            .where(AutomationRun.account_id.is_not(None))
+            .where(AutomationRun.started_at == observed_started_at)
+            .where(
+                or_(
+                    AutomationRun.started_at <= AutomationRun.scheduled_for,
+                    AutomationRun.started_at <= stale_started_before,
+                )
+            )
+            .values(started_at=claimed_started_at)
+            .returning(AutomationRun)
+        )
+        run = result.scalar_one_or_none()
+        await self._session.commit()
+        if run is None:
+            return None
+        return self._run_from_model(run)
 
     async def list_runs_page(
         self,
@@ -621,6 +664,7 @@ class AutomationsRepository:
         filtered_runs_stmt = select(
             AutomationRun.id.label("run_id"),
             AutomationRun.cycle_key.label("cycle_key"),
+            AutomationRun.trigger.label("trigger"),
             AutomationRun.status.label("status"),
             AutomationRun.account_id.label("account_id"),
             AutomationRun.started_at.label("started_at"),
@@ -637,6 +681,7 @@ class AutomationsRepository:
             select(
                 AutomationRun.id.label("run_id"),
                 AutomationRun.cycle_key.label("cycle_key"),
+                AutomationRun.trigger.label("trigger"),
                 AutomationRun.status.label("status"),
                 AutomationRun.account_id.label("account_id"),
                 AutomationRun.started_at.label("started_at"),
@@ -664,7 +709,13 @@ class AutomationsRepository:
 
         cycle_agg_stmt = select(
             cycle_runs.c.cycle_key.label("cycle_key"),
-            func.max(cycle_runs.c.started_at).label("cycle_started_at"),
+            func.max(case((cycle_runs.c.trigger == "manual", 1), else_=0)).label("has_manual_trigger"),
+            func.min(case((cycle_runs.c.trigger == "manual", cycle_runs.c.scheduled_for), else_=None)).label(
+                "manual_cycle_started_at"
+            ),
+            func.max(case((cycle_runs.c.trigger != "manual", cycle_runs.c.started_at), else_=None)).label(
+                "non_manual_cycle_started_at"
+            ),
             func.count(
                 func.distinct(
                     case(
@@ -686,7 +737,10 @@ class AutomationsRepository:
             select(
                 ranked.c.run_id,
                 ranked.c.cycle_key,
-                cycle_agg.c.cycle_started_at,
+                case(
+                    (cycle_agg.c.has_manual_trigger == 1, cycle_agg.c.manual_cycle_started_at),
+                    else_=cycle_agg.c.non_manual_cycle_started_at,
+                ).label("cycle_started_at"),
                 ranked.c.fallback_status,
                 cycle_agg.c.completed_accounts,
                 cycle_agg.c.success_count,
@@ -991,10 +1045,68 @@ class AutomationsRepository:
     async def get_latest_runs_by_job_ids(self, job_ids: Sequence[str]) -> dict[str, AutomationRunRecord]:
         if not job_ids:
             return {}
+        normalized_job_ids = list(dict.fromkeys(job_id for job_id in job_ids if job_id))
+        if not normalized_job_ids:
+            return {}
+
+        cycle_agg = (
+            select(
+                AutomationRun.job_id.label("job_id"),
+                AutomationRun.cycle_key.label("cycle_key"),
+                func.max(case((AutomationRun.trigger == "manual", 1), else_=0)).label("has_manual_trigger"),
+                func.min(case((AutomationRun.trigger == "manual", AutomationRun.scheduled_for), else_=None)).label(
+                    "manual_cycle_started_at"
+                ),
+                func.max(case((AutomationRun.trigger != "manual", AutomationRun.started_at), else_=None)).label(
+                    "non_manual_cycle_started_at"
+                ),
+            )
+            .where(AutomationRun.job_id.in_(normalized_job_ids))
+            .group_by(AutomationRun.job_id, AutomationRun.cycle_key)
+            .subquery()
+        )
+        cycle_started_at = case(
+            (cycle_agg.c.has_manual_trigger == 1, cycle_agg.c.manual_cycle_started_at),
+            else_=cycle_agg.c.non_manual_cycle_started_at,
+        )
+        ranked_cycles = select(
+            cycle_agg.c.job_id,
+            cycle_agg.c.cycle_key,
+            func.row_number()
+            .over(
+                partition_by=cycle_agg.c.job_id,
+                order_by=(cycle_started_at.desc(), cycle_agg.c.cycle_key.desc()),
+            )
+            .label("cycle_rank"),
+        ).subquery()
+        ranked_runs = (
+            select(
+                AutomationRun.id.label("run_id"),
+                AutomationRun.job_id.label("job_id"),
+                AutomationRun.cycle_key.label("cycle_key"),
+                func.row_number()
+                .over(
+                    partition_by=(AutomationRun.job_id, AutomationRun.cycle_key),
+                    order_by=(AutomationRun.started_at.desc(), AutomationRun.id.desc()),
+                )
+                .label("run_rank"),
+            )
+            .where(AutomationRun.job_id.in_(normalized_job_ids))
+            .subquery()
+        )
         result = await self._session.execute(
             select(AutomationRun)
-            .where(AutomationRun.job_id.in_(list(job_ids)))
-            .order_by(AutomationRun.job_id.asc(), AutomationRun.started_at.desc(), AutomationRun.id.desc())
+            .join(ranked_runs, ranked_runs.c.run_id == AutomationRun.id)
+            .join(
+                ranked_cycles,
+                and_(
+                    ranked_cycles.c.job_id == ranked_runs.c.job_id,
+                    ranked_cycles.c.cycle_key == ranked_runs.c.cycle_key,
+                ),
+            )
+            .where(ranked_runs.c.run_rank == 1)
+            .where(ranked_cycles.c.cycle_rank == 1)
+            .order_by(AutomationRun.job_id.asc())
         )
         latest: dict[str, AutomationRunRecord] = {}
         for run in result.scalars().all():

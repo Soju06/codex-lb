@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -644,6 +645,184 @@ async def test_automations_run_now_reactivates_elapsed_rate_limited_account(asyn
             log.account_id for log in recent_logs if log.transport == "automation" and log.model == "gpt-5.3-codex"
         }
         assert account.id in observed
+
+
+@pytest.mark.asyncio
+async def test_manual_run_due_jobs_claim_each_run_once_under_race(async_client, monkeypatch):
+    account = (await _create_accounts("auto-manual-race"))[0]
+    first_call_started = asyncio.Event()
+    allow_first_call_to_finish = asyncio.Event()
+    call_count = 0
+
+    async def _fake_compact(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            first_call_started.set()
+            await allow_first_call_to_finish.wait()
+        return SimpleNamespace(id=f"resp-{call_count}")
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Manual race",
+            "enabled": False,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.3-codex",
+            "prompt": "ping",
+            "accountIds": [account.id],
+        },
+    )
+    assert create_response.status_code == 200
+    automation_id = create_response.json()["id"]
+
+    run_response = await async_client.post(f"/api/automations/{automation_id}/run-now")
+    assert run_response.status_code == 202
+    initial_run_payload = run_response.json()
+    initial_cycle_started_at = initial_run_payload["startedAt"]
+    initial_cycle_scheduled_for = initial_run_payload["scheduledFor"]
+
+    now = utcnow() + timedelta(seconds=5)
+    async with SessionLocal() as session_one, SessionLocal() as session_two:
+        service_one = AutomationsService(
+            AutomationsRepository(session_one),
+            AccountsRepository(session_one),
+            RequestLogsRepository(session_one),
+        )
+        service_two = AutomationsService(
+            AutomationsRepository(session_two),
+            AccountsRepository(session_two),
+            RequestLogsRepository(session_two),
+        )
+
+        task_one = asyncio.create_task(service_one.run_due_jobs(now_utc=now))
+        await asyncio.wait_for(first_call_started.wait(), timeout=1.0)
+        task_two = asyncio.create_task(service_two.run_due_jobs(now_utc=now))
+        await asyncio.sleep(0.05)
+        allow_first_call_to_finish.set()
+        executed_one, executed_two = await asyncio.gather(task_one, task_two)
+
+    assert call_count == 1
+    assert sorted([executed_one, executed_two]) == [0, 1]
+
+    runs_response = await async_client.get(f"/api/automations/{automation_id}/runs")
+    assert runs_response.status_code == 200
+    runs_payload = runs_response.json()["items"]
+    assert len(runs_payload) == 1
+    assert runs_payload[0]["status"] == "success"
+    assert runs_payload[0]["attemptCount"] == 1
+    assert runs_payload[0]["startedAt"] == initial_cycle_started_at
+    assert runs_payload[0]["scheduledFor"] == initial_cycle_scheduled_for
+
+
+@pytest.mark.asyncio
+async def test_grouped_manual_runs_keep_cycle_trigger_order_when_started_at_drifts(async_client):
+    account = (await _create_accounts("auto-manual-group-order"))[0]
+    first_now = datetime(2026, 4, 22, 10, 0, 0)
+    second_now = first_now + timedelta(minutes=1)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+
+        job = await automations_repository.create_job(
+            name="Manual grouped order",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        first_run = await service.run_now(job.id, now_utc=first_now)
+        second_run = await service.run_now(job.id, now_utc=second_now)
+
+    assert first_run.cycle_key is not None
+    assert second_run.cycle_key is not None
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(AutomationRun)
+            .where(AutomationRun.cycle_key == first_run.cycle_key)
+            .values(started_at=second_now + timedelta(minutes=5))
+        )
+        await session.commit()
+
+    grouped_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": job.id, "trigger": "manual", "limit": 25, "offset": 0},
+    )
+    assert grouped_response.status_code == 200
+    grouped_items = grouped_response.json()["items"]
+    assert len(grouped_items) == 2
+    assert grouped_items[0]["cycleKey"] == second_run.cycle_key
+    assert grouped_items[0]["startedAt"] == second_now.isoformat() + "Z"
+    assert grouped_items[0]["scheduledFor"] == second_now.isoformat() + "Z"
+    assert grouped_items[1]["cycleKey"] == first_run.cycle_key
+    assert grouped_items[1]["startedAt"] == first_now.isoformat() + "Z"
+    assert grouped_items[1]["scheduledFor"] == first_now.isoformat() + "Z"
+
+
+@pytest.mark.asyncio
+async def test_automations_list_last_run_uses_latest_manual_cycle_not_drifted_started_at(async_client):
+    account = (await _create_accounts("auto-manual-last-run"))[0]
+    first_now = datetime(2026, 4, 22, 10, 0, 0)
+    second_now = first_now + timedelta(minutes=1)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+
+        job = await automations_repository.create_job(
+            name="Manual last run",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        first_run = await service.run_now(job.id, now_utc=first_now)
+        second_run = await service.run_now(job.id, now_utc=second_now)
+
+    assert first_run.cycle_key is not None
+    assert second_run.cycle_key is not None
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(AutomationRun)
+            .where(AutomationRun.cycle_key == first_run.cycle_key)
+            .values(started_at=second_now + timedelta(minutes=5))
+        )
+        await session.commit()
+
+    jobs_response = await async_client.get("/api/automations", params={"limit": 25, "offset": 0})
+    assert jobs_response.status_code == 200
+    jobs_items = jobs_response.json()["items"]
+    matching = [item for item in jobs_items if item["id"] == job.id]
+    assert len(matching) == 1
+    assert matching[0]["lastRun"]["cycleKey"] == second_run.cycle_key
+    assert matching[0]["lastRun"]["startedAt"] == second_now.isoformat() + "Z"
+    assert matching[0]["lastRun"]["scheduledFor"] == second_now.isoformat() + "Z"
 
 
 @pytest.mark.asyncio
@@ -1535,6 +1714,128 @@ async def test_automations_runs_page_groups_scheduled_cycle_after_all_accounts_f
     assert run["totalAccounts"] == 3
     assert run["completedAccounts"] == 3
     assert run["pendingAccounts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_grouped_runs_and_last_run_use_cycle_finished_at_and_error_summary(async_client):
+    accounts = await _create_accounts("auto-cycle-summary-a", "auto-cycle-summary-b")
+    now = datetime(2026, 4, 22, 12, 0, 0)
+    success_finished_at = now + timedelta(seconds=45)
+    failed_finished_at = now + timedelta(seconds=30)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+
+        job = await automations_repository.create_job(
+            name="Cycle terminal summary",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id for account in accounts],
+        )
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=now,
+            accounts=[
+                (accounts[0].id, now),
+                (accounts[1].id, now + timedelta(seconds=10)),
+            ],
+        )
+        failed_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=now,
+            started_at=now,
+            account_id=accounts[0].id,
+        )
+        success_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[1].id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=now + timedelta(seconds=10),
+            started_at=now + timedelta(seconds=20),
+            account_id=accounts[1].id,
+        )
+        assert failed_run is not None
+        assert success_run is not None
+        await automations_repository.complete_run(
+            failed_run.id,
+            status="failed",
+            finished_at=failed_finished_at,
+            account_id=accounts[0].id,
+            error_code="rate_limited",
+            error_message="try later",
+            attempt_count=1,
+        )
+        await automations_repository.complete_run(
+            success_run.id,
+            status="success",
+            finished_at=success_finished_at,
+            account_id=accounts[1].id,
+            error_code=None,
+            error_message=None,
+            attempt_count=1,
+        )
+
+        details = await service.get_run_details(success_run.id)
+
+    assert details.run.effective_status == "partial"
+    assert details.run.finished_at == success_finished_at
+    assert details.run.error_code == "rate_limited"
+    assert details.run.error_message == "try later"
+
+    runs_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": job.id, "trigger": "scheduled", "limit": 25, "offset": 0},
+    )
+    assert runs_response.status_code == 200
+    payload = runs_response.json()
+    assert payload["total"] == 1
+    run = payload["items"][0]
+    assert run["id"] == success_run.id
+    assert run["effectiveStatus"] == "partial"
+    assert run["finishedAt"] == success_finished_at.isoformat() + "Z"
+    assert run["errorCode"] == "rate_limited"
+    assert run["errorMessage"] == "try later"
+
+    jobs_response = await async_client.get("/api/automations", params={"limit": 25, "offset": 0})
+    assert jobs_response.status_code == 200
+    jobs_items = jobs_response.json()["items"]
+    matching = [item for item in jobs_items if item["id"] == job.id]
+    assert len(matching) == 1
+    last_run = matching[0]["lastRun"]
+    assert last_run is not None
+    assert last_run["effectiveStatus"] == "partial"
+    assert last_run["finishedAt"] == success_finished_at.isoformat() + "Z"
+    assert last_run["errorCode"] == "rate_limited"
+    assert last_run["errorMessage"] == "try later"
+
+    details_response = await async_client.get(f"/api/automations/runs/{success_run.id}/details")
+    assert details_response.status_code == 200
+    details_payload = details_response.json()
+    assert details_payload["run"]["effectiveStatus"] == "partial"
+    assert details_payload["run"]["finishedAt"] == success_finished_at.isoformat() + "Z"
+    assert details_payload["run"]["errorCode"] == "rate_limited"
+    assert details_payload["run"]["errorMessage"] == "try later"
 
 
 @pytest.mark.asyncio

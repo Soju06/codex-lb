@@ -8,6 +8,7 @@ Create Date: 2026-04-22
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from hashlib import sha1
 from typing import TypedDict
 
 import sqlalchemy as sa
@@ -102,24 +103,81 @@ def _looks_like_legacy_scheduled_digest(value: str, *, job_id: str) -> bool:
     return all(character in "0123456789abcdef" for character in digest)
 
 
-def _normalize_cycle_key(row: _ObservedRunRow) -> str:
+def _extract_legacy_scheduled_digest(value: str, *, job_id: str) -> str | None:
+    if not _looks_like_legacy_scheduled_digest(value, job_id=job_id):
+        return None
+    return value.rsplit(":", 1)[-1]
+
+
+def _scheduled_cycle_key(job_id: str, due_slot: datetime) -> str:
+    return f"scheduled:{job_id}:{due_slot.isoformat()}"
+
+
+def _scheduled_slot_digest(job_id: str, *, account_id: str, due_slot: datetime) -> str:
+    seed = f"{job_id}:{due_slot.isoformat()}:{account_id}"
+    return sha1(seed.encode("utf-8")).hexdigest()[:20]
+
+
+def _recover_legacy_scheduled_due_slot(row: _ObservedRunRow) -> datetime | None:
+    account_id = row["account_id"]
+    if account_id is None:
+        return None
+
+    digest = _extract_legacy_scheduled_digest(row["cycle_key"], job_id=row["job_id"])
+    if digest is None:
+        digest = _extract_legacy_scheduled_digest(row["slot_key"], job_id=row["job_id"])
+    if digest is None:
+        return None
+
+    threshold_minutes = max(0, row["schedule_threshold_minutes"] or 0)
+    candidate_due_slot = row["scheduled_for"].replace(second=0, microsecond=0)
+    for offset_minutes in range(threshold_minutes + 1):
+        due_slot = candidate_due_slot - timedelta(minutes=offset_minutes)
+        if _scheduled_slot_digest(row["job_id"], account_id=account_id, due_slot=due_slot) == digest:
+            return due_slot
+    return None
+
+
+def _normalize_run_row(row: _ObservedRunRow) -> _NormalizedRunRow:
     trigger = row["trigger"]
     cycle_key = row["cycle_key"]
-    slot_key = row["slot_key"]
     if trigger == "manual":
         normalized_cycle_key = _normalize_legacy_manual_cycle_key(cycle_key)
         if normalized_cycle_key is not None:
-            return normalized_cycle_key
-        normalized_slot_cycle_key = _normalize_legacy_manual_cycle_key(slot_key)
+            cycle_key = normalized_cycle_key
+        normalized_slot_cycle_key = _normalize_legacy_manual_cycle_key(row["slot_key"])
         if normalized_slot_cycle_key is not None:
-            return normalized_slot_cycle_key
-        return cycle_key
-    if trigger == "scheduled" and _looks_like_legacy_scheduled_digest(cycle_key, job_id=row["job_id"]):
+            cycle_key = normalized_slot_cycle_key
+        return {
+            "id": row["id"],
+            "cycle_key": cycle_key,
+            "job_id": row["job_id"],
+            "trigger": row["trigger"],
+            "account_id": row["account_id"],
+            "scheduled_for": row["scheduled_for"],
+            "cycle_window_end": row["cycle_window_end"],
+            "created_at": row["created_at"],
+        }
+
+    cycle_window_end = row["cycle_window_end"]
+    due_slot = _recover_legacy_scheduled_due_slot(row)
+    if trigger == "scheduled" and due_slot is not None:
         threshold_minutes = max(0, row["schedule_threshold_minutes"] or 0)
-        cycle_anchor = row["cycle_window_end"] or row["scheduled_for"]
-        due_slot = cycle_anchor - timedelta(minutes=threshold_minutes)
-        return f"scheduled:{row['job_id']}:{due_slot.isoformat()}"
-    return cycle_key
+        cycle_key = _scheduled_cycle_key(row["job_id"], due_slot)
+        recovered_window_end = due_slot + timedelta(minutes=threshold_minutes)
+        if cycle_window_end is None or recovered_window_end > cycle_window_end:
+            cycle_window_end = recovered_window_end
+
+    return {
+        "id": row["id"],
+        "cycle_key": cycle_key,
+        "job_id": row["job_id"],
+        "trigger": row["trigger"],
+        "account_id": row["account_id"],
+        "scheduled_for": row["scheduled_for"],
+        "cycle_window_end": cycle_window_end,
+        "created_at": row["created_at"],
+    }
 
 
 def _new_mutable_cycle_snapshot(row: _NormalizedRunRow) -> _MutableCycleSnapshot:
@@ -248,18 +306,7 @@ def _load_observed_runs(connection: Connection) -> list[_ObservedRunRow]:
 def _normalize_runs(connection: Connection, rows: list[_ObservedRunRow]) -> list[_NormalizedRunRow]:
     normalized_rows: list[_NormalizedRunRow] = []
     for row in rows:
-        normalized_rows.append(
-            {
-                "id": row["id"],
-                "cycle_key": _normalize_cycle_key(row),
-                "job_id": row["job_id"],
-                "trigger": row["trigger"],
-                "account_id": row["account_id"],
-                "scheduled_for": row["scheduled_for"],
-                "cycle_window_end": row["cycle_window_end"],
-                "created_at": row["created_at"],
-            }
-        )
+        normalized_rows.append(_normalize_run_row(row))
     snapshots = _build_cycle_snapshots(normalized_rows)
     snapshot_by_cycle_key = {snapshot["cycle_key"]: snapshot for snapshot in snapshots}
 

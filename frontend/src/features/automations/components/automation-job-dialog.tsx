@@ -196,6 +196,7 @@ export function AutomationJobDialog({
   const [scheduleDays, setScheduleDays] = useState<AutomationScheduleDay[]>([...DEFAULT_WEEKDAYS]);
   const [model, setModel] = useState("");
   const [reasoningEffortValue, setReasoningEffortValue] = useState(DEFAULT_REASONING_EFFORT_VALUE);
+  const [reasoningEffortTouched, setReasoningEffortTouched] = useState(false);
   const [promptDefaultValue, setPromptDefaultValue] = useState("ping");
   const [promptInputVersion, setPromptInputVersion] = useState(0);
   const [accountIds, setAccountIds] = useState<string[]>([]);
@@ -203,6 +204,7 @@ export function AutomationJobDialog({
   const timeRef = useRef<HTMLInputElement | null>(null);
   const thresholdRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const reasoningEffortProgrammaticValueRef = useRef<string | null>(null);
   const [touched, setTouched] = useState<Record<CreateFormField, boolean>>({
     name: false,
     model: false,
@@ -219,16 +221,26 @@ export function AutomationJobDialog({
     [models, selectedModel],
   );
   const availableReasoningEfforts = useMemo(() => {
-    const fromModel = selectedModelMetadata?.supportedReasoningEfforts ?? [];
-    if (fromModel.length > 0) {
+    const fromModel = selectedModelMetadata?.supportedReasoningEfforts;
+    if (fromModel != null) {
       return fromModel;
     }
     return FALLBACK_REASONING_EFFORTS;
-  }, [selectedModelMetadata?.supportedReasoningEfforts]);
+  }, [selectedModelMetadata]);
   const selectedReasoningEffort =
     reasoningEffortValue === DEFAULT_REASONING_EFFORT_VALUE
       ? null
       : (reasoningEffortValue as AutomationReasoningEffort);
+  const shouldPersistReasoningEffortOnUpdate =
+    editingJob !== null &&
+    selectedModel !== editingJob.model &&
+    selectedReasoningEffort !== (editingJob.reasoningEffort ?? null);
+  const shouldClearStoredUnsupportedReasoningEffortOnUpdate =
+    editingJob !== null &&
+    selectedModel === editingJob.model &&
+    selectedReasoningEffort === null &&
+    editingJob.reasoningEffort != null &&
+    !availableReasoningEfforts.includes(editingJob.reasoningEffort);
   const timezoneChoices = useMemo(() => timezoneOptions(scheduleTimezone), [scheduleTimezone]);
   const modelSelectItems = useMemo(
     () =>
@@ -271,6 +283,11 @@ export function AutomationJobDialog({
     return createFormErrors[field] ?? null;
   };
 
+  const setReasoningEffortValueProgrammatically = (value: string) => {
+    reasoningEffortProgrammaticValueRef.current = value;
+    setReasoningEffortValue(value);
+  };
+
   useEffect(() => {
     if (!open) {
       return;
@@ -293,7 +310,8 @@ export function AutomationJobDialog({
       setScheduleTimezone(editingJob.schedule.timezone);
       setScheduleDays([...editingJob.schedule.days]);
       setModel(editingJob.model);
-      setReasoningEffortValue(editingJob.reasoningEffort ?? DEFAULT_REASONING_EFFORT_VALUE);
+      setReasoningEffortValueProgrammatically(editingJob.reasoningEffort ?? DEFAULT_REASONING_EFFORT_VALUE);
+      setReasoningEffortTouched(false);
       setPromptDefaultValue(editingJob.prompt);
       setPromptInputVersion((value) => value + 1);
       setAccountIds([...editingJob.accountIds]);
@@ -314,7 +332,8 @@ export function AutomationJobDialog({
       setScheduleTimezone(SERVER_DEFAULT_TIMEZONE);
       setScheduleDays([...DEFAULT_WEEKDAYS]);
       setModel("");
-      setReasoningEffortValue(DEFAULT_REASONING_EFFORT_VALUE);
+      setReasoningEffortValueProgrammatically(DEFAULT_REASONING_EFFORT_VALUE);
+      setReasoningEffortTouched(false);
       setPromptDefaultValue("ping");
       setPromptInputVersion((value) => value + 1);
       setAccountIds([]);
@@ -336,7 +355,7 @@ export function AutomationJobDialog({
       return;
     }
     if (!availableReasoningEfforts.includes(reasoningEffortValue as AutomationReasoningEffort)) {
-      setReasoningEffortValue(DEFAULT_REASONING_EFFORT_VALUE);
+      setReasoningEffortValueProgrammatically(DEFAULT_REASONING_EFFORT_VALUE);
     }
   }, [availableReasoningEfforts, reasoningEffortValue]);
 
@@ -383,7 +402,7 @@ export function AutomationJobDialog({
     }
     const promptText = (promptRef.current?.value ?? promptDefaultValue).trim() || "ping";
 
-    const payload: AutomationCreateRequest | AutomationUpdateRequest = {
+    const payloadBase: AutomationCreateRequest | AutomationUpdateRequest = {
       name: nameValue,
       includePausedAccounts,
       schedule: {
@@ -394,17 +413,26 @@ export function AutomationJobDialog({
         days: scheduleDays,
       },
       model: selectedModel.trim(),
-      reasoningEffort: selectedReasoningEffort,
       prompt: promptText,
       accountIds,
     };
 
     try {
       if (editingJob) {
-        await onUpdate(editingJob.id, payload as AutomationUpdateRequest);
+        const updatePayload: AutomationUpdateRequest =
+          reasoningEffortTouched ||
+          shouldPersistReasoningEffortOnUpdate ||
+          shouldClearStoredUnsupportedReasoningEffortOnUpdate
+            ? {
+                ...(payloadBase as AutomationUpdateRequest),
+                reasoningEffort: selectedReasoningEffort,
+              }
+            : (payloadBase as AutomationUpdateRequest);
+        await onUpdate(editingJob.id, updatePayload);
       } else {
         await onCreate({
-          ...(payload as AutomationCreateRequest),
+          ...(payloadBase as AutomationCreateRequest),
+          reasoningEffort: selectedReasoningEffort,
           enabled: true,
         });
       }
@@ -511,7 +539,18 @@ export function AutomationJobDialog({
 
                 <div className="space-y-1.5 sm:col-span-2">
                   <label htmlFor={FORM_FIELD_IDS.reasoning} className="text-sm font-medium">Reasoning effort</label>
-                  <Select value={reasoningEffortValue} onValueChange={setReasoningEffortValue}>
+                  <Select
+                    value={reasoningEffortValue}
+                    onValueChange={(value) => {
+                      if (reasoningEffortProgrammaticValueRef.current === value) {
+                        reasoningEffortProgrammaticValueRef.current = null;
+                        return;
+                      }
+                      reasoningEffortProgrammaticValueRef.current = null;
+                      setReasoningEffortValue(value);
+                      setReasoningEffortTouched(true);
+                    }}
+                  >
                     <SelectTrigger id={FORM_FIELD_IDS.reasoning}>
                       <SelectValue placeholder="Model default" />
                     </SelectTrigger>

@@ -14,6 +14,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
@@ -183,10 +184,14 @@ class AutomationRunDetailsData:
 @dataclass(frozen=True, slots=True)
 class _AutomationRunCycleSummary:
     cycle_key: str
+    cycle_started_at: datetime
+    cycle_finished_at: datetime | None
     effective_status: str
     total_accounts: int
     completed_accounts: int
     pending_accounts: int
+    error_code: str | None
+    error_message: str | None
     accounts: list[AutomationRunAccountStateData]
 
 
@@ -456,7 +461,10 @@ class AutomationsService:
         now = now_utc or utcnow()
         jobs = await self._repository.list_jobs()
         latest_runs = await self._repository.get_latest_runs_by_job_ids([job.id for job in jobs])
-        latest_run_data = await self._enrich_runs_with_progress(list(latest_runs.values()))
+        latest_run_data = await self._enrich_runs_with_progress(
+            list(latest_runs.values()),
+            apply_cycle_terminal_overrides=True,
+        )
         latest_run_data_by_job_id = {run.job_id: run for run in latest_run_data}
         return [self._to_job_data(job, latest_run_data_by_job_id.get(job.id), now_utc=now) for job in jobs]
 
@@ -483,7 +491,10 @@ class AutomationsService:
             schedule_types=schedule_types,
         )
         latest_runs = await self._repository.get_latest_runs_by_job_ids([job.id for job in jobs])
-        latest_run_data = await self._enrich_runs_with_progress(list(latest_runs.values()))
+        latest_run_data = await self._enrich_runs_with_progress(
+            list(latest_runs.values()),
+            apply_cycle_terminal_overrides=True,
+        )
         latest_run_data_by_job_id = {run.job_id: run for run in latest_run_data}
         items = [self._to_job_data(job, latest_run_data_by_job_id.get(job.id), now_utc=now) for job in jobs]
         return AutomationJobsPageData(items=items, total=total, has_more=offset + limit < total)
@@ -572,7 +583,10 @@ class AutomationsService:
         if updated is None:
             raise AutomationNotFoundError(job_id)
         latest_runs = await self._repository.get_latest_runs_by_job_ids([job_id])
-        latest_run_data = await self._enrich_runs_with_progress(list(latest_runs.values()))
+        latest_run_data = await self._enrich_runs_with_progress(
+            list(latest_runs.values()),
+            apply_cycle_terminal_overrides=True,
+        )
         latest_run_data_by_job_id = {run.job_id: run for run in latest_run_data}
         now = now_utc or utcnow()
         return self._to_job_data(updated, latest_run_data_by_job_id.get(job_id), now_utc=now)
@@ -585,7 +599,8 @@ class AutomationsService:
         if job is None:
             raise AutomationNotFoundError(job_id)
         runs = await self._repository.list_runs(job_id, limit=limit)
-        return await self._enrich_runs_with_progress(runs)
+        items = await self._enrich_runs_with_progress(runs)
+        return sorted(items, key=lambda entry: (entry.started_at, entry.id), reverse=True)
 
     async def list_runs_page(
         self,
@@ -610,7 +625,7 @@ class AutomationsService:
             triggers=_normalize_run_trigger_filters(triggers),
             job_ids=job_ids,
         )
-        items = await self._enrich_runs_with_progress(runs)
+        items = await self._enrich_runs_with_progress(runs, apply_cycle_terminal_overrides=True)
         return AutomationRunsPageData(items=items, total=total, has_more=offset + limit < total)
 
     async def list_run_filter_options(
@@ -668,7 +683,7 @@ class AutomationsService:
             now_utc=utcnow(),
         )
         return AutomationRunDetailsData(
-            run=self._to_run_data(run, summary=summary),
+            run=self._to_run_data(run, summary=summary, apply_cycle_terminal_overrides=True),
             accounts=summary.accounts,
             total_accounts=summary.total_accounts,
             completed_accounts=summary.completed_accounts,
@@ -741,7 +756,11 @@ class AutomationsService:
                 job=job,
                 now_utc=now,
             )
-            return self._to_run_data(representative_run, summary=summary)
+            return self._to_run_data(
+                representative_run,
+                summary=summary,
+                apply_cycle_terminal_overrides=True,
+            )
         raise RuntimeError("Failed to claim manual automation run")
 
     async def run_due_jobs(self, *, now_utc: datetime | None = None) -> int:
@@ -796,7 +815,11 @@ class AutomationsService:
         return executed
 
     async def _run_due_manual_runs(self, *, now_utc: datetime) -> int:
-        due_runs = await self._repository.list_due_manual_runs(now_utc=now_utc)
+        stale_started_before = now_utc - timedelta(seconds=_manual_run_execution_claim_timeout_seconds())
+        due_runs = await self._repository.list_due_manual_runs(
+            now_utc=now_utc,
+            stale_started_before=stale_started_before,
+        )
         if not due_runs:
             return 0
         jobs_by_id = await self._repository.get_jobs_by_ids([run.job_id for run in due_runs])
@@ -805,7 +828,20 @@ class AutomationsService:
             job = jobs_by_id.get(run.job_id)
             if job is None or run.account_id is None:
                 continue
-            await self._execute_claimed_run(job, run, forced_account_id=run.account_id)
+            claimed_started_at = max(
+                utcnow(),
+                run.started_at + timedelta(microseconds=1),
+                run.scheduled_for + timedelta(microseconds=1),
+            )
+            claimed_run = await self._repository.claim_manual_run_execution(
+                run.id,
+                observed_started_at=run.started_at,
+                claimed_started_at=claimed_started_at,
+                stale_started_before=stale_started_before,
+            )
+            if claimed_run is None:
+                continue
+            await self._execute_claimed_run(job, claimed_run, forced_account_id=claimed_run.account_id)
             executed += 1
         return executed
 
@@ -987,7 +1023,12 @@ class AutomationsService:
         )
         return self._to_run_data(completed)
 
-    async def _enrich_runs_with_progress(self, runs: list[AutomationRunRecord]) -> list[AutomationRunData]:
+    async def _enrich_runs_with_progress(
+        self,
+        runs: list[AutomationRunRecord],
+        *,
+        apply_cycle_terminal_overrides: bool = False,
+    ) -> list[AutomationRunData]:
         if not runs:
             return []
         jobs_by_id = await self._repository.get_jobs_by_ids([run.job_id for run in runs])
@@ -1004,7 +1045,13 @@ class AutomationsService:
                     now_utc=now,
                     cycle_cache=cycle_cache,
                 )
-            items.append(self._to_run_data(run, summary=summary))
+            items.append(
+                self._to_run_data(
+                    run,
+                    summary=summary,
+                    apply_cycle_terminal_overrides=apply_cycle_terminal_overrides,
+                )
+            )
         return items
 
     async def _build_cycle_summary_for_run(
@@ -1045,10 +1092,14 @@ class AutomationsService:
         if cycle_key is None:
             return _AutomationRunCycleSummary(
                 cycle_key=f"manual:{run.id}",
+                cycle_started_at=run.scheduled_for,
+                cycle_finished_at=run.finished_at,
                 effective_status=run.status,
                 total_accounts=1 if run.account_id else 0,
                 completed_accounts=1 if run.account_id else 0,
                 pending_accounts=0,
+                error_code=run.error_code,
+                error_message=run.error_message,
                 accounts=[
                     AutomationRunAccountStateData(
                         account_id=run.account_id,
@@ -1105,6 +1156,10 @@ class AutomationsService:
             scheduled_for_by_account_id = {
                 account_id: entry.scheduled_for for account_id, entry in latest_run_by_account_id.items()
             }
+        cycle_started_at = min(
+            scheduled_for_by_account_id.values(),
+            default=min((entry.scheduled_for for entry in cycle_runs), default=run.scheduled_for),
+        )
         expected_set = set(expected_account_ids)
         observed_only = [account_id for account_id in latest_run_by_account_id if account_id not in expected_set]
         all_account_ids = [*expected_account_ids, *observed_only]
@@ -1186,12 +1241,18 @@ class AutomationsService:
             )
             or run.scheduled_for,
         )
+        cycle_finished_at = _resolve_cycle_finished_at(account_states, pending_accounts=pending_accounts)
+        error_code, error_message = _resolve_cycle_error_summary(account_states)
         summary = _AutomationRunCycleSummary(
             cycle_key=cycle_key,
+            cycle_started_at=cycle_started_at,
+            cycle_finished_at=cycle_finished_at,
             effective_status=effective_status,
             total_accounts=total_accounts,
             completed_accounts=completed_accounts,
             pending_accounts=pending_accounts,
+            error_code=error_code,
+            error_message=error_message,
             accounts=account_states,
         )
         if cycle_cache is not None:
@@ -1326,12 +1387,18 @@ class AutomationsService:
             now_utc=now_utc,
             window_end_utc=window_end,
         )
+        cycle_finished_at = _resolve_cycle_finished_at(account_states, pending_accounts=pending_accounts)
+        error_code, error_message = _resolve_cycle_error_summary(account_states)
         summary = _AutomationRunCycleSummary(
             cycle_key=cycle_key,
+            cycle_started_at=max((entry.started_at for entry in cycle_runs), default=run.started_at),
+            cycle_finished_at=cycle_finished_at,
             effective_status=effective_status,
             total_accounts=total_accounts,
             completed_accounts=completed_accounts,
             pending_accounts=pending_accounts,
+            error_code=error_code,
+            error_message=error_message,
             accounts=account_states,
         )
         if cycle_cache is not None:
@@ -1596,12 +1663,20 @@ class AutomationsService:
         run: AutomationRunRecord,
         *,
         summary: _AutomationRunCycleSummary | None = None,
+        apply_cycle_terminal_overrides: bool = False,
     ) -> AutomationRunData:
-        scheduled_for = (
-            run.started_at
-            if summary is not None and run.trigger == AUTOMATION_RUN_TRIGGER_MANUAL
-            else run.scheduled_for
+        cycle_started_at = (
+            summary.cycle_started_at if summary is not None and run.trigger == AUTOMATION_RUN_TRIGGER_MANUAL else None
         )
+        cycle_finished_at = (
+            summary.cycle_finished_at if summary is not None and apply_cycle_terminal_overrides else None
+        )
+        error_code = summary.error_code if summary is not None and apply_cycle_terminal_overrides else run.error_code
+        error_message = (
+            summary.error_message if summary is not None and apply_cycle_terminal_overrides else run.error_message
+        )
+        scheduled_for = cycle_started_at or run.scheduled_for
+        started_at = cycle_started_at or run.started_at
         return AutomationRunData(
             id=run.id,
             job_id=run.job_id,
@@ -1611,11 +1686,11 @@ class AutomationsService:
             trigger=run.trigger,
             status=run.status,
             scheduled_for=scheduled_for,
-            started_at=run.started_at,
-            finished_at=run.finished_at,
+            started_at=started_at,
+            finished_at=cycle_finished_at if apply_cycle_terminal_overrides else run.finished_at,
             account_id=run.account_id,
-            error_code=run.error_code,
-            error_message=run.error_message,
+            error_code=error_code,
+            error_message=error_message,
             attempt_count=run.attempt_count,
             effective_status=summary.effective_status if summary is not None else None,
             total_accounts=summary.total_accounts if summary is not None else None,
@@ -1731,7 +1806,7 @@ def _normalize_reasoning_effort(value: str | None, *, model_slug: str) -> str | 
     if model is None:
         return normalized
     supported = {level.effort.strip().lower() for level in model.supported_reasoning_levels if level.effort.strip()}
-    if supported and normalized not in supported:
+    if normalized not in supported:
         raise AutomationValidationError(
             f"Reasoning effort '{normalized}' is not supported by model '{model_slug}'",
             code="invalid_reasoning_effort",
@@ -1878,6 +1953,38 @@ def _resolve_effective_status(
     return fallback_status
 
 
+def _resolve_cycle_finished_at(
+    account_states: list[AutomationRunAccountStateData],
+    *,
+    pending_accounts: int,
+) -> datetime | None:
+    if pending_accounts > 0:
+        return None
+    return max((entry.finished_at for entry in account_states if entry.finished_at is not None), default=None)
+
+
+def _resolve_cycle_error_summary(
+    account_states: list[AutomationRunAccountStateData],
+) -> tuple[str | None, str | None]:
+    failed_states = [
+        entry
+        for entry in account_states
+        if entry.status in {AUTOMATION_RUN_STATUS_FAILED, AUTOMATION_RUN_STATUS_PARTIAL}
+    ]
+    if not failed_states:
+        return None, None
+    if len(failed_states) == 1:
+        failure = failed_states[0]
+        if failure.error_code or failure.error_message:
+            return failure.error_code, failure.error_message
+        return "account_failure", "1 account failed in this cycle"
+
+    shared_codes = {entry.error_code for entry in failed_states if entry.error_code}
+    error_code = next(iter(shared_codes)) if len(shared_codes) == 1 else "multiple_account_failures"
+    error_message = f"{len(failed_states)} accounts failed in this cycle"
+    return error_code, error_message
+
+
 def _extract_proxy_error(exc: ProxyResponseError) -> tuple[str, str]:
     payload = exc.payload
     if isinstance(payload, dict):
@@ -1940,6 +2047,11 @@ def _automation_request_id(response_id: str | None, run_id: str, attempt_count: 
         if normalized:
             return normalized
     return f"automation-{run_id}-attempt-{attempt_count}"
+
+
+def _manual_run_execution_claim_timeout_seconds() -> float:
+    settings = get_settings()
+    return max(30.0, settings.compact_request_budget_seconds + 30.0)
 
 
 def _elapsed_ms(started_at: float | None) -> int | None:

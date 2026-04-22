@@ -677,6 +677,8 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
     created_at = datetime(2026, 4, 22, 3, 0, 0)
     scheduled_due_slot = created_at + timedelta(hours=1)
     scheduled_window_end = scheduled_due_slot + timedelta(minutes=5)
+    scheduled_digest_a = "b32d81b774f1e6d05dfe"
+    scheduled_digest_b = "53c9867d6d99b6ffc226"
     with create_engine(sync_url, future=True).begin() as connection:
         connection.execute(
             text(
@@ -915,10 +917,10 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "id": "run_scheduled_repair_a",
                     "job_id": "job_cycle_scheduled",
                     "trigger": "scheduled",
-                    "slot_key": "scheduled:job_cycle_scheduled:aaaaaaaaaaaaaaaaaaaa",
-                    "cycle_key": "scheduled:job_cycle_scheduled:aaaaaaaaaaaaaaaaaaaa",
+                    "slot_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
                     "cycle_expected_accounts": 2,
-                    "cycle_window_end": scheduled_window_end,
+                    "cycle_window_end": scheduled_due_slot,
                     "scheduled_for": scheduled_due_slot,
                     "started_at": scheduled_due_slot,
                     "finished_at": scheduled_due_slot + timedelta(seconds=5),
@@ -933,10 +935,10 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "id": "run_scheduled_repair_b",
                     "job_id": "job_cycle_scheduled",
                     "trigger": "scheduled",
-                    "slot_key": "scheduled:job_cycle_scheduled:bbbbbbbbbbbbbbbbbbbb",
-                    "cycle_key": "scheduled:job_cycle_scheduled:bbbbbbbbbbbbbbbbbbbb",
+                    "slot_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
                     "cycle_expected_accounts": 2,
-                    "cycle_window_end": scheduled_window_end,
+                    "cycle_window_end": scheduled_due_slot + timedelta(minutes=1),
                     "scheduled_for": scheduled_due_slot + timedelta(minutes=1),
                     "started_at": scheduled_due_slot + timedelta(minutes=1),
                     "finished_at": scheduled_due_slot + timedelta(minutes=1, seconds=5),
@@ -971,7 +973,7 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
             ),
             [
                 {
-                    "cycle_key": "scheduled:job_cycle_scheduled:aaaaaaaaaaaaaaaaaaaa",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
                     "job_id": "job_cycle_scheduled",
                     "trigger": "scheduled",
                     "cycle_expected_accounts": 1,
@@ -979,7 +981,7 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "created_at": scheduled_due_slot,
                 },
                 {
-                    "cycle_key": "scheduled:job_cycle_scheduled:bbbbbbbbbbbbbbbbbbbb",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
                     "job_id": "job_cycle_scheduled",
                     "trigger": "scheduled",
                     "cycle_expected_accounts": 1,
@@ -1008,14 +1010,14 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
             ),
             [
                 {
-                    "cycle_key": "scheduled:job_cycle_scheduled:aaaaaaaaaaaaaaaaaaaa",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
                     "account_id": "acc_cycle_scheduled_a",
                     "position": 0,
                     "scheduled_for": scheduled_due_slot,
                     "created_at": scheduled_due_slot,
                 },
                 {
-                    "cycle_key": "scheduled:job_cycle_scheduled:bbbbbbbbbbbbbbbbbbbb",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
                     "account_id": "acc_cycle_scheduled_b",
                     "position": 0,
                     "scheduled_for": scheduled_due_slot + timedelta(minutes=1),
@@ -1031,31 +1033,63 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
         run_rows = connection.execute(
             text(
                 """
-                SELECT id, cycle_key
+                SELECT id, cycle_key, cycle_window_end
                 FROM automation_runs
                 ORDER BY id
                 """
             )
         ).all()
+        run_rows = [
+            (
+                run_id,
+                cycle_key,
+                datetime.fromisoformat(cycle_window_end) if isinstance(cycle_window_end, str) else cycle_window_end,
+            )
+            for run_id, cycle_key, cycle_window_end in run_rows
+        ]
         assert run_rows == [
-            ("run_manual_repair_a", "manual:job_cycle_manual:cycle-1"),
-            ("run_manual_repair_b", "manual:job_cycle_manual:cycle-1"),
-            ("run_scheduled_repair_a", f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}"),
-            ("run_scheduled_repair_b", f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}"),
+            ("run_manual_repair_a", "manual:job_cycle_manual:cycle-1", created_at + timedelta(minutes=5)),
+            ("run_manual_repair_b", "manual:job_cycle_manual:cycle-1", created_at + timedelta(minutes=5)),
+            (
+                "run_scheduled_repair_a",
+                f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                scheduled_window_end,
+            ),
+            (
+                "run_scheduled_repair_b",
+                f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                scheduled_window_end,
+            ),
         ]
 
         cycle_rows = connection.execute(
             text(
                 """
-                SELECT cycle_key, job_id, trigger, cycle_expected_accounts
+                SELECT cycle_key, job_id, trigger, cycle_expected_accounts, cycle_window_end
                 FROM automation_run_cycles
                 ORDER BY cycle_key
                 """
             )
         ).all()
+        cycle_rows = [
+            (
+                cycle_key,
+                job_id,
+                trigger,
+                cycle_expected_accounts,
+                datetime.fromisoformat(cycle_window_end) if isinstance(cycle_window_end, str) else cycle_window_end,
+            )
+            for cycle_key, job_id, trigger, cycle_expected_accounts, cycle_window_end in cycle_rows
+        ]
         assert cycle_rows == [
-            ("manual:job_cycle_manual:cycle-1", "job_cycle_manual", "manual", 2),
-            (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "job_cycle_scheduled", "scheduled", 2),
+            ("manual:job_cycle_manual:cycle-1", "job_cycle_manual", "manual", 2, created_at + timedelta(minutes=5)),
+            (
+                f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                "job_cycle_scheduled",
+                "scheduled",
+                2,
+                scheduled_window_end,
+            ),
         ]
 
         account_rows = connection.execute(

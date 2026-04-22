@@ -6,6 +6,7 @@ import pytest
 
 from app.modules.automations.service import (
     AutomationValidationError,
+    _normalize_reasoning_effort,
     _pick_dispatch_offsets_seconds,
     _resolve_effective_status,
     _scheduled_slot_key,
@@ -103,6 +104,26 @@ def test_validate_timezone_accepts_server_default() -> None:
     assert validate_timezone("server_default") == "server_default"
     assert validate_timezone("Server default") == "server_default"
     assert validate_timezone("default") == "server_default"
+
+
+def test_normalize_reasoning_effort_rejects_models_with_no_supported_levels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeRegistry:
+        @staticmethod
+        def get_models_with_fallback() -> dict[str, object]:
+            return {
+                "gpt-4o-mini": type(
+                    "_Model",
+                    (),
+                    {"supported_reasoning_levels": tuple()},
+                )()
+            }
+
+    monkeypatch.setattr("app.modules.automations.service.get_model_registry", lambda: _FakeRegistry())
+
+    with pytest.raises(AutomationValidationError, match="not supported"):
+        _normalize_reasoning_effort("low", model_slug="gpt-4o-mini")
 
 
 def test_compute_next_run_utc_accepts_server_default_timezone(monkeypatch: pytest.MonkeyPatch) -> None:

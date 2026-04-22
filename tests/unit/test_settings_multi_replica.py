@@ -22,10 +22,10 @@ def test_settings_multi_replica_defaults():
     assert settings.bulkhead_proxy_http_limit == settings.bulkhead_proxy_limit
     assert settings.bulkhead_proxy_websocket_limit == settings.bulkhead_proxy_limit
     assert settings.bulkhead_proxy_compact_limit == 16
-    assert settings.proxy_token_refresh_limit == 32
-    assert settings.proxy_upstream_websocket_connect_limit == 64
-    assert settings.proxy_response_create_limit == 64
-    assert settings.proxy_compact_response_create_limit == 16
+    assert settings.proxy_token_refresh_limit == 64
+    assert settings.proxy_upstream_websocket_connect_limit == 128
+    assert settings.proxy_response_create_limit == 256
+    assert settings.proxy_compact_response_create_limit == 64
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
     assert settings.max_sse_event_bytes == 16 * 1024 * 1024
     assert settings.proxy_refresh_failure_cooldown_seconds == 5.0

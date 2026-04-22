@@ -4516,7 +4516,7 @@ class ProxyService:
                     return
                 session.prewarmed = False
                 raise
-            except Exception:
+            except BaseException:
                 session.prewarmed = False
                 await self._cleanup_http_bridge_submit_interruption(
                     session,

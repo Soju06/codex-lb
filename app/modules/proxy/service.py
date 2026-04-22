@@ -749,14 +749,36 @@ class ProxyService:
         # lookup didn't inject one, but this bridge session is carrying
         # Codex-style conversational continuity and has already completed a
         # request on this logical conversation, inject the session's last
-        # completed response ID. Soft affinity reuse (for example prompt
-        # cache / sticky-thread sharing) must stay self-contained, so it
-        # must never inherit a previous_response_id from another request.
+        # completed response ID so the trim branch below can strip the
+        # already-stored prefix.
+        #
+        # Correctness guards:
+        # - Soft affinity reuse (for example prompt cache / sticky-thread
+        #   sharing) must stay self-contained, so only true Codex
+        #   continuity sessions opt in.
+        # - Injecting an anchor when the incoming payload is a full-resend
+        #   whose prefix cannot be safely trimmed (non-list input, prefix
+        #   mismatch, or shorter-than-stored history) would send both the
+        #   full history *and* the anchor upstream, which duplicates
+        #   context and distorts output/cost. Gate injection so it only
+        #   fires when the trim branch below would actually succeed.
+        incoming_input_preview = effective_payload.input
+        stored_count_preview = session.last_completed_input_count
+        stored_fingerprint_preview = session.last_completed_input_prefix_fingerprint
+        session_anchor_trimmable = (
+            stored_count_preview > 0
+            and stored_fingerprint_preview is not None
+            and isinstance(incoming_input_preview, list)
+            and len(incoming_input_preview) > stored_count_preview
+            and _fingerprint_input_items(cast(list[JsonValue], incoming_input_preview)[:stored_count_preview])
+            == stored_fingerprint_preview
+        )
         if (
             session.codex_session
             and not proxy_injected_previous_response_id
             and effective_payload.previous_response_id is None
             and session.last_completed_response_id is not None
+            and session_anchor_trimmable
         ):
             fresh_upstream_request_text = text_data
             effective_payload = effective_payload.model_copy(
@@ -5054,15 +5076,18 @@ class ProxyService:
             )
             event_block = f"data: {rewritten_text}\n\n"
 
-        if (
-            event_type == "response.completed"
-            and terminal_request_state is not None
-            and terminal_request_state.input_item_count > 0
-        ):
-            session.last_completed_input_count = terminal_request_state.input_item_count
-            session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
+        if event_type == "response.completed" and terminal_request_state is not None:
+            # Record the completed response id regardless of input shape so
+            # subsequent turns (including ones that never populated
+            # input_item_count, e.g. string inputs) can still reuse this
+            # anchor for continuity lookups.
             if response_id is not None:
                 session.last_completed_response_id = response_id
+            # Prefix trimming is only meaningful for list-shaped inputs, so
+            # keep the input-count / fingerprint update scoped to that path.
+            if terminal_request_state.input_item_count > 0:
+                session.last_completed_input_count = terminal_request_state.input_item_count
+                session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
 
         if event_type == "error":
             http_status = _http_error_status_from_payload(payload)

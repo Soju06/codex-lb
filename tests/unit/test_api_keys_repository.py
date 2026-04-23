@@ -9,7 +9,6 @@ import pytest
 from app.db.models import LimitWindow
 from app.modules.api_keys.repository import ApiKeysRepository
 
-
 pytestmark = pytest.mark.unit
 
 

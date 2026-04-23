@@ -161,10 +161,8 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
-# Stay below the common 16 MiB websocket message ceiling so we can slim or fail
-# early before upstream closes the session with 1009.
-_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = 12 * 1024 * 1024
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = 15 * 1024 * 1024
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _OVERSIZED_RESPONSE_CREATE_DUMP_DIR = Path("/var/lib/codex-lb/debug/response-create-dumps")
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (

@@ -140,6 +140,7 @@ class Settings(BaseSettings):
     # large built-in tool payloads (for example image_generation outputs) do not
     # fail locally with a 1009 before upstream completion.
     max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
+    upstream_response_create_max_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_originator: str = "codex_chatgpt_desktop"

@@ -70,6 +70,23 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
 
 
 DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
+    "gpt-5.5": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=0.5,
+        output_per_1m=30.0,
+        flex_input_per_1m=2.5,
+        flex_cached_input_per_1m=0.25,
+        flex_output_per_1m=15.0,
+        priority_input_per_1m=12.5,
+        priority_cached_input_per_1m=1.25,
+        priority_output_per_1m=75.0,
+    ),
+    "gpt-5.5-pro": ModelPrice(
+        input_per_1m=30.0,
+        output_per_1m=180.0,
+        flex_input_per_1m=15.0,
+        flex_output_per_1m=90.0,
+    ),
     "gpt-5.4": ModelPrice(
         input_per_1m=2.5,
         cached_input_per_1m=0.25,
@@ -210,6 +227,8 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
+    "gpt-5.5-pro*": "gpt-5.5-pro",
+    "gpt-5.5*": "gpt-5.5",
     "gpt-5.4-pro*": "gpt-5.4-pro",
     "gpt-5.4-mini*": "gpt-5.4-mini",
     "gpt-5.4-nano*": "gpt-5.4-nano",

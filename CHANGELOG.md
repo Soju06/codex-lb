@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.15.0](https://github.com/Soju06/codex-lb/compare/v1.14.1...v1.15.0) (2026-04-24)
+
+
+### Features
+
+* **proxy:** add GPT-5.5 and GPT-5.5 Pro model support ([#477](https://github.com/Soju06/codex-lb/issues/477)) ([9c2cd97](https://github.com/Soju06/codex-lb/commit/9c2cd972687ec717b53308b154ad1c0044391a87))
+
+
+### Bug Fixes
+
+* **proxy:** inject session-level previous_response_id to enable input trimming for all clients ([#456](https://github.com/Soju06/codex-lb/issues/456)) ([637fa85](https://github.com/Soju06/codex-lb/commit/637fa85e6aadc4ef363e379d5a3acb2a5bbbf900))
+* **proxy:** prevent admission semaphore leak and raise concurrency limits ([#466](https://github.com/Soju06/codex-lb/issues/466)) ([015f669](https://github.com/Soju06/codex-lb/commit/015f669e44826ac4373f9410ba78d596b97995ae))
+
 ## [1.14.1](https://github.com/Soju06/codex-lb/compare/v1.14.0...v1.14.1) (2026-04-22)
 
 

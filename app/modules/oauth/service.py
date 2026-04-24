@@ -232,14 +232,18 @@ class OauthService:
         code = params.get("code", [None])[0]
         state = params.get("state", [None])[0]
 
+        async with self._store.lock:
+            current_status = self._store.state.status
+            expected_state = self._store.state.state_token
+            verifier = self._store.state.code_verifier
+
+        if current_status == "success":
+            return ManualCallbackResponse(status="success")
+
         if error:
             message = f"OAuth error: {error}"
             await self._set_error(message)
             return ManualCallbackResponse(status="error", error_message=message)
-
-        async with self._store.lock:
-            expected_state = self._store.state.state_token
-            verifier = self._store.state.code_verifier
 
         if not code or not state or state != expected_state or not verifier:
             message = "Invalid OAuth callback: state mismatch or missing code."

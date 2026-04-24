@@ -146,7 +146,8 @@ class StubUsageRepository(UsageRepository):
 
 class StubStickySessionsRepository(StickySessionsRepository):
     def __init__(self) -> None:
-        pass
+        self.upserts: list[StickySession] = []
+        self.deletes: list[tuple[str, StickySessionKind | None]] = []
 
     async def get_account_id(
         self,
@@ -158,9 +159,12 @@ class StubStickySessionsRepository(StickySessionsRepository):
         return None
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
-        return self._build_row(key, account_id, kind)
+        row = self._build_row(key, account_id, kind)
+        self.upserts.append(row)
+        return row
 
     async def delete(self, key: str, *, kind: StickySessionKind | None = None) -> bool:
+        self.deletes.append((key, kind))
         return False
 
     @staticmethod
@@ -1756,6 +1760,90 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
 
     assert load_calls >= 2
     assert selection.account is None
+
+
+@pytest.mark.asyncio
+async def test_load_selection_inputs_excludes_paused_accounts_from_sticky_pool(monkeypatch) -> None:
+    paused_team = _make_account("acc-team-paused", "shared@example.com")
+    paused_team.plan_type = "team"
+    paused_team.status = AccountStatus.PAUSED
+    active_free = _make_account("acc-free-active", "shared@example.com")
+    active_free.plan_type = "free"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary = {
+        paused_team.id: UsageHistory(
+            id=1,
+            account_id=paused_team.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        active_free.id: UsageHistory(
+            id=2,
+            account_id=active_free.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=15.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        paused_team.id: UsageHistory(
+            id=3,
+            account_id=paused_team.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        active_free.id: UsageHistory(
+            id=4,
+            account_id=active_free.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=15.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([paused_team, active_free])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    async def pinned_account_id(
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> str | None:
+        del key, kind, max_age_seconds
+        return paused_team.id
+
+    monkeypatch.setattr(sticky_repo, "get_account_id", pinned_account_id)
+
+    selection_inputs = await balancer._load_selection_inputs(model=None)
+    selection = await balancer.select_account(
+        sticky_key="sticky-session-paused-team",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+    )
+
+    assert [account.id for account in selection_inputs.accounts] == [active_free.id]
+    assert {account.id for account in selection_inputs.runtime_accounts or []} == {
+        paused_team.id,
+        active_free.id,
+    }
+    assert selection.account is not None
+    assert selection.account.id == active_free.id
+    assert sticky_repo.deletes == [("sticky-session-paused-team", StickySessionKind.CODEX_SESSION)]
+    assert all(row.account_id != paused_team.id for row in sticky_repo.upserts)
+    assert sticky_repo.upserts[-1].account_id == active_free.id
 
 
 @pytest.mark.asyncio

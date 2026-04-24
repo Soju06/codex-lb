@@ -411,7 +411,7 @@ class LoadBalancer:
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
-            accounts = all_accounts
+            accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
                 allowed_account_ids = set(account_ids)
                 accounts = [account for account in accounts if account.id in allowed_account_ids]
@@ -1165,6 +1165,10 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
     if allowed_plans is None:
         return accounts
     return [a for a in accounts if a.plan_type in allowed_plans]
+
+
+def _selectable_accounts(accounts: list[Account]) -> list[Account]:
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _gated_limit_name_for_model(model: str | None) -> str | None:

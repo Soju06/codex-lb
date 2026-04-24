@@ -261,7 +261,7 @@ async def test_pool_exhausted_but_better_candidate_exists_reallocates():
 
 
 @pytest.mark.asyncio
-async def test_round_robin_pool_health_check_uses_round_robin_probe():
+async def test_round_robin_pool_health_check_prefers_budget_safe_candidate():
     now = time.time()
     acc_a = AccountState("a", AccountStatus.ACTIVE, used_percent=96.0, last_selected_at=now - 10)
     acc_b = AccountState("b", AccountStatus.ACTIVE, used_percent=50.0, last_selected_at=now - 1)
@@ -277,13 +277,13 @@ async def test_round_robin_pool_health_check_uses_round_robin_probe():
     )
 
     assert result.account is not None
-    assert result.account.account_id == "a"
-    repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key-round-robin", "a", kind=StickySessionKind.PROMPT_CACHE)
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key-round-robin", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key-round-robin", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
 @pytest.mark.asyncio
-async def test_capacity_weighted_pool_health_check_uses_capacity_probe():
+async def test_capacity_weighted_pool_health_check_prefers_budget_safe_candidate():
     acc_a = AccountState(
         "a",
         AccountStatus.ACTIVE,
@@ -319,9 +319,9 @@ async def test_capacity_weighted_pool_health_check_uses_capacity_probe():
     )
 
     assert result.account is not None
-    assert result.account.account_id == "a"
-    repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key-capacity-weighted", "a", kind=StickySessionKind.PROMPT_CACHE)
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key-capacity-weighted", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key-capacity-weighted", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
 @pytest.mark.asyncio
@@ -739,7 +739,7 @@ async def test_budget_threshold_95_no_reallocation_at_85_percent():
 
 
 @pytest.mark.asyncio
-async def test_budget_threshold_does_not_reallocate_codex_session_affinity():
+async def test_budget_threshold_reallocates_codex_session_affinity():
     acc_a = _active("a", used_percent=96.0)
     acc_b = _active("b", used_percent=50.0)
     repo = _make_sticky_repo(existing_account_id="a")
@@ -755,9 +755,9 @@ async def test_budget_threshold_does_not_reallocate_codex_session_affinity():
     )
 
     assert result.account is not None
-    assert result.account.account_id == "a"
-    repo.delete.assert_not_called()
-    repo.upsert.assert_not_called()
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
 
 
 @pytest.mark.asyncio

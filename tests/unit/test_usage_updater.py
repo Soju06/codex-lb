@@ -10,6 +10,7 @@ import pytest
 
 from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
+from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.usage import updater as usage_updater_module
@@ -43,6 +44,77 @@ async def test_clear_usage_refresh_state_clears_singleflight_cache() -> None:
     assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
     release.set()
     await first
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_singleflight_cancel_all_cancels_inflight_task() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def factory():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run("acc_cancel", factory))
+    await started.wait()
+
+    await usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.cancel_all()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+    assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_scheduler_stop_cancels_inflight_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    run_loop_task = asyncio.create_task(asyncio.sleep(3600))
+    scheduler._task = run_loop_task
+    cancel_all = asyncio.Event()
+
+    async def _cancel_all() -> None:
+        cancel_all.set()
+
+    monkeypatch.setattr(
+        refresh_scheduler_module.usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT,
+        "cancel_all",
+        _cancel_all,
+    )
+
+    await scheduler.stop()
+
+    assert cancel_all.is_set()
+    assert scheduler._task is None
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_scheduler_stop_cancels_inflight_singleflight_without_scheduler_task() -> None:
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def factory():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run("acc_stop_no_task", factory))
+    await started.wait()
+
+    await scheduler.stop()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+    assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
 
 
 @dataclass(frozen=True, slots=True)

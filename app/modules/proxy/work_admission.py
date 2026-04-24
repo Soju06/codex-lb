@@ -24,6 +24,19 @@ class AdmissionLease:
         self._released = True
         self._semaphore.release()
 
+    def __enter__(self) -> AdmissionLease:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        if self._released or self._semaphore is None:
+            return
+        self._released = True
+        self._semaphore.release()
+        logger.warning("AdmissionLease was garbage-collected without release() — this indicates a bug in the caller")
+
 
 @dataclass(slots=True)
 class _AdmissionGate:

@@ -1,0 +1,55 @@
+name: Stale issues
+
+on:
+  schedule:
+    # Daily at 05:00 UTC
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mark needs-info issues stale and close after timeout
+        uses: actions/stale@v9
+        with:
+          # 7 days with no activity after needs-info is applied -> mark stale
+          days-before-issue-stale: 7
+          # 7 more days after stale -> close (14 days total)
+          days-before-issue-close: 7
+
+          only-labels: "needs-info"
+          stale-issue-label: "stale"
+          close-issue-reason: "not_planned"
+
+          stale-issue-message: |
+            This issue has been automatically marked as **stale** because it has been open for 7 days with no reporter activity since `needs-info` was applied.
+
+            It will be closed in 7 more days unless additional information is provided.
+
+            If this is still relevant, please:
+            - Reply with the requested details, or
+            - Remove the `stale` label to keep it open
+
+            Thanks for the report 🙏
+
+          close-issue-message: |
+            Closing as **insufficient information** — no response from reporter within the 14-day `needs-info` window.
+
+            Please feel free to reopen with the requested details. 🙏
+
+          # Do not touch pull requests
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+
+          # Operator-protected labels
+          exempt-issue-labels: "pinned,security,in-progress"
+
+          # Safety cap per run
+          operations-per-run: 100
+          remove-stale-when-updated: true
+          ascending: true

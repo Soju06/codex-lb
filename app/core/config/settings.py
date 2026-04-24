@@ -135,7 +135,11 @@ class Settings(BaseSettings):
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
-    max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    # Applies to both upstream SSE event buffering and upstream websocket message
+    # frames. Keep the default aligned with the common 16 MiB websocket ceiling so
+    # large built-in tool payloads (for example image_generation outputs) do not
+    # fail locally with a 1009 before upstream completion.
+    max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_originator: str = "codex_chatgpt_desktop"
@@ -218,16 +222,16 @@ class Settings(BaseSettings):
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
 
-    bulkhead_proxy_limit: int = Field(default=200, ge=0)
+    bulkhead_proxy_limit: int = Field(default=512, ge=0)
     bulkhead_proxy_http_limit: int | None = Field(default=None, ge=0)
     bulkhead_proxy_websocket_limit: int | None = Field(default=None, ge=0)
     bulkhead_proxy_compact_limit: int | None = Field(default=None, ge=0)
     bulkhead_dashboard_limit: int = Field(default=50, ge=0)
     dashboard_bootstrap_token: str | None = None
-    proxy_token_refresh_limit: int = Field(default=32, ge=0)
-    proxy_upstream_websocket_connect_limit: int = Field(default=64, ge=0)
-    proxy_response_create_limit: int = Field(default=64, ge=0)
-    proxy_compact_response_create_limit: int = Field(default=16, ge=0)
+    proxy_token_refresh_limit: int = Field(default=64, ge=0)
+    proxy_upstream_websocket_connect_limit: int = Field(default=128, ge=0)
+    proxy_response_create_limit: int = Field(default=256, ge=0)
+    proxy_compact_response_create_limit: int = Field(default=64, ge=0)
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)

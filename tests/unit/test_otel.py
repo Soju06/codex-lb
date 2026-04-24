@@ -6,15 +6,25 @@ import errno
 import json
 import logging
 import sys
+from collections import deque
 from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import aiohttp
+import anyio
 import pytest
 
 import app.core.tracing.otel as otel
+import app.modules.proxy.service as proxy_module
+from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.core.config.settings import Settings
 from app.core.runtime_logging import JsonFormatter
+from app.core.usage import refresh_scheduler as refresh_scheduler_module
+from app.db.models import AccountStatus
+from app.dependencies import get_proxy_service_for_app
+from app.modules.usage import updater as usage_updater_module
 
 pytestmark = pytest.mark.unit
 
@@ -389,6 +399,173 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         grace_seconds=main.RING_STALE_GRACE_SECONDS,
     )
     ring_service.unregister.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_singleflight(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.core.startup as startup_module
+    import app.main as main
+
+    usage_updater_module._clear_usage_refresh_state()
+
+    class _NoopStartUsageScheduler(refresh_scheduler_module.UsageRefreshScheduler):
+        async def start(self) -> None:
+            return None
+
+    settings = Settings(
+        otel_enabled=False,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        shutdown_drain_timeout_seconds=0,
+        http_responses_session_bridge_instance_id="pod-a",
+    )
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
+    )
+    rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
+    usage_scheduler = _NoopStartUsageScheduler(interval_seconds=60, enabled=True)
+    model_scheduler = _DummyScheduler()
+    sticky_scheduler = _DummyScheduler()
+    close_http_client = AsyncMock()
+    close_db = AsyncMock()
+    ring_service = SimpleNamespace(
+        register=AsyncMock(),
+        mark_stale=AsyncMock(),
+        unregister=AsyncMock(),
+        heartbeat=AsyncMock(),
+    )
+    cache_poller = SimpleNamespace(
+        on_invalidation=Mock(),
+        start=AsyncMock(),
+        stop=AsyncMock(),
+    )
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
+    monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "init_background_db", Mock())
+    monkeypatch.setattr(main, "init_http_client", AsyncMock())
+    monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "close_http_client", close_http_client)
+    monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
+    monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
+    monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(main, "mark_process_dead", Mock())
+    monkeypatch.setattr(
+        "app.core.cache.invalidation.CacheInvalidationPoller",
+        lambda session_factory: cache_poller,
+    )
+
+    app = main.create_app()
+
+    try:
+        async with main.lifespan(app):
+            await asyncio.sleep(0)
+            assert startup_module._startup_complete is True
+
+            service = get_proxy_service_for_app(app)
+            existing_key = proxy_module._HTTPBridgeSessionKey("session_header", "sid-capacity-existing", None)
+            existing = proxy_module._HTTPBridgeSession(
+                key=existing_key,
+                headers={},
+                affinity=proxy_module._AffinityPolicy(
+                    key="sid-capacity-existing",
+                    kind=proxy_module.StickySessionKind.CODEX_SESSION,
+                ),
+                request_model="gpt-5.4",
+                account=cast(Any, SimpleNamespace(id="acc-existing", status=AccountStatus.ACTIVE)),
+                upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+                upstream_control=proxy_module._WebSocketUpstreamControl(),
+                pending_requests=deque(),
+                pending_lock=anyio.Lock(),
+                response_create_gate=asyncio.Semaphore(1),
+                queued_request_count=1,
+                last_used_at=1.0,
+                idle_ttl_seconds=120.0,
+                codex_session=True,
+                prewarm_lock=anyio.Lock(),
+            )
+            service._http_bridge_sessions[existing_key] = existing
+            inflight_key = proxy_module._HTTPBridgeSessionKey(
+                "session_header",
+                "sid-capacity-inflight",
+                None,
+            )
+            inflight_future: asyncio.Future[proxy_module._HTTPBridgeSession] = (
+                asyncio.get_running_loop().create_future()
+            )
+            service._http_bridge_inflight_sessions[inflight_key] = inflight_future
+
+            monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
+            monkeypatch.setattr(service, "_http_bridge_pending_count", AsyncMock(return_value=1))
+            monkeypatch.setattr(
+                proxy_module,
+                "_http_bridge_should_wait_for_registration",
+                AsyncMock(return_value=False),
+            )
+            monkeypatch.setattr(proxy_module, "_http_bridge_owner_instance", AsyncMock(return_value="pod-a"))
+            monkeypatch.setattr(
+                proxy_module,
+                "_active_http_bridge_instance_ring",
+                AsyncMock(return_value=("pod-a", ("pod-a",))),
+            )
+            create_http_bridge_session = AsyncMock()
+            monkeypatch.setattr(service, "_create_http_bridge_session_compatible", create_http_bridge_session)
+            monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+            monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
+
+            capacity_waiter = asyncio.create_task(
+                service._get_or_create_http_bridge_session(
+                    proxy_module._HTTPBridgeSessionKey("session_header", "sid-capacity-request", None),
+                    headers={"x-codex-session-id": "sid-capacity-request"},
+                    affinity=proxy_module._AffinityPolicy(
+                        key="sid-capacity-request",
+                        kind=proxy_module.StickySessionKind.CODEX_SESSION,
+                    ),
+                    api_key=None,
+                    request_model="gpt-5.4",
+                    idle_ttl_seconds=120.0,
+                    max_sessions=1,
+                )
+            )
+            await asyncio.sleep(0)
+            assert not capacity_waiter.done()
+
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def factory():
+                started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            singleflight_task = asyncio.create_task(
+                usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run("acc-lifespan-shutdown", factory)
+            )
+            await started.wait()
+        with pytest.raises(ProxyResponseError) as capacity_exc:
+            await asyncio.wait_for(capacity_waiter, timeout=0.1)
+        assert capacity_exc.value.status_code == 503
+        assert capacity_exc.value.payload["error"]["code"] == "upstream_unavailable"
+        create_http_bridge_session.assert_not_awaited()
+
+        with pytest.raises(asyncio.CancelledError):
+            await singleflight_task
+        assert cancelled.is_set()
+        assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
+    finally:
+        usage_updater_module._clear_usage_refresh_state()
 
 
 @pytest.mark.asyncio

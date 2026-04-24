@@ -134,6 +134,7 @@ describe("RequestLogsResponseSchema", () => {
         {
           requestedAt: ISO,
           accountId: "acc-1",
+          planType: "plus",
           apiKeyName: "Key A",
           requestId: "req-1",
           model: "gpt-5.1",
@@ -153,6 +154,7 @@ describe("RequestLogsResponseSchema", () => {
     });
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
+    expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
   });
 });

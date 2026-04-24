@@ -14,8 +14,8 @@ can reach upstream.
 - Strip only that advertised top-level `image_generation` tool before shared
   validation and upstream forwarding on `/backend-api/codex/responses` HTTP and
   websocket paths.
-- Preserve the existing unsupported built-in tool policy for public `/v1/*`
-  routes and for other unsupported tool types.
+- Keep this change scoped to `/backend-api/codex/responses` rather than changing
+  shared `/v1/*` route behavior.
 - Add regression coverage for backend Codex HTTP and websocket request shapes
   emitted by current Codex clients.
 
@@ -28,8 +28,8 @@ None.
 ### Modified Capabilities
 
 - `responses-api-compat`: backend Codex Responses routes tolerate the client's
-  advertised `image_generation` tool without broadening public OpenAI-style
-  tool acceptance.
+  advertised `image_generation` tool while leaving shared public route behavior
+  to the existing upstream validator path.
 
 ## Impact
 
@@ -39,4 +39,4 @@ None.
 - Tests: backend Codex HTTP/websocket proxy regression coverage and targeted
   request-normalization unit tests.
 - Client compatibility: current Codex app/CLI payloads continue to work against
-  codex-lb without relaxing `/v1/responses` validation semantics.
+  codex-lb on backend Codex responses routes.

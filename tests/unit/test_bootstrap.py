@@ -166,3 +166,31 @@ async def test_ensure_auto_bootstrap_token_reuses_existing_encrypted_token(monke
 
     assert await bootstrap_module.ensure_auto_bootstrap_token() == "shared-auto-token"
     repository.store_bootstrap_token_if_absent.assert_not_called()
+
+
+def test_log_bootstrap_token_emits_at_warning_level_so_docker_default_surfaces_it() -> None:
+    """Regression guard for #458.
+
+    The token must be logged at a level that survives docker's default
+    root-logger WARNING threshold. If it downgrades to INFO, operators
+    following the README quickstart cannot find their first-run token.
+    """
+    import io
+    import logging
+
+    handler_stream = io.StringIO()
+    handler = logging.StreamHandler(handler_stream)
+    handler.setLevel(logging.WARNING)
+    test_logger = logging.getLogger("app.core.bootstrap.test_458_regression")
+    test_logger.setLevel(logging.WARNING)
+    test_logger.addHandler(handler)
+    test_logger.propagate = False
+
+    try:
+        bootstrap_module.log_bootstrap_token(test_logger, "tok-regression-458")
+    finally:
+        test_logger.removeHandler(handler)
+
+    output = handler_stream.getvalue()
+    assert "Dashboard bootstrap token" in output
+    assert "tok-regression-458" in output

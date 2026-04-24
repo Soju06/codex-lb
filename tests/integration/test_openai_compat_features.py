@@ -137,7 +137,18 @@ async def test_v1_responses_accepts_previous_response_id(async_client, monkeypat
         {"type": "image_generation"},
     ],
 )
-async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
+async def test_v1_responses_forwards_builtin_tools(async_client, monkeypatch, tool_payload):
+    await _import_account(async_client, "acc_builtin_tools", "builtin-tools@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del headers, access_token, account_id, base_url, raise_for_status
+        seen["payload"] = payload
+        yield _completed_event("resp_builtin_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     request_payload = {
         "model": "gpt-5.2",
         "input": [
@@ -150,9 +161,8 @@ async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
     }
 
     resp = await async_client.post("/v1/responses", json=request_payload)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "invalid_request_error"
-    assert resp.json()["error"]["param"] == "tools"
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [tool_payload]
 
 
 @pytest.mark.asyncio
@@ -301,10 +311,13 @@ async def test_v1_responses_rejects_invalid_include(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_store_true(async_client):
+async def test_v1_responses_coerces_store_true_to_false(async_client):
+    """store=true should be silently coerced to false (not rejected) so the
+    bridge path can later override it on the upstream payload."""
     payload = {"model": "gpt-5.2", "input": "hi", "store": True}
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
+    # 503 means it passed validation (no 400) but there are no upstream accounts in test
+    assert resp.status_code != 400
 
 
 @pytest.mark.asyncio

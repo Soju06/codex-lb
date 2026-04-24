@@ -18,8 +18,7 @@ both converge on shared request normalization before upstream forwarding.
 - Restore compatibility with current Codex clients on
   `/backend-api/codex/responses`.
 - Keep the change narrow to backend Codex routes.
-- Preserve the existing unsupported built-in tool policy for public `/v1/*`
-  compatibility routes.
+- Avoid changing shared `/v1/*` route behavior as part of this PR.
 - Add regression coverage for both backend Codex HTTP and websocket request
   handling.
 
@@ -41,8 +40,8 @@ through shared `ResponsesRequest` / `V1ResponsesRequest` validation.
 Rationale:
 
 - This is the smallest fix that unblocks current Codex clients.
-- It avoids changing the shared unsupported-tool policy that public `/v1/*`
-  routes depend on.
+- It avoids changing the shared request-normalization behavior used by public
+  `/v1/*` routes.
 - It preserves other tool entries exactly as they are today.
 
 Alternative considered:
@@ -71,7 +70,7 @@ Alternative considered:
 
 - [Upstream begins requiring the advertised tool descriptor for Codex image
   flows] -> Keep the sanitization isolated so it can be revised or removed
-  without disturbing `/v1/*` compatibility behavior.
+  without disturbing shared `/v1/*` behavior.
 - [Future Codex clients advertise additional ambient built-in tools] -> Cover
   this change with focused regression tests and revisit the backend Codex
   sanitization allowlist if new incompatibilities appear.

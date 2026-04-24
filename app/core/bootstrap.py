@@ -32,7 +32,11 @@ def _get_encryptor() -> TokenEncryptor:
 
 
 def log_bootstrap_token(logger: logging.Logger, token: str, *, reason: str = "first-run") -> None:
-    logger.info(
+    # Emit at WARNING so the one-time token is surfaced regardless of the
+    # container/root logger level (which defaults to WARNING in most docker
+    # setups, silently dropping an INFO log and leaving operators unable to
+    # find the token). See #458.
+    logger.warning(
         "\n"
         "============================================\n"
         "  Dashboard bootstrap token (%s):\n"

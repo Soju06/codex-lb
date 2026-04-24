@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 import aiohttp
@@ -16,12 +17,10 @@ class HttpClient:
 
 
 _http_client: HttpClient | None = None
+_http_client_lock = asyncio.Lock()
 
 
-async def init_http_client() -> HttpClient:
-    global _http_client
-    if _http_client is not None:
-        return _http_client
+async def _build_http_client() -> HttpClient:
     settings = get_settings()
     connector = aiohttp.TCPConnector(
         limit=settings.http_connector_limit,
@@ -43,24 +42,47 @@ async def init_http_client() -> HttpClient:
         await session.close()
         raise
     retry_client = RetryClient(client_session=session, raise_for_status=False)
-    _http_client = HttpClient(
+    return HttpClient(
         session=session,
         websocket_session=websocket_session,
         retry_client=retry_client,
     )
-    return _http_client
 
 
-async def close_http_client() -> None:
-    global _http_client
-    if _http_client is None:
-        return
-    client = _http_client
+async def _close_client(client: HttpClient) -> None:
     try:
         await client.websocket_session.close()
     finally:
         await client.retry_client.close()
-    _http_client = None
+
+
+async def init_http_client() -> HttpClient:
+    global _http_client
+    async with _http_client_lock:
+        if _http_client is not None:
+            return _http_client
+        _http_client = await _build_http_client()
+        return _http_client
+
+
+async def refresh_http_client() -> HttpClient:
+    global _http_client
+    async with _http_client_lock:
+        previous = _http_client
+        replacement = await _build_http_client()
+        _http_client = replacement
+    if previous is not None:
+        await _close_client(previous)
+    return replacement
+
+
+async def close_http_client() -> None:
+    global _http_client
+    async with _http_client_lock:
+        client = _http_client
+        _http_client = None
+    if client is not None:
+        await _close_client(client)
 
 
 def get_http_client() -> HttpClient:

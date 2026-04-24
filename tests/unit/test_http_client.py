@@ -64,3 +64,46 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     assert client_session_cls.call_args_list[0].kwargs["connector"] is connector
 
     await http_module.close_http_client()
+
+
+@pytest.mark.asyncio
+async def test_refresh_http_client_replaces_existing_sessions() -> None:
+    await http_module.close_http_client()
+
+    first_http_session = MagicMock()
+    first_websocket_session = MagicMock()
+    first_websocket_session.close = AsyncMock()
+    first_retry_client = MagicMock()
+    first_retry_client.close = AsyncMock()
+
+    second_http_session = MagicMock()
+    second_websocket_session = MagicMock()
+    second_websocket_session.close = AsyncMock()
+    second_retry_client = MagicMock()
+    second_retry_client.close = AsyncMock()
+
+    with (
+        patch("app.core.clients.http.aiohttp.TCPConnector"),
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[
+                first_http_session,
+                first_websocket_session,
+                second_http_session,
+                second_websocket_session,
+            ],
+        ),
+        patch(
+            "app.core.clients.http.RetryClient",
+            side_effect=[first_retry_client, second_retry_client],
+        ),
+    ):
+        initial = await http_module.init_http_client()
+        refreshed = await http_module.refresh_http_client()
+
+    assert initial.session is first_http_session
+    assert refreshed.session is second_http_session
+    first_websocket_session.close.assert_awaited_once()
+    first_retry_client.close.assert_awaited_once()
+
+    await http_module.close_http_client()

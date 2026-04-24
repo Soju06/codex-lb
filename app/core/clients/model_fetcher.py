@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import cast
 
@@ -18,10 +19,11 @@ _FILTERED_FIELDS = {"model_messages"}
 
 
 class ModelFetchError(Exception):
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int, message: str, *, transport_error: bool = False) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+        self.transport_error = transport_error
 
 
 def _str(data: dict[str, JsonValue], key: str, default: str = "") -> str:
@@ -111,12 +113,18 @@ async def fetch_models_for_plan(
     timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
     session = get_http_client().session
 
-    async with session.get(url, headers=headers, timeout=timeout) as resp:
-        if resp.status >= 400:
-            text = await resp.text()
-            raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
+    try:
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status >= 400:
+                text = await resp.text()
+                raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
 
-        data = await resp.json(content_type=None)
+            data = await resp.json(content_type=None)
+    except ModelFetchError:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        message = str(exc) or exc.__class__.__name__
+        raise ModelFetchError(0, f"Transport error during model fetch: {message}", transport_error=True) from exc
 
     if not isinstance(data, dict):
         raise ModelFetchError(502, "Invalid response format from upstream models API")

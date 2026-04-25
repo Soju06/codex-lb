@@ -104,6 +104,7 @@ export const RequestLogSchema = z.object({
   accountId: z.string().nullable(),
   planType: z.string().nullable().optional().default(null),
   apiKeyName: z.string().nullable(),
+  apiKeyId: z.string().nullable().optional().default(null),
   requestId: z.string(),
   model: z.string(),
   transport: z.string().nullable().optional().default(null),
@@ -131,9 +132,16 @@ export const RequestLogModelOptionSchema = z.object({
   reasoningEffort: z.string().nullable(),
 });
 
+export const RequestLogApiKeyOptionSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  keyPrefix: z.string().nullable().optional().default(null),
+});
+
 export const RequestLogFilterOptionsSchema = z.object({
   accountIds: z.array(z.string()),
   modelOptions: z.array(RequestLogModelOptionSchema),
+  apiKeys: z.array(RequestLogApiKeyOptionSchema),
   statuses: z.array(z.string()),
 });
 
@@ -141,6 +149,7 @@ export const FilterStateSchema = z.object({
   search: z.string(),
   timeframe: z.enum(["all", "1h", "24h", "7d"]),
   accountIds: z.array(z.string()),
+  apiKeyIds: z.array(z.string()),
   modelOptions: z.array(z.string()),
   statuses: z.array(z.string()),
   limit: z.number().int().positive(),

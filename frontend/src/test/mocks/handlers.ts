@@ -147,10 +147,12 @@ function parseDateValue(value: string | null): number | null {
 
 function filterRequestLogs(
 	url: URL,
-	options?: { includeStatuses?: boolean },
+	options?: { includeStatuses?: boolean; ignoreApiKeyIds?: boolean },
 ): RequestLogEntry[] {
 	const includeStatuses = options?.includeStatuses ?? true;
+	const ignoreApiKeyIds = options?.ignoreApiKeyIds ?? false;
 	const accountIds = new Set(url.searchParams.getAll("accountId"));
+	const apiKeyIds = new Set(url.searchParams.getAll("apiKeyId"));
 	const statuses = new Set(
 		url.searchParams.getAll("status").map((value) => value.toLowerCase()),
 	);
@@ -165,6 +167,13 @@ function filterRequestLogs(
 		if (
 			accountIds.size > 0 &&
 			(!entry.accountId || !accountIds.has(entry.accountId))
+		) {
+			return false;
+		}
+		if (
+			!ignoreApiKeyIds &&
+			apiKeyIds.size > 0 &&
+			(!entry.apiKeyId || !apiKeyIds.has(entry.apiKeyId))
 		) {
 			return false;
 		}
@@ -208,6 +217,7 @@ function filterRequestLogs(
 		if (search.length > 0) {
 			const haystack = [
 				entry.accountId,
+				entry.apiKeyId,
 				entry.apiKeyName,
 				entry.requestId,
 				entry.model,
@@ -228,7 +238,10 @@ function filterRequestLogs(
 	});
 }
 
-function requestLogOptionsFromEntries(entries: RequestLogEntry[]) {
+function requestLogOptionsFromEntries(
+	entries: RequestLogEntry[],
+	apiKeyEntries: RequestLogEntry[] = entries,
+) {
 	const accountIds = [
 		...new Set(
 			entries
@@ -257,12 +270,33 @@ function requestLogOptionsFromEntries(entries: RequestLogEntry[]) {
 		return (a.reasoningEffort ?? "").localeCompare(b.reasoningEffort ?? "");
 	});
 
+	const apiKeyMap = new Map<
+		string,
+		{ id: string; name: string; keyPrefix: string | null }
+	>();
+	for (const entry of apiKeyEntries) {
+		if (!entry.apiKeyId) continue;
+		const apiKey = findApiKey(entry.apiKeyId);
+		apiKeyMap.set(entry.apiKeyId, {
+			id: entry.apiKeyId,
+			name: apiKey?.name ?? entry.apiKeyName ?? entry.apiKeyId,
+			keyPrefix: apiKey?.keyPrefix ?? null,
+		});
+	}
+	const apiKeys = [...apiKeyMap.values()].sort((a, b) => {
+		if (a.name !== b.name) {
+			return a.name.localeCompare(b.name);
+		}
+		return (a.keyPrefix ?? "").localeCompare(b.keyPrefix ?? "");
+	});
+
 	const presentStatuses = new Set(entries.map((entry) => entry.status));
 	const statuses = STATUS_ORDER.filter((status) => presentStatuses.has(status));
 
 	return createRequestLogFilterOptions({
 		accountIds,
 		modelOptions: modelOptionsList,
+		apiKeys,
 		statuses: [...statuses],
 	});
 }
@@ -305,10 +339,15 @@ export const handlers = [
 	}),
 
 	http.get("/api/request-logs/options", ({ request }) => {
-		const filtered = filterRequestLogs(new URL(request.url), {
+		const url = new URL(request.url);
+		const filtered = filterRequestLogs(url, {
 			includeStatuses: false,
 		});
-		return HttpResponse.json(requestLogOptionsFromEntries(filtered));
+		const apiKeyFiltered = filterRequestLogs(url, {
+			includeStatuses: false,
+			ignoreApiKeyIds: true,
+		});
+		return HttpResponse.json(requestLogOptionsFromEntries(filtered, apiKeyFiltered));
 	}),
 
 	http.get("/api/accounts", () => {

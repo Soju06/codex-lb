@@ -11,6 +11,7 @@ class RequestLogEntry(DashboardModel):
     requested_at: datetime
     account_id: str | None = None
     plan_type: str | None = None
+    api_key_id: str | None = None
     api_key_name: str | None = None
     request_id: str
     model: str
@@ -40,7 +41,14 @@ class RequestLogModelOption(DashboardModel):
     reasoning_effort: str | None = None
 
 
+class RequestLogApiKeyOption(DashboardModel):
+    id: str
+    name: str
+    key_prefix: str | None = None
+
+
 class RequestLogFilterOptionsResponse(DashboardModel):
     account_ids: list[str] = Field(default_factory=list)
     model_options: list[RequestLogModelOption] = Field(default_factory=list)
+    api_keys: list[RequestLogApiKeyOption] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)

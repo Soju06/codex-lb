@@ -100,6 +100,18 @@ def _find_violation(
 
         properties = node.get("properties")
         if is_json_mapping(properties):
+            required_raw = node.get("required")
+            required_set: set[str] = set()
+            if is_json_list(required_raw):
+                required_set = {item for item in required_raw if isinstance(item, str)}
+            missing_required = [str(prop_name) for prop_name in properties.keys() if str(prop_name) not in required_set]
+            if missing_required:
+                missing_list = ", ".join(f"'{name}'" for name in missing_required)
+                return (
+                    path,
+                    "'required' is required to be supplied and to be an array including every key in properties. "
+                    f"Missing {missing_list}",
+                )
             for prop_name, prop_schema in properties.items():
                 violation = _find_violation(
                     prop_schema,

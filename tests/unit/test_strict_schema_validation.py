@@ -113,6 +113,51 @@ def test_strict_valid_schema_passes():
     assert validate_strict_json_schema(schema, name="person", param="text.format.schema") is None
 
 
+def test_strict_required_must_list_every_property():
+    """Strict mode requires every key in ``properties`` to appear in ``required``.
+
+    Mirrors OpenAI's wording so callers see the same diagnostic regardless
+    of whether the request hit the local pre-check or the upstream API.
+    """
+
+    schema = {
+        "type": "object",
+        "properties": {"x": {"type": "string"}, "y": {"type": "integer"}},
+        "required": ["x"],
+        "additionalProperties": False,
+    }
+    violation = validate_strict_json_schema(schema, name="p", param="text.format.schema")
+    assert violation is not None
+    assert "required" in violation.message
+    assert "'y'" in violation.message
+    assert "context=()" in violation.message
+
+
+def test_strict_required_empty_array_rejected():
+    """Even an empty ``required`` is rejected when ``properties`` is non-empty."""
+
+    schema = {
+        "type": "object",
+        "properties": {"x": {"type": "string"}},
+        "required": [],
+        "additionalProperties": False,
+    }
+    violation = validate_strict_json_schema(schema, name="p", param="text.format.schema")
+    assert violation is not None
+    assert "'x'" in violation.message
+
+
+def test_strict_required_missing_array_rejected():
+    schema = {
+        "type": "object",
+        "properties": {"x": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    violation = validate_strict_json_schema(schema, name="p", param="text.format.schema")
+    assert violation is not None
+    assert "'x'" in violation.message
+
+
 def test_strict_combinator_recurses_into_branches():
     schema = {
         "type": "object",

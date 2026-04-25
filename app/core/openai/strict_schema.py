@@ -23,6 +23,7 @@ Only the strict-mode constraints are enforced here. Schemas with
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.core.types import JsonValue
@@ -138,9 +139,9 @@ def _find_violation(
     return None
 
 
-def _has_combinator(node: dict[str, JsonValue]) -> bool:
+def _has_combinator(node: Mapping[str, JsonValue]) -> bool:
     return any(is_json_list(node.get(name)) for name in ("anyOf", "oneOf", "allOf"))
 
 
-def _is_ref(node: dict[str, JsonValue]) -> bool:
+def _is_ref(node: Mapping[str, JsonValue]) -> bool:
     return isinstance(node.get("$ref"), str)

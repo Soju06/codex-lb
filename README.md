@@ -501,6 +501,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/tobwen"><img src="https://avatars.githubusercontent.com/u/1864057?v=4?s=100" width="100px;" alt="tobwen"/><br /><sub><b>tobwen</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=tobwen" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=tobwen" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Atobwen" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/rio-jeong"><img src="https://avatars.githubusercontent.com/u/193858009?v=4?s=100" width="100px;" alt="Rio"/><br /><sub><b>Rio</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=rio-jeong" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Ario-jeong" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=rio-jeong" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

@@ -389,6 +389,17 @@
         "test",
         "bug"
       ]
+    },
+    {
+      "login": "rio-jeong",
+      "name": "Rio",
+      "avatar_url": "https://avatars.githubusercontent.com/u/193858009?v=4",
+      "profile": "https://github.com/rio-jeong",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -141,6 +141,7 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     normalize_responses_request_payload,
+    openai_client_payload_error,
     openai_invalid_payload_error,
     openai_validation_error,
     validate_model_access,
@@ -161,10 +162,8 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
-# Stay below the common 16 MiB websocket message ceiling so we can slim or fail
-# early before upstream closes the session with 1009.
-_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = 12 * 1024 * 1024
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = 15 * 1024 * 1024
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _OVERSIZED_RESPONSE_CREATE_DUMP_DIR = Path("/var/lib/codex-lb/debug/response-create-dumps")
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (
@@ -2031,7 +2030,7 @@ class ProxyService:
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
-                                            _wrapped_websocket_error_event(400, openai_invalid_payload_error(exc.param))
+                                            _wrapped_websocket_error_event(400, openai_client_payload_error(exc))
                                         )
                                     )
                                 continue

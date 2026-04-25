@@ -439,7 +439,12 @@ async def test_v1_chat_completions_maps_response_format(async_client, monkeypatc
             "type": "json_schema",
             "json_schema": {
                 "name": "result_schema",
-                "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
                 "strict": True,
             },
         },
@@ -451,6 +456,41 @@ async def test_v1_chat_completions_maps_response_format(async_client, monkeypatc
     assert text.format is not None
     assert text.format.type == "json_schema"
     assert text.format.name == "result_schema"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_rejects_strict_schema_violation(async_client):
+    """Strict-mode schema violations are rejected locally with 400.
+
+    Mirrors the OpenAI ``invalid_json_schema`` error so callers (Graphiti,
+    raw SDK clients) see actionable diagnostics instead of a generic
+    ``stream_incomplete`` 502 from upstream.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Return JSON."}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "result_schema",
+                "strict": True,
+                # No additionalProperties: false → strict-mode violation.
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
+            },
+        },
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_json_schema"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "text.format.schema"
+    assert "additionalProperties" in body["error"]["message"]
+    assert "result_schema" in body["error"]["message"]
 
 
 @pytest.mark.asyncio

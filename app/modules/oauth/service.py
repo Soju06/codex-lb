@@ -237,7 +237,17 @@ class OauthService:
             expected_state = self._store.state.state_token
             verifier = self._store.state.code_verifier
 
-        if current_status == "success":
+        # Idempotent return only when this manual-callback corresponds to the
+        # same OAuth attempt that already succeeded (state token matches the
+        # current attempt). This avoids reporting success for stale callback
+        # URLs from a different/previous attempt, which would skip state/code
+        # validation and token persistence.
+        if (
+            current_status == "success"
+            and state
+            and expected_state
+            and state == expected_state
+        ):
             return ManualCallbackResponse(status="success")
 
         if error:

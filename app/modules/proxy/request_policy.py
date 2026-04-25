@@ -9,6 +9,7 @@ from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.modules.api_keys.service import ApiKeyData
 
@@ -95,7 +96,30 @@ def normalize_responses_request_payload(
     payload: dict[str, JsonValue],
     *,
     openai_compat: bool,
+    codex_tool_compat: bool = False,
 ) -> ResponsesRequest:
+    effective_payload = _sanitize_backend_codex_tool_advertisements(payload) if codex_tool_compat else payload
     if openai_compat:
-        return V1ResponsesRequest.model_validate(payload).to_responses_request()
-    return ResponsesRequest.model_validate(payload)
+        return V1ResponsesRequest.model_validate(effective_payload).to_responses_request()
+    return ResponsesRequest.model_validate(effective_payload)
+
+
+def _sanitize_backend_codex_tool_advertisements(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    tools_value = payload.get("tools")
+    if not is_json_list(tools_value):
+        return payload
+
+    sanitized_tools: list[JsonValue] = []
+    removed_any = False
+    for tool in tools_value:
+        if is_json_mapping(tool) and tool.get("type") == "image_generation":
+            removed_any = True
+            continue
+        sanitized_tools.append(tool)
+
+    if not removed_any:
+        return payload
+
+    sanitized_payload = dict(payload)
+    sanitized_payload["tools"] = sanitized_tools
+    return sanitized_payload

@@ -143,6 +143,46 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     assert payload.service_tier == "priority"
 
 
+def test_normalize_responses_request_payload_strips_backend_codex_image_generation_tools():
+    function_tool = {
+        "type": "function",
+        "name": "lookup_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+    payload = {
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [],
+        "tools": [{"type": "image_generation", "output_format": "png"}, function_tool],
+    }
+
+    request = proxy_request_policy.normalize_responses_request_payload(
+        payload,
+        openai_compat=True,
+        codex_tool_compat=True,
+    )
+
+    assert request.tools == [function_tool]
+    assert payload["tools"] == [{"type": "image_generation", "output_format": "png"}, function_tool]
+
+
+def test_normalize_responses_request_payload_without_codex_compat_preserves_image_generation():
+    payload = {
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [],
+        "tools": [{"type": "image_generation", "output_format": "png"}],
+    }
+
+    request = proxy_request_policy.normalize_responses_request_payload(
+        payload,
+        openai_compat=True,
+        codex_tool_compat=False,
+    )
+
+    assert request.tools == [{"type": "image_generation", "output_format": "png"}]
+
+
 class _RingMembershipStub:
     def __init__(self, members: list[str]) -> None:
         self.members = members

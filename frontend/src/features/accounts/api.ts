@@ -65,8 +65,9 @@ export function startOauth(payload: unknown) {
   });
 }
 
-export function getOauthStatus() {
-  return get(`${OAUTH_BASE_PATH}/status`, OauthStatusResponseSchema);
+export function getOauthStatus(flowId?: string) {
+  const query = flowId ? `?flowId=${encodeURIComponent(flowId)}` : "";
+  return get(`${OAUTH_BASE_PATH}/status${query}`, OauthStatusResponseSchema);
 }
 
 export function completeOauth(payload?: unknown) {

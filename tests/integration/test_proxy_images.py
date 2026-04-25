@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -233,8 +234,8 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
 
     # The host model is hidden from clients but appears in the upstream call.
     assert captured["model"] == "gpt-5.5"
-    assert isinstance(captured["tools"], list)
-    image_tool = captured["tools"][0]
+    tools = cast(list[Any], captured["tools"])
+    image_tool = cast(dict[str, Any], tools[0])
     assert image_tool["type"] == "image_generation"
     assert image_tool["model"] == "gpt-image-2"
     assert image_tool["size"] == "1024x1024"
@@ -431,14 +432,19 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
 
     # Verify the upstream payload contained the image as an input_image data
     # URL alongside the prompt text.
-    input_value = captured["input"]
-    assert isinstance(input_value, list) and input_value
-    content = input_value[0]["content"]
-    assert content[0]["type"] == "input_text"
-    assert content[0]["text"] == "make it green"
-    image_parts = [p for p in content if p.get("type") == "input_image"]
+    input_value = cast(list[Any], captured["input"])
+    assert input_value
+    first_message = cast(dict[str, Any], input_value[0])
+    content = cast(list[Any], first_message["content"])
+    text_part = cast(dict[str, Any], content[0])
+    assert text_part["type"] == "input_text"
+    assert text_part["text"] == "make it green"
+    image_parts: list[dict[str, Any]] = [
+        cast(dict[str, Any], p) for p in content if isinstance(p, dict) and p.get("type") == "input_image"
+    ]
     assert len(image_parts) == 1
-    assert image_parts[0]["image_url"].startswith("data:image/png;base64,")
+    image_url_value = cast(str, image_parts[0]["image_url"])
+    assert image_url_value.startswith("data:image/png;base64,")
 
 
 @pytest.mark.asyncio

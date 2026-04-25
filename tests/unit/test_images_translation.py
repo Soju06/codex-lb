@@ -4,12 +4,50 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from typing import Any, cast
 
 import pytest
 
-from app.core.openai.images import V1ImagesEditsForm, V1ImagesGenerationsRequest
+from app.core.openai.images import V1ImageResponse, V1ImagesEditsForm, V1ImagesGenerationsRequest
+from app.core.types import JsonValue
 from app.modules.proxy import images_service
+
+
+def _tool(responses: Any, index: int = 0) -> Mapping[str, JsonValue]:
+    """Return ``responses.tools[index]`` as a typed mapping for ``ty``.
+
+    The Responses request models tools as ``list[JsonValue]``; ``ty`` cannot
+    narrow to a mapping for chained subscripting in tests, so we cast at the
+    one place we use this access pattern.
+    """
+    return cast(Mapping[str, JsonValue], responses.tools[index])
+
+
+def _input_msg(responses: Any, index: int = 0) -> Mapping[str, JsonValue]:
+    """Return ``responses.input[index]`` as a typed mapping for ``ty``."""
+    return cast(Mapping[str, JsonValue], responses.input[index])
+
+
+def _content_list(message: Mapping[str, JsonValue]) -> list[JsonValue]:
+    """Return ``message['content']`` as a typed list for ``ty``."""
+    return cast(list[JsonValue], message["content"])
+
+
+def _content_part(message: Mapping[str, JsonValue], index: int) -> Mapping[str, JsonValue]:
+    """Return one content part as a typed mapping for ``ty``."""
+    return cast(Mapping[str, JsonValue], _content_list(message)[index])
+
+
+def _image_response(result: Any) -> V1ImageResponse:
+    """Narrow ``images_response_from_responses`` to ``V1ImageResponse`` for tests."""
+    assert isinstance(result, V1ImageResponse)
+    return result
+
+
+def _as_mapping(value: Any) -> Mapping[str, JsonValue]:
+    return cast(Mapping[str, JsonValue], value)
+
 
 # ---------------------------------------------------------------------------
 # Request translation
@@ -29,10 +67,10 @@ class TestImagesGenerationToResponsesRequest:
         assert responses.stream is True
         assert "image generator" in responses.instructions
         assert isinstance(responses.input, list)
-        assert responses.input[0]["role"] == "user"
-        assert responses.input[0]["content"] == [{"type": "input_text", "text": "tiny red circle"}]
+        assert _input_msg(responses)["role"] == "user"
+        assert _content_list(_input_msg(responses)) == [{"type": "input_text", "text": "tiny red circle"}]
         assert len(responses.tools) == 1
-        tool = responses.tools[0]
+        tool = _tool(responses)
         assert tool["type"] == "image_generation"
         assert tool["model"] == "gpt-image-2"
         # ``n`` is intentionally not forwarded into the tool config because
@@ -62,7 +100,7 @@ class TestImagesGenerationToResponsesRequest:
         )
         responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.5")
         assert responses.stream is True
-        tool = responses.tools[0]
+        tool = _tool(responses)
         assert tool["partial_images"] == 2
         # ``n`` is dropped from the tool config; see the docstring on
         # _build_image_generation_tool. The Images-API layer enforces n bounds.
@@ -80,7 +118,7 @@ class TestImagesGenerationToResponsesRequest:
             }
         )
         responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.5")
-        assert "partial_images" not in responses.tools[0]
+        assert "partial_images" not in _tool(responses)
 
     def test_host_model_replaces_public_model(self) -> None:
         payload = V1ImagesGenerationsRequest.model_validate({"model": "gpt-image-2", "prompt": "blue square"})
@@ -88,7 +126,7 @@ class TestImagesGenerationToResponsesRequest:
         # The public model only appears in tools[0].model — never on the
         # outer Responses ``model`` field.
         assert responses.model == "gpt-5.5"
-        assert responses.tools[0]["model"] == "gpt-image-2"
+        assert _tool(responses)["model"] == "gpt-image-2"
 
 
 class TestImagesEditToResponsesRequest:
@@ -105,12 +143,14 @@ class TestImagesEditToResponsesRequest:
         )
         # Exactly one input message containing the prompt and one input_image
         # data URL.
-        assert len(responses.input) == 1
-        content = responses.input[0]["content"]
+        assert len(cast(list[JsonValue], responses.input)) == 1
+        content = _content_list(_input_msg(responses))
         assert content[0] == {"type": "input_text", "text": "make it green"}
-        assert content[1]["type"] == "input_image"
-        assert content[1]["image_url"].startswith("data:image/png;base64,")
-        decoded = base64.b64decode(content[1]["image_url"].split(",", 1)[1])
+        image_part = _as_mapping(content[1])
+        assert image_part["type"] == "input_image"
+        image_url = cast(str, image_part["image_url"])
+        assert image_url.startswith("data:image/png;base64,")
+        decoded = base64.b64decode(image_url.split(",", 1)[1])
         assert decoded == png_bytes
 
     def test_mask_is_appended_with_hint_in_prompt(self) -> None:
@@ -121,13 +161,17 @@ class TestImagesEditToResponsesRequest:
             images=[(b"image-bytes", "image/png")],
             mask=(b"mask-bytes", "image/png"),
         )
-        content = responses.input[0]["content"]
+        content = _content_list(_input_msg(responses))
         # Prompt picks up the mask hint.
-        assert content[0]["type"] == "input_text"
-        assert "edit this" in content[0]["text"]
-        assert "mask" in content[0]["text"].lower()
+        first_part = _as_mapping(content[0])
+        assert first_part["type"] == "input_text"
+        text_value = cast(str, first_part["text"])
+        assert "edit this" in text_value
+        assert "mask" in text_value.lower()
         # Two input_image parts: source + mask.
-        image_parts = [part for part in content if part.get("type") == "input_image"]
+        image_parts = [
+            part for part in (cast(Mapping[str, JsonValue], p) for p in content) if part.get("type") == "input_image"
+        ]
         assert len(image_parts) == 2
 
     def test_no_images_raises(self) -> None:
@@ -155,7 +199,7 @@ class TestImagesEditToResponsesRequest:
             images=[(b"data", "image/png")],
             mask=None,
         )
-        assert responses.tools[0]["input_fidelity"] == "high"
+        assert _tool(responses)["input_fidelity"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -183,15 +227,15 @@ class TestImagesResponseFromResponses:
             ],
             "tool_usage": {"image_gen": {"input_tokens": 12, "output_tokens": 84}},
         }
-        result = images_service.images_response_from_responses(upstream)
-        assert hasattr(result, "data"), f"expected V1ImageResponse, got {result!r}"
-        assert len(result.data) == 1
-        assert result.data[0].b64_json == "BASE64DATA=="
-        assert result.data[0].revised_prompt == "a tiny red circle on white"
-        assert result.usage is not None
-        assert result.usage.input_tokens == 12
-        assert result.usage.output_tokens == 84
-        assert result.usage.total_tokens == 96
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
+        response = _image_response(result)
+        assert len(response.data) == 1
+        assert response.data[0].b64_json == "BASE64DATA=="
+        assert response.data[0].revised_prompt == "a tiny red circle on white"
+        assert response.usage is not None
+        assert response.usage.input_tokens == 12
+        assert response.usage.output_tokens == 84
+        assert response.usage.total_tokens == 96
 
     def test_multiple_images_in_output(self) -> None:
         upstream = {
@@ -212,11 +256,11 @@ class TestImagesResponseFromResponses:
                 {"type": "message", "role": "assistant", "content": []},
             ],
         }
-        result = images_service.images_response_from_responses(upstream)
-        assert hasattr(result, "data")
-        assert [d.b64_json for d in result.data] == ["AAAA", "BBBB"]
-        assert result.data[0].revised_prompt is None
-        assert result.data[1].revised_prompt == "second image"
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
+        response = _image_response(result)
+        assert [d.b64_json for d in response.data] == ["AAAA", "BBBB"]
+        assert response.data[0].revised_prompt is None
+        assert response.data[1].revised_prompt == "second image"
 
     def test_failed_image_returns_error_envelope(self) -> None:
         upstream = {
@@ -233,14 +277,14 @@ class TestImagesResponseFromResponses:
                 }
             ],
         }
-        result = images_service.images_response_from_responses(upstream)
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
         assert isinstance(result, dict)
         assert result["error"]["code"] == "content_policy_violation"
         assert result["error"]["message"] == "not allowed"
 
     def test_no_image_items_returns_error(self) -> None:
         upstream = {"status": "completed", "output": []}
-        result = images_service.images_response_from_responses(upstream)
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
         assert isinstance(result, dict)
         assert result["error"]["code"] == "image_generation_failed"
 
@@ -249,13 +293,13 @@ class TestImagesResponseFromResponses:
             "status": "completed",
             "output": [{"type": "image_generation_call", "status": "completed", "result": ""}],
         }
-        result = images_service.images_response_from_responses(upstream)
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
         assert isinstance(result, dict)
         assert result["error"]["code"] == "image_generation_failed"
 
     def test_missing_output_returns_error(self) -> None:
         upstream = {"status": "completed"}
-        result = images_service.images_response_from_responses(upstream)
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
         assert isinstance(result, dict)
 
     def test_partial_usage_falls_through(self) -> None:
@@ -264,12 +308,12 @@ class TestImagesResponseFromResponses:
             "output": [{"type": "image_generation_call", "status": "completed", "result": "AA"}],
             "tool_usage": {"image_gen": {"input_tokens": 5}},
         }
-        result = images_service.images_response_from_responses(upstream)
-        assert hasattr(result, "data")
-        assert result.usage is not None
-        assert result.usage.input_tokens == 5
-        assert result.usage.output_tokens is None
-        assert result.usage.total_tokens is None
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
+        response = _image_response(result)
+        assert response.usage is not None
+        assert response.usage.input_tokens == 5
+        assert response.usage.output_tokens is None
+        assert response.usage.total_tokens is None
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +330,8 @@ async def _stream(events: list[str]) -> AsyncIterator[str]:
         yield event
 
 
-def _events_from_translated_stream(blocks: list[str]) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
+def _events_from_translated_stream(blocks: list[str]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
     for block in blocks:
         if not block.strip():
             continue
@@ -511,8 +555,12 @@ class TestCollectResponsesStreamForImages:
         assert error is None
         assert response is not None
         assert response["id"] == "resp_z"
-        assert response["output"][0]["result"] == "ABC"
-        assert response["tool_usage"]["image_gen"]["output_tokens"] == 6
+        output = cast(list[JsonValue], response["output"])
+        first_item = cast(Mapping[str, JsonValue], output[0])
+        assert first_item["result"] == "ABC"
+        tool_usage = cast(Mapping[str, JsonValue], response["tool_usage"])
+        image_gen = cast(Mapping[str, JsonValue], tool_usage["image_gen"])
+        assert image_gen["output_tokens"] == 6
 
     @pytest.mark.asyncio
     async def test_response_failed_returns_error_envelope(self) -> None:

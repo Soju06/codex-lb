@@ -18,7 +18,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Mapping
-from typing import Final
+from typing import Final, cast
 
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
@@ -339,14 +339,14 @@ def images_response_from_responses(response: Mapping[str, JsonValue]) -> V1Image
     response indicates the image generation failed; otherwise returns a
     :class:`V1ImageResponse`.
     """
-    output = response.get("output")
-    if not isinstance(output, list):
+    output_value = response.get("output")
+    if not isinstance(output_value, list):
         return openai_error(
             "image_generation_failed",
             "Upstream response did not include an output array",
             error_type="server_error",
         )
-    items = _select_image_items(output)
+    items = _select_image_items(cast(list[JsonValue], output_value))
     if not items:
         return openai_error(
             "image_generation_failed",
@@ -449,7 +449,10 @@ def _build_error_event(
     envelope = openai_error(code, message, error_type=error_type)
     if param:
         envelope["error"]["param"] = param
-    return {"type": _DOWNSTREAM_ERROR_EVENT, **envelope}
+    event: dict[str, JsonValue] = {"type": _DOWNSTREAM_ERROR_EVENT}
+    for key, value in envelope.items():
+        event[key] = cast(JsonValue, value)
+    return event
 
 
 def _failed_image_item_error_event(item: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
@@ -560,14 +563,10 @@ async def translate_responses_stream_to_images_stream(
 
         if event_type == _UPSTREAM_RESPONSE_COMPLETED_EVENT:
             response_obj = payload.get("response")
-            usage = (
-                _extract_image_usage(response_obj) if is_json_mapping(response_obj) else None
-            )
+            usage = _extract_image_usage(response_obj) if is_json_mapping(response_obj) else None
             if pending_completed_event is not None:
                 if usage is not None:
-                    pending_completed_event["usage"] = usage.model_dump(
-                        mode="json", exclude_none=True
-                    )
+                    pending_completed_event["usage"] = usage.model_dump(mode="json", exclude_none=True)
                 yield format_sse_event(pending_completed_event)
                 pending_completed_event = None
                 terminal_emitted = True

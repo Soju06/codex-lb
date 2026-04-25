@@ -31,7 +31,7 @@ from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, reso
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.images import V1ImagesEditsForm, V1ImagesGenerationsRequest
+from app.core.openai.images import V1ImageResponse, V1ImagesEditsForm, V1ImagesGenerationsRequest
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
 from app.core.openai.models import (
     CompactResponseResult,
@@ -798,7 +798,7 @@ async def _proxy_images_generation_request(
         )
     assert response_payload is not None
     images_result = images_service_module.images_response_from_responses(response_payload)
-    if isinstance(images_result, dict):  # OpenAIErrorEnvelope (TypedDict)
+    if not isinstance(images_result, V1ImageResponse):
         return _logged_error_json_response(
             request,
             502,
@@ -901,7 +901,7 @@ async def _proxy_images_edit_request(
         )
     assert response_payload is not None
     images_result = images_service_module.images_response_from_responses(response_payload)
-    if isinstance(images_result, dict):
+    if not isinstance(images_result, V1ImageResponse):
         return _logged_error_json_response(
             request,
             502,

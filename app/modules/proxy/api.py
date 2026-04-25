@@ -31,6 +31,7 @@ from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, reso
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.images import V1ImagesEditsForm, V1ImagesGenerationsRequest
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
 from app.core.openai.models import (
     CompactResponseResult,
@@ -65,6 +66,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
@@ -598,6 +600,317 @@ async def v1_audio_transcriptions(
         prompt=prompt,
         context=context,
         api_key=api_key,
+    )
+
+
+@v1_router.post("/images/generations", response_model=None)
+async def v1_images_generations(
+    request: Request,
+    payload: V1ImagesGenerationsRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _proxy_images_generation_request(
+        request=request,
+        payload=payload,
+        context=context,
+        api_key=api_key,
+    )
+
+
+@v1_router.post("/images/edits", response_model=None)
+async def v1_images_edits(
+    request: Request,
+    model: str = Form(...),
+    prompt: str = Form(...),
+    image: list[UploadFile] = File(...),
+    mask: UploadFile | None = File(None),
+    n: int = Form(1),
+    size: str = Form("auto"),
+    quality: str = Form("auto"),
+    background: str = Form("auto"),
+    output_format: str = Form("png"),
+    output_compression: int = Form(100),
+    moderation: str = Form("auto"),
+    partial_images: int | None = Form(None),
+    stream: bool = Form(False),
+    input_fidelity: str | None = Form(None),
+    user: str | None = Form(None),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    try:
+        form_payload = V1ImagesEditsForm.model_validate(
+            {
+                "model": model,
+                "prompt": prompt,
+                "n": n,
+                "size": size,
+                "quality": quality,
+                "background": background,
+                "output_format": output_format,
+                "output_compression": output_compression,
+                "moderation": moderation,
+                "partial_images": partial_images,
+                "stream": stream,
+                "input_fidelity": input_fidelity,
+                "user": user,
+            }
+        )
+    except ValidationError as exc:
+        return _logged_error_json_response(request, 400, openai_validation_error(exc))
+
+    images_payload: list[tuple[bytes, str | None]] = []
+    for upload in image:
+        try:
+            data = await upload.read()
+        finally:
+            await upload.close()
+        if not data:
+            return _logged_error_json_response(
+                request,
+                400,
+                images_service_module.make_invalid_request_error(
+                    "image part is empty",
+                    param="image",
+                ),
+            )
+        images_payload.append((data, upload.content_type))
+
+    mask_payload: tuple[bytes, str | None] | None = None
+    if mask is not None:
+        try:
+            data = await mask.read()
+        finally:
+            await mask.close()
+        if not data:
+            return _logged_error_json_response(
+                request,
+                400,
+                images_service_module.make_invalid_request_error(
+                    "mask part is empty",
+                    param="mask",
+                ),
+            )
+        mask_payload = (data, mask.content_type)
+
+    return await _proxy_images_edit_request(
+        request=request,
+        payload=form_payload,
+        images=images_payload,
+        mask=mask_payload,
+        context=context,
+        api_key=api_key,
+    )
+
+
+@v1_router.post("/images/variations", include_in_schema=False)
+async def v1_images_variations(request: Request) -> Response:
+    return _logged_error_json_response(
+        request,
+        status_code=404,
+        content=images_service_module.make_not_found_error(
+            "/v1/images/variations is not supported by codex-lb. Use /v1/images/edits with an explicit prompt instead."
+        ),
+    )
+
+
+async def _proxy_images_generation_request(
+    *,
+    request: Request,
+    payload: V1ImagesGenerationsRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    try:
+        images_service_module.validate_generations_payload(payload)
+    except ClientPayloadError as exc:
+        return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
+
+    public_model = payload.model
+    settings = proxy_service_module.get_settings()
+    host_model = settings.images_host_model
+
+    try:
+        validate_model_access(api_key, public_model)
+    except Exception:
+        # Re-raise so the global handler maps to 403.
+        raise
+
+    rate_limit_headers = await context.service.rate_limit_headers()
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=public_model,
+        request_service_tier=None,
+    )
+
+    try:
+        responses_payload = images_service_module.images_generation_to_responses_request(payload, host_model=host_model)
+    except ValidationError as exc:
+        await _release_reservation(reservation)
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_validation_error(exc),
+            headers=rate_limit_headers,
+        )
+
+    # We always need an upstream stream because tool_usage.image_gen only
+    # appears on response.completed. For non-streaming clients we drain the
+    # stream and translate to a JSON envelope.
+    upstream = context.service.stream_responses(
+        responses_payload,
+        request.headers,
+        codex_session_affinity=False,
+        propagate_http_errors=True,
+        openai_cache_affinity=True,
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    if payload.stream:
+        translated = images_service_module.translate_responses_stream_to_images_stream(upstream)
+        return StreamingResponse(
+            translated,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **rate_limit_headers},
+        )
+
+    try:
+        response_payload, error_envelope = await images_service_module.collect_responses_stream_for_images(
+            upstream,
+        )
+    except ProxyResponseError as exc:
+        await _release_reservation(reservation)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers=rate_limit_headers,
+        )
+
+    if error_envelope is not None:
+        return _logged_error_json_response(
+            request,
+            502,
+            error_envelope,
+            headers=rate_limit_headers,
+        )
+    assert response_payload is not None
+    images_result = images_service_module.images_response_from_responses(response_payload)
+    if isinstance(images_result, dict):  # OpenAIErrorEnvelope (TypedDict)
+        return _logged_error_json_response(
+            request,
+            502,
+            images_result,
+            headers=rate_limit_headers,
+        )
+    return JSONResponse(
+        content=images_result.model_dump(mode="json", exclude_none=True),
+        headers=rate_limit_headers,
+    )
+
+
+async def _proxy_images_edit_request(
+    *,
+    request: Request,
+    payload: V1ImagesEditsForm,
+    images: list[tuple[bytes, str | None]],
+    mask: tuple[bytes, str | None] | None,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    try:
+        images_service_module.validate_edits_payload(payload)
+    except ClientPayloadError as exc:
+        return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
+
+    public_model = payload.model
+    settings = proxy_service_module.get_settings()
+    host_model = settings.images_host_model
+
+    validate_model_access(api_key, public_model)
+
+    rate_limit_headers = await context.service.rate_limit_headers()
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=public_model,
+        request_service_tier=None,
+    )
+
+    try:
+        responses_payload = images_service_module.images_edit_to_responses_request(
+            payload,
+            host_model=host_model,
+            images=images,
+            mask=mask,
+        )
+    except (ValidationError, ValueError) as exc:
+        await _release_reservation(reservation)
+        if isinstance(exc, ValidationError):
+            return _logged_error_json_response(
+                request,
+                400,
+                openai_validation_error(exc),
+                headers=rate_limit_headers,
+            )
+        return _logged_error_json_response(
+            request,
+            400,
+            images_service_module.make_invalid_request_error(str(exc)),
+            headers=rate_limit_headers,
+        )
+
+    upstream = context.service.stream_responses(
+        responses_payload,
+        request.headers,
+        codex_session_affinity=False,
+        propagate_http_errors=True,
+        openai_cache_affinity=True,
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    if payload.stream:
+        translated = images_service_module.translate_responses_stream_to_images_stream(upstream)
+        return StreamingResponse(
+            translated,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **rate_limit_headers},
+        )
+
+    try:
+        response_payload, error_envelope = await images_service_module.collect_responses_stream_for_images(
+            upstream,
+        )
+    except ProxyResponseError as exc:
+        await _release_reservation(reservation)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers=rate_limit_headers,
+        )
+
+    if error_envelope is not None:
+        return _logged_error_json_response(
+            request,
+            502,
+            error_envelope,
+            headers=rate_limit_headers,
+        )
+    assert response_payload is not None
+    images_result = images_service_module.images_response_from_responses(response_payload)
+    if isinstance(images_result, dict):
+        return _logged_error_json_response(
+            request,
+            502,
+            images_result,
+            headers=rate_limit_headers,
+        )
+    return JSONResponse(
+        content=images_result.model_dump(mode="json", exclude_none=True),
+        headers=rate_limit_headers,
     )
 
 

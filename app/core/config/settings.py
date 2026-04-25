@@ -181,6 +181,15 @@ class Settings(BaseSettings):
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # OpenAI Images API compatibility (POST /v1/images/{generations,edits})
+    # ``images_host_model`` is the internal Responses model used to invoke the
+    # built-in ``image_generation`` tool. It is never echoed to clients.
+    # ``images_default_model`` is the public model returned to clients when
+    # they omit ``model``; it must remain in the ``gpt-image-*`` family.
+    images_host_model: str = "gpt-5.5"
+    images_default_model: str = "gpt-image-2"
+    images_max_partial_images: int = Field(default=3, ge=0, le=3)
+    images_max_n: int = Field(default=4, ge=1, le=10)
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"

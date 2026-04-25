@@ -499,6 +499,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/ihazgithub"><img src="https://avatars.githubusercontent.com/u/129220128?v=4?s=100" width="100px;" alt="ihazgithub"/><br /><sub><b>ihazgithub</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ihazgithub" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=ihazgithub" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/stemirkhan"><img src="https://avatars.githubusercontent.com/u/99467693?v=4?s=100" width="100px;" alt="Temirkhan"/><br /><sub><b>Temirkhan</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=stemirkhan" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=stemirkhan" title="Tests">⚠️</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/rio-jeong"><img src="https://avatars.githubusercontent.com/u/193858009?v=4?s=100" width="100px;" alt="Rio"/><br /><sub><b>Rio</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=rio-jeong" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Ario-jeong" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=rio-jeong" title="Tests">⚠️</a></td>
+    </tr>
   </tbody>
 </table>
 

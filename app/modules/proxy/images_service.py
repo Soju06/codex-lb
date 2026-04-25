@@ -504,6 +504,8 @@ def _error_event_to_error_event(payload: Mapping[str, JsonValue]) -> dict[str, J
 
 async def translate_responses_stream_to_images_stream(
     upstream: AsyncIterator[str],
+    *,
+    captured: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
     """Convert a Responses SSE event stream into an OpenAI Images SSE stream.
 
@@ -511,6 +513,11 @@ async def translate_responses_stream_to_images_stream(
     for streaming directly to the client. Always emits exactly one terminal
     event (``image_generation.completed`` or ``error``) followed by
     ``data: [DONE]``.
+
+    When ``captured`` is provided, the translator stores the upstream
+    Responses ``id`` (under the ``response_id`` key) the first time it sees
+    one, so route handlers can correlate the resulting request log with the
+    public effective model after the stream completes.
     """
     terminal_emitted = False
     completion_pending = True
@@ -535,6 +542,16 @@ async def translate_responses_stream_to_images_stream(
         event_type = payload.get("type")
         if not isinstance(event_type, str):
             continue
+
+        # Capture the upstream Responses id once so the route handler can
+        # rewrite the request log with the public effective model after the
+        # stream completes.
+        if captured is not None and "response_id" not in captured:
+            response_value = payload.get("response")
+            if is_json_mapping(response_value):
+                response_id = response_value.get("id")
+                if isinstance(response_id, str) and response_id:
+                    captured["response_id"] = response_id
 
         if event_type == _UPSTREAM_PARTIAL_IMAGE_EVENT:
             event = _build_partial_image_event(payload)
@@ -630,12 +647,18 @@ async def translate_responses_stream_to_images_stream(
 
 async def collect_responses_stream_for_images(
     upstream: AsyncIterator[str],
+    *,
+    captured: dict[str, str] | None = None,
 ) -> tuple[dict[str, JsonValue] | None, OpenAIErrorEnvelope | None]:
     """Drain a Responses SSE stream and return the final ``response`` payload.
 
     Returns ``(response_mapping, None)`` when the upstream stream emits a
     ``response.completed`` event; ``(None, error_envelope)`` when it emits
     ``response.failed`` / ``error`` / closes early.
+
+    When ``captured`` is provided, stores the upstream Responses ``id`` the
+    first time it appears in any event, so the caller can correlate the
+    resulting request log with the public effective model.
     """
     output_items: dict[int, dict[str, JsonValue]] = {}
     fallback_items: list[dict[str, JsonValue]] = []
@@ -654,6 +677,16 @@ async def collect_responses_stream_for_images(
         if not isinstance(event_type, str):
             continue
 
+        # Capture the upstream Responses id once so the route handler can
+        # rewrite the request log with the public effective model after the
+        # stream completes.
+        if captured is not None and "response_id" not in captured:
+            response_value = payload.get("response")
+            if is_json_mapping(response_value):
+                response_id = response_value.get("id")
+                if isinstance(response_id, str) and response_id:
+                    captured["response_id"] = response_id
+
         if event_type == _UPSTREAM_OUTPUT_ITEM_DONE_EVENT:
             output_index = payload.get("output_index")
             item = payload.get("item")
@@ -667,7 +700,10 @@ async def collect_responses_stream_for_images(
                 fallback_items.append(dict(item))
             continue
 
-        if event_type in (_UPSTREAM_RESPONSE_COMPLETED_EVENT, _UPSTREAM_RESPONSE_INCOMPLETE_EVENT):
+        if (
+            event_type in (_UPSTREAM_RESPONSE_COMPLETED_EVENT, _UPSTREAM_RESPONSE_INCOMPLETE_EVENT)
+            and final_response is None
+        ):
             response_value = payload.get("response")
             base: dict[str, JsonValue]
             if is_json_mapping(response_value):
@@ -680,7 +716,11 @@ async def collect_responses_stream_for_images(
                 merged_output.extend(fallback_items)
                 base["output"] = merged_output
             final_response = base
-            break
+            # Don't break — keep draining so the upstream stream_responses
+            # generator finalizes (which writes the request log) before we
+            # return control to the caller. Once we have ``final_response``
+            # we still skip processing of any subsequent events.
+            continue
 
         if event_type == _UPSTREAM_RESPONSE_FAILED_EVENT:
             response_value = payload.get("response")

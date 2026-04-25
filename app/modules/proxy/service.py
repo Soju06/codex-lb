@@ -6271,6 +6271,50 @@ class ProxyService:
     async def rate_limit_headers(self) -> dict[str, str]:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
 
+    async def rewrite_request_log_model(self, request_id: str, model: str) -> None:
+        """Override the ``model`` field on any ``request_logs`` row that
+        matches ``request_id``.
+
+        Used by route adapters that translate a public request shape
+        (currently ``/v1/images/*``) into an internal Responses request: the
+        first-pass log row stores the internal host model the proxy used
+        for routing, and we rewrite it here once the public effective model
+        is known so dashboards and usage views surface the user-visible
+        ``gpt-image-*`` model instead of the host (e.g. ``gpt-5.5``).
+
+        The upstream ``stream_responses`` generator writes its request_log
+        row from a ``finally`` block that runs after the last chunk is
+        yielded, which can race with the call site here. We therefore retry
+        a few times with short backoff while the row is still missing.
+        """
+        if not request_id or not model:
+            return
+        with anyio.CancelScope(shield=True):
+            try:
+                rowcount = 0
+                # Total wait: 0 + 50 + 100 + 200 + 400 + 800 ms = 1550 ms.
+                for delay in (0.0, 0.05, 0.1, 0.2, 0.4, 0.8):
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    async with self._repo_factory() as repos:
+                        rowcount = await repos.request_logs.update_model_for_request(request_id, model)
+                    if rowcount:
+                        break
+                if not rowcount:
+                    logger.warning(
+                        "rewrite_request_log_model: request_log row for %s never appeared; "
+                        "public effective model %s not recorded",
+                        request_id,
+                        model,
+                    )
+            except Exception:
+                logger.warning(
+                    "failed to rewrite request_log model request_id=%s model=%s",
+                    request_id,
+                    model,
+                    exc_info=True,
+                )
+
     async def _compute_rate_limit_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
         async with self._repo_factory() as repos:

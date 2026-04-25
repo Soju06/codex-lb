@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select, update
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -223,6 +223,31 @@ class RequestLogsRepository:
         except BaseException:
             await _safe_rollback(self._session)
             raise
+
+    async def update_model_for_request(self, request_id: str, model: str) -> int:
+        """Override the ``model`` field of any logs matching ``request_id``.
+
+        Used by route handlers that translate a public request shape (e.g.
+        ``/v1/images/generations``) into an internal Responses request: the
+        first-pass log row stores the internal host model used for routing,
+        and we rewrite it here once the public effective model is known so
+        the dashboard and usage views surface the user-visible model.
+
+        Returns the number of rows that were updated.
+        """
+        resolved_request_id = ensure_request_id(request_id)
+        try:
+            result = await self._session.execute(
+                update(RequestLog).where(RequestLog.request_id == resolved_request_id).values(model=model)
+            )
+            await self._session.commit()
+        except sa_exc.ResourceClosedError:
+            return 0
+        except BaseException:
+            await _safe_rollback(self._session)
+            raise
+        rowcount = getattr(result, "rowcount", None)
+        return int(rowcount) if rowcount else 0
 
     async def list_recent(
         self,

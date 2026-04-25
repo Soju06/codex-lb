@@ -590,6 +590,90 @@ class TestCollectResponsesStreamForImages:
         assert error is not None
         assert error["error"]["code"] == "image_generation_failed"
 
+    @pytest.mark.asyncio
+    async def test_captured_response_id_populated_during_collect(self) -> None:
+        upstream_events = [
+            _sse({"type": "response.created", "response": {"id": "resp_collect_id"}}),
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_xx",
+                        "status": "completed",
+                        "result": "AAAA",
+                    },
+                }
+            ),
+            _sse(
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp_collect_id"},
+                }
+            ),
+        ]
+        captured: dict[str, str] = {}
+        response, error = await images_service.collect_responses_stream_for_images(
+            _stream(upstream_events), captured=captured
+        )
+        assert error is None
+        assert response is not None
+        assert captured.get("response_id") == "resp_collect_id"
+
+
+class TestStreamingCapturesResponseId:
+    @pytest.mark.asyncio
+    async def test_translate_populates_captured_response_id(self) -> None:
+        upstream_events = [
+            _sse({"type": "response.created", "response": {"id": "resp_stream_id"}}),
+            _sse(
+                {
+                    "type": "response.image_generation_call.partial_image",
+                    "item_id": "ig_zz",
+                    "output_index": 0,
+                    "partial_image_b64": "AAAA",
+                    "partial_image_index": 0,
+                    "size": "1024x1024",
+                    "quality": "low",
+                    "background": "opaque",
+                    "output_format": "png",
+                    "sequence_number": 1,
+                }
+            ),
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_zz",
+                        "status": "completed",
+                        "result": "BBBB",
+                    },
+                }
+            ),
+            _sse(
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp_stream_id", "tool_usage": {"image_gen": {"input_tokens": 1}}},
+                }
+            ),
+        ]
+        captured: dict[str, str] = {}
+        translated_blocks = [
+            block
+            async for block in images_service.translate_responses_stream_to_images_stream(
+                _stream(upstream_events), captured=captured
+            )
+        ]
+        # translator must reach a terminal event before captured is read by
+        # the caller; the response_id is captured on the first event whose
+        # ``response.id`` is present (typically ``response.created``).
+        assert captured.get("response_id") == "resp_stream_id"
+        events = _events_from_translated_stream(translated_blocks)
+        assert any(e["type"] == "image_generation.completed" for e in events)
+
 
 # ---------------------------------------------------------------------------
 # Misc utilities

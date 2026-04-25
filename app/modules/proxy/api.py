@@ -768,10 +768,24 @@ async def _proxy_images_generation_request(
         api_key_reservation=reservation,
     )
 
+    # ``images_service`` populates ``response_id`` once the upstream stream
+    # surfaces the Responses id, so we can rewrite the request log's model
+    # column from the internal host model to the public ``gpt-image-*``
+    # value the client actually requested.
+    captured: dict[str, str] = {}
+
     if payload.stream:
-        translated = images_service_module.translate_responses_stream_to_images_stream(upstream)
+        translated = images_service_module.translate_responses_stream_to_images_stream(upstream, captured=captured)
+
+        async def _stream_with_log_rewrite() -> AsyncIterator[bytes]:
+            async for chunk in translated:
+                yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+            response_id = captured.get("response_id")
+            if response_id:
+                await context.service.rewrite_request_log_model(response_id, public_model)
+
         return StreamingResponse(
-            translated,
+            _stream_with_log_rewrite(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
@@ -779,6 +793,7 @@ async def _proxy_images_generation_request(
     try:
         response_payload, error_envelope = await images_service_module.collect_responses_stream_for_images(
             upstream,
+            captured=captured,
         )
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
@@ -788,6 +803,10 @@ async def _proxy_images_generation_request(
             exc.payload,
             headers=rate_limit_headers,
         )
+
+    response_id = captured.get("response_id")
+    if response_id:
+        await context.service.rewrite_request_log_model(response_id, public_model)
 
     if error_envelope is not None:
         return _logged_error_json_response(
@@ -871,10 +890,20 @@ async def _proxy_images_edit_request(
         api_key_reservation=reservation,
     )
 
+    captured: dict[str, str] = {}
+
     if payload.stream:
-        translated = images_service_module.translate_responses_stream_to_images_stream(upstream)
+        translated = images_service_module.translate_responses_stream_to_images_stream(upstream, captured=captured)
+
+        async def _stream_with_log_rewrite() -> AsyncIterator[bytes]:
+            async for chunk in translated:
+                yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+            response_id = captured.get("response_id")
+            if response_id:
+                await context.service.rewrite_request_log_model(response_id, public_model)
+
         return StreamingResponse(
-            translated,
+            _stream_with_log_rewrite(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
@@ -882,6 +911,7 @@ async def _proxy_images_edit_request(
     try:
         response_payload, error_envelope = await images_service_module.collect_responses_stream_for_images(
             upstream,
+            captured=captured,
         )
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
@@ -891,6 +921,10 @@ async def _proxy_images_edit_request(
             exc.payload,
             headers=rate_limit_headers,
         )
+
+    response_id = captured.get("response_id")
+    if response_id:
+        await context.service.rewrite_request_log_model(response_id, public_model)
 
     if error_envelope is not None:
         return _logged_error_json_response(

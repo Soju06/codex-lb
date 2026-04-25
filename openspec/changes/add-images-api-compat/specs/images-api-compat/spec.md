@@ -73,14 +73,14 @@ When a client requests `stream=true` on `/v1/images/generations` or `/v1/images/
 
 ### Requirement: Image routes participate in usage accounting and policy
 
-The system SHALL apply API-key allowed-model policy and model-scoped usage limits to `/v1/images/*` using the publicly-requested `gpt-image-*` value as the effective model. The system SHALL record image-generation token usage from `response.tool_usage.image_gen` (if present, else from a size/quality fallback estimate) under a dedicated `image_generation` request kind in usage history.
+The system SHALL apply API-key allowed-model policy and model-scoped usage limits to `/v1/images/*` using the publicly-requested `gpt-image-*` value as the effective model. The system SHALL record the publicly-requested `gpt-image-*` value (not the internal host model) in the request log's `model` column once the upstream response id becomes known.
 
 #### Scenario: API key allowed-model policy blocks gpt-image-2
 
 - **WHEN** an API key's `allowed_models` list does not include `gpt-image-2`
 - **THEN** requests to `/v1/images/generations` or `/v1/images/edits` with `model=gpt-image-2` return 403 `model_not_allowed`
 
-#### Scenario: Image usage is recorded separately from text usage
+#### Scenario: Request log surfaces the publicly requested image model
 
-- **WHEN** an `/v1/images/*` request completes successfully
-- **THEN** usage history contains an entry with kind `image_generation` whose token counts come from `tool_usage.image_gen`
+- **WHEN** an `/v1/images/*` request completes successfully against an internal host Responses model (for example `gpt-5.5`)
+- **THEN** the resulting `request_logs` row has `model` equal to the publicly requested value (for example `gpt-image-2`) so dashboards and usage views surface the user-visible model rather than the internal host model

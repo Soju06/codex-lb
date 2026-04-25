@@ -242,12 +242,7 @@ class OauthService:
         # current attempt). This avoids reporting success for stale callback
         # URLs from a different/previous attempt, which would skip state/code
         # validation and token persistence.
-        if (
-            current_status == "success"
-            and state
-            and expected_state
-            and state == expected_state
-        ):
+        if current_status == "success" and state and expected_state and state == expected_state:
             return ManualCallbackResponse(status="success")
 
         if error:

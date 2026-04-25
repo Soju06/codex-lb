@@ -451,9 +451,7 @@ async def test_manual_callback_is_idempotent_for_same_attempt(async_client, monk
     async with oauth_module._OAUTH_STORE.lock:
         state_token = oauth_module._OAUTH_STORE.state.state_token
 
-    callback_url = (
-        f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"
-    )
+    callback_url = f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"
 
     first = await async_client.post(
         "/api/oauth/manual-callback",
@@ -508,9 +506,7 @@ async def test_manual_callback_after_success_rejects_stale_callback(async_client
     first = await async_client.post(
         "/api/oauth/manual-callback",
         json={
-            "callbackUrl": (
-                f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"
-            ),
+            "callbackUrl": (f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"),
         },
     )
     assert first.status_code == 200

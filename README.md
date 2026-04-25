@@ -176,16 +176,46 @@ Healthy websocket signals:
 If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket upgrades.
 
 **Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
-old sessions won't appear until you re-tag them:
+old sessions won't appear until you re-tag them. Use the built-in retag command
+instead of editing Codex files by hand:
 
 ```bash
-# JSONL session files (all versions)
-find ~/.codex/sessions -name '*.jsonl' \
-  -exec sed -i '' 's/"model_provider":"openai"/"model_provider":"codex-lb"/g' {} +
+# Preview what will change first.
+codex-lb codex-sessions retag --from openai --to codex-lb --dry-run
 
-# SQLite state DB (>= v0.105.0, creates ~/.codex/state_*.sqlite)
-sqlite3 ~/.codex/state_5.sqlite \
-  "UPDATE threads SET model_provider = 'codex-lb' WHERE model_provider = 'openai';"
+# Then close Codex/Codex CLI and apply the retag.
+codex-lb codex-sessions retag --from openai --to codex-lb --yes
+```
+
+The command updates both Codex storage formats when they exist: JSONL session
+files under `~/.codex/sessions` and `state_*.sqlite` thread rows created by
+newer Codex CLI versions. It uses Python's built-in SQLite support, creates a
+backup under `~/.codex/backups/provider-retag/`, and refuses non-interactive
+writes unless `--yes` is provided. On native Windows, macOS, Linux, and WSL,
+use `--codex-home PATH` if your Codex data directory is not detected. In WSL,
+autodetect only considers the current Windows `USERPROFILE`; pass
+`--codex-home /mnt/c/Users/<name>/.codex` to retag another Windows profile
+explicitly. To switch back, reverse the providers:
+
+```bash
+codex-lb codex-sessions retag --from codex-lb --to openai --dry-run
+codex-lb codex-sessions retag --from codex-lb --to openai --yes
+```
+
+For Docker, mount your Codex data directory only for this one-off command:
+
+```bash
+docker run --rm \
+  -v ~/.codex:/codex-home \
+  ghcr.io/soju06/codex-lb:latest \
+  codex-lb codex-sessions retag --from openai --to codex-lb \
+    --codex-home /codex-home --dry-run
+
+docker run --rm \
+  -v ~/.codex:/codex-home \
+  ghcr.io/soju06/codex-lb:latest \
+  codex-lb codex-sessions retag --from openai --to codex-lb \
+    --codex-home /codex-home --yes
 ```
 
 </details>

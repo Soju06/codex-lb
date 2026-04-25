@@ -59,7 +59,9 @@ COPY config config
 COPY scripts scripts
 COPY --from=frontend-build /app/app/static app/static
 
-RUN chmod +x /app/scripts/docker-entrypoint.sh
+RUN chmod +x /app/scripts/docker-entrypoint.sh \
+    && printf '%s\n' '#!/bin/sh' 'exec python -m app.cli "$@"' > /usr/local/bin/codex-lb \
+    && chmod +x /usr/local/bin/codex-lb
 
 USER app
 EXPOSE 2455 1455

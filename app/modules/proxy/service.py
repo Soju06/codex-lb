@@ -141,6 +141,7 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     normalize_responses_request_payload,
+    openai_client_payload_error,
     openai_invalid_payload_error,
     openai_validation_error,
     validate_model_access,
@@ -2029,7 +2030,7 @@ class ProxyService:
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
-                                            _wrapped_websocket_error_event(400, openai_invalid_payload_error(exc.param))
+                                            _wrapped_websocket_error_event(400, openai_client_payload_error(exc))
                                         )
                                     )
                                 continue

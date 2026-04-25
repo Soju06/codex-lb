@@ -157,9 +157,7 @@ def _build_registry_with_model(slug: str, efforts: list[str]):
         description="",
         context_window=128000,
         input_modalities=("text",),
-        supported_reasoning_levels=tuple(
-            ReasoningLevel(effort=e, description="") for e in efforts
-        ),
+        supported_reasoning_levels=tuple(ReasoningLevel(effort=e, description="") for e in efforts),
         default_reasoning_level=efforts[1] if len(efforts) > 1 else None,
         supports_reasoning_summaries=False,
         support_verbosity=False,
@@ -216,9 +214,7 @@ def test_normalize_unsupported_reasoning_effort_falls_back_to_low_without_regist
     )
     payload.reasoning = ResponsesReasoning(effort="MINIMAL")
 
-    proxy_request_policy.normalize_unsupported_reasoning_effort(
-        payload, registry=ModelRegistry()
-    )
+    proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=ModelRegistry())
 
     assert payload.reasoning is not None
     assert payload.reasoning.effort == "low"

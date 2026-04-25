@@ -143,6 +143,123 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     assert payload.service_tier == "priority"
 
 
+def _build_registry_with_model(slug: str, efforts: list[str]):
+    from app.core.openai.model_registry import (
+        ModelRegistry,
+        ModelRegistrySnapshot,
+        ReasoningLevel,
+        UpstreamModel,
+    )
+
+    upstream = UpstreamModel(
+        slug=slug,
+        display_name=slug,
+        description="",
+        context_window=128000,
+        input_modalities=("text",),
+        supported_reasoning_levels=tuple(
+            ReasoningLevel(effort=e, description="") for e in efforts
+        ),
+        default_reasoning_level=efforts[1] if len(efforts) > 1 else None,
+        supports_reasoning_summaries=False,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=True,
+        supports_parallel_tool_calls=True,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"pro"}),
+    )
+    snapshot = ModelRegistrySnapshot(
+        models={slug: upstream},
+        model_plans={slug: frozenset({"pro"})},
+        plan_models={"pro": frozenset({slug})},
+        fetched_at=0.0,
+    )
+    registry = ModelRegistry()
+    registry._snapshot = snapshot  # type: ignore[attr-defined]
+    return registry
+
+
+def test_normalize_unsupported_reasoning_effort_rewrites_minimal_to_low(caplog):
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.request_policy"):
+        proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "low"
+    assert any("reasoning_effort_normalized" in record.message for record in caplog.records)
+
+
+def test_normalize_unsupported_reasoning_effort_falls_back_to_low_without_registry():
+    from app.core.openai.model_registry import ModelRegistry
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-unknown",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="MINIMAL")
+
+    proxy_request_policy.normalize_unsupported_reasoning_effort(
+        payload, registry=ModelRegistry()
+    )
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "low"
+
+
+def test_normalize_unsupported_reasoning_effort_preserves_supported_effort():
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="high")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning.effort == "high"
+
+
+def test_apply_api_key_enforcement_normalizes_minimal_without_api_key():
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="minimal")
+
+    proxy_request_policy.apply_api_key_enforcement(payload, None)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "low"
+
+
 class _RingMembershipStub:
     def __init__(self, members: list[str]) -> None:
         self.members = members

@@ -95,13 +95,14 @@ def _build_image_generation_tool(
     streaming: bool,
 ) -> dict[str, JsonValue]:
     # NOTE: the upstream ``image_generation`` tool config does not accept
-    # ``n``. Multiple images are produced by emitting multiple
-    # ``image_generation_call`` ResponseItems within a single response, which
-    # we still need to surface in the Images-shaped envelope. Until the
-    # upstream exposes a documented multi-image option, we forward only the
-    # parameters the tool accepts and treat ``payload.n`` as a hint that we
-    # validate up-front (rejecting ``n > images_max_n``).
-    del n  # forwarded via Images-API validation, not via the tool config
+    # ``n``. Until upstream exposes a documented multi-image option,
+    # ``validate_image_request_parameters`` rejects ``n > images_max_n``
+    # at the API boundary (default ``images_max_n=1``), so this function
+    # is only ever called with ``n == 1`` for now. Operators who want
+    # multi-image responses must override ``images_max_n`` AND implement
+    # fan-out (multiple internal Responses calls) before raising the cap;
+    # we do not silently drop a requested ``n > 1`` here.
+    del n  # rejected upstream of this call when n > images_max_n
     tool: dict[str, JsonValue] = {
         "type": "image_generation",
         "model": model,
@@ -619,11 +620,12 @@ async def translate_responses_stream_to_images_stream(
                 break
             event = _build_completed_event(item)
             if event is not None:
-                # Defer flushing until response.completed arrives so we can
-                # attach the upstream tool_usage.image_gen as ``usage``
-                # to the *last* completed image (matching the OpenAI
-                # Images streaming shape, where ``usage`` only appears on
-                # the terminal event).
+                # Buffer every completion (NOT a single overwrite-on-update
+                # variable) so multi-image responses do not silently drop
+                # earlier images. Flushing is deferred until the trailing
+                # ``response.completed`` arrives so we can attach
+                # ``tool_usage.image_gen`` as ``usage`` to the final event,
+                # matching the canonical OpenAI Images streaming shape.
                 pending_completed_events.append(event)
             continue
 

@@ -24,6 +24,16 @@ The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Imag
 - **WHEN** a client sends `gpt-image-1.5`, `gpt-image-1`, or `gpt-image-1-mini` with `size` outside `{1024x1024, 1536x1024, 1024x1536, auto}`
 - **THEN** the service returns 400 with OpenAI `invalid_request_error` and `param: size`
 
+#### Scenario: Multi-image requests are rejected until upstream support arrives
+
+- **WHEN** a client sends `/v1/images/generations` or `/v1/images/edits` with `n > 1`
+- **THEN** the service returns 400 with OpenAI `invalid_request_error` and `param: n`, with a message that explains the upstream `image_generation` tool does not yet support multi-image responses. Operators may raise the cap by overriding `images_max_n`.
+
+#### Scenario: Missing model defaults to images_default_model
+
+- **WHEN** a client sends `/v1/images/generations` or `/v1/images/edits` without `model`
+- **THEN** the service uses `images_default_model` (default `gpt-image-2`) as the publicly-effective model for validation, request log accounting, and the internal `image_generation` tool config
+
 ### Requirement: OpenAI-compatible image edit endpoint
 
 The system SHALL expose `POST /v1/images/edits` and accept the OpenAI Images Edits multipart shape (`image` repeatable file part, optional `mask`, plus `model`, `prompt`, `n`, `size`, `quality`, `background`, `output_format`, `output_compression`, `partial_images`, `stream`, `user`). The endpoint MUST apply the same model gating and parameter rules as `/v1/images/generations`. The endpoint MUST forward `image[]` and `mask` parts as `input_image` content (base64 data URLs) inside the internal Responses request.
@@ -54,7 +64,7 @@ The system SHALL implement `/v1/images/generations` and `/v1/images/edits` by is
 
 ### Requirement: Image generation streaming uses canonical OpenAI Images events
 
-When a client requests `stream=true` on `/v1/images/generations` or `/v1/images/edits`, the system SHALL translate upstream Responses SSE events into the OpenAI Images streaming format. The system MUST emit `image_generation.partial_image` for each upstream `response.image_generation_call.partial_image` and a final `image_generation.completed` for each `image_generation_call` ResponseItem when its containing `response.output_item.done` arrives. The system MUST NOT forward Responses-specific events (`response.created`, `response.in_progress`, `response.image_generation_call.in_progress`, `response.image_generation_call.generating`, reasoning/content events) to the client.
+When a client requests `stream=true` on `/v1/images/generations` or `/v1/images/edits`, the system SHALL translate upstream Responses SSE events into the OpenAI Images streaming format. The system MUST emit `image_generation.partial_image` for each upstream `response.image_generation_call.partial_image` and an `image_generation.completed` event for *every* `image_generation_call` ResponseItem the upstream surfaces, in arrival order, when the trailing `response.completed` arrives. The `usage` field MUST be attached only to the final `image_generation.completed` event so multi-image responses match the OpenAI Images streaming shape. The system MUST NOT forward Responses-specific events (`response.created`, `response.in_progress`, `response.image_generation_call.in_progress`, `response.image_generation_call.generating`, reasoning/content events) to the client. The system MUST also surface upstream errors that occur before the first SSE chunk as a structured OpenAI error envelope rather than a broken/truncated stream body.
 
 #### Scenario: Partial images are forwarded with stable field names
 

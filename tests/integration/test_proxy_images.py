@@ -494,3 +494,97 @@ async def test_images_variations_returns_404(async_client):
     assert response.status_code == 404
     body = response.json()
     assert body["error"]["code"] == "not_found_error"
+
+
+# ---------------------------------------------------------------------------
+# Defaults, n>1 rejection, and stream priming.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_images_generations_falls_back_to_default_model_when_omitted(async_client, monkeypatch):
+    """Omitting ``model`` should fall back to ``settings.images_default_model``."""
+    await _import_account(async_client, "acc_images_default", "img-default@example.com")
+
+    captured: dict[str, Any] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        captured["tools"] = list(payload.tools)
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_default",
+                    "status": "completed",
+                    "result": "AAAA",
+                },
+            }
+        )
+        yield _sse({"type": "response.completed", "response": {"id": "resp_default"}})
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={"prompt": "no model given", "size": "1024x1024", "quality": "low"},
+    )
+    assert response.status_code == 200, response.text
+    image_tool = cast(dict[str, Any], cast(list[Any], captured["tools"])[0])
+    # Default falls back to images_default_model = "gpt-image-2".
+    assert image_tool["model"] == "gpt-image-2"
+
+
+@pytest.mark.asyncio
+async def test_images_generations_rejects_n_greater_than_one(async_client):
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={"model": "gpt-image-2", "prompt": "x", "n": 2},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["param"] == "n"
+    assert body["error"]["code"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_images_generations_propagates_upstream_error_before_first_chunk(async_client, monkeypatch):
+    """When the upstream stream raises before any chunk is emitted, we
+    surface a structured OpenAI error envelope instead of a broken SSE
+    body. This guards against the prime-before-StreamingResponse path in
+    the route handler.
+    """
+    from app.core.clients.proxy import ProxyResponseError
+
+    await _import_account(async_client, "acc_images_prime", "img-prime@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        if False:  # pragma: no cover - generator marker only
+            yield ""
+        raise ProxyResponseError(
+            status_code=503,
+            payload={"error": {"message": "boom", "type": "server_error", "code": "upstream_error"}},
+        )
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={"model": "gpt-image-2", "prompt": "x", "size": "1024x1024", "quality": "low"},
+    )
+    assert response.status_code == 503
+    body = response.json()
+    assert body["error"]["code"] == "upstream_error"

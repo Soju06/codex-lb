@@ -22,12 +22,14 @@ from typing import Final, cast
 
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.images import (
     V1ImageData,
     V1ImageResponse,
     V1ImagesEditsForm,
     V1ImagesGenerationsRequest,
     V1ImageUsage,
+    is_supported_image_model,
     validate_image_request_parameters,
 )
 from app.core.openai.requests import ResponsesRequest
@@ -157,6 +159,9 @@ def images_generation_to_responses_request(
     request streaming.
     """
     streaming = bool(payload.stream)
+    # ``validate_generations_payload`` resolves ``payload.model`` to a
+    # concrete ``gpt-image-*`` value before this is ever called.
+    assert payload.model is not None, "payload.model must be resolved before translation"
     tool = _build_image_generation_tool(
         model=payload.model,
         n=payload.n,
@@ -215,6 +220,9 @@ def images_edit_to_responses_request(
     if mask is not None:
         prompt_text = f"{prompt_text}{_IMAGE_EDIT_MASK_HINT}"
 
+    # ``validate_edits_payload`` resolves ``payload.model`` to a concrete
+    # ``gpt-image-*`` value before this is ever called.
+    assert payload.model is not None, "payload.model must be resolved before translation"
     tool = _build_image_generation_tool(
         model=payload.model,
         n=payload.n,
@@ -248,10 +256,33 @@ def images_edit_to_responses_request(
 # ---------------------------------------------------------------------------
 
 
-def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> None:
+def resolve_public_image_model(requested: str | None) -> str:
+    """Return the publicly-effective ``gpt-image-*`` model.
+
+    Falls back to the configured ``images_default_model`` when the client
+    omits ``model``. The returned value is always validated against the
+    ``gpt-image-*`` allowlist to catch a misconfigured default early.
+    """
     settings = get_settings()
+    resolved = requested or settings.images_default_model
+    if not is_supported_image_model(resolved):
+        raise ClientPayloadError(
+            f"Unsupported image model '{resolved}'. Use a 'gpt-image-*' model.",
+            param="model",
+            code="invalid_request_error",
+            error_type="invalid_request_error",
+        )
+    return resolved
+
+
+def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> V1ImagesGenerationsRequest:
+    """Apply the cross-field validation matrix and return the payload with
+    ``model`` populated to the configured default when the client omitted it.
+    """
+    settings = get_settings()
+    resolved_model = resolve_public_image_model(payload.model)
     validate_image_request_parameters(
-        model=payload.model,
+        model=resolved_model,
         quality=payload.quality,
         size=payload.size,
         background=payload.background,
@@ -265,12 +296,22 @@ def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> None:
         images_max_n=settings.images_max_n,
         images_max_partial_images=settings.images_max_partial_images,
     )
+    if payload.model != resolved_model:
+        # Pydantic models are immutable by default; build a copy with the
+        # resolved model so downstream code can rely on ``payload.model``
+        # always being a concrete ``gpt-image-*`` value.
+        return payload.model_copy(update={"model": resolved_model})
+    return payload
 
 
-def validate_edits_payload(payload: V1ImagesEditsForm) -> None:
+def validate_edits_payload(payload: V1ImagesEditsForm) -> V1ImagesEditsForm:
+    """Apply the cross-field validation matrix and return the payload with
+    ``model`` populated to the configured default when the client omitted it.
+    """
     settings = get_settings()
+    resolved_model = resolve_public_image_model(payload.model)
     validate_image_request_parameters(
-        model=payload.model,
+        model=resolved_model,
         quality=payload.quality,
         size=payload.size,
         background=payload.background,
@@ -284,6 +325,9 @@ def validate_edits_payload(payload: V1ImagesEditsForm) -> None:
         images_max_n=settings.images_max_n,
         images_max_partial_images=settings.images_max_partial_images,
     )
+    if payload.model != resolved_model:
+        return payload.model_copy(update={"model": resolved_model})
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -521,13 +565,15 @@ async def translate_responses_stream_to_images_stream(
     """
     terminal_emitted = False
     completion_pending = True
-    # The Responses backend emits ``response.output_item.done`` for the
+    # The Responses backend emits ``response.output_item.done`` for each
     # ``image_generation_call`` *before* the final ``response.completed``
-    # event that carries ``tool_usage``. We buffer the prepared completed
-    # event so we can attach ``usage`` once the ``response.completed`` arrives
-    # and only flush it then. If the upstream stream ends without a
-    # ``response.completed`` we still flush the buffered event without usage.
-    pending_completed_event: dict[str, JsonValue] | None = None
+    # event that carries ``tool_usage``. We buffer prepared completed
+    # events so we can attach ``usage`` once ``response.completed``
+    # arrives, and we keep them in arrival order so multi-image responses
+    # do not silently drop earlier completions. If the upstream stream
+    # ends without a ``response.completed`` we still flush whatever we
+    # have buffered (without ``usage``).
+    pending_completed_events: list[dict[str, JsonValue]] = []
 
     async for line in upstream:
         if not line:
@@ -574,18 +620,26 @@ async def translate_responses_stream_to_images_stream(
             event = _build_completed_event(item)
             if event is not None:
                 # Defer flushing until response.completed arrives so we can
-                # attach the upstream tool_usage.image_gen as ``usage``.
-                pending_completed_event = event
+                # attach the upstream tool_usage.image_gen as ``usage``
+                # to the *last* completed image (matching the OpenAI
+                # Images streaming shape, where ``usage`` only appears on
+                # the terminal event).
+                pending_completed_events.append(event)
             continue
 
         if event_type == _UPSTREAM_RESPONSE_COMPLETED_EVENT:
             response_obj = payload.get("response")
             usage = _extract_image_usage(response_obj) if is_json_mapping(response_obj) else None
-            if pending_completed_event is not None:
-                if usage is not None:
-                    pending_completed_event["usage"] = usage.model_dump(mode="json", exclude_none=True)
-                yield format_sse_event(pending_completed_event)
-                pending_completed_event = None
+            if pending_completed_events:
+                # Emit every buffered completion in arrival order so
+                # multi-image responses do not silently drop earlier
+                # images. Only the last completion carries ``usage``.
+                last_index = len(pending_completed_events) - 1
+                for idx, event in enumerate(pending_completed_events):
+                    if idx == last_index and usage is not None:
+                        event["usage"] = usage.model_dump(mode="json", exclude_none=True)
+                    yield format_sse_event(event)
+                pending_completed_events.clear()
                 terminal_emitted = True
             elif not terminal_emitted:
                 yield format_sse_event(
@@ -629,9 +683,12 @@ async def translate_responses_stream_to_images_stream(
 
     # If the upstream stream ended without a ``response.completed`` (e.g.
     # truncation), still flush whatever we have buffered so the client sees
-    # a terminal event before [DONE].
-    if pending_completed_event is not None and not terminal_emitted:
-        yield format_sse_event(pending_completed_event)
+    # a terminal event before [DONE]. ``usage`` is unknown in this case so
+    # we omit it.
+    if pending_completed_events and not terminal_emitted:
+        for event in pending_completed_events:
+            yield format_sse_event(event)
+        pending_completed_events.clear()
         terminal_emitted = True
 
     if completion_pending and not terminal_emitted:

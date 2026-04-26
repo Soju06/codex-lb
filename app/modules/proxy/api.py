@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import logging
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import cast
 
@@ -715,6 +715,47 @@ async def v1_images_variations(request: Request) -> Response:
     )
 
 
+async def _prime_upstream_stream(
+    request: Request,
+    upstream: AsyncIterator[str],
+    rate_limit_headers: Mapping[str, str],
+    *,
+    on_error: Callable[[], Awaitable[None]] | None = None,
+) -> tuple[AsyncIterator[str] | None, Response | None]:
+    """Pull the first chunk from ``upstream`` so any error raised before the
+    first SSE event is surfaced as a structured OpenAI error envelope
+    instead of a broken/truncated stream.
+
+    Returns ``(primed_iterator, None)`` on success, where the returned
+    iterator yields the captured first chunk followed by the rest of
+    ``upstream``. Returns ``(None, error_response)`` when the upstream
+    raised before yielding anything; in that case ``on_error`` is called
+    so the caller can release reservations.
+    """
+    iterator = upstream.__aiter__()
+    try:
+        first_chunk = await iterator.__anext__()
+    except StopAsyncIteration:
+        first_chunk = None
+    except ProxyResponseError as exc:
+        if on_error is not None:
+            await on_error()
+        return None, _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers=dict(rate_limit_headers),
+        )
+
+    async def _replay() -> AsyncIterator[str]:
+        if first_chunk is not None:
+            yield first_chunk
+        async for chunk in iterator:
+            yield chunk
+
+    return _replay(), None
+
+
 async def _proxy_images_generation_request(
     *,
     request: Request,
@@ -723,11 +764,16 @@ async def _proxy_images_generation_request(
     api_key: ApiKeyData | None,
 ) -> Response:
     try:
-        images_service_module.validate_generations_payload(payload)
+        payload = images_service_module.validate_generations_payload(payload)
     except ClientPayloadError as exc:
         return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
 
+    # ``validate_generations_payload`` resolves missing ``model`` to the
+    # configured ``images_default_model`` and re-validates the matrix
+    # against the resolved value. After this call ``payload.model`` is
+    # always a concrete ``gpt-image-*`` string.
     public_model = payload.model
+    assert public_model is not None
     settings = proxy_service_module.get_settings()
     host_model = settings.images_host_model
 
@@ -774,8 +820,26 @@ async def _proxy_images_generation_request(
     # value the client actually requested.
     captured: dict[str, str] = {}
 
+    # Prime the upstream stream so that errors raised before the first
+    # chunk (e.g. exhausted retries propagating a ProxyResponseError) are
+    # surfaced as structured OpenAI error envelopes instead of broken /
+    # truncated SSE streams. ``_prime_upstream_stream`` returns either
+    # ``(primed_iterator, None)`` on success or ``(None, error_response)``
+    # when the upstream raised before yielding anything.
+    primed_upstream, prime_error = await _prime_upstream_stream(
+        request,
+        upstream,
+        rate_limit_headers,
+        on_error=lambda: _release_reservation(reservation),
+    )
+    if prime_error is not None:
+        return prime_error
+    assert primed_upstream is not None
+
     if payload.stream:
-        translated = images_service_module.translate_responses_stream_to_images_stream(upstream, captured=captured)
+        translated = images_service_module.translate_responses_stream_to_images_stream(
+            primed_upstream, captured=captured
+        )
 
         async def _stream_with_log_rewrite() -> AsyncIterator[bytes]:
             async for chunk in translated:
@@ -792,7 +856,7 @@ async def _proxy_images_generation_request(
 
     try:
         response_payload, error_envelope = await images_service_module.collect_responses_stream_for_images(
-            upstream,
+            primed_upstream,
             captured=captured,
         )
     except ProxyResponseError as exc:
@@ -840,11 +904,12 @@ async def _proxy_images_edit_request(
     api_key: ApiKeyData | None,
 ) -> Response:
     try:
-        images_service_module.validate_edits_payload(payload)
+        payload = images_service_module.validate_edits_payload(payload)
     except ClientPayloadError as exc:
         return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
 
     public_model = payload.model
+    assert public_model is not None
     settings = proxy_service_module.get_settings()
     host_model = settings.images_host_model
 
@@ -892,8 +957,20 @@ async def _proxy_images_edit_request(
 
     captured: dict[str, str] = {}
 
+    primed_upstream, prime_error = await _prime_upstream_stream(
+        request,
+        upstream,
+        rate_limit_headers,
+        on_error=lambda: _release_reservation(reservation),
+    )
+    if prime_error is not None:
+        return prime_error
+    assert primed_upstream is not None
+
     if payload.stream:
-        translated = images_service_module.translate_responses_stream_to_images_stream(upstream, captured=captured)
+        translated = images_service_module.translate_responses_stream_to_images_stream(
+            primed_upstream, captured=captured
+        )
 
         async def _stream_with_log_rewrite() -> AsyncIterator[bytes]:
             async for chunk in translated:
@@ -910,7 +987,7 @@ async def _proxy_images_edit_request(
 
     try:
         response_payload, error_envelope = await images_service_module.collect_responses_stream_for_images(
-            upstream,
+            primed_upstream,
             captured=captured,
         )
     except ProxyResponseError as exc:

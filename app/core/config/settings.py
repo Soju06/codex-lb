@@ -189,7 +189,12 @@ class Settings(BaseSettings):
     images_host_model: str = "gpt-5.5"
     images_default_model: str = "gpt-image-2"
     images_max_partial_images: int = Field(default=3, ge=0, le=3)
-    images_max_n: int = Field(default=4, ge=1, le=10)
+    # The upstream ``image_generation`` tool path does not currently expose
+    # a documented multi-image option, and the codex CLI image fallback
+    # always issues n=1. We therefore reject ``n>1`` at the API boundary
+    # until upstream support arrives. Operators who want to override this
+    # cap (e.g. once fan-out is implemented) can set this above 1.
+    images_max_n: int = Field(default=1, ge=1, le=10)
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"

@@ -167,6 +167,16 @@ def validate_image_request_parameters(
         )
 
     if n < 1 or n > images_max_n:
+        if images_max_n == 1:
+            # Single-image responses are the only path supported by the
+            # upstream ``image_generation`` tool today; document the
+            # limit explicitly so clients see why ``n>1`` is rejected.
+            raise _images_invalid(
+                "n must be 1; multiple images per request are not supported by the "
+                "upstream image_generation tool yet. Issue the request multiple "
+                "times to get more images.",
+                param="n",
+            )
         raise _images_invalid(
             f"n must be between 1 and {images_max_n}",
             param="n",
@@ -251,8 +261,10 @@ class V1ImagesGenerationsRequest(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    #: Public model id. Required. Must be in the ``gpt-image-*`` family.
-    model: str = Field(min_length=1)
+    #: Public model id. Optional; route handlers fall back to the configured
+    #: ``images_default_model`` when omitted. When provided, it must be a
+    #: ``gpt-image-*`` model.
+    model: str | None = Field(default=None, min_length=1)
     prompt: str = Field(min_length=1)
     n: int = 1
     size: str = "auto"
@@ -267,7 +279,9 @@ class V1ImagesGenerationsRequest(BaseModel):
 
     @field_validator("model")
     @classmethod
-    def _validate_model(cls, value: str) -> str:
+    def _validate_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not is_supported_image_model(value):
             raise ValueError(f"Unsupported image model '{value}'. Use a 'gpt-image-*' model.")
         return value
@@ -282,7 +296,10 @@ class V1ImagesEditsForm(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    model: str = Field(min_length=1)
+    #: Public model id. Optional; route handlers fall back to the configured
+    #: ``images_default_model`` when omitted. When provided, it must be a
+    #: ``gpt-image-*`` model.
+    model: str | None = Field(default=None, min_length=1)
     prompt: str = Field(min_length=1)
     n: int = 1
     size: str = "auto"
@@ -298,7 +315,9 @@ class V1ImagesEditsForm(BaseModel):
 
     @field_validator("model")
     @classmethod
-    def _validate_model(cls, value: str) -> str:
+    def _validate_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not is_supported_image_model(value):
             raise ValueError(f"Unsupported image model '{value}'. Use a 'gpt-image-*' model.")
         return value

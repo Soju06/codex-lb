@@ -622,6 +622,67 @@ class TestCollectResponsesStreamForImages:
         assert captured.get("response_id") == "resp_collect_id"
 
 
+class TestStreamingMultiImage:
+    @pytest.mark.asyncio
+    async def test_multiple_completed_image_items_are_all_emitted(self) -> None:
+        """When upstream emits multiple ``image_generation_call`` completions in
+        a single response, the translator must forward every one to the client
+        in arrival order. Only the last completion carries ``usage`` to match
+        the canonical OpenAI Images streaming shape.
+        """
+        upstream_events = [
+            _sse({"type": "response.created", "response": {"id": "resp_multi"}}),
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_first",
+                        "status": "completed",
+                        "result": "FIRST_B64",
+                        "size": "1024x1024",
+                        "quality": "low",
+                    },
+                }
+            ),
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 1,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_second",
+                        "status": "completed",
+                        "result": "SECOND_B64",
+                        "size": "1024x1024",
+                        "quality": "low",
+                    },
+                }
+            ),
+            _sse(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_multi",
+                        "tool_usage": {"image_gen": {"input_tokens": 3, "output_tokens": 11}},
+                    },
+                }
+            ),
+        ]
+        translated_blocks = [
+            block
+            async for block in images_service.translate_responses_stream_to_images_stream(_stream(upstream_events))
+        ]
+        events = _events_from_translated_stream(translated_blocks)
+        completed = [e for e in events if e["type"] == "image_generation.completed"]
+        assert [e["b64_json"] for e in completed] == ["FIRST_B64", "SECOND_B64"]
+        # Only the final completion carries usage.
+        assert "usage" not in completed[0]
+        assert completed[1]["usage"]["input_tokens"] == 3
+        assert completed[1]["usage"]["output_tokens"] == 11
+
+
 class TestStreamingCapturesResponseId:
     @pytest.mark.asyncio
     async def test_translate_populates_captured_response_id(self) -> None:

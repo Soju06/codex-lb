@@ -95,12 +95,12 @@ def _build_image_generation_tool(
     streaming: bool,
 ) -> dict[str, JsonValue]:
     # NOTE: the upstream ``image_generation`` tool config does not accept
-    # ``n``. Today ``validate_image_request_parameters`` unconditionally
-    # rejects ``n > 1`` (regardless of ``images_max_n``) because we do
-    # not implement client-side fan-out yet, so this function is only
-    # ever called with ``n == 1``. The assert below catches a future
-    # regression where the API-boundary cap is loosened without also
-    # adding fan-out, instead of silently dropping the requested count.
+    # ``n``. ``validate_image_request_parameters`` unconditionally
+    # rejects ``n > 1`` because client-side fan-out is not implemented
+    # yet, so this function is only ever called with ``n == 1``. The
+    # assert below catches a future regression where the API-boundary
+    # cap is loosened without also adding fan-out, instead of silently
+    # dropping the requested count.
     assert n == 1, "image_generation tool does not accept n; fan-out is not implemented"
     del n  # rejected upstream of this call (fan-out not yet implemented)
     tool: dict[str, JsonValue] = {
@@ -294,7 +294,6 @@ def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> V1Image
         n=payload.n,
         partial_images=payload.partial_images,
         output_compression=payload.output_compression,
-        images_max_n=settings.images_max_n,
         images_max_partial_images=settings.images_max_partial_images,
     )
     if payload.model != resolved_model:
@@ -323,7 +322,6 @@ def validate_edits_payload(payload: V1ImagesEditsForm) -> V1ImagesEditsForm:
         n=payload.n,
         partial_images=payload.partial_images,
         output_compression=payload.output_compression,
-        images_max_n=settings.images_max_n,
         images_max_partial_images=settings.images_max_partial_images,
     )
     if payload.model != resolved_model:
@@ -790,6 +788,13 @@ async def collect_responses_stream_for_images(
             break
 
         if event_type == _UPSTREAM_RESPONSE_FAILED_EVENT:
+            # Once a successful ``response.completed`` is captured, ignore
+            # any trailing transport-level failure events: they cannot
+            # invalidate an already-received image result. Without this
+            # guard a late ``response.failed`` could turn a successful
+            # 200 envelope into a spurious 502.
+            if final_response is not None:
+                continue
             response_value = payload.get("response")
             error_value: JsonValue | None = None
             if is_json_mapping(response_value):
@@ -813,6 +818,11 @@ async def collect_responses_stream_for_images(
             break
 
         if event_type == _UPSTREAM_ERROR_EVENT:
+            # Same rationale as the ``response.failed`` branch above:
+            # ignore late error events once a complete response has
+            # already been captured.
+            if final_response is not None:
+                continue
             error_value = payload.get("error")
             if is_json_mapping(error_value):
                 code = error_value.get("code")

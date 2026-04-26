@@ -583,6 +583,60 @@ class TestCollectResponsesStreamForImages:
         assert error["error"]["code"] == "image_generation_failed"
 
     @pytest.mark.asyncio
+    async def test_late_failed_after_completed_is_ignored(self) -> None:
+        """Once ``response.completed`` is captured, a trailing
+        ``response.failed`` (e.g. transport-level error during cleanup)
+        must NOT invalidate the already-received image result.
+        """
+        upstream_events = [
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_late",
+                        "status": "completed",
+                        "result": "GOODB64",
+                    },
+                }
+            ),
+            _sse({"type": "response.completed", "response": {"id": "resp_late"}}),
+            _sse(
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": "transport_error", "message": "late"}},
+                }
+            ),
+        ]
+        response, error = await images_service.collect_responses_stream_for_images(_stream(upstream_events))
+        assert error is None
+        assert response is not None
+        assert response["id"] == "resp_late"
+
+    @pytest.mark.asyncio
+    async def test_late_error_event_after_completed_is_ignored(self) -> None:
+        upstream_events = [
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_late",
+                        "status": "completed",
+                        "result": "GOODB64",
+                    },
+                }
+            ),
+            _sse({"type": "response.completed", "response": {"id": "resp_late"}}),
+            _sse({"type": "error", "error": {"code": "transport_error", "message": "late"}}),
+        ]
+        response, error = await images_service.collect_responses_stream_for_images(_stream(upstream_events))
+        assert error is None
+        assert response is not None
+
+    @pytest.mark.asyncio
     async def test_response_failed_returns_error_envelope(self) -> None:
         upstream_events = [
             _sse(

@@ -179,7 +179,6 @@ def _validate_default(**overrides: object) -> None:
         "n": 1,
         "partial_images": None,
         "output_compression": 100,
-        "images_max_n": 4,
         "images_max_partial_images": 3,
     }
     kwargs.update(overrides)
@@ -208,10 +207,12 @@ class TestValidateImageRequestParameters:
                 _validate_default(n=n)
             assert excinfo.value.param == "n"
 
-    def test_n_greater_than_one_is_rejected_even_when_images_max_n_is_higher(self) -> None:
-        """``images_max_n`` must NOT be a path to silently dropping images."""
+    def test_n_greater_than_one_is_unconditionally_rejected(self) -> None:
+        """There is no operator-tunable knob that can promote silent drop:
+        ``n > 1`` is hard-rejected as long as fan-out is unimplemented.
+        """
         with pytest.raises(ClientPayloadError) as excinfo:
-            _validate_default(n=2, images_max_n=4)
+            _validate_default(n=2)
         assert excinfo.value.param == "n"
 
     @pytest.mark.parametrize(

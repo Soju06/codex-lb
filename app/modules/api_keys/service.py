@@ -765,7 +765,7 @@ class ApiKeysService:
                 remaining_value=max(0, limit.max_value - max(0, min(limit.current_value, limit.max_value))),
                 model_filter=limit.model_filter,
                 reset_at=limit.reset_at,
-                source="api_key_override" if limit.limit_type == LimitType.CREDITS else "api_key_limit",
+                source="api_key_limit",
             )
             for limit in refreshed.limits
         ]

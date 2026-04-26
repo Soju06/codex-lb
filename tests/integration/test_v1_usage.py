@@ -289,6 +289,7 @@ async def test_v1_usage_returns_zero_usage_for_key_without_logs(async_client):
         "cached_input_tokens": 0,
         "total_cost_usd": 0.0,
         "limits": [],
+        "upstream_limits": [],
     }
 
 
@@ -440,32 +441,33 @@ async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exis
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["limits"][0] == {
+    assert payload["limits"] == []
+    assert payload["upstream_limits"][0] == {
         "limit_type": "credits",
         "limit_window": "5h",
         "max_value": 450,
         "current_value": 68,
         "remaining_value": 382,
         "model_filter": None,
-        "reset_at": payload["limits"][0]["reset_at"],
+        "reset_at": payload["upstream_limits"][0]["reset_at"],
         "source": "aggregate",
     }
-    assert payload["limits"][1] == {
+    assert payload["upstream_limits"][1] == {
         "limit_type": "credits",
         "limit_window": "7d",
         "max_value": 15120,
         "current_value": 3780,
         "remaining_value": 11340,
         "model_filter": None,
-        "reset_at": payload["limits"][1]["reset_at"],
+        "reset_at": payload["upstream_limits"][1]["reset_at"],
         "source": "aggregate",
     }
-    assert payload["limits"][0]["reset_at"].endswith("Z")
-    assert payload["limits"][1]["reset_at"].endswith("Z")
+    assert payload["upstream_limits"][0]["reset_at"].endswith("Z")
+    assert payload["upstream_limits"][1]["reset_at"].endswith("Z")
 
 
 @pytest.mark.asyncio
-async def test_v1_usage_overrides_aggregate_credit_windows_with_api_key_credit_limits(async_client):
+async def test_v1_usage_returns_api_key_and_upstream_credit_limits_separately(async_client):
     key_id, plain_key = await _create_api_key(
         name="credit-override",
         limits=[
@@ -515,19 +517,21 @@ async def test_v1_usage_overrides_aggregate_credit_windows_with_api_key_credit_l
             "remaining_value": 0,
             "model_filter": None,
             "reset_at": payload["limits"][0]["reset_at"],
-            "source": "api_key_override",
+            "source": "api_key_limit",
         },
         {
             "limit_type": "credits",
             "limit_window": "7d",
             "max_value": 1000,
-            "current_value": 1000,
-            "remaining_value": 0,
+            "current_value": 10,
+            "remaining_value": 990,
             "model_filter": None,
             "reset_at": payload["limits"][1]["reset_at"],
-            "source": "api_key_override",
+            "source": "api_key_limit",
         },
     ]
+    assert [limit["source"] for limit in payload["upstream_limits"]] == ["aggregate", "aggregate"]
+    assert [limit["limit_window"] for limit in payload["upstream_limits"]] == ["5h", "7d"]
 
 
 @pytest.mark.asyncio
@@ -597,6 +601,7 @@ async def test_v1_usage_prefers_raw_limits_when_aggregate_credit_pair_is_partial
             "source": "api_key_limit",
         },
     ]
+    assert [limit["limit_window"] for limit in payload["upstream_limits"]] == ["5h"]
 
 
 @pytest.mark.asyncio
@@ -644,7 +649,8 @@ async def test_v1_usage_falls_back_to_raw_credit_limits_when_aggregate_reset_is_
     response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
 
     assert response.status_code == 200
-    assert response.json()["limits"] == [
+    payload = response.json()
+    assert payload["limits"] == [
         {
             "limit_type": "credits",
             "limit_window": "5h",
@@ -653,7 +659,7 @@ async def test_v1_usage_falls_back_to_raw_credit_limits_when_aggregate_reset_is_
             "remaining_value": 48,
             "model_filter": None,
             "reset_at": primary_reset.isoformat() + "Z",
-            "source": "api_key_override",
+            "source": "api_key_limit",
         },
         {
             "limit_type": "credits",
@@ -663,9 +669,10 @@ async def test_v1_usage_falls_back_to_raw_credit_limits_when_aggregate_reset_is_
             "remaining_value": 750,
             "model_filter": None,
             "reset_at": secondary_reset.isoformat() + "Z",
-            "source": "api_key_override",
+            "source": "api_key_limit",
         },
     ]
+    assert [limit["limit_window"] for limit in payload["upstream_limits"]] == ["7d"]
 
 
 @pytest.mark.asyncio
@@ -678,7 +685,8 @@ async def test_v1_usage_ignores_paused_and_deactivated_accounts_in_aggregate_cre
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["limits"] == [
+    assert payload["limits"] == []
+    assert payload["upstream_limits"] == [
         {
             "limit_type": "credits",
             "limit_window": "5h",
@@ -686,7 +694,7 @@ async def test_v1_usage_ignores_paused_and_deactivated_accounts_in_aggregate_cre
             "current_value": 45,
             "remaining_value": 180,
             "model_filter": None,
-            "reset_at": payload["limits"][0]["reset_at"],
+            "reset_at": payload["upstream_limits"][0]["reset_at"],
             "source": "aggregate",
         },
         {
@@ -696,7 +704,7 @@ async def test_v1_usage_ignores_paused_and_deactivated_accounts_in_aggregate_cre
             "current_value": 1890,
             "remaining_value": 5670,
             "model_filter": None,
-            "reset_at": payload["limits"][1]["reset_at"],
+            "reset_at": payload["upstream_limits"][1]["reset_at"],
             "source": "aggregate",
         },
     ]

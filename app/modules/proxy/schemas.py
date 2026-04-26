@@ -199,3 +199,4 @@ class V1UsageResponse(BaseModel):
     cached_input_tokens: int
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
+    upstream_limits: list[V1UsageLimitResponse] = []

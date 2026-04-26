@@ -59,7 +59,6 @@ from app.modules.api_keys.service import (
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
     ApiKeySelfLimitData,
-    ApiKeySelfUsageData,
     ApiKeysService,
     ApiKeyUsageReservationData,
 )
@@ -357,32 +356,13 @@ async def v1_usage(
         total_tokens=usage.total_tokens,
         cached_input_tokens=usage.cached_input_tokens,
         total_cost_usd=usage.total_cost_usd,
-        limits=_build_v1_usage_limits(usage, aggregate_limits),
+        limits=[_to_v1_usage_limit_response(limit) for limit in usage.limits],
+        upstream_limits=_ordered_aggregate_limits(aggregate_limits),
     )
 
 
-def _build_v1_usage_limits(
-    usage: ApiKeySelfUsageData,
-    aggregate_limits: dict[str, V1UsageLimitResponse],
-) -> list[V1UsageLimitResponse]:
-    raw_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
-    credit_overrides = {
-        limit.limit_window: limit
-        for limit in usage.limits
-        if limit.limit_type == "credits" and limit.model_filter is None
-    }
-
-    if aggregate_limits:
-        merged: list[V1UsageLimitResponse] = []
-        for window in ("5h", "7d"):
-            aggregate = aggregate_limits.get(window)
-            if aggregate is None:
-                continue
-            merged.append(_apply_credit_override(aggregate, credit_overrides.get(window)))
-        if {item.limit_window for item in merged} == {"5h", "7d"}:
-            return merged
-
-    return raw_limits
+def _ordered_aggregate_limits(aggregate_limits: dict[str, V1UsageLimitResponse]) -> list[V1UsageLimitResponse]:
+    return [limit for window in ("5h", "7d") if (limit := aggregate_limits.get(window)) is not None]
 
 
 def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitResponse:
@@ -396,27 +376,6 @@ def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitRespo
         model_filter=limit.model_filter,
         reset_at=limit.reset_at.isoformat() + "Z",
         source=limit.source,
-    )
-
-
-def _apply_credit_override(
-    aggregate_limit: V1UsageLimitResponse,
-    override_limit: ApiKeySelfLimitData | None,
-) -> V1UsageLimitResponse:
-    if override_limit is None:
-        return aggregate_limit
-
-    override_max = max(0, override_limit.max_value)
-    current_value = max(0, min(aggregate_limit.current_value, override_max))
-    return V1UsageLimitResponse(
-        limit_type="credits",
-        limit_window=aggregate_limit.limit_window,
-        max_value=override_max,
-        current_value=current_value,
-        remaining_value=max(0, override_max - current_value),
-        model_filter=None,
-        reset_at=aggregate_limit.reset_at,
-        source="api_key_override",
     )
 
 

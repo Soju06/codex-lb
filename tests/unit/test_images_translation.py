@@ -563,6 +563,26 @@ class TestCollectResponsesStreamForImages:
         assert image_gen["output_tokens"] == 6
 
     @pytest.mark.asyncio
+    async def test_response_incomplete_returns_error_envelope(self) -> None:
+        """``response.incomplete`` must surface as an error in non-streaming
+        collect, matching the streaming translator's behaviour. Returning a
+        200 image envelope on a half-finished response would silently
+        promote partial output to success.
+        """
+        upstream_events = [
+            _sse(
+                {
+                    "type": "response.incomplete",
+                    "response": {"id": "resp_inc", "status": "incomplete"},
+                }
+            ),
+        ]
+        response, error = await images_service.collect_responses_stream_for_images(_stream(upstream_events))
+        assert response is None
+        assert error is not None
+        assert error["error"]["code"] == "image_generation_failed"
+
+    @pytest.mark.asyncio
     async def test_response_failed_returns_error_envelope(self) -> None:
         upstream_events = [
             _sse(

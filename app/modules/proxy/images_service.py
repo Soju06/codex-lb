@@ -759,10 +759,7 @@ async def collect_responses_stream_for_images(
                 fallback_items.append(dict(item))
             continue
 
-        if (
-            event_type in (_UPSTREAM_RESPONSE_COMPLETED_EVENT, _UPSTREAM_RESPONSE_INCOMPLETE_EVENT)
-            and final_response is None
-        ):
+        if event_type == _UPSTREAM_RESPONSE_COMPLETED_EVENT and final_response is None:
             response_value = payload.get("response")
             base: dict[str, JsonValue]
             if is_json_mapping(response_value):
@@ -780,6 +777,17 @@ async def collect_responses_stream_for_images(
             # return control to the caller. Once we have ``final_response``
             # we still skip processing of any subsequent events.
             continue
+
+        if event_type == _UPSTREAM_RESPONSE_INCOMPLETE_EVENT and terminal_error is None:
+            # Match the streaming translator: an incomplete upstream
+            # response is surfaced as an error envelope rather than a
+            # 200 response carrying a half-finished image.
+            terminal_error = openai_error(
+                "image_generation_failed",
+                "Upstream response was incomplete before the image was generated",
+                error_type="server_error",
+            )
+            break
 
         if event_type == _UPSTREAM_RESPONSE_FAILED_EVENT:
             response_value = payload.get("response")

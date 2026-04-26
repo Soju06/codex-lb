@@ -621,7 +621,12 @@ async def v1_images_generations(
 @v1_router.post("/images/edits", response_model=None)
 async def v1_images_edits(
     request: Request,
-    model: str = Form(...),
+    # ``model`` is intentionally optional here so the FastAPI form parser
+    # does not 422 before ``validate_edits_payload`` can fall back to
+    # ``settings.images_default_model``. The schema-level optional /
+    # default-resolution lives in ``V1ImagesEditsForm`` +
+    # ``resolve_public_image_model``.
+    model: str | None = Form(None),
     prompt: str = Form(...),
     image: list[UploadFile] = File(...),
     mask: UploadFile | None = File(None),

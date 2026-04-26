@@ -166,19 +166,20 @@ def validate_image_request_parameters(
             param="model",
         )
 
-    if n < 1 or n > images_max_n:
-        if images_max_n == 1:
-            # Single-image responses are the only path supported by the
-            # upstream ``image_generation`` tool today; document the
-            # limit explicitly so clients see why ``n>1`` is rejected.
-            raise _images_invalid(
-                "n must be 1; multiple images per request are not supported by the "
-                "upstream image_generation tool yet. Issue the request multiple "
-                "times to get more images.",
-                param="n",
-            )
+    # ``n`` is unconditionally capped at 1 today, regardless of the
+    # configured ``images_max_n``. The upstream ``image_generation`` tool
+    # accepts only a single image per call, and codex-lb does not yet
+    # implement client-side fan-out (multiple internal Responses calls
+    # whose ``image_generation_call`` results are concatenated into one
+    # public envelope). Allowing ``n>1`` through configuration would
+    # silently return fewer images than requested. The cap is lifted in
+    # the same change that introduces fan-out.
+    del images_max_n  # not consulted while fan-out is unimplemented
+    if n < 1 or n > 1:
         raise _images_invalid(
-            f"n must be between 1 and {images_max_n}",
+            "n must be 1; multiple images per request are not supported by the "
+            "upstream image_generation tool yet. Issue the request multiple "
+            "times to get more images.",
             param="n",
         )
 

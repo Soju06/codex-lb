@@ -847,11 +847,17 @@ async def _proxy_images_generation_request(
         )
 
         async def _stream_with_log_rewrite() -> AsyncIterator[bytes]:
-            async for chunk in translated:
-                yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
-            response_id = captured.get("response_id")
-            if response_id:
-                await context.service.rewrite_request_log_model(response_id, public_model)
+            try:
+                async for chunk in translated:
+                    yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+            finally:
+                # Run the request-log model rewrite even when the stream
+                # is cancelled mid-flight (e.g. client disconnect). Without
+                # this, an interrupted SSE response would leave the
+                # request_logs row pinned to the internal host model.
+                response_id = captured.get("response_id")
+                if response_id:
+                    await context.service.rewrite_request_log_model(response_id, public_model)
 
         return StreamingResponse(
             _stream_with_log_rewrite(),
@@ -978,11 +984,17 @@ async def _proxy_images_edit_request(
         )
 
         async def _stream_with_log_rewrite() -> AsyncIterator[bytes]:
-            async for chunk in translated:
-                yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
-            response_id = captured.get("response_id")
-            if response_id:
-                await context.service.rewrite_request_log_model(response_id, public_model)
+            try:
+                async for chunk in translated:
+                    yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+            finally:
+                # Run the request-log model rewrite even when the stream
+                # is cancelled mid-flight (e.g. client disconnect). Without
+                # this, an interrupted SSE response would leave the
+                # request_logs row pinned to the internal host model.
+                response_id = captured.get("response_id")
+                if response_id:
+                    await context.service.rewrite_request_log_model(response_id, public_model)
 
         return StreamingResponse(
             _stream_with_log_rewrite(),

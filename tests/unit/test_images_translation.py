@@ -95,7 +95,7 @@ class TestImagesGenerationToResponsesRequest:
                 "partial_images": 2,
                 "size": "1024x1024",
                 "quality": "low",
-                "n": 2,
+                "n": 1,
             }
         )
         responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.5")

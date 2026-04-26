@@ -95,14 +95,14 @@ def _build_image_generation_tool(
     streaming: bool,
 ) -> dict[str, JsonValue]:
     # NOTE: the upstream ``image_generation`` tool config does not accept
-    # ``n``. Until upstream exposes a documented multi-image option,
-    # ``validate_image_request_parameters`` rejects ``n > images_max_n``
-    # at the API boundary (default ``images_max_n=1``), so this function
-    # is only ever called with ``n == 1`` for now. Operators who want
-    # multi-image responses must override ``images_max_n`` AND implement
-    # fan-out (multiple internal Responses calls) before raising the cap;
-    # we do not silently drop a requested ``n > 1`` here.
-    del n  # rejected upstream of this call when n > images_max_n
+    # ``n``. Today ``validate_image_request_parameters`` unconditionally
+    # rejects ``n > 1`` (regardless of ``images_max_n``) because we do
+    # not implement client-side fan-out yet, so this function is only
+    # ever called with ``n == 1``. The assert below catches a future
+    # regression where the API-boundary cap is loosened without also
+    # adding fan-out, instead of silently dropping the requested count.
+    assert n == 1, "image_generation tool does not accept n; fan-out is not implemented"
+    del n  # rejected upstream of this call (fan-out not yet implemented)
     tool: dict[str, JsonValue] = {
         "type": "image_generation",
         "model": model,

@@ -195,14 +195,24 @@ class TestValidateImageRequestParameters:
             _validate_default(model="gpt-5.2")
         assert excinfo.value.param == "model"
 
-    @pytest.mark.parametrize("n,expect_ok", [(1, True), (4, True), (0, False), (5, False)])
+    @pytest.mark.parametrize("n,expect_ok", [(1, True), (0, False), (2, False), (5, False)])
     def test_n_bounds(self, n: int, expect_ok: bool) -> None:
+        """``n`` is hard-capped at 1 today regardless of ``images_max_n``
+        because client-side fan-out is not implemented yet. The cap is
+        relaxed in the same change that introduces fan-out.
+        """
         if expect_ok:
             _validate_default(n=n)
         else:
             with pytest.raises(ClientPayloadError) as excinfo:
                 _validate_default(n=n)
             assert excinfo.value.param == "n"
+
+    def test_n_greater_than_one_is_rejected_even_when_images_max_n_is_higher(self) -> None:
+        """``images_max_n`` must NOT be a path to silently dropping images."""
+        with pytest.raises(ClientPayloadError) as excinfo:
+            _validate_default(n=2, images_max_n=4)
+        assert excinfo.value.param == "n"
 
     @pytest.mark.parametrize(
         "background,expect_ok",

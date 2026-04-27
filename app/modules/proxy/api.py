@@ -891,7 +891,7 @@ async def _proxy_images_generation_request(
     # surfaces the Responses id, so we can rewrite the request log's model
     # column from the internal host model to the public ``gpt-image-*``
     # value the client actually requested.
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     # Prime the upstream stream so that errors raised before the first
     # chunk (e.g. exhausted retries propagating a ProxyResponseError) are
@@ -924,8 +924,22 @@ async def _proxy_images_generation_request(
                 # this, an interrupted SSE response would leave the
                 # request_logs row pinned to the internal host model.
                 response_id = captured.get("response_id")
-                if response_id:
+                if response_id and isinstance(response_id, str):
                     await context.service.rewrite_request_log_model(response_id, public_model)
+                # Charge the API key for the actual image_generation
+                # tokens. The standard stream settlement only reads
+                # response.usage which is typically empty for the
+                # image_generation tool path, so we record post-hoc here
+                # using the tokens stashed by ``images_service``.
+                _input = captured.get("image_input_tokens")
+                _output = captured.get("image_output_tokens")
+                if isinstance(_input, int) or isinstance(_output, int):
+                    await context.service.record_image_api_key_usage(
+                        api_key,
+                        model=public_model,
+                        input_tokens=_input if isinstance(_input, int) else None,
+                        output_tokens=_output if isinstance(_output, int) else None,
+                    )
 
         return StreamingResponse(
             _stream_with_log_rewrite(),
@@ -948,8 +962,17 @@ async def _proxy_images_generation_request(
         )
 
     response_id = captured.get("response_id")
-    if response_id:
+    if response_id and isinstance(response_id, str):
         await context.service.rewrite_request_log_model(response_id, public_model)
+    _input = captured.get("image_input_tokens")
+    _output = captured.get("image_output_tokens")
+    if isinstance(_input, int) or isinstance(_output, int):
+        await context.service.record_image_api_key_usage(
+            api_key,
+            model=public_model,
+            input_tokens=_input if isinstance(_input, int) else None,
+            output_tokens=_output if isinstance(_output, int) else None,
+        )
 
     if error_envelope is not None:
         return _logged_error_json_response(
@@ -1057,7 +1080,7 @@ async def _proxy_images_edit_request(
         api_key_reservation=reservation,
     )
 
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     primed_upstream, prime_error = await _prime_upstream_stream(
         request,
@@ -1084,8 +1107,22 @@ async def _proxy_images_edit_request(
                 # this, an interrupted SSE response would leave the
                 # request_logs row pinned to the internal host model.
                 response_id = captured.get("response_id")
-                if response_id:
+                if response_id and isinstance(response_id, str):
                     await context.service.rewrite_request_log_model(response_id, public_model)
+                # Charge the API key for the actual image_generation
+                # tokens. The standard stream settlement only reads
+                # response.usage which is typically empty for the
+                # image_generation tool path, so we record post-hoc here
+                # using the tokens stashed by ``images_service``.
+                _input = captured.get("image_input_tokens")
+                _output = captured.get("image_output_tokens")
+                if isinstance(_input, int) or isinstance(_output, int):
+                    await context.service.record_image_api_key_usage(
+                        api_key,
+                        model=public_model,
+                        input_tokens=_input if isinstance(_input, int) else None,
+                        output_tokens=_output if isinstance(_output, int) else None,
+                    )
 
         return StreamingResponse(
             _stream_with_log_rewrite(),
@@ -1108,8 +1145,17 @@ async def _proxy_images_edit_request(
         )
 
     response_id = captured.get("response_id")
-    if response_id:
+    if response_id and isinstance(response_id, str):
         await context.service.rewrite_request_log_model(response_id, public_model)
+    _input = captured.get("image_input_tokens")
+    _output = captured.get("image_output_tokens")
+    if isinstance(_input, int) or isinstance(_output, int):
+        await context.service.record_image_api_key_usage(
+            api_key,
+            model=public_model,
+            input_tokens=_input if isinstance(_input, int) else None,
+            output_tokens=_output if isinstance(_output, int) else None,
+        )
 
     if error_envelope is not None:
         return _logged_error_json_response(

@@ -6315,6 +6315,53 @@ class ProxyService:
                     exc_info=True,
                 )
 
+    async def record_image_api_key_usage(
+        self,
+        api_key: ApiKeyData | None,
+        *,
+        model: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None = None,
+    ) -> None:
+        """Record post-hoc API-key usage for a ``/v1/images/*`` request.
+
+        The image adapter routes through ``stream_responses``, which only
+        sees the upstream Responses ``response.usage`` block. For the
+        ``image_generation`` tool path that block is typically absent or
+        zero - the real token counts live under
+        ``response.tool_usage.image_gen``. Without this helper the
+        standard stream settlement would release the API-key reservation
+        without charging anything, so cost-based ``cost_usd`` quotas
+        would never bite on image requests and dashboards would
+        undercount image cost. The route handler calls this with the
+        token counts extracted from ``tool_usage.image_gen`` so the API
+        key's usage limits and cost are incremented consistently with
+        the request log's ``cost_usd`` rewrite.
+        """
+        if api_key is None:
+            return
+        if not input_tokens and not output_tokens:
+            return
+        with anyio.CancelScope(shield=True):
+            try:
+                async with self._repo_factory() as repos:
+                    api_keys_service = ApiKeysService(repos.api_keys)
+                    await api_keys_service.record_usage(
+                        api_key.id,
+                        model=model,
+                        input_tokens=int(input_tokens or 0),
+                        output_tokens=int(output_tokens or 0),
+                        cached_input_tokens=int(cached_input_tokens or 0),
+                    )
+            except Exception:
+                logger.warning(
+                    "failed to record image API-key usage key_id=%s model=%s",
+                    api_key.id,
+                    model,
+                    exc_info=True,
+                )
+
     async def _compute_rate_limit_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
         async with self._repo_factory() as repos:

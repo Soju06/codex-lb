@@ -507,6 +507,21 @@ def images_response_from_responses(response: Mapping[str, JsonValue]) -> V1Image
 # ---------------------------------------------------------------------------
 
 
+def _stash_image_usage_tokens(captured: dict[str, object], usage: V1ImageUsage) -> None:
+    """Persist the ``tool_usage.image_gen`` token counts on ``captured``
+    so the route handler can post-hoc record them against the API key.
+
+    Stored under explicit ``image_input_tokens`` / ``image_output_tokens``
+    keys (alongside the existing ``response_id``) so the route handler
+    does not have to re-parse the SSE stream or know the V1ImageUsage
+    shape.
+    """
+    if usage.input_tokens is not None:
+        captured["image_input_tokens"] = int(usage.input_tokens)
+    if usage.output_tokens is not None:
+        captured["image_output_tokens"] = int(usage.output_tokens)
+
+
 def _build_partial_image_event(payload: Mapping[str, JsonValue], *, event_type: str) -> dict[str, JsonValue] | None:
     partial_b64 = payload.get("partial_image_b64")
     if not isinstance(partial_b64, str) or not partial_b64:
@@ -625,7 +640,7 @@ def _error_event_to_error_event(payload: Mapping[str, JsonValue]) -> dict[str, J
 async def translate_responses_stream_to_images_stream(
     upstream: AsyncIterator[str],
     *,
-    captured: dict[str, str] | None = None,
+    captured: dict[str, object] | None = None,
     is_edit: bool = False,
 ) -> AsyncIterator[str]:
     """Convert a Responses SSE event stream into an OpenAI Images SSE stream.
@@ -717,6 +732,13 @@ async def translate_responses_stream_to_images_stream(
         if event_type == _UPSTREAM_RESPONSE_COMPLETED_EVENT:
             response_obj = payload.get("response")
             usage = _extract_image_usage(response_obj) if is_json_mapping(response_obj) else None
+            # Stash the usage tokens on ``captured`` so the route handler
+            # can post-hoc record them against the API key (the
+            # standard stream settlement only sees ``response.usage``,
+            # which is typically empty for the image_generation tool
+            # path).
+            if captured is not None and usage is not None:
+                _stash_image_usage_tokens(captured, usage)
             if pending_completed_events:
                 # Emit every buffered completion in arrival order so
                 # multi-image responses do not silently drop earlier
@@ -792,7 +814,7 @@ async def translate_responses_stream_to_images_stream(
 async def collect_responses_stream_for_images(
     upstream: AsyncIterator[str],
     *,
-    captured: dict[str, str] | None = None,
+    captured: dict[str, object] | None = None,
 ) -> tuple[dict[str, JsonValue] | None, OpenAIErrorEnvelope | None]:
     """Drain a Responses SSE stream and return the final ``response`` payload.
 
@@ -857,6 +879,15 @@ async def collect_responses_stream_for_images(
                 merged_output.extend(fallback_items)
                 base["output"] = merged_output
             final_response = base
+            # Stash the image usage tokens so the route handler can
+            # post-hoc charge the API key. The standard stream
+            # settlement only reads ``response.usage`` which is
+            # typically empty for the image_generation tool path.
+            if captured is not None:
+                tool_usage_payload = base
+                usage = _extract_image_usage(tool_usage_payload)
+                if usage is not None:
+                    _stash_image_usage_tokens(captured, usage)
             # Don't break — keep draining so the upstream stream_responses
             # generator finalizes (which writes the request log) before we
             # return control to the caller. Once we have ``final_response``

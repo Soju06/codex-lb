@@ -687,7 +687,7 @@ class TestCollectResponsesStreamForImages:
                 }
             ),
         ]
-        captured: dict[str, str] = {}
+        captured: dict[str, object] = {}
         response, error = await images_service.collect_responses_stream_for_images(
             _stream(upstream_events), captured=captured
         )
@@ -795,7 +795,7 @@ class TestStreamingCapturesResponseId:
                 }
             ),
         ]
-        captured: dict[str, str] = {}
+        captured: dict[str, object] = {}
         translated_blocks = [
             block
             async for block in images_service.translate_responses_stream_to_images_stream(

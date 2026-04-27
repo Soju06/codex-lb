@@ -114,6 +114,7 @@ def build_log_config() -> LogConfig:
 
     config = copy.deepcopy(LOGGING_CONFIG)
     formatters = config.setdefault("formatters", {})
+    handlers = config.setdefault("handlers", {})
     settings = get_settings()
 
     if settings.log_format == "json":
@@ -139,6 +140,15 @@ def build_log_config() -> LogConfig:
             "datefmt": "%Y-%m-%dT%H:%M:%SZ",
             "use_colors": None,
         }
+
+    # Uvicorn's stock config only wires uvicorn.* loggers. Attach the same
+    # default handler to the root logger so application loggers such as
+    # app.core.balancer.logic surface in docker logs at INFO.
+    handlers.setdefault("default", {"class": "logging.StreamHandler", "formatter": "default", "stream": "ext://sys.stderr"})
+    config["root"] = {
+        "handlers": ["default"],
+        "level": "INFO",
+    }
     return cast(LogConfig, config)
 
 

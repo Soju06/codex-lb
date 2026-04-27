@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import time
 from dataclasses import dataclass
@@ -49,6 +50,12 @@ DRAIN_ERROR_COUNT_THRESHOLD = 2
 PROBE_QUIET_SECONDS = 60.0
 PROBE_SUCCESS_STREAK_REQUIRED = 3
 
+logger = logging.getLogger(__name__)
+
+_RELATIVE_AVAILABILITY_LOG_PREFIX_CANDIDATE = "Relative availability candidate "
+_RELATIVE_AVAILABILITY_LOG_PREFIX_TOP_K = "Relative availability top-k     "
+_RELATIVE_AVAILABILITY_LOG_PREFIX_WINNER = "Relative availability winner    "
+
 
 @dataclass
 class AccountState:
@@ -63,6 +70,7 @@ class AccountState:
     last_error_at: float | None = None
     last_selected_at: float | None = None
     error_count: int = 0
+    email: str | None = None
     deactivation_reason: str | None = None
     plan_type: str | None = None
     capacity_credits: float | None = None
@@ -302,11 +310,62 @@ def _relative_availability_divisor_seconds(state: AccountState, current: float) 
     return max(remaining_seconds, float(RELATIVE_AVAILABILITY_MIN_DIVISOR_SECONDS))
 
 
+def _relative_availability_remaining_seconds(state: AccountState, current: float) -> float:
+    if state.secondary_reset_at is None:
+        return float(UNKNOWN_RESET_FALLBACK_SECONDS)
+    return max(0.0, float(state.secondary_reset_at) - current)
+
+
 def _relative_availability_raw_score(state: AccountState, current: float) -> float:
     remaining_credits = _remaining_secondary_credits(state)
     if remaining_credits <= 0.0:
         return 0.0
     return remaining_credits / _relative_availability_divisor_seconds(state, current)
+
+
+def _relative_availability_label(state: AccountState) -> str:
+    return state.email or state.account_id
+
+
+def _relative_availability_score_per_minute(raw_score: float) -> float:
+    return raw_score * 60.0
+
+
+def _log_relative_availability_candidate_scores(
+    raw_scores: list[tuple[AccountState, float]],
+    *,
+    current: float,
+) -> None:
+    for state, raw_score in raw_scores:
+        remaining_seconds = _relative_availability_remaining_seconds(state, current)
+        logger.info(
+            (
+                f"{_RELATIVE_AVAILABILITY_LOG_PREFIX_CANDIDATE}account=%s "
+                "remaining_credits=%.2f remaining_minutes=%.2f score_per_minute=%.6f"
+            ),
+            _relative_availability_label(state),
+            _remaining_secondary_credits(state),
+            remaining_seconds / 60.0,
+            _relative_availability_score_per_minute(raw_score),
+        )
+
+
+def _log_relative_availability_top_k(
+    weighted_candidates: list[tuple[AccountState, float, float]],
+    *,
+    current: float,
+) -> None:
+    formatted_candidates = ", ".join(
+        (
+            f"account={_relative_availability_label(state)} "
+            f"remaining_credits={_remaining_secondary_credits(state):.2f} "
+            f"remaining_minutes={_relative_availability_remaining_seconds(state, current) / 60.0:.2f} "
+            f"score_per_minute={_relative_availability_score_per_minute(raw_score):.6f} "
+            f"weight={weight:.8f}"
+        )
+        for state, weight, raw_score in weighted_candidates
+    )
+    logger.info("%s%s", _RELATIVE_AVAILABILITY_LOG_PREFIX_TOP_K, formatted_candidates)
 
 
 def _relative_availability_weighted_candidates(
@@ -317,6 +376,7 @@ def _relative_availability_weighted_candidates(
     top_k: int,
 ) -> list[tuple[AccountState, float, float]]:
     raw_scores = [(state, _relative_availability_raw_score(state, current)) for state in available]
+    _log_relative_availability_candidate_scores(raw_scores, current=current)
     best_raw_score = max((score for _, score in raw_scores), default=0.0)
     if best_raw_score <= 0.0:
         return []
@@ -341,8 +401,31 @@ def _relative_availability_weighted_candidates(
         )
     )
     safe_top_k = max(1, top_k)
-    return weighted[:safe_top_k]
+    top_candidates = weighted[:safe_top_k]
+    _log_relative_availability_top_k(top_candidates, current=current)
+    return top_candidates
 
+
+
+def _log_relative_availability_winner(
+    winner: AccountState,
+    *,
+    current: float,
+    weight: float | None,
+    raw_score: float,
+) -> None:
+    remaining_seconds = _relative_availability_remaining_seconds(winner, current)
+    logger.info(
+        (
+            f"{_RELATIVE_AVAILABILITY_LOG_PREFIX_WINNER}account=%s "
+            "remaining_credits=%.2f remaining_minutes=%.2f score_per_minute=%.6f weight=%s"
+        ),
+        _relative_availability_label(winner),
+        _remaining_secondary_credits(winner),
+        remaining_seconds / 60.0,
+        _relative_availability_score_per_minute(raw_score),
+        f"{weight:.8f}" if weight is not None else "fallback",
+    )
 
 
 def _select_relative_availability(
@@ -360,15 +443,36 @@ def _select_relative_availability(
         top_k=top_k,
     )
     if not weighted_candidates:
-        return min(available, key=_usage_sort_key)
+        winner = min(available, key=_usage_sort_key)
+        _log_relative_availability_winner(
+            winner,
+            current=current,
+            weight=None,
+            raw_score=_relative_availability_raw_score(winner, current),
+        )
+        return winner
     if deterministic_probe:
-        return weighted_candidates[0][0]
+        winner, weight, raw_score = weighted_candidates[0]
+        _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
+        return winner
     states = [state for state, _, _ in weighted_candidates]
     weights = [weight for _, weight, _ in weighted_candidates]
     total = sum(weights)
     if total <= 0.0:
-        return min(available, key=_usage_sort_key)
-    return random.choices(states, weights=weights, k=1)[0]
+        winner = min(available, key=_usage_sort_key)
+        _log_relative_availability_winner(
+            winner,
+            current=current,
+            weight=None,
+            raw_score=_relative_availability_raw_score(winner, current),
+        )
+        return winner
+    winner = random.choices(states, weights=weights, k=1)[0]
+    for state, weight, raw_score in weighted_candidates:
+        if state.account_id == winner.account_id:
+            _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
+            break
+    return winner
 
 
 def _select_capacity_weighted(available: list[AccountState]) -> AccountState:

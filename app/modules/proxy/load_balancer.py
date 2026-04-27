@@ -388,8 +388,8 @@ class LoadBalancer:
                 error_message = _format_degraded_error_message(error_message)
             return AccountSelection(account=None, error_message=error_message, error_code=None)
         logger.info(
-            "Selected account_id=%s strategy=%s sticky=%s model=%s",
-            selected_snapshot.id,
+            "Selected account=%s strategy=%s sticky=%s model=%s",
+            selected_snapshot.email or selected_snapshot.id,
             routing_strategy,
             bool(sticky_key),
             model,
@@ -1123,6 +1123,7 @@ def _state_from_account(
                 secondary_used_percent=secondary_used,
                 last_error_at=runtime.last_error_at,
                 error_count=runtime.error_count,
+                email=account.email,
                 health_tier=runtime.health_tier,
             ),
             now=time.time(),
@@ -1160,6 +1161,7 @@ def _state_from_account(
         last_error_at=runtime.last_error_at,
         last_selected_at=runtime.last_selected_at,
         error_count=runtime.error_count,
+        email=account.email,
         deactivation_reason=account.deactivation_reason,
         plan_type=account.plan_type,
         capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),

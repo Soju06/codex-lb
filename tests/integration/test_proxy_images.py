@@ -793,7 +793,69 @@ async def test_images_edits_accepts_image_brackets_form_key(async_client, monkey
     input_value = cast(list[Any], captured["input"])
     first_message = cast(dict[str, Any], input_value[0])
     content = cast(list[Any], first_message["content"])
-    image_parts = [
-        cast(dict[str, Any], p) for p in content if isinstance(p, dict) and p.get("type") == "input_image"
-    ]
+    image_parts = [cast(dict[str, Any], p) for p in content if isinstance(p, dict) and p.get("type") == "input_image"]
     assert len(image_parts) == 1
+
+
+@pytest.mark.asyncio
+async def test_images_generations_succeeds_when_reservation_finalize_fails(async_client, monkeypatch):
+    """A successful image generation must NOT 500 when the post-hoc
+    API-key reservation finalize raises (e.g. transient DB failure).
+    The accounting failure is swallowed and logged; the client still
+    receives the image envelope.
+    """
+    await _import_account(async_client, "acc_images_finalize_fail", "img-fin-fail@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_finfail",
+                    "status": "completed",
+                    "result": "B64_FINFAIL",
+                },
+            }
+        )
+        yield _sse(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_finfail",
+                    "tool_usage": {"image_gen": {"input_tokens": 4, "output_tokens": 5}},
+                },
+            }
+        )
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    # Patch finalize to blow up so we can confirm the route still 200s.
+    from app.modules.api_keys.service import ApiKeysService
+
+    async def fake_finalize(self, *args, **kwargs):
+        del self, args, kwargs
+        raise RuntimeError("simulated DB failure during finalize")
+
+    monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", fake_finalize)
+
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={
+            "model": "gpt-image-2",
+            "prompt": "x",
+            "size": "1024x1024",
+            "quality": "low",
+        },
+    )
+    # Even though finalize raised, the client still sees a 200 with the image.
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["data"] == [{"b64_json": "B64_FINFAIL"}]

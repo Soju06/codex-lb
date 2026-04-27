@@ -1954,21 +1954,36 @@ async def _finalize_image_reservation(
     otherwise releases it. Calling this exactly once per request prevents
     the double-billing scenario where both the standard settlement and
     the post-hoc image record_usage path increment limits.
+
+    Persistence errors are caught and logged so a transient DB/session
+    failure during the tail accounting cannot turn a successfully
+    generated image into a user-facing 500 (non-streaming) or an
+    abrupt stream termination (streaming). This mirrors the
+    best-effort accounting policy used by
+    ``ProxyService._settle_stream_api_key_usage``.
     """
     if reservation is None:
         return
-    if not input_tokens and not output_tokens:
-        await _release_reservation(reservation)
-        return
-    async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
-        await service.finalize_usage_reservation(
+    try:
+        if not input_tokens and not output_tokens:
+            await _release_reservation(reservation)
+            return
+        async with get_background_session() as session:
+            service = ApiKeysService(ApiKeysRepository(session))
+            await service.finalize_usage_reservation(
+                reservation.reservation_id,
+                model=model,
+                input_tokens=int(input_tokens or 0),
+                output_tokens=int(output_tokens or 0),
+                cached_input_tokens=int(cached_input_tokens or 0),
+                service_tier=None,
+            )
+    except Exception:
+        logger.warning(
+            "failed to finalize image reservation reservation_id=%s model=%s",
             reservation.reservation_id,
-            model=model,
-            input_tokens=int(input_tokens or 0),
-            output_tokens=int(output_tokens or 0),
-            cached_input_tokens=int(cached_input_tokens or 0),
-            service_tier=None,
+            model,
+            exc_info=True,
         )
 
 

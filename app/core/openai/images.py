@@ -22,7 +22,8 @@ request *before* any upstream call is opened):
 - ``gpt-image-1.5`` / ``gpt-image-1`` / ``gpt-image-1-mini`` (legacy):
     * ``size`` in ``{1024x1024, 1536x1024, 1024x1536, auto}``.
     * ``input_fidelity`` in ``{low, high}`` is allowed but only on
-      ``/v1/images/edits``.
+      ``/v1/images/edits``, and only for ``gpt-image-1`` / ``gpt-image-1.5``.
+      ``gpt-image-1-mini`` does NOT accept ``input_fidelity``.
 - Any other ``model`` value: rejected with OpenAI ``invalid_request_error``
   and ``param: model``.
 """
@@ -48,7 +49,16 @@ _GPT_IMAGE_2_MODELS: Final[frozenset[str]] = frozenset({"gpt-image-2"})
 _LEGACY_GPT_IMAGE_MODELS: Final[frozenset[str]] = frozenset({"gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"})
 
 _GPT_IMAGE_2_QUALITY: Final[frozenset[str]] = frozenset({"low", "medium", "high", "auto"})
-_LEGACY_QUALITY: Final[frozenset[str]] = frozenset({"low", "medium", "high", "standard", "hd", "auto"})
+# ``standard`` / ``hd`` are DALL-E-only quality values and are NOT valid for
+# any ``gpt-image-*`` model. Allowing them here would let invalid requests
+# bypass adapter-side validation and fail later with a less deterministic
+# upstream error.
+_LEGACY_QUALITY: Final[frozenset[str]] = frozenset({"low", "medium", "high", "auto"})
+# ``input_fidelity`` is supported on the gpt-image-1 / gpt-image-1.5 edit
+# paths, but ``gpt-image-1-mini`` does NOT accept it. Keeping a separate
+# allowlist ensures we reject the parameter at the API boundary instead of
+# relying on an upstream round-trip.
+_INPUT_FIDELITY_SUPPORTED_MODELS: Final[frozenset[str]] = frozenset({"gpt-image-1.5", "gpt-image-1"})
 _LEGACY_FIXED_SIZES: Final[frozenset[str]] = frozenset({"1024x1024", "1536x1024", "1024x1536", "auto"})
 _BACKGROUND_VALUES: Final[frozenset[str]] = frozenset({"transparent", "opaque", "auto"})
 _OUTPUT_FORMATS: Final[frozenset[str]] = frozenset({"png", "jpeg", "webp"})
@@ -241,6 +251,11 @@ def validate_image_request_parameters(
             if not is_edit:
                 raise _images_invalid(
                     "input_fidelity is only supported on /v1/images/edits",
+                    param="input_fidelity",
+                )
+            if model not in _INPUT_FIDELITY_SUPPORTED_MODELS:
+                raise _images_invalid(
+                    f"input_fidelity is not supported by {model}",
                     param="input_fidelity",
                 )
             if input_fidelity not in _INPUT_FIDELITY_VALUES:

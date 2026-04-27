@@ -359,3 +359,41 @@ class TestImagePricingPresent:
         for model in ("gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"):
             result = get_pricing_for_model(model)
             assert result is not None, f"{model} must have pricing"
+
+
+class TestQualityAndFidelityEdgeCases:
+    def test_legacy_quality_does_not_accept_dalle_only_values(self) -> None:
+        """``standard``/``hd`` are DALL·E-only quality values and must NOT
+        be accepted by any ``gpt-image-*`` model."""
+        for invalid_quality in ("standard", "hd"):
+            with pytest.raises(ClientPayloadError) as excinfo:
+                _validate_default(model="gpt-image-1.5", quality=invalid_quality, size="1024x1024")
+            assert excinfo.value.param == "quality"
+
+    def test_input_fidelity_rejected_on_gpt_image_1_mini_edits(self) -> None:
+        """``gpt-image-1-mini`` does not accept ``input_fidelity`` even on
+        the edits path, so we reject it at the API boundary instead of
+        relying on an upstream round-trip."""
+        with pytest.raises(ClientPayloadError) as excinfo:
+            _validate_default(
+                model="gpt-image-1-mini",
+                size="1024x1024",
+                is_edit=True,
+                input_fidelity="high",
+            )
+        assert excinfo.value.param == "input_fidelity"
+
+    def test_input_fidelity_still_accepted_on_gpt_image_1_edits(self) -> None:
+        # Sanity: the supported models still pass.
+        _validate_default(
+            model="gpt-image-1",
+            size="1024x1024",
+            is_edit=True,
+            input_fidelity="high",
+        )
+        _validate_default(
+            model="gpt-image-1.5",
+            size="1024x1024",
+            is_edit=True,
+            input_fidelity="low",
+        )

@@ -65,8 +65,15 @@ _UPSTREAM_RESPONSE_INCOMPLETE_EVENT: Final[str] = "response.incomplete"
 _UPSTREAM_ERROR_EVENT: Final[str] = "error"
 
 #: OpenAI Images SSE event names we *emit* to the client.
-_DOWNSTREAM_PARTIAL_EVENT: Final[str] = "image_generation.partial_image"
-_DOWNSTREAM_COMPLETED_EVENT: Final[str] = "image_generation.completed"
+# Downstream OpenAI Images SSE event names. ``/v1/images/generations``
+# emits ``image_generation.*`` and ``/v1/images/edits`` emits
+# ``image_edit.*`` to match the canonical OpenAI Images streaming
+# vocabulary; the route handler picks the prefix when invoking the
+# translator.
+_GENERATION_PARTIAL_EVENT: Final[str] = "image_generation.partial_image"
+_GENERATION_COMPLETED_EVENT: Final[str] = "image_generation.completed"
+_EDIT_PARTIAL_EVENT: Final[str] = "image_edit.partial_image"
+_EDIT_COMPLETED_EVENT: Final[str] = "image_edit.completed"
 _DOWNSTREAM_ERROR_EVENT: Final[str] = "error"
 
 _DATA_URL_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -450,12 +457,12 @@ def images_response_from_responses(response: Mapping[str, JsonValue]) -> V1Image
 # ---------------------------------------------------------------------------
 
 
-def _build_partial_image_event(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+def _build_partial_image_event(payload: Mapping[str, JsonValue], *, event_type: str) -> dict[str, JsonValue] | None:
     partial_b64 = payload.get("partial_image_b64")
     if not isinstance(partial_b64, str) or not partial_b64:
         return None
     event: dict[str, JsonValue] = {
-        "type": _DOWNSTREAM_PARTIAL_EVENT,
+        "type": event_type,
         "b64_json": partial_b64,
     }
     for key in ("partial_image_index", "size", "quality", "background", "output_format", "output_index"):
@@ -465,14 +472,14 @@ def _build_partial_image_event(payload: Mapping[str, JsonValue]) -> dict[str, Js
     return event
 
 
-def _build_completed_event(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+def _build_completed_event(item: Mapping[str, JsonValue], *, event_type: str) -> dict[str, JsonValue] | None:
     if item.get("type") != "image_generation_call":
         return None
     result = item.get("result")
     if not isinstance(result, str) or not result:
         return None
     event: dict[str, JsonValue] = {
-        "type": _DOWNSTREAM_COMPLETED_EVENT,
+        "type": event_type,
         "b64_json": result,
     }
     for key in ("revised_prompt", "size", "quality", "background", "output_format"):
@@ -549,19 +556,29 @@ async def translate_responses_stream_to_images_stream(
     upstream: AsyncIterator[str],
     *,
     captured: dict[str, str] | None = None,
+    is_edit: bool = False,
 ) -> AsyncIterator[str]:
     """Convert a Responses SSE event stream into an OpenAI Images SSE stream.
 
     Yields formatted SSE event blocks (terminated by ``\\n\\n``) suitable
     for streaming directly to the client. Always emits exactly one terminal
-    event (``image_generation.completed`` or ``error``) followed by
-    ``data: [DONE]``.
+    event (``image_generation.completed`` / ``image_edit.completed`` or
+    ``error``) followed by ``data: [DONE]``.
+
+    The ``is_edit`` flag selects the canonical OpenAI event prefix:
+    ``/v1/images/generations`` callers leave it ``False`` and receive
+    ``image_generation.partial_image`` / ``image_generation.completed``;
+    ``/v1/images/edits`` callers pass ``True`` and receive
+    ``image_edit.partial_image`` / ``image_edit.completed`` so SDKs that
+    listen for the edit-specific event names see the stream.
 
     When ``captured`` is provided, the translator stores the upstream
     Responses ``id`` (under the ``response_id`` key) the first time it sees
     one, so route handlers can correlate the resulting request log with the
     public effective model after the stream completes.
     """
+    partial_event_type = _EDIT_PARTIAL_EVENT if is_edit else _GENERATION_PARTIAL_EVENT
+    completed_event_type = _EDIT_COMPLETED_EVENT if is_edit else _GENERATION_COMPLETED_EVENT
     terminal_emitted = False
     completion_pending = True
     # The Responses backend emits ``response.output_item.done`` for each
@@ -599,7 +616,7 @@ async def translate_responses_stream_to_images_stream(
                     captured["response_id"] = response_id
 
         if event_type == _UPSTREAM_PARTIAL_IMAGE_EVENT:
-            event = _build_partial_image_event(payload)
+            event = _build_partial_image_event(payload, event_type=partial_event_type)
             if event is not None:
                 yield format_sse_event(event)
             continue
@@ -616,7 +633,7 @@ async def translate_responses_stream_to_images_stream(
                 terminal_emitted = True
                 completion_pending = False
                 break
-            event = _build_completed_event(item)
+            event = _build_completed_event(item, event_type=completed_event_type)
             if event is not None:
                 # Buffer every completion (NOT a single overwrite-on-update
                 # variable) so multi-image responses do not silently drop

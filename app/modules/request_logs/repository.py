@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select, update
+from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -237,17 +237,26 @@ class RequestLogsRepository:
         """
         resolved_request_id = ensure_request_id(request_id)
         try:
-            result = await self._session.execute(
-                update(RequestLog).where(RequestLog.request_id == resolved_request_id).values(model=model)
-            )
+            # Fetch the affected rows so we can recompute ``cost_usd``
+            # from the new model. ``add_log`` derives the cost at insert
+            # time from the original (host) model; without recomputing
+            # here, dashboards would mix the public ``gpt-image-*`` model
+            # label with host-model pricing and report inaccurate cost.
+            stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
+            result_rows = await self._session.execute(stmt)
+            logs = list(result_rows.scalars())
+            if not logs:
+                return 0
+            for log in logs:
+                log.model = model
+                log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
             await self._session.commit()
         except sa_exc.ResourceClosedError:
             return 0
         except BaseException:
             await _safe_rollback(self._session)
             raise
-        rowcount = getattr(result, "rowcount", None)
-        return int(rowcount) if rowcount else 0
+        return len(logs)
 
     async def list_recent(
         self,

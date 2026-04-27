@@ -830,3 +830,52 @@ class TestDecodeDataUrl:
     def test_rejects_invalid_base64(self) -> None:
         with pytest.raises(ValueError):
             images_service.decode_data_url("data:image/png;base64,!!!")
+
+
+class TestStreamingEditEventNames:
+    @pytest.mark.asyncio
+    async def test_translator_emits_image_edit_events_when_is_edit_true(self) -> None:
+        """``/v1/images/edits`` callers must receive ``image_edit.*`` events,
+        not ``image_generation.*``, to match the canonical OpenAI Images
+        streaming vocabulary that SDKs listen for.
+        """
+        upstream_events = [
+            _sse(
+                {
+                    "type": "response.image_generation_call.partial_image",
+                    "item_id": "ig_e",
+                    "output_index": 0,
+                    "partial_image_b64": "EDITPARTIAL",
+                    "partial_image_index": 0,
+                    "size": "1024x1024",
+                    "quality": "low",
+                    "background": "auto",
+                    "output_format": "png",
+                }
+            ),
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_e",
+                        "status": "completed",
+                        "result": "EDITFINAL",
+                    },
+                }
+            ),
+            _sse({"type": "response.completed", "response": {"id": "resp_e"}}),
+        ]
+        translated_blocks = [
+            block
+            async for block in images_service.translate_responses_stream_to_images_stream(
+                _stream(upstream_events), is_edit=True
+            )
+        ]
+        events = _events_from_translated_stream(translated_blocks)
+        types = [e["type"] for e in events]
+        assert "image_edit.partial_image" in types
+        assert "image_edit.completed" in types
+        # Must NOT emit the generation event names on the edits path.
+        assert not any(t.startswith("image_generation.") for t in types)

@@ -1061,7 +1061,7 @@ async def _proxy_images_edit_request(
 
     if payload.stream:
         translated = images_service_module.translate_responses_stream_to_images_stream(
-            primed_upstream, captured=captured
+            primed_upstream, captured=captured, is_edit=True
         )
 
         async def _stream_with_log_rewrite() -> AsyncIterator[bytes]:

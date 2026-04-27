@@ -308,6 +308,10 @@ def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> V1Image
     """
     settings = get_settings()
     resolved_model = resolve_public_image_model(payload.model)
+    # Forward ``payload.input_fidelity`` so the validator rejects it on the
+    # generations path (it is an edit-only parameter). Without this the
+    # field would be silently dropped via the schema's ``extra=ignore``
+    # and an invalid request would 200 instead of 400.
     validate_image_request_parameters(
         model=resolved_model,
         quality=payload.quality,
@@ -315,7 +319,7 @@ def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> V1Image
         background=payload.background,
         output_format=payload.output_format,
         moderation=payload.moderation,
-        input_fidelity=None,
+        input_fidelity=payload.input_fidelity,
         is_edit=False,
         n=payload.n,
         partial_images=payload.partial_images,

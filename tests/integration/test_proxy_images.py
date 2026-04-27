@@ -717,3 +717,24 @@ async def test_images_generations_maps_content_policy_to_400(async_client, monke
     assert response.status_code == 400, response.text
     body = response.json()
     assert body["error"]["code"] == "content_policy_violation"
+
+
+@pytest.mark.asyncio
+async def test_images_generations_rejects_input_fidelity(async_client):
+    """``input_fidelity`` is an edit-only parameter; generations requests
+    must reject it deterministically at the API boundary instead of
+    silently dropping it via ``extra=ignore``.
+    """
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={
+            "model": "gpt-image-1.5",
+            "prompt": "x",
+            "size": "1024x1024",
+            "input_fidelity": "high",
+        },
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["error"]["param"] == "input_fidelity"
+    assert body["error"]["type"] == "invalid_request_error"

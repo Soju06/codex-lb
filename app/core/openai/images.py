@@ -291,6 +291,10 @@ class V1ImagesGenerationsRequest(BaseModel):
     moderation: str = "auto"
     partial_images: int | None = None
     stream: bool = False
+    # ``input_fidelity`` is an edit-only parameter; the field is captured
+    # here so that ``validate_generations_payload`` can reject requests
+    # that send it (instead of silently dropping it via ``extra=ignore``).
+    input_fidelity: str | None = None
     user: str | None = None
 
     @field_validator("model")

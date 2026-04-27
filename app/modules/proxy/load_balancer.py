@@ -793,6 +793,8 @@ class LoadBalancer:
             states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:

@@ -673,3 +673,47 @@ async def test_images_edits_invalid_stream_returns_openai_error(async_client):
     assert response.status_code == 400
     body = response.json()
     assert body["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_images_generations_maps_content_policy_to_400(async_client, monkeypatch):
+    """An upstream content policy violation must surface as HTTP 400, not
+    the previous hard-coded 502, so clients get the canonical OpenAI
+    status for client-originated failures.
+    """
+    await _import_account(async_client, "acc_images_cp", "img-cp@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_cp",
+                    "status": "failed",
+                    "error": {
+                        "code": "content_policy_violation",
+                        "message": "policy violation",
+                        "type": "invalid_request_error",
+                    },
+                },
+            }
+        )
+        yield _sse({"type": "response.completed", "response": {"id": "resp_cp"}})
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={"model": "gpt-image-2", "prompt": "x", "size": "1024x1024", "quality": "low"},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["error"]["code"] == "content_policy_violation"

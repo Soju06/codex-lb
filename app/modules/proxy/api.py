@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
-from typing import cast
+from typing import Final, cast
 
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -153,6 +153,27 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_plan_support_for_model",
     "additional_quota_data_unavailable",
     "no_additional_quota_eligible_accounts",
+}
+
+# OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
+# error path. The /v1/responses path has its own ``_status_for_error``
+# helper that operates on a parsed ``OpenAIError`` model; the image
+# adapter works with raw envelope dicts so we map directly here.
+_IMAGE_ERROR_TYPE_STATUS: Final[dict[str, int]] = {
+    "invalid_request_error": 400,
+    "authentication_error": 401,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "rate_limit_error": 429,
+    "insufficient_quota": 429,
+}
+
+# OpenAI error ``code`` -> HTTP status, applied as a higher-precedence
+# override before the type-based mapping above.
+_IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
+    "content_policy_violation": 400,
+    "rate_limit_exceeded": 429,
+    "insufficient_quota": 429,
 }
 
 
@@ -923,7 +944,7 @@ async def _proxy_images_generation_request(
     if error_envelope is not None:
         return _logged_error_json_response(
             request,
-            502,
+            _status_for_image_error_envelope(error_envelope),
             error_envelope,
             headers=rate_limit_headers,
         )
@@ -932,7 +953,7 @@ async def _proxy_images_generation_request(
     if not isinstance(images_result, V1ImageResponse):
         return _logged_error_json_response(
             request,
-            502,
+            _status_for_image_error_envelope(images_result),
             images_result,
             headers=rate_limit_headers,
         )
@@ -1083,7 +1104,7 @@ async def _proxy_images_edit_request(
     if error_envelope is not None:
         return _logged_error_json_response(
             request,
-            502,
+            _status_for_image_error_envelope(error_envelope),
             error_envelope,
             headers=rate_limit_headers,
         )
@@ -1092,7 +1113,7 @@ async def _proxy_images_edit_request(
     if not isinstance(images_result, V1ImageResponse):
         return _logged_error_json_response(
             request,
-            502,
+            _status_for_image_error_envelope(images_result),
             images_result,
             headers=rate_limit_headers,
         )
@@ -2177,4 +2198,30 @@ def _status_for_error(error_value: OpenAIError | None) -> int:
         return 400
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
+    return 502
+
+
+def _status_for_image_error_envelope(envelope: object) -> int:
+    """Map an OpenAI-shape error envelope dict to its canonical HTTP status
+    for the ``/v1/images/*`` non-streaming response path.
+
+    Returns 502 when no specific mapping matches (e.g. server_error or an
+    unrecognised type), so transport-level failures still surface as
+    upstream errors. Code matches take precedence over type matches.
+    """
+    if not isinstance(envelope, Mapping):
+        return 502
+    error = cast(Mapping[str, object], envelope).get("error")
+    if not isinstance(error, Mapping):
+        return 502
+    error_map = cast(Mapping[str, object], error)
+    code = error_map.get("code")
+    if isinstance(code, str):
+        if code in _IMAGE_ERROR_CODE_STATUS:
+            return _IMAGE_ERROR_CODE_STATUS[code]
+        if code in _UNAVAILABLE_SELECTION_ERROR_CODES:
+            return 503
+    error_type = error_map.get("type")
+    if isinstance(error_type, str) and error_type in _IMAGE_ERROR_TYPE_STATUS:
+        return _IMAGE_ERROR_TYPE_STATUS[error_type]
     return 502

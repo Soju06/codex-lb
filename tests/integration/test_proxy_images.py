@@ -636,3 +636,40 @@ async def test_images_edits_falls_back_to_default_model_when_omitted(async_clien
     assert response.status_code == 200, response.text
     image_tool = cast(dict[str, Any], cast(list[Any], captured["tools"])[0])
     assert image_tool["model"] == "gpt-image-2"
+
+
+@pytest.mark.asyncio
+async def test_images_edits_invalid_n_returns_openai_error(async_client):
+    """A bad ``n`` form value must come back as an OpenAI-shaped 400, not
+    a FastAPI 422 with the framework's default error envelope.
+    """
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    response = await async_client.post(
+        "/v1/images/edits",
+        data={
+            "model": "gpt-image-2",
+            "prompt": "x",
+            "n": "abc",  # not a valid integer
+        },
+        files={"image": ("source.png", image_bytes, "image/png")},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_images_edits_invalid_stream_returns_openai_error(async_client):
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    response = await async_client.post(
+        "/v1/images/edits",
+        data={
+            "model": "gpt-image-2",
+            "prompt": "x",
+            "stream": "yesplz",  # not a valid bool
+        },
+        files={"image": ("source.png", image_bytes, "image/png")},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"

@@ -621,47 +621,59 @@ async def v1_images_generations(
 @v1_router.post("/images/edits", response_model=None)
 async def v1_images_edits(
     request: Request,
-    # ``model`` is intentionally optional here so the FastAPI form parser
-    # does not 422 before ``validate_edits_payload`` can fall back to
-    # ``settings.images_default_model``. The schema-level optional /
-    # default-resolution lives in ``V1ImagesEditsForm`` +
-    # ``resolve_public_image_model``.
+    # All typed form fields below are bound as raw strings so FastAPI
+    # never 422s on malformed input (e.g. ``n=abc``). Pydantic on
+    # ``V1ImagesEditsForm`` coerces and validates them and surfaces any
+    # failure as an OpenAI-shape ``invalid_request_error`` envelope.
     model: str | None = Form(None),
     prompt: str = Form(...),
     image: list[UploadFile] = File(...),
     mask: UploadFile | None = File(None),
-    n: int = Form(1),
-    size: str = Form("auto"),
-    quality: str = Form("auto"),
-    background: str = Form("auto"),
-    output_format: str = Form("png"),
-    output_compression: int = Form(100),
-    moderation: str = Form("auto"),
-    partial_images: int | None = Form(None),
-    stream: bool = Form(False),
+    n: str | None = Form(None),
+    size: str | None = Form(None),
+    quality: str | None = Form(None),
+    background: str | None = Form(None),
+    output_format: str | None = Form(None),
+    output_compression: str | None = Form(None),
+    moderation: str | None = Form(None),
+    partial_images: str | None = Form(None),
+    stream: str | None = Form(None),
     input_fidelity: str | None = Form(None),
     user: str | None = Form(None),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    raw_form: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "size": size if size is not None else "auto",
+        "quality": quality if quality is not None else "auto",
+        "background": background if background is not None else "auto",
+        "output_format": output_format if output_format is not None else "png",
+        "moderation": moderation if moderation is not None else "auto",
+        "input_fidelity": input_fidelity,
+        "user": user,
+    }
+    # Pydantic coerces these scalar fields from strings on its own as
+    # long as the value is a valid representation (e.g. "1", "true");
+    # invalid values land in ValidationError below and we map to
+    # ``invalid_request_error`` rather than letting FastAPI 422.
+    if n is not None:
+        raw_form["n"] = n
+    else:
+        raw_form["n"] = 1
+    if output_compression is not None:
+        raw_form["output_compression"] = output_compression
+    else:
+        raw_form["output_compression"] = 100
+    if partial_images is not None:
+        raw_form["partial_images"] = partial_images
+    if stream is not None:
+        raw_form["stream"] = stream
+    else:
+        raw_form["stream"] = False
     try:
-        form_payload = V1ImagesEditsForm.model_validate(
-            {
-                "model": model,
-                "prompt": prompt,
-                "n": n,
-                "size": size,
-                "quality": quality,
-                "background": background,
-                "output_format": output_format,
-                "output_compression": output_compression,
-                "moderation": moderation,
-                "partial_images": partial_images,
-                "stream": stream,
-                "input_fidelity": input_fidelity,
-                "user": user,
-            }
-        )
+        form_payload = V1ImagesEditsForm.model_validate(raw_form)
     except ValidationError as exc:
         return _logged_error_json_response(request, 400, openai_validation_error(exc))
 
@@ -777,13 +789,35 @@ async def _proxy_images_generation_request(
     # configured ``images_default_model`` and re-validates the matrix
     # against the resolved value. After this call ``payload.model`` is
     # always a concrete ``gpt-image-*`` string.
-    public_model = payload.model
-    assert public_model is not None
+    # Apply the API key's enforced model exactly the way ``/v1/responses``
+    # and ``/v1/chat/completions`` do, so a key that is configured to
+    # pin a specific image model cannot be bypassed through the image
+    # routes. The enforced value must still belong to the public
+    # ``gpt-image-*`` family or the request fails closed.
+    requested_model = payload.model
+    assert requested_model is not None
+    effective_model = _effective_model_for_api_key(api_key, requested_model)
+    if not images_service_module.is_supported_image_model(effective_model):
+        return _logged_error_json_response(
+            request,
+            400,
+            images_service_module.make_invalid_request_error(
+                f"Effective model '{effective_model}' is not a 'gpt-image-*' model. "
+                f"This API key is pinned to '{effective_model}' which cannot be used on "
+                f"/v1/images/* routes; use a key that allows gpt-image models.",
+                param="model",
+            ),
+        )
+    public_model = effective_model
+    if effective_model != requested_model:
+        # Rebind ``payload.model`` so downstream translation, request
+        # logging, and tool config all see the enforced value.
+        payload = payload.model_copy(update={"model": effective_model})
     settings = proxy_service_module.get_settings()
     host_model = settings.images_host_model
 
     try:
-        validate_model_access(api_key, public_model)
+        validate_model_access(api_key, effective_model)
     except Exception:
         # Re-raise so the global handler maps to 403.
         raise
@@ -791,7 +825,7 @@ async def _proxy_images_generation_request(
     rate_limit_headers = await context.service.rate_limit_headers()
     reservation = await _enforce_request_limits(
         api_key,
-        request_model=public_model,
+        request_model=effective_model,
         request_service_tier=None,
     )
 
@@ -919,17 +953,35 @@ async def _proxy_images_edit_request(
     except ClientPayloadError as exc:
         return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
 
-    public_model = payload.model
-    assert public_model is not None
+    # Mirror the ``/v1/images/generations`` handler: apply the API key's
+    # enforced model so image edits respect the same key-pinning policy as
+    # the rest of the proxy.
+    requested_model = payload.model
+    assert requested_model is not None
+    effective_model = _effective_model_for_api_key(api_key, requested_model)
+    if not images_service_module.is_supported_image_model(effective_model):
+        return _logged_error_json_response(
+            request,
+            400,
+            images_service_module.make_invalid_request_error(
+                f"Effective model '{effective_model}' is not a 'gpt-image-*' model. "
+                f"This API key is pinned to '{effective_model}' which cannot be used on "
+                f"/v1/images/* routes; use a key that allows gpt-image models.",
+                param="model",
+            ),
+        )
+    public_model = effective_model
+    if effective_model != requested_model:
+        payload = payload.model_copy(update={"model": effective_model})
     settings = proxy_service_module.get_settings()
     host_model = settings.images_host_model
 
-    validate_model_access(api_key, public_model)
+    validate_model_access(api_key, effective_model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     reservation = await _enforce_request_limits(
         api_key,
-        request_model=public_model,
+        request_model=effective_model,
         request_service_tier=None,
     )
 

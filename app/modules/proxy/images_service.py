@@ -32,7 +32,7 @@ from app.core.openai.images import (
     is_supported_image_model,
     validate_image_request_parameters,
 )
-from app.core.openai.requests import ResponsesRequest
+from app.core.openai.requests import ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY, ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -204,7 +204,8 @@ def images_generation_to_responses_request(
             "tool_choice": {"type": "image_generation"},
             "stream": True,
             "store": False,
-        }
+        },
+        context={ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY: True},
     )
 
 
@@ -274,7 +275,8 @@ def images_edit_to_responses_request(
             # always True regardless of what the public client requested.
             "stream": True,
             "store": False,
-        }
+        },
+        context={ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY: True},
     )
 
 

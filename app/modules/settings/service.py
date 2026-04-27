@@ -11,6 +11,8 @@ class DashboardSettingsData:
     upstream_stream_transport: str
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
+    relative_availability_power: float
+    relative_availability_top_k: int
     openai_cache_affinity_max_age_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
@@ -27,6 +29,8 @@ class DashboardSettingsUpdateData:
     upstream_stream_transport: str
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
+    relative_availability_power: float
+    relative_availability_top_k: int
     openai_cache_affinity_max_age_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
@@ -47,6 +51,8 @@ class SettingsService:
             upstream_stream_transport=row.upstream_stream_transport,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
+            relative_availability_power=row.relative_availability_power,
+            relative_availability_top_k=row.relative_availability_top_k,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
@@ -68,6 +74,8 @@ class SettingsService:
             upstream_stream_transport=payload.upstream_stream_transport,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             routing_strategy=payload.routing_strategy,
+            relative_availability_power=payload.relative_availability_power,
+            relative_availability_top_k=payload.relative_availability_top_k,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
@@ -83,6 +91,8 @@ class SettingsService:
             upstream_stream_transport=row.upstream_stream_transport,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
+            relative_availability_power=row.relative_availability_power,
+            relative_availability_top_k=row.relative_availability_top_k,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds

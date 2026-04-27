@@ -9,6 +9,8 @@ export function buildSettingsUpdateRequest(
     upstreamStreamTransport: settings.upstreamStreamTransport,
     preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
     routingStrategy: settings.routingStrategy,
+    relativeAvailabilityPower: settings.relativeAvailabilityPower,
+    relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,

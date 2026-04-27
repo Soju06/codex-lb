@@ -112,6 +112,8 @@ class LoadBalancer:
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "capacity_weighted",
+        relative_availability_power: float = 2.0,
+        relative_availability_top_k: int = 5,
         model: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
@@ -174,6 +176,8 @@ class LoadBalancer:
                     states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
+                    relative_availability_power=relative_availability_power,
+                    relative_availability_top_k=relative_availability_top_k,
                     budget_threshold_pct=budget_threshold_pct,
                 )
 
@@ -310,6 +314,8 @@ class LoadBalancer:
                         budget_threshold_pct=budget_threshold_pct,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
                         sticky_repo=repos.sticky_sessions,
                     )
                     selected_account_map = account_map
@@ -643,6 +649,8 @@ class LoadBalancer:
         budget_threshold_pct: float = 95.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
+        relative_availability_power: float = 2.0,
+        relative_availability_top_k: int = 5,
         sticky_repo: StickySessionsRepository | None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
@@ -650,6 +658,8 @@ class LoadBalancer:
                 states,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
             )
         if sticky_kind is None:
@@ -695,6 +705,8 @@ class LoadBalancer:
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
                         allow_backoff_fallback=False,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
                     )
                     if pinned_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -711,6 +723,8 @@ class LoadBalancer:
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
                         )
@@ -724,6 +738,8 @@ class LoadBalancer:
                                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                                 routing_strategy=routing_strategy,
                                 allow_backoff_fallback=False,
+                                relative_availability_power=relative_availability_power,
+                                relative_availability_top_k=relative_availability_top_k,
                             )
                             if pinned_result.account is not None:
                                 if sticky_max_age_seconds is not None:
@@ -748,6 +764,8 @@ class LoadBalancer:
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
                         allow_backoff_fallback=False,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
                     )
                     if grace_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -1314,6 +1332,8 @@ def _select_account_preferring_budget_safe(
     *,
     prefer_earlier_reset: bool,
     routing_strategy: RoutingStrategy,
+    relative_availability_power: float = 2.0,
+    relative_availability_top_k: int = 5,
     budget_threshold_pct: float,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
@@ -1327,6 +1347,8 @@ def _select_account_preferring_budget_safe(
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
         )
         if preferred.account is not None:
             return preferred
@@ -1336,6 +1358,8 @@ def _select_account_preferring_budget_safe(
         routing_strategy=routing_strategy,
         allow_backoff_fallback=allow_backoff_fallback,
         deterministic_probe=deterministic_probe,
+        relative_availability_power=relative_availability_power,
+        relative_availability_top_k=relative_availability_top_k,
     )
 
 

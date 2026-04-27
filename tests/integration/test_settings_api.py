@@ -14,6 +14,8 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamStreamTransport"] == "default"
     assert payload["preferEarlierResetAccounts"] is True
     assert payload["routingStrategy"] == "capacity_weighted"
+    assert payload["relativeAvailabilityPower"] == 2.0
+    assert payload["relativeAvailabilityTopK"] == 5
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is False
@@ -29,7 +31,9 @@ async def test_settings_api_get_and_update(async_client):
             "stickyThreadsEnabled": False,
             "upstreamStreamTransport": "websocket",
             "preferEarlierResetAccounts": False,
-            "routingStrategy": "round_robin",
+            "routingStrategy": "relative_availability",
+            "relativeAvailabilityPower": 1.5,
+            "relativeAvailabilityTopK": 7,
             "openaiCacheAffinityMaxAgeSeconds": 180,
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
             "httpResponsesSessionBridgeGatewaySafeMode": True,
@@ -44,7 +48,9 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["stickyThreadsEnabled"] is False
     assert updated["upstreamStreamTransport"] == "websocket"
     assert updated["preferEarlierResetAccounts"] is False
-    assert updated["routingStrategy"] == "round_robin"
+    assert updated["routingStrategy"] == "relative_availability"
+    assert updated["relativeAvailabilityPower"] == 1.5
+    assert updated["relativeAvailabilityTopK"] == 7
     assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert updated["httpResponsesSessionBridgeGatewaySafeMode"] is True
@@ -60,7 +66,9 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["stickyThreadsEnabled"] is False
     assert payload["upstreamStreamTransport"] == "websocket"
     assert payload["preferEarlierResetAccounts"] is False
-    assert payload["routingStrategy"] == "round_robin"
+    assert payload["routingStrategy"] == "relative_availability"
+    assert payload["relativeAvailabilityPower"] == 1.5
+    assert payload["relativeAvailabilityTopK"] == 7
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is True

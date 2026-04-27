@@ -80,6 +80,8 @@ async def get_settings(
         upstream_stream_transport=settings.upstream_stream_transport,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
         routing_strategy=settings.routing_strategy,
+        relative_availability_power=settings.relative_availability_power,
+        relative_availability_top_k=settings.relative_availability_top_k,
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
@@ -110,6 +112,16 @@ async def update_settings(
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
                 prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
+                relative_availability_power=(
+                    payload.relative_availability_power
+                    if payload.relative_availability_power is not None
+                    else current.relative_availability_power
+                ),
+                relative_availability_top_k=(
+                    payload.relative_availability_top_k
+                    if payload.relative_availability_top_k is not None
+                    else current.relative_availability_top_k
+                ),
                 openai_cache_affinity_max_age_seconds=(
                     payload.openai_cache_affinity_max_age_seconds
                     if payload.openai_cache_affinity_max_age_seconds is not None
@@ -158,6 +170,8 @@ async def update_settings(
             "upstream_stream_transport",
             "prefer_earlier_reset_accounts",
             "routing_strategy",
+            "relative_availability_power",
+            "relative_availability_top_k",
             "openai_cache_affinity_max_age_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
             "import_without_overwrite",
@@ -176,6 +190,8 @@ async def update_settings(
         upstream_stream_transport=updated.upstream_stream_transport,
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
         routing_strategy=updated.routing_strategy,
+        relative_availability_power=updated.relative_availability_power,
+        relative_availability_top_k=updated.relative_availability_top_k,
         openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=updated.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=updated.http_responses_session_bridge_gateway_safe_mode,

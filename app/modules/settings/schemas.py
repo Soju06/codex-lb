@@ -9,7 +9,9 @@ class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
     prefer_earlier_reset_accounts: bool
-    routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
+    routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$")
+    relative_availability_power: float = Field(gt=0.0)
+    relative_availability_top_k: int = Field(ge=1, le=20)
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool
@@ -27,7 +29,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         pattern=r"^(default|auto|http|websocket)$",
     )
     prefer_earlier_reset_accounts: bool
-    routing_strategy: str | None = Field(default=None, pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
+    routing_strategy: str | None = Field(
+        default=None,
+        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$",
+    )
+    relative_availability_power: float | None = Field(default=None, gt=0.0)
+    relative_availability_top_k: int | None = Field(default=None, ge=1, le=20)
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool | None = None

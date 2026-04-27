@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Route } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,24 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
     String(settings.openaiCacheAffinityMaxAgeSeconds),
   );
+  const [relativeAvailabilityPower, setRelativeAvailabilityPower] = useState(
+    String(settings.relativeAvailabilityPower),
+  );
+  const [relativeAvailabilityTopK, setRelativeAvailabilityTopK] = useState(
+    String(settings.relativeAvailabilityTopK),
+  );
+
+  useEffect(() => {
+    setCacheAffinityTtl(String(settings.openaiCacheAffinityMaxAgeSeconds));
+  }, [settings.openaiCacheAffinityMaxAgeSeconds]);
+
+  useEffect(() => {
+    setRelativeAvailabilityPower(String(settings.relativeAvailabilityPower));
+  }, [settings.relativeAvailabilityPower]);
+
+  useEffect(() => {
+    setRelativeAvailabilityTopK(String(settings.relativeAvailabilityTopK));
+  }, [settings.relativeAvailabilityTopK]);
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
@@ -32,6 +50,21 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+
+  const parsedRelativeAvailabilityPower = Number.parseFloat(relativeAvailabilityPower);
+  const relativeAvailabilityPowerValid = Number.isFinite(parsedRelativeAvailabilityPower) && parsedRelativeAvailabilityPower > 0;
+  const relativeAvailabilityPowerChanged =
+    relativeAvailabilityPowerValid && parsedRelativeAvailabilityPower !== settings.relativeAvailabilityPower;
+
+  const parsedRelativeAvailabilityTopK = Number.parseInt(relativeAvailabilityTopK, 10);
+  const relativeAvailabilityTopKValid =
+    Number.isInteger(parsedRelativeAvailabilityTopK) &&
+    parsedRelativeAvailabilityTopK >= 1 &&
+    parsedRelativeAvailabilityTopK <= 20;
+  const relativeAvailabilityTopKChanged =
+    relativeAvailabilityTopKValid && parsedRelativeAvailabilityTopK !== settings.relativeAvailabilityTopK;
+
+  const relativeAvailabilitySelected = settings.routingStrategy === "relative_availability";
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -81,18 +114,102 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             </div>
             <Select
               value={settings.routingStrategy}
-              onValueChange={(value) => save({ routingStrategy: value as "usage_weighted" | "round_robin" | "capacity_weighted" })}
+              onValueChange={(value) =>
+                save({
+                  routingStrategy: value as DashboardSettings["routingStrategy"],
+                })
+              }
             >
-              <SelectTrigger className="h-8 w-44 text-xs" disabled={busy}>
+              <SelectTrigger className="h-8 w-48 text-xs" disabled={busy}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align="end">
                 <SelectItem value="capacity_weighted">Capacity weighted</SelectItem>
+                <SelectItem value="relative_availability">Relative availability</SelectItem>
                 <SelectItem value="usage_weighted">Usage weighted</SelectItem>
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>
             </Select>
           </div>
+
+          {relativeAvailabilitySelected ? (
+            <>
+              <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Relative availability power</p>
+                  <p className="text-xs text-muted-foreground">
+                    Raise normalized relative-availability scores to this power before weighted selection.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Input
+                    aria-label="Relative availability power"
+                    type="number"
+                    min={0.1}
+                    step={0.1}
+                    inputMode="decimal"
+                    value={relativeAvailabilityPower}
+                    disabled={busy}
+                    onChange={(event) => setRelativeAvailabilityPower(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && relativeAvailabilityPowerChanged) {
+                        void save({ relativeAvailabilityPower: parsedRelativeAvailabilityPower });
+                      }
+                    }}
+                    className="h-8 w-28 text-xs"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs"
+                    disabled={busy || !relativeAvailabilityPowerChanged}
+                    onClick={() => void save({ relativeAvailabilityPower: parsedRelativeAvailabilityPower })}
+                  >
+                    Save power
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Relative availability top K</p>
+                  <p className="text-xs text-muted-foreground">
+                    Keep only the strongest weighted candidates before the final random draw.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Input
+                    aria-label="Relative availability top K"
+                    type="number"
+                    min={1}
+                    max={20}
+                    step={1}
+                    inputMode="numeric"
+                    value={relativeAvailabilityTopK}
+                    disabled={busy}
+                    onChange={(event) => setRelativeAvailabilityTopK(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && relativeAvailabilityTopKChanged) {
+                        void save({ relativeAvailabilityTopK: parsedRelativeAvailabilityTopK });
+                      }
+                    }}
+                    className="h-8 w-28 text-xs"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs"
+                    disabled={busy || !relativeAvailabilityTopKChanged}
+                    onClick={() => void save({ relativeAvailabilityTopK: parsedRelativeAvailabilityTopK })}
+                  >
+                    Save top K
+                  </Button>
+                </div>
+              </div>
+            </>
+          ) : null}
 
           <div className="flex items-center justify-between p-3">
             <div>
@@ -127,6 +244,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             </div>
             <div className="flex items-center gap-2">
               <Input
+                aria-label="Prompt-cache affinity TTL"
                 type="number"
                 min={1}
                 step={1}

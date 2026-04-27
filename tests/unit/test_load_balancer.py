@@ -1325,3 +1325,220 @@ def test_select_account_capacity_weighted_with_prefer_falls_back_when_earliest_b
         )
         assert result.account is not None
         assert result.account.account_id == "earliest-lower-usage"
+
+
+def test_select_account_relative_availability_prefers_more_urgent_weekly_capacity():
+    random.seed(101)
+    now = time.time()
+    soon_plus = AccountState(
+        "soon-plus",
+        AccountStatus.ACTIVE,
+        used_percent=60.0,
+        secondary_used_percent=60.0,
+        secondary_reset_at=int(now + 6 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    later_pro = AccountState(
+        "later-pro",
+        AccountStatus.ACTIVE,
+        used_percent=60.0,
+        secondary_used_percent=60.0,
+        secondary_reset_at=int(now + 72 * 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    counts = {"soon-plus": 0, "later-pro": 0}
+    for _ in range(2000):
+        result = select_account([soon_plus, later_pro], now=now, routing_strategy="relative_availability")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    assert counts["soon-plus"] > counts["later-pro"]
+
+
+def test_select_account_relative_availability_ignores_prefer_earlier_reset_bucket():
+    now = time.time()
+    early_low = AccountState(
+        "early-low",
+        AccountStatus.ACTIVE,
+        used_percent=90.0,
+        secondary_used_percent=90.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    later_high = AccountState(
+        "later-high",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 6 * 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    result = select_account(
+        [early_low, later_high],
+        now=now,
+        prefer_earlier_reset=True,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+    )
+    assert result.account is not None
+    assert result.account.account_id == "later-high"
+
+
+def test_select_account_relative_availability_missing_reset_uses_seven_day_fallback():
+    now = time.time()
+    missing_reset = AccountState(
+        "missing-reset",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=None,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    known_reset = AccountState(
+        "known-reset",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 24 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    result = select_account(
+        [missing_reset, known_reset],
+        now=now,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+    )
+    assert result.account is not None
+    assert result.account.account_id == "known-reset"
+
+
+def test_select_account_relative_availability_clamps_divisor_floor_to_five_minutes():
+    now = time.time()
+    first = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 5),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    second = AccountState(
+        "b",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 299),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    result = select_account(
+        [first, second],
+        now=now,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+    )
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+
+def test_select_account_relative_availability_top_k_limits_weighted_draw():
+    random.seed(202)
+    now = time.time()
+    leader = AccountState(
+        "leader",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    runner_up = AccountState(
+        "runner-up",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 2 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    tail = AccountState(
+        "tail",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    for _ in range(200):
+        result = select_account(
+            [leader, runner_up, tail],
+            now=now,
+            routing_strategy="relative_availability",
+            relative_availability_top_k=1,
+        )
+        assert result.account is not None
+        assert result.account.account_id == "leader"
+
+
+def test_select_account_relative_availability_power_sharpens_preference_for_the_leader():
+    now = time.time()
+    leader = AccountState(
+        "leader",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    close_second = AccountState(
+        "close-second",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 4500),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts_power_1 = {"leader": 0, "close-second": 0}
+    random.seed(303)
+    for _ in range(3000):
+        result = select_account(
+            [leader, close_second],
+            now=now,
+            routing_strategy="relative_availability",
+            relative_availability_power=1.0,
+        )
+        assert result.account is not None
+        counts_power_1[result.account.account_id] += 1
+
+    counts_power_4 = {"leader": 0, "close-second": 0}
+    random.seed(303)
+    for _ in range(3000):
+        result = select_account(
+            [leader, close_second],
+            now=now,
+            routing_strategy="relative_availability",
+            relative_availability_power=4.0,
+        )
+        assert result.account is not None
+        counts_power_4[result.account.account_id] += 1
+
+    leader_ratio_power_1 = counts_power_1["leader"] / 3000
+    leader_ratio_power_4 = counts_power_4["leader"] / 3000
+    assert leader_ratio_power_4 > leader_ratio_power_1 + 0.05

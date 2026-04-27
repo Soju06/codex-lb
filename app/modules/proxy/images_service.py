@@ -100,6 +100,7 @@ def _build_image_generation_tool(
     partial_images: int | None,
     input_fidelity: str | None,
     streaming: bool,
+    is_edit: bool = False,
 ) -> dict[str, JsonValue]:
     # NOTE: the upstream ``image_generation`` tool config does not accept
     # ``n``. ``validate_image_request_parameters`` unconditionally
@@ -120,6 +121,13 @@ def _build_image_generation_tool(
         "output_compression": output_compression,
         "moderation": moderation,
     }
+    if is_edit:
+        # Force the edit code path so the host model treats the attached
+        # input_image(s) as a source/mask pair instead of inspiration for
+        # a fresh generation. Without this the default "auto" action lets
+        # the model decide between generation and editing, which can
+        # silently break the edits contract.
+        tool["action"] = "edit"
     if input_fidelity is not None:
         tool["input_fidelity"] = input_fidelity
     if streaming and partial_images is not None and partial_images > 0:
@@ -189,7 +197,11 @@ def images_generation_to_responses_request(
             "instructions": _IMAGE_GENERATION_INSTRUCTIONS,
             "input": _build_user_message_input(payload.prompt),
             "tools": [tool],
-            "tool_choice": "auto",
+            # Force the host model to invoke the image_generation tool
+            # so it cannot return a refusal or plain text. Without this
+            # the auto choice would surface as a 5xx through this
+            # adapter even though the request shape was valid.
+            "tool_choice": {"type": "image_generation"},
             "stream": True,
             "store": False,
         }
@@ -243,6 +255,7 @@ def images_edit_to_responses_request(
         partial_images=payload.partial_images,
         input_fidelity=payload.input_fidelity,
         streaming=streaming,
+        is_edit=True,
     )
     return ResponsesRequest.model_validate(
         {
@@ -250,7 +263,13 @@ def images_edit_to_responses_request(
             "instructions": _IMAGE_GENERATION_INSTRUCTIONS,
             "input": _build_user_message_input(prompt_text, attached_images=attached),
             "tools": [tool],
-            "tool_choice": "auto",
+            # Force the host model to invoke the image_generation tool.
+            # Leaving this on "auto" lets the model return a refusal or
+            # plain text instead, which would surface as a 5xx through
+            # this adapter even though the request shape was valid. See
+            # the matching forced tool call in
+            # ``images_generation_to_responses_request``.
+            "tool_choice": {"type": "image_generation"},
             # See ``images_generation_to_responses_request`` for why this is
             # always True regardless of what the public client requested.
             "stream": True,

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.core.openai.contracts import OpenAIMessage
 from app.core.openai.message_coercion import coerce_messages
 from app.core.openai.requests import (
+    CHAT_UNSUPPORTED_TOOL_TYPES,
     ResponsesRequest,
     ResponsesTextControls,
     ResponsesTextFormat,
@@ -68,7 +69,7 @@ class ChatCompletionsRequest(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value)
+        return validate_tool_types(value, unsupported_tool_types=CHAT_UNSUPPORTED_TOOL_TYPES)
 
     @field_validator("messages")
     @classmethod

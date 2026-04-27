@@ -52,7 +52,7 @@ class V1ResponsesRequest(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+        return validate_tool_types(value)
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesRequest":

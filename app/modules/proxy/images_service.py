@@ -361,6 +361,9 @@ def _coerce_int(value: JsonValue | None) -> int | None:
     return None
 
 
+_USAGE_TOKEN_FIELDS: Final[frozenset[str]] = frozenset({"input_tokens", "output_tokens", "total_tokens"})
+
+
 def _extract_image_usage(response: Mapping[str, JsonValue]) -> V1ImageUsage | None:
     tool_usage = response.get("tool_usage")
     if not is_json_mapping(tool_usage):
@@ -373,12 +376,36 @@ def _extract_image_usage(response: Mapping[str, JsonValue]) -> V1ImageUsage | No
     total_tokens = _coerce_int(image_usage.get("total_tokens"))
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
-    if input_tokens is None and output_tokens is None and total_tokens is None:
+    input_details_raw = image_usage.get("input_tokens_details")
+    output_details_raw = image_usage.get("output_tokens_details")
+    input_details = dict(input_details_raw) if is_json_mapping(input_details_raw) else None
+    output_details = dict(output_details_raw) if is_json_mapping(output_details_raw) else None
+    # Forward any other usage detail keys upstream may add (e.g. cached
+    # token counters) so the public response keeps the OpenAI Images
+    # usage shape rather than silently dropping new fields.
+    extra_usage: dict[str, JsonValue] = {}
+    for key, value in image_usage.items():
+        if key in _USAGE_TOKEN_FIELDS:
+            continue
+        if key in ("input_tokens_details", "output_tokens_details"):
+            continue
+        extra_usage[key] = value
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+        and input_details is None
+        and output_details is None
+        and not extra_usage
+    ):
         return None
     return V1ImageUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
+        input_tokens_details=input_details,
+        output_tokens_details=output_details,
+        **extra_usage,
     )
 
 
@@ -464,6 +491,12 @@ def _build_partial_image_event(payload: Mapping[str, JsonValue], *, event_type: 
     event: dict[str, JsonValue] = {
         "type": event_type,
         "b64_json": partial_b64,
+        # OpenAI Images stream event schemas expose ``created_at`` on
+        # both partial and completed events. Forward the upstream value
+        # if present, otherwise stamp a synthesized one so consumers
+        # that deserialize against the official model do not reject the
+        # event for a missing field.
+        "created_at": _coerce_created_at(payload.get("created_at")),
     }
     for key in ("partial_image_index", "size", "quality", "background", "output_format", "output_index"):
         value = payload.get(key)
@@ -481,12 +514,26 @@ def _build_completed_event(item: Mapping[str, JsonValue], *, event_type: str) ->
     event: dict[str, JsonValue] = {
         "type": event_type,
         "b64_json": result,
+        # See ``_build_partial_image_event`` for the rationale: keep the
+        # upstream ``created_at`` if it is present, otherwise synthesize
+        # so the OpenAI Images stream-event schema validates.
+        "created_at": _coerce_created_at(item.get("created_at")),
     }
     for key in ("revised_prompt", "size", "quality", "background", "output_format"):
         value = item.get(key)
         if value is not None:
             event[key] = value
     return event
+
+
+def _coerce_created_at(value: JsonValue | None) -> int:
+    """Return ``value`` as an int when upstream supplied it, otherwise
+    a synthesized current Unix timestamp."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return int(time.time())
 
 
 def _build_error_event(

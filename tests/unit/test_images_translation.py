@@ -879,3 +879,73 @@ class TestStreamingEditEventNames:
         assert "image_edit.completed" in types
         # Must NOT emit the generation event names on the edits path.
         assert not any(t.startswith("image_generation.") for t in types)
+
+
+class TestStreamingCreatedAtAndUsageDetails:
+    @pytest.mark.asyncio
+    async def test_partial_and_completed_events_include_created_at(self) -> None:
+        """OpenAI Images stream event schemas expose ``created_at`` on
+        both partial and completed events. We synthesize a value when
+        upstream omits it.
+        """
+        upstream_events = [
+            _sse(
+                {
+                    "type": "response.image_generation_call.partial_image",
+                    "item_id": "ig_t",
+                    "output_index": 0,
+                    "partial_image_b64": "PB64",
+                    "partial_image_index": 0,
+                    "size": "1024x1024",
+                }
+            ),
+            _sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_t",
+                        "status": "completed",
+                        "result": "DONE_B64",
+                    },
+                }
+            ),
+            _sse({"type": "response.completed", "response": {"id": "resp_t"}}),
+        ]
+        translated_blocks = [
+            block
+            async for block in images_service.translate_responses_stream_to_images_stream(_stream(upstream_events))
+        ]
+        events = _events_from_translated_stream(translated_blocks)
+        for e in events:
+            if e["type"] in ("image_generation.partial_image", "image_generation.completed"):
+                assert isinstance(e.get("created_at"), int) and e["created_at"] > 0
+
+
+class TestUsageDetailPreservation:
+    def test_input_and_output_tokens_details_are_forwarded(self) -> None:
+        upstream = {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "image_generation_call",
+                    "status": "completed",
+                    "result": "B64",
+                }
+            ],
+            "tool_usage": {
+                "image_gen": {
+                    "input_tokens": 11,
+                    "output_tokens": 22,
+                    "total_tokens": 33,
+                    "input_tokens_details": {"text_tokens": 11, "image_tokens": 0},
+                    "output_tokens_details": {"image_tokens": 22},
+                }
+            },
+        }
+        result = images_service.images_response_from_responses(_as_mapping(upstream))
+        response = _image_response(result)
+        assert response.usage is not None
+        assert response.usage.input_tokens_details == {"text_tokens": 11, "image_tokens": 0}
+        assert response.usage.output_tokens_details == {"image_tokens": 22}

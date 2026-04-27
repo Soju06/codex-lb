@@ -35,6 +35,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.types import JsonValue
 
 #: Allowed public ``gpt-image-*`` family. Any other model is rejected up-front.
 GPT_IMAGE_MODEL_PREFIX: Final[str] = "gpt-image-"
@@ -342,14 +343,21 @@ class V1ImageUsage(BaseModel):
 
     Sourced from upstream ``response.tool_usage.image_gen`` when present.
     Total tokens are derived (``input_tokens + output_tokens``) when both
-    components are known.
+    components are known. Nested ``input_tokens_details`` /
+    ``output_tokens_details`` objects are forwarded as-is so the public
+    response surface keeps the OpenAI Images usage shape (which exposes
+    a per-modality breakdown).
     """
 
-    model_config = ConfigDict(extra="ignore")
+    # Allow extra fields so future upstream additions to ``tool_usage.image_gen``
+    # propagate without a schema bump.
+    model_config = ConfigDict(extra="allow")
 
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    input_tokens_details: dict[str, JsonValue] | None = None
+    output_tokens_details: dict[str, JsonValue] | None = None
 
 
 class V1ImageResponse(BaseModel):

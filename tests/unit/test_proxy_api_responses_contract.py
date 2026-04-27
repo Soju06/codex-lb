@@ -84,8 +84,12 @@ async def test_normalize_public_responses_stream_normalizes_unknown_terminal_out
         )
     ]
 
-    assert len(blocks) == 1
-    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert len(blocks) == 2
+    delta_payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert delta_payload is not None
+    assert delta_payload["type"] == "response.output_text.delta"
+    assert delta_payload["delta"] == "normalized"
+    payload = proxy_api_module._parse_sse_payload(blocks[1])
     assert payload is not None
     assert payload["type"] == "response.completed"
     response = payload["response"]
@@ -100,6 +104,95 @@ async def test_normalize_public_responses_stream_normalizes_unknown_terminal_out
             "status": "completed",
             "content": [{"type": "output_text", "text": "normalized"}],
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_synthesizes_delta_from_done_message() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.output_item.done","output_index":0,'
+                    '"item":{"id":"msg_1","type":"message","role":"assistant",'
+                    '"content":[{"type":"output_text","text":"visible text"}]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
+                    '"status":"completed","output":[]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    assert payloads[0] == {
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "visible text",
+        "item_id": "msg_1",
+    }
+    assert payloads[1] is not None
+    assert payloads[1]["type"] == "response.output_item.done"
+    assert payloads[2] is not None
+    assert payloads[2]["type"] == "response.completed"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_synthesizes_delta_from_completed_output() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
+                    '"status":"completed","output":[{"id":"msg_1","type":"message",'
+                    '"content":[{"type":"output_text","text":"terminal text"}]}]}}\n\n'
+                )
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    assert payloads[0] == {
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "terminal text",
+        "item_id": "msg_1",
+    }
+    assert payloads[1] is not None
+    assert payloads[1]["type"] == "response.completed"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_does_not_duplicate_existing_delta() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"already visible"}\n\n',
+                (
+                    'data: {"type":"response.output_item.done","output_index":0,'
+                    '"item":{"id":"msg_1","type":"message","role":"assistant",'
+                    '"content":[{"type":"output_text","text":"already visible"}]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
+                    '"status":"completed","output":[]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    event_types = [payload["type"] for payload in payloads if payload is not None]
+    assert event_types == [
+        "response.output_text.delta",
+        "response.output_item.done",
+        "response.completed",
     ]
 
 

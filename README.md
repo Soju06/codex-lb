@@ -45,7 +45,11 @@ macOS / Linux:
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install codex-lb-cinamon
-codex-lb-cinamon --host 127.0.0.1 --port 2455
+codex-lb-cinamon start
+# 동작 상태 확인
+codex-lb-cinamon status
+# 종료 시
+codex-lb-cinamon shutdown
 ```
 
 Windows PowerShell:
@@ -54,10 +58,29 @@ Windows PowerShell:
 py -3.13 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install codex-lb-cinamon
-codex-lb-cinamon --host 127.0.0.1 --port 2455
+codex-lb-cinamon start
+# 동작 상태 확인
+codex-lb-cinamon status
+# 종료 시
+codex-lb-cinamon shutdown
 ```
 
-원하면 `--host`, `--port`, `--ssl-certfile`, `--ssl-keyfile`를 함께 줄 수 있습니다. 서버는 foreground 로 실행되고 로그는 표준 출력으로 바로 확인할 수 있습니다.
+포그라운드로 명시 실행:
+
+```bash
+codex-lb-cinamon serve
+```
+
+기본 PID 파일과 로그 파일은 아래 경로를 사용합니다.
+
+```text
+macOS / Linux: ~/.codex-lb/server.pid
+macOS / Linux: ~/.codex-lb/server.log
+Windows: %USERPROFILE%\.codex-lb\server.pid
+Windows: %USERPROFILE%\.codex-lb\server.log
+```
+
+원하면 `start`에는 `--pid-file`, `--log-file`, `--host`, `--port`를 함께 줄 수 있고, `serve`에는 `--host`, `--port`, `--ssl-certfile`, `--ssl-keyfile`를 함께 줄 수 있습니다.
 
 ## Remote Setup
 
@@ -114,7 +137,7 @@ docker run -d --name codex-lb-cinamon \
 uvx codex-lb-cinamon
 ```
 
-명령은 foreground 서버를 바로 띄우며, 필요하면 추가 인자를 그대로 넘길 수 있습니다.
+명령은 `serve`와 동일하게 foreground 서버를 바로 띄우며, 필요하면 추가 인자를 그대로 넘길 수 있습니다.
 
 컨테이너로 실행할 때는 아래 설정을 함께 주는 것을 권장합니다.
 

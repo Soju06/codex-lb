@@ -438,7 +438,7 @@ wheels = [
 
 [[package]]
 name = "codex-lb-cinamon"
-version = "1.15.0"
+version = "1.15.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

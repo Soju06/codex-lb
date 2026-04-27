@@ -877,6 +877,15 @@ async def _proxy_images_generation_request(
     # We always need an upstream stream because tool_usage.image_gen only
     # appears on response.completed. For non-streaming clients we drain the
     # stream and translate to a JSON envelope.
+    # Pass ``api_key_reservation=None`` so the standard stream settlement
+    # in ``_settle_stream_api_key_usage`` does NOT release/finalize the
+    # reservation from ``response.usage`` (which is typically empty for
+    # the image_generation tool path). The image route owns the
+    # reservation lifecycle and finalizes it from the captured
+    # ``tool_usage.image_gen`` tokens via ``_finalize_image_reservation``,
+    # which avoids the double-billing scenario where standard settlement
+    # would charge ``response.usage`` and we would also charge the image
+    # tokens.
     upstream = context.service.stream_responses(
         responses_payload,
         request.headers,
@@ -884,7 +893,7 @@ async def _proxy_images_generation_request(
         propagate_http_errors=True,
         openai_cache_affinity=True,
         api_key=api_key,
-        api_key_reservation=reservation,
+        api_key_reservation=None,
     )
 
     # ``images_service`` populates ``response_id`` once the upstream stream
@@ -926,20 +935,22 @@ async def _proxy_images_generation_request(
                 response_id = captured.get("response_id")
                 if response_id and isinstance(response_id, str):
                     await context.service.rewrite_request_log_model(response_id, public_model)
-                # Charge the API key for the actual image_generation
-                # tokens. The standard stream settlement only reads
-                # response.usage which is typically empty for the
-                # image_generation tool path, so we record post-hoc here
-                # using the tokens stashed by ``images_service``.
+                # Finalize the reservation from the captured
+                # ``tool_usage.image_gen`` tokens (or release if
+                # upstream never produced a usable image). This is the
+                # single point where the image API charges API-key
+                # limits; standard stream settlement is bypassed via
+                # ``api_key_reservation=None`` above.
                 _input = captured.get("image_input_tokens")
                 _output = captured.get("image_output_tokens")
-                if isinstance(_input, int) or isinstance(_output, int):
-                    await context.service.record_image_api_key_usage(
-                        api_key,
-                        model=public_model,
-                        input_tokens=_input if isinstance(_input, int) else None,
-                        output_tokens=_output if isinstance(_output, int) else None,
-                    )
+                _cached = captured.get("image_cached_input_tokens")
+                await _finalize_image_reservation(
+                    reservation,
+                    model=public_model,
+                    input_tokens=_input if isinstance(_input, int) else None,
+                    output_tokens=_output if isinstance(_output, int) else None,
+                    cached_input_tokens=_cached if isinstance(_cached, int) else None,
+                )
 
         return StreamingResponse(
             _stream_with_log_rewrite(),
@@ -966,13 +977,14 @@ async def _proxy_images_generation_request(
         await context.service.rewrite_request_log_model(response_id, public_model)
     _input = captured.get("image_input_tokens")
     _output = captured.get("image_output_tokens")
-    if isinstance(_input, int) or isinstance(_output, int):
-        await context.service.record_image_api_key_usage(
-            api_key,
-            model=public_model,
-            input_tokens=_input if isinstance(_input, int) else None,
-            output_tokens=_output if isinstance(_output, int) else None,
-        )
+    _cached = captured.get("image_cached_input_tokens")
+    await _finalize_image_reservation(
+        reservation,
+        model=public_model,
+        input_tokens=_input if isinstance(_input, int) else None,
+        output_tokens=_output if isinstance(_output, int) else None,
+        cached_input_tokens=_cached if isinstance(_cached, int) else None,
+    )
 
     if error_envelope is not None:
         return _logged_error_json_response(
@@ -1070,6 +1082,9 @@ async def _proxy_images_edit_request(
             headers=rate_limit_headers,
         )
 
+    # See ``_proxy_images_generation_request`` for why we pass
+    # ``api_key_reservation=None`` and finalize via
+    # ``_finalize_image_reservation`` instead.
     upstream = context.service.stream_responses(
         responses_payload,
         request.headers,
@@ -1077,7 +1092,7 @@ async def _proxy_images_edit_request(
         propagate_http_errors=True,
         openai_cache_affinity=True,
         api_key=api_key,
-        api_key_reservation=reservation,
+        api_key_reservation=None,
     )
 
     captured: dict[str, object] = {}
@@ -1109,20 +1124,22 @@ async def _proxy_images_edit_request(
                 response_id = captured.get("response_id")
                 if response_id and isinstance(response_id, str):
                     await context.service.rewrite_request_log_model(response_id, public_model)
-                # Charge the API key for the actual image_generation
-                # tokens. The standard stream settlement only reads
-                # response.usage which is typically empty for the
-                # image_generation tool path, so we record post-hoc here
-                # using the tokens stashed by ``images_service``.
+                # Finalize the reservation from the captured
+                # ``tool_usage.image_gen`` tokens (or release if
+                # upstream never produced a usable image). This is the
+                # single point where the image API charges API-key
+                # limits; standard stream settlement is bypassed via
+                # ``api_key_reservation=None`` above.
                 _input = captured.get("image_input_tokens")
                 _output = captured.get("image_output_tokens")
-                if isinstance(_input, int) or isinstance(_output, int):
-                    await context.service.record_image_api_key_usage(
-                        api_key,
-                        model=public_model,
-                        input_tokens=_input if isinstance(_input, int) else None,
-                        output_tokens=_output if isinstance(_output, int) else None,
-                    )
+                _cached = captured.get("image_cached_input_tokens")
+                await _finalize_image_reservation(
+                    reservation,
+                    model=public_model,
+                    input_tokens=_input if isinstance(_input, int) else None,
+                    output_tokens=_output if isinstance(_output, int) else None,
+                    cached_input_tokens=_cached if isinstance(_cached, int) else None,
+                )
 
         return StreamingResponse(
             _stream_with_log_rewrite(),
@@ -1149,13 +1166,14 @@ async def _proxy_images_edit_request(
         await context.service.rewrite_request_log_model(response_id, public_model)
     _input = captured.get("image_input_tokens")
     _output = captured.get("image_output_tokens")
-    if isinstance(_input, int) or isinstance(_output, int):
-        await context.service.record_image_api_key_usage(
-            api_key,
-            model=public_model,
-            input_tokens=_input if isinstance(_input, int) else None,
-            output_tokens=_output if isinstance(_output, int) else None,
-        )
+    _cached = captured.get("image_cached_input_tokens")
+    await _finalize_image_reservation(
+        reservation,
+        model=public_model,
+        input_tokens=_input if isinstance(_input, int) else None,
+        output_tokens=_output if isinstance(_output, int) else None,
+        cached_input_tokens=_cached if isinstance(_cached, int) else None,
+    )
 
     if error_envelope is not None:
         return _logged_error_json_response(
@@ -1892,6 +1910,42 @@ async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         await service.release_usage_reservation(reservation.reservation_id)
+
+
+async def _finalize_image_reservation(
+    reservation: ApiKeyUsageReservationData | None,
+    *,
+    model: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cached_input_tokens: int | None = None,
+) -> None:
+    """Finalize the API-key usage reservation for a ``/v1/images/*`` call.
+
+    The image adapter bypasses the standard stream settlement (``stream_responses``
+    is invoked with ``api_key_reservation=None``) because the ``image_generation``
+    tool path typically leaves ``response.usage`` empty; charging from
+    ``tool_usage.image_gen`` is the only source of truth. This helper
+    finalizes the reservation with the captured image tokens when present,
+    otherwise releases it. Calling this exactly once per request prevents
+    the double-billing scenario where both the standard settlement and
+    the post-hoc image record_usage path increment limits.
+    """
+    if reservation is None:
+        return
+    if not input_tokens and not output_tokens:
+        await _release_reservation(reservation)
+        return
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        await service.finalize_usage_reservation(
+            reservation.reservation_id,
+            model=model,
+            input_tokens=int(input_tokens or 0),
+            output_tokens=int(output_tokens or 0),
+            cached_input_tokens=int(cached_input_tokens or 0),
+            service_tier=None,
+        )
 
 
 def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:

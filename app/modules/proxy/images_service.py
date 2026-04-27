@@ -512,14 +512,33 @@ def _stash_image_usage_tokens(captured: dict[str, object], usage: V1ImageUsage) 
     so the route handler can post-hoc record them against the API key.
 
     Stored under explicit ``image_input_tokens`` / ``image_output_tokens``
-    keys (alongside the existing ``response_id``) so the route handler
-    does not have to re-parse the SSE stream or know the V1ImageUsage
-    shape.
+    / ``image_cached_input_tokens`` keys (alongside the existing
+    ``response_id``) so the route handler does not have to re-parse the
+    SSE stream or know the V1ImageUsage shape. Cached tokens are pulled
+    from ``input_tokens_details.cached_tokens`` when upstream reports
+    them so cached requests are not billed as fully uncached input.
     """
     if usage.input_tokens is not None:
         captured["image_input_tokens"] = int(usage.input_tokens)
     if usage.output_tokens is not None:
         captured["image_output_tokens"] = int(usage.output_tokens)
+    cached = _extract_cached_input_tokens(usage)
+    if cached is not None:
+        captured["image_cached_input_tokens"] = cached
+
+
+def _extract_cached_input_tokens(usage: V1ImageUsage) -> int | None:
+    details = usage.input_tokens_details
+    if not isinstance(details, Mapping):
+        return None
+    raw = details.get("cached_tokens")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    return None
 
 
 def _build_partial_image_event(payload: Mapping[str, JsonValue], *, event_type: str) -> dict[str, JsonValue] | None:

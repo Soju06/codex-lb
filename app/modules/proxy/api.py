@@ -743,7 +743,17 @@ async def v1_images_edits(
 
 
 @v1_router.post("/images/variations", include_in_schema=False)
-async def v1_images_variations(request: Request) -> Response:
+async def v1_images_variations(
+    request: Request,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    # ``api_key`` is captured purely so the standard
+    # ``Security(validate_proxy_api_key)`` dependency runs and rejects
+    # unauthenticated callers with the same policy as every other
+    # /v1/images/* route (and the rest of /v1). Without it, this
+    # endpoint would return a public 404 even when proxy API-key auth
+    # is enabled, which is an inconsistent auth surface.
+    del api_key
     return _logged_error_json_response(
         request,
         status_code=404,

@@ -738,3 +738,62 @@ async def test_images_generations_rejects_input_fidelity(async_client):
     body = response.json()
     assert body["error"]["param"] == "input_fidelity"
     assert body["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_images_edits_accepts_image_brackets_form_key(async_client, monkeypatch):
+    """OpenAI SDKs/HTTP clients commonly send multiple files under
+    ``image[]`` instead of ``image``. Both keys must work for drop-in
+    compatibility.
+    """
+    await _import_account(async_client, "acc_images_brackets", "img-brackets@example.com")
+
+    captured: dict[str, Any] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        captured["input"] = payload.input
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_brackets",
+                    "status": "completed",
+                    "result": "B64_BRACKETS",
+                },
+            }
+        )
+        yield _sse({"type": "response.completed", "response": {"id": "resp_brackets"}})
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    response = await async_client.post(
+        "/v1/images/edits",
+        data={
+            "model": "gpt-image-2",
+            "prompt": "image[] form key test",
+        },
+        files={
+            "image[]": ("source.png", image_bytes, "image/png"),
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # ``exclude_none=True`` drops missing revised_prompt from the public envelope.
+    assert body["data"] == [{"b64_json": "B64_BRACKETS"}]
+    # Confirm the file was actually picked up and forwarded to upstream.
+    input_value = cast(list[Any], captured["input"])
+    first_message = cast(dict[str, Any], input_value[0])
+    content = cast(list[Any], first_message["content"])
+    image_parts = [
+        cast(dict[str, Any], p) for p in content if isinstance(p, dict) and p.get("type") == "input_image"
+    ]
+    assert len(image_parts) == 1

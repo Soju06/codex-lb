@@ -648,7 +648,13 @@ async def v1_images_edits(
     # failure as an OpenAI-shape ``invalid_request_error`` envelope.
     model: str | None = Form(None),
     prompt: str = Form(...),
-    image: list[UploadFile] = File(...),
+    # Accept either the OpenAI canonical ``image`` form key (single or
+    # repeated) or the ``image[]`` array-style key that some OpenAI SDKs
+    # / HTTP clients emit when sending multiple files. Both are bound as
+    # ``list[UploadFile] = File(None)`` and merged below; at least one
+    # entry must be present after the merge.
+    image: list[UploadFile] | None = File(None),
+    image_brackets: list[UploadFile] | None = File(None, alias="image[]"),
     mask: UploadFile | None = File(None),
     n: str | None = Form(None),
     size: str | None = Form(None),
@@ -698,8 +704,26 @@ async def v1_images_edits(
     except ValidationError as exc:
         return _logged_error_json_response(request, 400, openai_validation_error(exc))
 
+    # Merge ``image`` and ``image[]`` into a single ordered list. Both
+    # form keys are accepted so OpenAI SDKs and HTTP clients that pick
+    # either convention work without modification.
+    merged_images: list[UploadFile] = []
+    if image:
+        merged_images.extend(image)
+    if image_brackets:
+        merged_images.extend(image_brackets)
+    if not merged_images:
+        return _logged_error_json_response(
+            request,
+            400,
+            images_service_module.make_invalid_request_error(
+                "At least one ``image`` (or ``image[]``) multipart part is required.",
+                param="image",
+            ),
+        )
+
     images_payload: list[tuple[bytes, str | None]] = []
-    for upload in image:
+    for upload in merged_images:
         try:
             data = await upload.read()
         finally:

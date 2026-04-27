@@ -88,6 +88,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["errorCode"] == "rate_limit_exceeded"
     assert latest["errorMessage"] == "Rate limit reached"
     assert latest["transport"] == "websocket"
+    assert latest["requestKind"] == "normal"
 
     older = payload[1]
     assert older["status"] == "ok"
@@ -96,3 +97,4 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None
     assert older["transport"] == "http"
+    assert older["requestKind"] == "normal"

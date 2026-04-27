@@ -86,6 +86,11 @@ from app.modules.proxy.schemas import (
     ReasoningLevelSchema,
     V1UsageLimitResponse,
     V1UsageResponse,
+    WarmupFailedAccount,
+    WarmupRequest,
+    WarmupResponse,
+    WarmupSkippedAccount,
+    WarmupSubmittedAccount,
 )
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
@@ -174,6 +179,7 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }
+_WARMUP_MODES: Final[frozenset[str]] = frozenset({"default", "all-or-none", "force-update"})
 
 
 @router.post(
@@ -382,6 +388,68 @@ async def v1_usage(
         limits=[_to_v1_usage_limit_response(limit) for limit in usage.limits],
         upstream_limits=_ordered_aggregate_limits(aggregate_limits),
     )
+
+
+@v1_router.post("/warmup", response_model=WarmupResponse)
+async def v1_warmup(
+    request: Request,
+    payload: WarmupRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    mode = payload.mode.strip().lower()
+    if mode not in _WARMUP_MODES:
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error(
+                "invalid_request_error",
+                "Invalid warmup mode. Supported values: default, all-or-none, force-update.",
+                error_type="invalid_request_error",
+            ),
+        )
+
+    try:
+        result = await context.service.warmup(mode=mode, headers=request.headers, api_key=api_key)
+    except ValueError as exc:
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error(
+                "invalid_request_error",
+                str(exc),
+                error_type="invalid_request_error",
+            ),
+        )
+
+    response = WarmupResponse(
+        mode=result.mode,
+        total_accounts=result.total_accounts,
+        submitted=[
+            WarmupSubmittedAccount(
+                account_id=entry.account_id,
+                request_id=entry.request_id,
+                model=entry.model,
+            )
+            for entry in result.submitted
+        ],
+        skipped=[
+            WarmupSkippedAccount(
+                account_id=entry.account_id,
+                reason=entry.reason,
+            )
+            for entry in result.skipped
+        ],
+        failed=[
+            WarmupFailedAccount(
+                account_id=entry.account_id,
+                error_code=entry.error_code,
+                error_message=entry.error_message,
+            )
+            for entry in result.failed
+        ],
+    )
+    return JSONResponse(content=response.model_dump(mode="json"))
 
 
 def _ordered_aggregate_limits(aggregate_limits: dict[str, V1UsageLimitResponse]) -> list[V1UsageLimitResponse]:

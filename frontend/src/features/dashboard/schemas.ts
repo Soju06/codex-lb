@@ -106,6 +106,7 @@ export const RequestLogSchema = z.object({
   apiKeyName: z.string().nullable(),
   apiKeyId: z.string().nullable().optional().default(null),
   requestId: z.string(),
+  requestKind: z.enum(["normal", "warmup"]).optional().default("normal"),
   model: z.string(),
   transport: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),

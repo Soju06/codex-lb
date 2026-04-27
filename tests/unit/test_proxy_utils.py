@@ -176,7 +176,7 @@ def _build_registry_with_model(slug: str, efforts: list[str]):
         fetched_at=0.0,
     )
     registry = ModelRegistry()
-    registry._snapshot = snapshot  # type: ignore[attr-defined]
+    registry._snapshot = snapshot
     return registry
 
 

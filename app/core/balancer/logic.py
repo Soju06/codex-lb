@@ -338,7 +338,7 @@ def _log_relative_availability_candidate_scores(
 ) -> None:
     for state, raw_score in raw_scores:
         remaining_seconds = _relative_availability_remaining_seconds(state, current)
-        logger.info(
+        logger.debug(
             (
                 f"{_RELATIVE_AVAILABILITY_LOG_PREFIX_CANDIDATE}account=%s "
                 "remaining_credits=%.2f remaining_minutes=%.2f score_per_minute=%.6f"

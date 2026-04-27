@@ -377,7 +377,8 @@
       "contributions": [
         "code",
         "test",
-        "doc"
+        "doc",
+        "bug"
       ]
     },
     {

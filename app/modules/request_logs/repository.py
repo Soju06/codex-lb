@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, cast, func, literal_column, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -14,10 +14,8 @@ from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestLog
+from app.db.models import Account, ApiKey, RequestKind, RequestLog
 from app.db.session import sqlite_writer_section
-
-_INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,9 +28,16 @@ class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    @staticmethod
+    def _exclude_warmup_clause() -> ColumnElement[bool]:
+        return RequestLog.request_kind != RequestKind.WARMUP.value
+
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(
-            select(RequestLog).where(RequestLog.requested_at >= since, _normal_traffic_clause())
+            select(RequestLog).where(
+                RequestLog.requested_at >= since,
+                self._exclude_warmup_clause(),
+            )
         )
         return list(result.scalars().all())
 
@@ -105,7 +110,8 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
-            .where(RequestLog.requested_at >= since, _normal_traffic_clause())
+            .where(RequestLog.requested_at >= since)
+            .where(self._exclude_warmup_clause())
             .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
             .order_by(bucket_col)
         )
@@ -137,7 +143,10 @@ class RequestLogsRepository:
             func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-        ).where(RequestLog.requested_at >= since, _normal_traffic_clause())
+        ).where(
+            RequestLog.requested_at >= since,
+            self._exclude_warmup_clause(),
+        )
         result = await self._session.execute(stmt)
         row = result.one()
         return RequestActivityAggregate(
@@ -154,7 +163,7 @@ class RequestLogsRepository:
             select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
             .where(
                 RequestLog.requested_at >= since,
-                _normal_traffic_clause(),
+                self._exclude_warmup_clause(),
                 RequestLog.status != "success",
                 RequestLog.error_code.is_not(None),
             )
@@ -189,7 +198,7 @@ class RequestLogsRepository:
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
-        source: str | None = None,
+        request_kind: str = RequestKind.NORMAL.value,
     ) -> RequestLog:
         async with sqlite_writer_section():
             resolved_request_id = ensure_request_id(request_id)
@@ -201,9 +210,9 @@ class RequestLogsRepository:
                 api_key_id=api_key_id,
                 session_id=session_id,
                 request_id=resolved_request_id,
+                request_kind=request_kind,
                 model=model,
                 plan_type=resolved_plan_type,
-                source=source,
                 transport=transport,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
@@ -523,7 +532,3 @@ async def _safe_rollback(session: AsyncSession) -> None:
             await session.rollback()
     except BaseException:
         return
-
-
-def _normal_traffic_clause():
-    return or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE)

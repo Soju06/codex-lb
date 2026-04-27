@@ -25,6 +25,7 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, drain_transitions_total
 from app.core.openai.model_registry import get_model_registry
 from app.core.plan_types import account_plan_matches_allowed
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
@@ -59,6 +60,16 @@ _RECOVERABLE_STATUSES = frozenset(
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+
+
+def _health_tier_metric_label(tier: int) -> str:
+    if tier == HEALTH_TIER_HEALTHY:
+        return "healthy"
+    if tier == HEALTH_TIER_DRAINING:
+        return "draining"
+    if tier == HEALTH_TIER_PROBING:
+        return "probing"
+    return str(tier)
 
 
 @dataclass
@@ -837,6 +848,29 @@ class LoadBalancer:
             async with self._repo_factory() as repos:
                 await self._persist_state_if_current(repos.accounts, account_snapshot, state)
 
+    async def mark_temporary_cooldown(
+        self,
+        account: Account,
+        cooldown_seconds: float,
+        *,
+        error_count: int = 1,
+    ) -> None:
+        increment = max(error_count, 1)
+        lock = await self._get_account_lock(account.id)
+        async with lock:
+            state = self._state_for(account)
+            now = time.time()
+            if cooldown_seconds > 0:
+                candidate_until = now + cooldown_seconds
+                current_until = state.cooldown_until or 0.0
+                state.cooldown_until = max(current_until, candidate_until)
+            state.last_error_at = now
+            state.error_count += increment
+            self._sync_runtime_state(account, state)
+            runtime = self._runtime.get(account.id)
+            if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
+                runtime.probe_success_streak = 0
+
     async def record_success(self, account: Account) -> None:
         """Clear transient error state after a successful upstream request."""
         lock = await self._get_account_lock(account.id)
@@ -1103,6 +1137,7 @@ def _state_from_account(
 
     settings = get_settings()
     if getattr(settings, "soft_drain_enabled", True):
+        previous_tier = runtime.health_tier
         new_tier = evaluate_health_tier(
             AccountState(
                 account_id=account.id,
@@ -1129,11 +1164,22 @@ def _state_from_account(
         if new_tier == HEALTH_TIER_HEALTHY:
             runtime.drain_entered_at = None
             runtime.probe_success_streak = 0
+        if new_tier != previous_tier and PROMETHEUS_AVAILABLE and drain_transitions_total is not None:
+            drain_transitions_total.labels(
+                from_tier=_health_tier_metric_label(previous_tier),
+                to_tier=_health_tier_metric_label(new_tier),
+            ).inc()
         runtime.health_tier = new_tier
     else:
+        previous_tier = runtime.health_tier
         new_tier = HEALTH_TIER_HEALTHY
         runtime.drain_entered_at = None
         runtime.probe_success_streak = 0
+        if previous_tier != HEALTH_TIER_HEALTHY and PROMETHEUS_AVAILABLE and drain_transitions_total is not None:
+            drain_transitions_total.labels(
+                from_tier=_health_tier_metric_label(previous_tier),
+                to_tier=_health_tier_metric_label(HEALTH_TIER_HEALTHY),
+            ).inc()
         runtime.health_tier = HEALTH_TIER_HEALTHY
 
     return AccountState(

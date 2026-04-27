@@ -65,6 +65,24 @@ class TestClassifyUpstreamFailure:
         )
         assert result["failure_class"] == "quota"
 
+    def test_connect_phase_forbidden_403_is_transient(self) -> None:
+        result = classify_upstream_failure(
+            error_code="forbidden",
+            error=UpstreamError(message="Forbidden"),
+            http_status=403,
+            phase="connect",
+        )
+        assert result["failure_class"] == "retryable_transient"
+
+    def test_first_event_forbidden_403_stays_non_retryable(self) -> None:
+        result = classify_upstream_failure(
+            error_code="forbidden",
+            error=UpstreamError(message="Forbidden"),
+            http_status=403,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "non_retryable"
+
     def test_server_error(self) -> None:
         result = classify_upstream_failure(
             error_code="server_error",

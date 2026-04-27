@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.message_coercion import coerce_messages
@@ -9,6 +9,7 @@ from app.core.openai.requests import (
     ResponsesReasoning,
     ResponsesRequest,
     ResponsesTextControls,
+    allow_native_tool_types,
     validate_tool_types,
 )
 from app.core.types import JsonValue
@@ -51,8 +52,8 @@ class V1ResponsesRequest(BaseModel):
 
     @field_validator("tools")
     @classmethod
-    def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+    def _validate_tools(cls, value: list[JsonValue], info: ValidationInfo) -> list[JsonValue]:
+        return validate_tool_types(value, allow_native_tool_types=allow_native_tool_types(info.context))
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesRequest":
@@ -64,7 +65,7 @@ class V1ResponsesRequest(BaseModel):
             raise ValueError("Provide either 'conversation' or 'previous_response_id', not both.")
         return self
 
-    def to_responses_request(self) -> ResponsesRequest:
+    def to_responses_request(self, *, allow_native_tool_types: bool = False) -> ResponsesRequest:
         data = self.model_dump(mode="json", exclude_none=True)
         messages = data.pop("messages", None)
         instructions = data.get("instructions")
@@ -86,7 +87,8 @@ class V1ResponsesRequest(BaseModel):
             data["input"] = input_text
         else:
             data["input"] = input_items
-        return ResponsesRequest.model_validate(data)
+        context = {"allow_native_tool_types": True} if allow_native_tool_types else None
+        return ResponsesRequest.model_validate(data, context=context)
 
 
 class V1ResponsesCompactRequest(BaseModel):

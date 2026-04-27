@@ -26,15 +26,19 @@ def test_settings_multi_replica_defaults():
     assert settings.proxy_upstream_websocket_connect_limit == 128
     assert settings.proxy_response_create_limit == 256
     assert settings.proxy_compact_response_create_limit == 64
+    assert settings.http_responses_session_bridge_codex_request_budget_seconds == 180.0
+    assert settings.http_responses_session_bridge_codex_prewarm_enabled is True
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
     assert settings.max_sse_event_bytes == 16 * 1024 * 1024
     assert settings.proxy_refresh_failure_cooldown_seconds == 5.0
+    assert settings.proxy_connect_forbidden_cooldown_seconds == 30.0
     assert settings.usage_refresh_auth_failure_cooldown_seconds == 300.0
+    assert settings.model_registry_refresh_auth_failure_cooldown_seconds == 300.0
     assert settings.otel_enabled is False
     assert settings.otel_exporter_endpoint == ""
     assert settings.shutdown_drain_timeout_seconds == 30
-    assert settings.http_connector_limit == 100
-    assert settings.http_connector_limit_per_host == 50
+    assert settings.http_connector_limit == 200
+    assert settings.http_connector_limit_per_host == 100
 
 
 def test_settings_metrics_enabled_from_env(monkeypatch):

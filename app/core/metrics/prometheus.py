@@ -183,6 +183,24 @@ if PROMETHEUS_AVAILABLE:
         ["surface", "reason"],
         registry=REGISTRY,
     )
+    failover_total = Counter(
+        "codex_lb_failover_total",
+        "Total pre-commit failover decisions",
+        ["transport", "failure_class", "action"],
+        registry=REGISTRY,
+    )
+    drain_transitions_total = Counter(
+        "codex_lb_drain_transitions_total",
+        "Total account health-tier transitions",
+        ["from_tier", "to_tier"],
+        registry=REGISTRY,
+    )
+    client_exposed_errors_total = Counter(
+        "codex_lb_client_exposed_errors_total",
+        "Total client-visible pre-commit upstream errors",
+        ["transport", "error_code"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -225,6 +243,9 @@ else:
     bridge_public_contract_error_total: CounterLike | None = None
     continuity_owner_resolution_total: CounterLike | None = None
     continuity_fail_closed_total: CounterLike | None = None
+    failover_total: CounterLike | None = None
+    drain_transitions_total: CounterLike | None = None
+    client_exposed_errors_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -252,9 +273,12 @@ __all__ = [
     "bridge_reattach_total",
     "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
+    "client_exposed_errors_total",
     "circuit_breaker_state",
     "continuity_fail_closed_total",
     "continuity_owner_resolution_total",
+    "drain_transitions_total",
+    "failover_total",
     "make_scrape_registry",
     "mark_process_dead",
     "prometheus_client",

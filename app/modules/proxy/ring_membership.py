@@ -40,6 +40,7 @@ class RingMembershipService:
             # Dialect-specific upsert
             dialect = session.get_bind().dialect.name
             metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
+            await _delete_endpoint_owner_conflicts(session, instance_id=instance_id, metadata_json=metadata_json)
             if dialect == "postgresql":
                 stmt = (
                     pg_insert(BridgeRingMember)
@@ -89,6 +90,7 @@ class RingMembershipService:
             dialect = session.get_bind().dialect.name
             now = utcnow()
             metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
+            await _delete_endpoint_owner_conflicts(session, instance_id=instance_id, metadata_json=metadata_json)
             if dialect == "postgresql":
                 stmt = (
                     pg_insert(BridgeRingMember)
@@ -219,6 +221,22 @@ def _bridge_ring_metadata_json(endpoint_base_url: str | None) -> str | None:
     if endpoint_base_url is None:
         return None
     return json.dumps({"endpoint_base_url": endpoint_base_url}, ensure_ascii=True, separators=(",", ":"))
+
+
+async def _delete_endpoint_owner_conflicts(
+    session: AsyncSession,
+    *,
+    instance_id: str,
+    metadata_json: str | None,
+) -> None:
+    if metadata_json is None:
+        return
+    await session.execute(
+        delete(BridgeRingMember).where(
+            BridgeRingMember.instance_id != instance_id,
+            BridgeRingMember.metadata_json == metadata_json,
+        )
+    )
 
 
 def _bridge_ring_endpoint_from_metadata(metadata_json: str | None) -> str | None:

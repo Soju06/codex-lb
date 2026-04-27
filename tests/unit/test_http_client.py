@@ -60,7 +60,7 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     ):
         await http_module.init_http_client()
 
-    tcp_connector_cls.assert_called_once_with(limit=100, limit_per_host=50)
+    tcp_connector_cls.assert_called_once_with(limit=200, limit_per_host=100)
     assert client_session_cls.call_args_list[0].kwargs["connector"] is connector
 
     await http_module.close_http_client()

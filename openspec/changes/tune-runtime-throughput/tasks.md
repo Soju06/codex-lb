@@ -1,0 +1,6 @@
+- [x] 1.1 Add configurable `uvicorn` worker/loop/http runtime flags in `app/cli.py`
+- [x] 1.2 Add focused unit coverage for runtime flag parsing and env defaults
+- [x] 1.3 Document the runtime throughput knobs in `.env.example`
+- [x] 1.4 Apply the throughput profile to `eric-claw` deployment config and rebuild the container
+- [x] 1.5 Make the default runtime assumptions multi-core aware and Codex-optimized
+- [x] 1.6 Add focused coverage for the new Codex-oriented defaults

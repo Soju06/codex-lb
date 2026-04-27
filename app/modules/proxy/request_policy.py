@@ -8,7 +8,12 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
+from app.core.openai.requests import (
+    ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY,
+    ResponsesCompactRequest,
+    ResponsesReasoning,
+    ResponsesRequest,
+)
 from app.core.openai.strict_schema import validate_strict_json_schema
 from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
@@ -16,6 +21,8 @@ from app.core.utils.request_id import get_request_id
 from app.modules.api_keys.service import ApiKeyData
 
 logger = logging.getLogger(__name__)
+
+_ALLOW_NATIVE_TOOL_TYPES_CONTEXT = {ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY: True}
 
 # Reasoning efforts that the upstream ChatGPT/Codex backend silently drops
 # (the WebSocket never produces ``response.completed``). When a client sends
@@ -188,11 +195,15 @@ def normalize_responses_request_payload(
     payload: dict[str, JsonValue],
     *,
     openai_compat: bool,
+    allow_native_tool_types: bool = False,
 ) -> ResponsesRequest:
+    context = _ALLOW_NATIVE_TOOL_TYPES_CONTEXT if allow_native_tool_types else None
     if openai_compat:
-        responses = V1ResponsesRequest.model_validate(payload).to_responses_request()
+        responses = V1ResponsesRequest.model_validate(payload, context=context).to_responses_request(
+            allow_native_tool_types=allow_native_tool_types
+        )
     else:
-        responses = ResponsesRequest.model_validate(payload)
+        responses = ResponsesRequest.model_validate(payload, context=context)
     enforce_strict_text_format(responses)
     return responses
 

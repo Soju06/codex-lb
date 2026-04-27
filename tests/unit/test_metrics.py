@@ -129,6 +129,10 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
     assert prometheus_module.continuity_owner_resolution_total.labelnames == ("surface", "source", "outcome")
     assert prometheus_module.continuity_fail_closed_total.name == "codex_lb_continuity_fail_closed_total"
     assert prometheus_module.continuity_fail_closed_total.labelnames == ("surface", "reason")
+    assert prometheus_module.failover_total.name == "codex_lb_failover_total"
+    assert prometheus_module.failover_total.labelnames == ("transport", "failure_class", "action")
+    assert prometheus_module.drain_transitions_total.name == "codex_lb_drain_transitions_total"
+    assert prometheus_module.client_exposed_errors_total.name == "codex_lb_client_exposed_errors_total"
 
 
 @pytest.mark.asyncio
@@ -202,3 +206,24 @@ def test_bridge_instance_mismatch_counter_noop_without_prometheus(monkeypatch: p
 
     assert prometheus_module.PROMETHEUS_AVAILABLE is False
     assert prometheus_module.bridge_instance_mismatch_total is None
+
+
+def test_failover_and_client_exposed_counters_increment(monkeypatch: pytest.MonkeyPatch) -> None:
+    prometheus_module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
+
+    failover_counter = prometheus_module.failover_total
+    exposed_counter = prometheus_module.client_exposed_errors_total
+    drain_counter = prometheus_module.drain_transitions_total
+    assert failover_counter is not None
+    assert exposed_counter is not None
+    assert drain_counter is not None
+
+    failover_counter.labels(transport="websocket", failure_class="retryable_transient", action="failover_next").inc()
+    exposed_counter.labels(transport="websocket", error_code="forbidden").inc()
+    drain_counter.labels(from_tier="healthy", to_tier="draining").inc()
+
+    assert failover_counter.samples[
+        (("action", "failover_next"), ("failure_class", "retryable_transient"), ("transport", "websocket"))
+    ].value == 1.0
+    assert exposed_counter.samples[(("error_code", "forbidden"), ("transport", "websocket"))].value == 1.0
+    assert drain_counter.samples[(("from_tier", "healthy"), ("to_tier", "draining"))].value == 1.0

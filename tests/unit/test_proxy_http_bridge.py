@@ -30,6 +30,38 @@ def _make_app_settings(*, bridge_enabled: bool = True) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled)
 
 
+def test_responses_request_budget_seconds_uses_codex_http_budget() -> None:
+    settings = Settings(
+        proxy_request_budget_seconds=600.0,
+        http_responses_session_bridge_codex_request_budget_seconds=180.0,
+    )
+
+    assert (
+        proxy_service._responses_request_budget_seconds(
+            settings,
+            codex_session_affinity=True,
+            request_transport="http",
+        )
+        == 180.0
+    )
+    assert (
+        proxy_service._responses_request_budget_seconds(
+            settings,
+            codex_session_affinity=False,
+            request_transport="http",
+        )
+        == 600.0
+    )
+    assert (
+        proxy_service._responses_request_budget_seconds(
+            settings,
+            codex_session_affinity=True,
+            request_transport="websocket",
+        )
+        == 600.0
+    )
+
+
 def _make_api_key(
     *,
     key_id: str,
@@ -2443,6 +2475,7 @@ async def test_forward_http_bridge_request_to_owner_preserves_session_header_key
             headers={"x-codex-session-id": "sid-123"},
             api_key_reservation=None,
             codex_session_affinity=True,
+            proxy_request_budget_seconds=75.0,
             downstream_turn_state="http_turn_generated",
             request_started_at=10.0,
             proxy_api_authorization=None,
@@ -2488,6 +2521,7 @@ async def test_forward_http_bridge_request_to_owner_raises_proxy_error_on_relay_
             headers={"x-codex-session-id": "sid-123"},
             api_key_reservation=None,
             codex_session_affinity=True,
+            proxy_request_budget_seconds=75.0,
             downstream_turn_state="http_turn_generated",
             request_started_at=10.0,
             proxy_api_authorization=None,
@@ -2530,6 +2564,7 @@ async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_for
             headers={"x-codex-session-id": "sid-123"},
             api_key_reservation=None,
             codex_session_affinity=True,
+            proxy_request_budget_seconds=75.0,
             downstream_turn_state="http_turn_generated",
             request_started_at=10.0,
             proxy_api_authorization=None,

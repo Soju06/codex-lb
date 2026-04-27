@@ -515,6 +515,8 @@ async def _validate_bridge_advertise_endpoint_for_multi_replica(
     except ValueError:
         parsed_ip = None
     if (parsed_ip is not None and parsed_ip.is_loopback) or hostname == "localhost":
+        if getattr(settings, "http_responses_session_bridge_worker_pool_mode", False):
+            return
         configured_multi_replica = len(settings.http_responses_session_bridge_instance_ring) > 1
         if configured_multi_replica:
             raise RuntimeError(

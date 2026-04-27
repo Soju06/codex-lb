@@ -32,6 +32,24 @@ HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
+_OWNER_FORWARD_STRIPPED_HEADER_NAMES = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-length",
+        "content-encoding",
+        "expect",
+    }
+)
+_OWNER_FORWARD_STRIPPED_HEADER_PREFIXES = ("x-codex-bridge-",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +96,7 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        proxy_request_budget_seconds: float,
     ) -> AsyncIterator[str]:
         settings = get_settings()
         timeout = _owner_forward_timeout(
@@ -100,7 +119,7 @@ class HTTPBridgeOwnerClient:
                     async for event_block in _iter_sse_event_blocks(
                         response,
                         request_started_at=request_started_at,
-                        proxy_request_budget_seconds=settings.proxy_request_budget_seconds,
+                        proxy_request_budget_seconds=proxy_request_budget_seconds,
                         stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
                     ):
                         yield event_block
@@ -122,9 +141,7 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
-    forwarded = dict(headers)
-    forwarded.pop("host", None)
-    forwarded.pop("content-length", None)
+    forwarded = _owner_forward_request_headers(headers)
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
@@ -140,6 +157,19 @@ def build_owner_forward_headers(
         forwarded[HTTP_BRIDGE_RESERVATION_MODEL_HEADER] = context.reservation.model
     forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(payload=payload, context=context)
     return forwarded
+
+
+def _owner_forward_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    stripped_names = set(_OWNER_FORWARD_STRIPPED_HEADER_NAMES)
+    for key, value in headers.items():
+        if key.lower() == "connection":
+            stripped_names.update(part.strip().lower() for part in value.split(",") if part.strip())
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in stripped_names
+        and not any(key.lower().startswith(prefix) for prefix in _OWNER_FORWARD_STRIPPED_HEADER_PREFIXES)
+    }
 
 
 def parse_forwarded_request(

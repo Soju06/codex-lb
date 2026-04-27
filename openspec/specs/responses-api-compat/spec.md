@@ -49,3 +49,32 @@ When the HTTP responses bridge observes an upstream websocket close with `close_
 - **WHEN** upstream closes the HTTP responses bridge with `close_code = 1000` before any `response.*` event for the pending request
 - **THEN** the proxy returns HTTP 502 with `error.code = "upstream_rejected_input"`
 - **AND** does not transparently replay the pre-created request
+
+### Requirement: Native `/backend-api/codex` routes accept the Codex tool surface
+The service MUST accept native `/backend-api/codex/responses` HTTP and websocket requests that include the Codex Desktop tool surface. This includes custom tools plus built-in Codex tool types such as `image_generation`, `file_search`, `code_interpreter`, and `computer_use_preview`. The service MUST continue normalizing `web_search_preview` to `web_search` before forwarding upstream. OpenAI-style `/v1/*` routes MUST keep rejecting unsupported built-in tools with an invalid_request_error.
+
+#### Scenario: backend responses accept native built-in and custom tools
+- **WHEN** a client sends `/backend-api/codex/responses` with tools including `{"type":"custom","name":"exec"}` and `{"type":"image_generation"}`
+- **THEN** the service accepts the request and forwards the tools upstream without returning an invalid_request_error
+
+#### Scenario: v1 responses continue rejecting unsupported built-in tools
+- **WHEN** a client sends `/v1/responses` with `tools=[{"type":"image_generation"}]`
+- **THEN** the service returns a 4xx OpenAI invalid_request_error indicating the unsupported tool type
+
+### Requirement: Bridge-enabled worker pools use addressable bridge owners
+
+When the HTTP responses session bridge is enabled and the configured runtime worker count is greater than one, the service MUST NOT start a plain Uvicorn multi-worker process group with a shared bridge instance id. It MUST instead start a front listener plus single-worker backend processes where each backend has a unique bridge instance id and an advertised endpoint that can route owner handoff to that worker-local bridge session map.
+
+#### Scenario: bridge-enabled multi-worker startup uses addressable workers
+
+- **WHEN** the HTTP responses session bridge is enabled
+- **AND** the configured worker count is greater than one
+- **THEN** startup launches single-worker backend app processes with unique bridge instance ids
+- **AND** each backend advertises a worker-specific bridge endpoint
+- **AND** public HTTP and WebSocket traffic enters through one front listener
+
+#### Scenario: bridge-disabled multi-worker startup remains plain Uvicorn
+
+- **WHEN** the HTTP responses session bridge is disabled
+- **AND** the configured worker count is greater than one
+- **THEN** startup continues to pass the requested worker count directly to Uvicorn

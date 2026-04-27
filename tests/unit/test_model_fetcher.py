@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
+from app.core.clients.model_fetcher import ModelFetchError, _response_preview, fetch_models_for_plan
 
 pytestmark = pytest.mark.unit
 
@@ -52,3 +52,8 @@ async def test_fetch_models_for_plan_maps_read_timeout_to_model_fetch_error(monk
 
     assert exc_info.value.status_code == 504
     assert exc_info.value.message == "Upstream models API timed out"
+
+
+def test_response_preview_normalizes_whitespace_and_bounds_length() -> None:
+    preview = _response_preview("  Forbidden \n request   details  ", max_chars=12)
+    assert preview == "Forbidden re"

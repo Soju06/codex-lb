@@ -150,18 +150,7 @@ async def test_v1_responses_accepts_previous_response_id(async_client, monkeypat
         {"type": "image_generation"},
     ],
 )
-async def test_v1_responses_forwards_builtin_tools(async_client, monkeypatch, tool_payload):
-    await _import_account(async_client, "acc_builtin_tools", "builtin-tools@example.com")
-
-    seen = {}
-
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        del headers, access_token, account_id, base_url, raise_for_status
-        seen["payload"] = payload
-        yield _completed_event("resp_builtin_tools")
-
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-
+async def test_v1_responses_rejects_builtin_tools(async_client, tool_payload):
     request_payload = {
         "model": "gpt-5.2",
         "input": [
@@ -174,8 +163,8 @@ async def test_v1_responses_forwards_builtin_tools(async_client, monkeypatch, to
     }
 
     resp = await async_client.post("/v1/responses", json=request_payload)
-    assert resp.status_code == 200
-    assert seen["payload"].tools == [tool_payload]
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
 
 
 @pytest.mark.asyncio
@@ -398,6 +387,49 @@ async def test_backend_responses_allows_web_search(async_client, monkeypatch, to
     resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
     assert resp.status_code == 200
     assert seen["payload"].tools == [{"type": "web_search"}]
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_allows_native_codex_tool_surface(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_native_tools", "backend-native-tools@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_native_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Create a tool response."}]}],
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "description": "Run JS",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"},
+            },
+            {
+                "type": "function",
+                "name": "shell_command",
+                "description": "Run shell",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {"type": "image_generation"},
+            {"type": "web_search_preview"},
+        ],
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [
+        request_payload["tools"][0],
+        request_payload["tools"][1],
+        request_payload["tools"][2],
+        {"type": "web_search"},
+    ]
 
 
 @pytest.mark.asyncio

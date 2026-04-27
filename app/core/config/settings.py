@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = False
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
+    http_responses_session_bridge_codex_request_budget_seconds: float = Field(default=180.0, gt=0)
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
@@ -164,13 +165,14 @@ class Settings(BaseSettings):
     http_responses_session_bridge_enabled: bool = True
     http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
-    http_responses_session_bridge_codex_prewarm_enabled: bool = False
+    http_responses_session_bridge_codex_prewarm_enabled: bool = True
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool = False
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
+    http_responses_session_bridge_worker_pool_mode: bool = False
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
@@ -251,7 +253,9 @@ class Settings(BaseSettings):
     proxy_compact_response_create_limit: int = Field(default=64, ge=0)
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
+    proxy_connect_forbidden_cooldown_seconds: float = Field(default=30.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    model_registry_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 
     memory_warning_threshold_mb: int = 0
     memory_reject_threshold_mb: int = 0
@@ -264,8 +268,8 @@ class Settings(BaseSettings):
     shutdown_drain_timeout_seconds: int = 30
 
     # HTTP connector limits
-    http_connector_limit: int = 100
-    http_connector_limit_per_host: int = 50
+    http_connector_limit: int = 200
+    http_connector_limit_per_host: int = 100
 
     @field_validator("database_url")
     @classmethod

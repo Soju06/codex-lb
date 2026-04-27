@@ -86,6 +86,45 @@ def test_build_owner_forward_headers_preserves_original_affinity_key() -> None:
     assert headers[HTTP_BRIDGE_AFFINITY_KEY_HEADER] == "sid-123"
 
 
+def test_build_owner_forward_headers_strips_transport_and_bridge_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_123",
+    )
+
+    headers = build_owner_forward_headers(
+        headers={
+            "Host": "127.0.0.1:2455",
+            "Connection": "keep-alive, X-Remove-Me",
+            "Keep-Alive": "timeout=5",
+            "Transfer-Encoding": "chunked",
+            "Content-Length": "42",
+            "Content-Encoding": "gzip",
+            "X-Remove-Me": "connection-token",
+            "x-codex-bridge-target-instance": "spoofed",
+            "Content-Type": "application/json",
+            "Authorization": "Bearer proxy-key",
+        },
+        payload=payload,
+        context=context,
+    )
+
+    lowered = {key.lower() for key in headers}
+    assert "host" not in lowered
+    assert "connection" not in lowered
+    assert "keep-alive" not in lowered
+    assert "transfer-encoding" not in lowered
+    assert "content-length" not in lowered
+    assert "content-encoding" not in lowered
+    assert "x-remove-me" not in lowered
+    assert headers[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] == "instance-b"
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Authorization"] == "Bearer proxy-key"
+
+
 def test_parse_forwarded_request_rejects_missing_signature() -> None:
     payload = _payload()
     headers = {
@@ -286,6 +325,7 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
             headers={"Authorization": "Bearer proxy-key"},
             context=context,
             request_started_at=10.0,
+            proxy_request_budget_seconds=75.0,
         )
     ]
 

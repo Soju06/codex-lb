@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.core.openai.contracts import OpenAIMessage
 from app.core.openai.message_coercion import coerce_messages
@@ -12,6 +12,7 @@ from app.core.openai.requests import (
     ResponsesTextControls,
     ResponsesTextFormat,
     normalize_reasoning_aliases,
+    allow_native_tool_types,
     normalize_tool_type,
     validate_tool_types,
 )
@@ -68,8 +69,8 @@ class ChatCompletionsRequest(BaseModel):
 
     @field_validator("tools")
     @classmethod
-    def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value)
+    def _validate_tools(cls, value: list[JsonValue], info: ValidationInfo) -> list[JsonValue]:
+        return validate_tool_types(value, allow_native_tool_types=allow_native_tool_types(info.context))
 
     @field_validator("messages")
     @classmethod

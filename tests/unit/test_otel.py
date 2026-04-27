@@ -1096,6 +1096,34 @@ async def test_validate_bridge_advertise_endpoint_rejects_loopback_when_peer_exi
 
 
 @pytest.mark.asyncio
+async def test_validate_bridge_advertise_endpoint_allows_loopback_peer_for_worker_pool():
+    import app.main as main
+
+    class _RingReader:
+        async def list_active(
+            self,
+            stale_threshold_seconds: int = main.RING_STALE_THRESHOLD_SECONDS,
+            *,
+            require_endpoint: bool = False,
+        ) -> list[str]:
+            del stale_threshold_seconds, require_endpoint
+            return ["instance-a-worker-1", "instance-a-worker-2"]
+
+    settings = Settings(
+        http_responses_session_bridge_instance_id="instance-a-worker-1",
+        http_responses_session_bridge_advertise_base_url="http://127.0.0.1:3455",
+        http_responses_session_bridge_worker_pool_mode=True,
+    )
+
+    await main._validate_bridge_advertise_endpoint_for_multi_replica(
+        svc=_RingReader(),
+        settings=settings,
+        instance_id="instance-a-worker-1",
+        endpoint_base_url=settings.http_responses_session_bridge_advertise_base_url,
+    )
+
+
+@pytest.mark.asyncio
 async def test_validate_bridge_advertise_endpoint_ignores_stale_grace_peer_for_loopback():
     import app.main as main
 

@@ -99,6 +99,16 @@ from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
 
+
+def _validate_backend_responses_payload(
+    request: Request,
+    payload: dict[str, JsonValue],
+) -> ResponsesRequest | JSONResponse:
+    try:
+        return proxy_service_module.normalize_backend_responses_payload(payload)
+    except ValidationError as exc:
+        return _logged_error_json_response(request, 400, openai_validation_error(exc))
+
 _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     {
         "message",
@@ -202,13 +212,16 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
 )
 async def responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: dict[str, JsonValue] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    responses_payload = _validate_backend_responses_payload(request, payload)
+    if isinstance(responses_payload, JSONResponse):
+        return responses_payload
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=True,
@@ -240,6 +253,7 @@ async def responses_websocket(
         forwarded_headers,
         codex_session_affinity=True,
         openai_cache_affinity=True,
+        allow_native_tool_types=True,
         api_key=api_key,
     )
 
@@ -308,12 +322,15 @@ async def v1_responses(
 )
 async def internal_bridge_responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: dict[str, JsonValue] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
 ) -> Response:
+    responses_payload = _validate_backend_responses_payload(request, payload)
+    if isinstance(responses_payload, JSONResponse):
+        return responses_payload
     forwarded_request_context, internal_error = parse_forwarded_request(
         request.headers,
-        payload=payload,
+        payload=responses_payload,
         current_instance=get_settings().http_responses_session_bridge_instance_id,
     )
     if internal_error is not None or forwarded_request_context is None:
@@ -326,7 +343,7 @@ async def internal_bridge_responses(
     forwarded_headers = _strip_internal_bridge_headers(request.headers)
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=forwarded_request_context.context.codex_session_affinity,
@@ -372,6 +389,7 @@ async def v1_responses_websocket(
         forwarded_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
+        allow_native_tool_types=False,
         api_key=api_key,
     )
 

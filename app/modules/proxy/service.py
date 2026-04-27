@@ -33,8 +33,12 @@ from app.core.auth.refresh import (
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
-from app.core.balancer.types import ClassifiedFailure, UpstreamError
-from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
+from app.core.balancer.types import ClassifiedFailure, FailurePhase, UpstreamError
+from app.core.clients.files import (
+    FileProxyError,
+    pop_files_timeout_overrides,
+    push_files_timeout_overrides,
+)
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.proxy import (
@@ -84,6 +88,8 @@ from app.core.metrics.prometheus import (
     bridge_soft_local_rebind_total,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    client_exposed_errors_total,
+    failover_total,
 )
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
@@ -170,6 +176,15 @@ from app.modules.usage.additional_quota_keys import get_additional_display_label
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_backend_responses_payload(payload: dict[str, JsonValue]) -> ResponsesRequest:
+    return normalize_responses_request_payload(
+        payload,
+        openai_compat=False,
+        allow_native_tool_types=True,
+    )
+
 
 _UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
@@ -677,6 +692,11 @@ class ProxyService:
                     headers=headers,
                     api_key_reservation=api_key_reservation,
                     codex_session_affinity=codex_session_affinity,
+                    proxy_request_budget_seconds=_responses_request_budget_seconds(
+                        get_settings(),
+                        codex_session_affinity=codex_session_affinity,
+                        request_transport=_REQUEST_TRANSPORT_HTTP,
+                    ),
                     downstream_turn_state=downstream_turn_state,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,
@@ -1337,6 +1357,7 @@ class ProxyService:
         headers: Mapping[str, str],
         api_key_reservation: ApiKeyUsageReservationData | None,
         codex_session_affinity: bool,
+        proxy_request_budget_seconds: float,
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
@@ -1376,6 +1397,7 @@ class ProxyService:
                 headers=forward_headers,
                 context=forward_context,
                 request_started_at=request_started_at,
+                proxy_request_budget_seconds=proxy_request_budget_seconds,
             ):
                 forwarded_any = True
                 yield event_block
@@ -1717,6 +1739,7 @@ class ProxyService:
                             _upstream_error_from_openai(error),
                             code,
                             http_status=exc.status_code,
+                            phase="connect",
                         )
                         if getattr(base_settings, "deterministic_failover_enabled", True):
                             action = failover_decision(
@@ -1735,11 +1758,20 @@ class ProxyService:
                             classified["failure_class"],
                             action,
                         )
+                        _record_failover_metric(
+                            transport="compact",
+                            failure_class=classified["failure_class"],
+                            action=action,
+                        )
                         if action == "failover_next":
                             last_exc = exc
                             excluded_account_ids.add(account.id)
                             transient_exhausted = True
                             break
+                        _record_client_exposed_precommit_error_metric(
+                            transport="compact",
+                            error_code=code,
+                        )
                         await self._settle_compact_api_key_usage(
                             api_key=api_key,
                             api_key_reservation=api_key_reservation,
@@ -1757,6 +1789,11 @@ class ProxyService:
                 request_service_tier=request_service_tier,
             )
             if last_exc is not None:
+                error = _parse_openai_error(last_exc.payload)
+                _record_client_exposed_precommit_error_metric(
+                    transport="compact",
+                    error_code=_normalize_error_code(error.code if error else None, error.type if error else None),
+                )
                 raise last_exc
             raise ProxyResponseError(
                 502,
@@ -2395,6 +2432,7 @@ class ProxyService:
         *,
         codex_session_affinity: bool,
         openai_cache_affinity: bool,
+        allow_native_tool_types: bool,
         api_key: ApiKeyData | None,
     ) -> None:
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
@@ -2530,6 +2568,7 @@ class ProxyService:
                                     headers=headers,
                                     codex_session_affinity=codex_session_affinity,
                                     openai_cache_affinity=openai_cache_affinity,
+                                    allow_native_tool_types=allow_native_tool_types,
                                     sticky_threads_enabled=sticky_threads_enabled,
                                     openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                     api_key=api_key,
@@ -2848,13 +2887,18 @@ class ProxyService:
         headers: Mapping[str, str],
         codex_session_affinity: bool,
         openai_cache_affinity: bool,
+        allow_native_tool_types: bool,
         sticky_threads_enabled: bool,
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
-        responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
+        responses_payload = normalize_responses_request_payload(
+            payload,
+            openai_compat=openai_cache_affinity,
+            allow_native_tool_types=allow_native_tool_types,
+        )
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
         self._raise_for_unsupported_input_image_references(responses_payload)
@@ -3139,6 +3183,10 @@ class ProxyService:
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 error_message = error.message if error else None
+                _record_client_exposed_precommit_error_metric(
+                    transport="websocket",
+                    error_code=error_code or "upstream_error",
+                )
                 await self._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
@@ -3160,6 +3208,10 @@ class ProxyService:
             error = _parse_openai_error(last_failover_exc.payload)
             error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
             error_message = error.message if error else None
+            _record_client_exposed_precommit_error_metric(
+                transport="websocket",
+                error_code=error_code or "upstream_error",
+            )
             await self._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -3515,6 +3567,11 @@ class ProxyService:
             attempt,
             failure_class,
             action,
+        )
+        _record_failover_metric(
+            transport="websocket",
+            failure_class=failure_class,
+            action=action,
         )
         return action
 
@@ -5228,12 +5285,16 @@ class ProxyService:
         session: "_HTTPBridgeSession",
     ) -> None:
         runtime_settings = get_settings()
+        request_budget_seconds = _http_bridge_session_request_budget_seconds(
+            runtime_settings,
+            session=session,
+        )
         try:
             while True:
                 receive_timeout = await self._next_websocket_receive_timeout(
                     session.pending_requests,
                     pending_lock=session.pending_lock,
-                    proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                    proxy_request_budget_seconds=request_budget_seconds,
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                 )
                 try:
@@ -5931,6 +5992,7 @@ class ProxyService:
             _upstream_error_from_openai(error),
             error_code,
             http_status=exc.status_code,
+            phase="connect",
         )
 
     async def _relay_upstream_websocket_messages(
@@ -7000,7 +7062,12 @@ class ProxyService:
         start = time.monotonic()
         base_settings = get_settings()
         settings = await get_settings_cache().get()
-        deadline = start + base_settings.proxy_request_budget_seconds
+        request_budget_seconds = _responses_request_budget_seconds(
+            base_settings,
+            codex_session_affinity=codex_session_affinity,
+            request_transport=request_transport,
+        )
+        deadline = start + request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
         if rewritten_file_account_id is None:
@@ -7338,6 +7405,7 @@ class ProxyService:
                                     _upstream_error_from_openai(error),
                                     code,
                                     http_status=tex.status_code,
+                                    phase="connect",
                                 )
                                 if getattr(base_settings, "deterministic_failover_enabled", True):
                                     action = failover_decision(
@@ -7356,10 +7424,19 @@ class ProxyService:
                                     classified["failure_class"],
                                     action,
                                 )
+                                _record_failover_metric(
+                                    transport="stream",
+                                    failure_class=classified["failure_class"],
+                                    action=action,
+                                )
                                 if action == "failover_next":
                                     last_transient_exc = tex
                                     excluded_account_ids.add(account.id)
                                     break
+                                _record_client_exposed_precommit_error_metric(
+                                    transport="stream",
+                                    error_code=code,
+                                )
                                 raise
                             transient_retries += 1
                             error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
@@ -8331,12 +8408,13 @@ class ProxyService:
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        phase: FailurePhase = "first_event",
     ) -> ClassifiedFailure:
         classified = classify_upstream_failure(
             error_code=code,
             error=error,
             http_status=http_status,
-            phase="first_event",
+            phase=phase,
         )
         if _is_account_neutral_error_code(code):
             return classified
@@ -8346,6 +8424,21 @@ class ProxyService:
             await self._load_balancer.mark_quota_exceeded(account, error)
         elif code in PERMANENT_FAILURE_CODES:
             await self._load_balancer.mark_permanent_failure(account, code)
+        elif phase == "connect" and http_status == 403:
+            cooldown_seconds = max(0.0, float(get_settings().proxy_connect_forbidden_cooldown_seconds))
+            await self._load_balancer.mark_temporary_cooldown(
+                account,
+                cooldown_seconds,
+            )
+            logger.info(
+                "Applied connect-phase forbidden cooldown account_id=%s request_id=%s code=%s "
+                "status=%s cooldown_seconds=%.1f",
+                account.id,
+                get_request_id(),
+                code,
+                http_status,
+                cooldown_seconds,
+            )
         else:
             await self._load_balancer.record_error(account)
             logger.info(
@@ -9809,6 +9902,29 @@ def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 
 
+def _responses_request_budget_seconds(
+    settings: object,
+    *,
+    codex_session_affinity: bool,
+    request_transport: str,
+) -> float:
+    default_budget = float(getattr(settings, "proxy_request_budget_seconds"))
+    if request_transport != _REQUEST_TRANSPORT_HTTP or not codex_session_affinity:
+        return default_budget
+    codex_budget = getattr(settings, "http_responses_session_bridge_codex_request_budget_seconds", None)
+    if codex_budget is None:
+        return default_budget
+    return min(default_budget, float(codex_budget))
+
+
+def _http_bridge_session_request_budget_seconds(settings: object, *, session: "_HTTPBridgeSession") -> float:
+    return _responses_request_budget_seconds(
+        settings,
+        codex_session_affinity=session.codex_session,
+        request_transport=_REQUEST_TRANSPORT_HTTP,
+    )
+
+
 def _websocket_connect_deadline(request_state: _WebSocketRequestState, budget_seconds: float) -> float:
     started_at = request_state.started_at if request_state.started_at > 0 else time.monotonic()
     return started_at + budget_seconds
@@ -10634,6 +10750,23 @@ def _http_bridge_request_stage(
     ):
         return "follow_up"
     return "first_turn"
+
+
+def _record_failover_metric(*, transport: str, failure_class: str, action: str) -> None:
+    if PROMETHEUS_AVAILABLE and failover_total is not None:
+        failover_total.labels(
+            transport=transport,
+            failure_class=failure_class,
+            action=action,
+        ).inc()
+
+
+def _record_client_exposed_precommit_error_metric(*, transport: str, error_code: str) -> None:
+    if PROMETHEUS_AVAILABLE and client_exposed_errors_total is not None:
+        client_exposed_errors_total.labels(
+            transport=transport,
+            error_code=error_code,
+        ).inc()
 
 
 def _record_same_account_takeover(*, preferred_account_id: str | None, selected_account_id: str | None) -> None:

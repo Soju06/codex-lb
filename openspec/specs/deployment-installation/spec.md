@@ -3,9 +3,7 @@
 ## Purpose
 
 Define installation modes and smoke-test expectations so the Helm chart remains portable across supported deployments.
-
 ## Requirements
-
 ### Requirement: Helm chart is organized around install modes
 
 The Helm chart MUST document and support three primary install modes: bundled PostgreSQL, direct external database, and external secrets. These install contracts MUST be portable across Kubernetes providers without requiring provider-specific chart forks.
@@ -50,3 +48,14 @@ The chart MUST declare a minimum supported Kubernetes version of `1.32`, and CI 
 - **WHEN** CI runs Kubernetes schema validation and kind-based smoke installs
 - **THEN** the validation set includes Kubernetes `1.35`
 - **AND** pre-`1.32` validation targets are not treated as the support baseline
+
+### Requirement: Direct Docker respects addressable worker-pool startup
+
+The direct Docker helper MUST rebuild the current checkout and recreate the local container without forcing the runtime worker count to one. If the env file configures multiple workers while the HTTP responses session bridge is enabled, the image startup path MUST use the addressable bridge worker pool rather than a plain multi-worker Uvicorn process.
+
+#### Scenario: direct Docker uses env-file worker count
+
+- **WHEN** an operator runs the local Docker helper
+- **AND** `.env.local` configures `CODEX_LB_UVICORN_WORKERS` greater than one
+- **THEN** the helper does not add a conflicting `CODEX_LB_UVICORN_WORKERS=1` override
+- **AND** the container startup path is responsible for selecting the safe worker-pool runtime

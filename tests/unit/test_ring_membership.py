@@ -63,6 +63,26 @@ async def test_list_active_can_require_advertised_endpoint(ring_service: RingMem
 
 
 @pytest.mark.asyncio
+async def test_register_replaces_prior_owner_for_same_endpoint(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-old", endpoint_base_url="http://127.0.0.1:3455")
+
+    await ring_service.register("pod-new", endpoint_base_url="http://127.0.0.1:3455")
+
+    assert await ring_service.list_active(require_endpoint=True) == ["pod-new"]
+    assert await ring_service.resolve_endpoint("pod-old") is None
+    assert await ring_service.resolve_endpoint("pod-new") == "http://127.0.0.1:3455"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_replaces_prior_owner_for_same_endpoint(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-old", endpoint_base_url="http://127.0.0.1:3455")
+
+    await ring_service.heartbeat("pod-new", endpoint_base_url="http://127.0.0.1:3455")
+
+    assert await ring_service.list_active(require_endpoint=True) == ["pod-new"]
+
+
+@pytest.mark.asyncio
 async def test_unregister(ring_service: RingMembershipService) -> None:
     """Register then unregister, list_active() returns empty."""
     await ring_service.register("pod-1")

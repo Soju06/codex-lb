@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
@@ -29,6 +29,8 @@ UNSUPPORTED_TOOL_TYPES = {
     "computer_use_preview",
     "image_generation",
 }
+
+ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY = "allow_native_tool_types"
 
 _TOOL_TYPE_ALIASES = {
     "web_search_preview": "web_search",
@@ -70,7 +72,17 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     return choice
 
 
-def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = False) -> list[JsonValue]:
+def allow_native_tool_types(context: object | None) -> bool:
+    if not isinstance(context, Mapping):
+        return False
+    return bool(context.get(ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY))
+
+
+def validate_tool_types(
+    tools: list[JsonValue],
+    *,
+    allow_native_tool_types: bool = False,
+) -> list[JsonValue]:
     normalized_tools: list[JsonValue] = []
     for tool in tools:
         if not is_json_mapping(tool):
@@ -84,7 +96,7 @@ def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = F
                 tool = dict(tool_mapping)
                 tool["type"] = normalized_type
                 tool_type = normalized_type
-            if not allow_builtin_tools and tool_type in UNSUPPORTED_TOOL_TYPES:
+            if tool_type in UNSUPPORTED_TOOL_TYPES and not allow_native_tool_types:
                 raise ValueError(f"Unsupported tool type: {tool_type}")
         normalized_tools.append(tool)
     return normalized_tools
@@ -483,8 +495,8 @@ class ResponsesRequest(BaseModel):
 
     @field_validator("tools")
     @classmethod
-    def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+    def _validate_tools(cls, value: list[JsonValue], info: ValidationInfo) -> list[JsonValue]:
+        return validate_tool_types(value, allow_native_tool_types=allow_native_tool_types(info.context))
 
     @field_validator("tool_choice")
     @classmethod

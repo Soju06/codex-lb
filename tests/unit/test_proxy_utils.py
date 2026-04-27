@@ -1078,6 +1078,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         max_sse_event_bytes=16 * 1024 * 1024,
         http_responses_session_bridge_instance_id="test-instance",
         http_responses_session_bridge_instance_ring=[],
+        proxy_connect_forbidden_cooldown_seconds=30.0,
     )
 
 
@@ -3017,7 +3018,8 @@ async def test_stream_responses_auto_transport_prefers_http_for_image_generation
             "instructions": "draw",
             "input": [{"role": "user", "content": "draw"}],
             "tools": [{"type": "image_generation"}],
-        }
+        },
+        context={"allow_native_tool_types": True},
     )
 
     events = [
@@ -4439,6 +4441,8 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
 
 @pytest.mark.asyncio
 async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.deterministic_failover_enabled = False
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_ws_retry_error")
@@ -4446,6 +4450,8 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
     second_exc = proxy_module.ProxyResponseError(403, openai_error("forbidden", "denied"))
     handle_connect_error = AsyncMock()
 
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -4491,6 +4497,78 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
     assert sent_payload["status"] == 403
     assert sent_payload["error"]["code"] == "forbidden"
     assert request_logs.calls[0]["error_code"] == "forbidden"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_fails_over_on_handshake_forbidden_with_cooldown(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.proxy_connect_forbidden_cooldown_seconds = 12.5
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_ws_failover_forbidden_a")
+    account_b = _make_account("acc_ws_failover_forbidden_b")
+    upstream = SimpleNamespace()
+
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=account_a, error_message=None),
+            AccountSelection(account=account_b, error_message=None),
+        ]
+    )
+    mark_temporary_cooldown = AsyncMock()
+    record_error = AsyncMock()
+    first_handshake_error = proxy_module.ProxyResponseError(
+        403,
+        openai_error("forbidden", "Forbidden"),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "mark_temporary_cooldown", mark_temporary_cooldown)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_handshake_error, upstream]))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_failover_handshake_403",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.4",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == account_b
+    assert selected_upstream is upstream
+    assert select_account.await_count == 2
+    first_call, second_call = select_account.await_args_list
+    assert first_call.kwargs["exclude_account_ids"] == set()
+    assert second_call.kwargs["exclude_account_ids"] == {account_a.id}
+    mark_temporary_cooldown.assert_awaited_once()
+    cooldown_call = mark_temporary_cooldown.await_args
+    assert cooldown_call is not None
+    assert cooldown_call.args[0] == account_a
+    assert cooldown_call.args[1] == 12.5
+    record_error.assert_not_awaited()
+    websocket_send.assert_not_awaited()
+    assert request_logs.calls == []
 
 
 @pytest.mark.asyncio
@@ -5108,6 +5186,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
         headers={"session_id": "sid-ignored"},
         codex_session_affinity=False,
         openai_cache_affinity=True,
+        allow_native_tool_types=False,
         sticky_threads_enabled=False,
         openai_cache_affinity_max_age_seconds=300,
         api_key=stale_api_key,
@@ -5133,6 +5212,53 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert normalized_payload["model"] == "gpt-5.2"
     assert normalized_payload["reasoning"] == {"effort": "high"}
     assert normalized_payload["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_allows_native_tool_surface(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=None))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        {
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": "hello",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "exec",
+                    "description": "Run JS",
+                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"},
+                },
+                {"type": "image_generation"},
+                {"type": "web_search_preview"},
+            ],
+            "tool_choice": "auto",
+        },
+        headers={"session_id": "sid-native"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        allow_native_tool_types=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=None,
+    )
+
+    normalized_payload = json.loads(prepared.text_data)
+    assert normalized_payload["tools"] == [
+        {"type": "image_generation"},
+        {"type": "web_search"},
+        {
+            "type": "custom",
+            "name": "exec",
+            "description": "Run JS",
+            "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"},
+        },
+    ]
+    assert normalized_payload["tool_choice"] == "auto"
 
 
 @pytest.mark.asyncio
@@ -5177,6 +5303,7 @@ async def test_prepare_websocket_response_create_request_logs_affinity_metadata(
             headers={"session_id": "ws-session-1"},
             codex_session_affinity=True,
             openai_cache_affinity=True,
+            allow_native_tool_types=True,
             sticky_threads_enabled=False,
             openai_cache_affinity_max_age_seconds=300,
             api_key=api_key,
@@ -5237,6 +5364,7 @@ async def test_prepare_websocket_response_create_request_releases_reservation_on
             headers={},
             codex_session_affinity=False,
             openai_cache_affinity=True,
+            allow_native_tool_types=False,
             sticky_threads_enabled=False,
             openai_cache_affinity_max_age_seconds=300,
             api_key=api_key,
@@ -5288,6 +5416,7 @@ async def test_prepare_websocket_response_create_request_does_not_infer_previous
         headers={"session_id": "turn_ws_scope", "x-codex-turn-state": "turn_ws_scope"},
         codex_session_affinity=False,
         openai_cache_affinity=True,
+        allow_native_tool_types=False,
         sticky_threads_enabled=False,
         openai_cache_affinity_max_age_seconds=300,
         api_key=api_key,
@@ -6838,6 +6967,7 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
         {},
         codex_session_affinity=False,
         openai_cache_affinity=False,
+        allow_native_tool_types=False,
         api_key=None,
     )
 
@@ -7069,6 +7199,7 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
         {"x-codex-turn-state": "turn_race_ws"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
+        allow_native_tool_types=False,
         api_key=None,
     )
 
@@ -7233,6 +7364,7 @@ async def test_proxy_responses_websocket_prefers_previous_response_owner_from_re
         {"session_id": "sid_owner"},
         codex_session_affinity=False,
         openai_cache_affinity=False,
+        allow_native_tool_types=False,
         api_key=None,
     )
 
@@ -7382,6 +7514,7 @@ async def test_proxy_responses_websocket_uses_turn_state_as_owner_lookup_session
         {"x-codex-turn-state": "turn_scope_owner"},
         codex_session_affinity=False,
         openai_cache_affinity=False,
+        allow_native_tool_types=False,
         api_key=None,
     )
 
@@ -7531,6 +7664,7 @@ async def test_proxy_responses_websocket_prefers_turn_state_over_session_for_own
         {"session_id": "shared_session_owner", "x-codex-turn-state": "turn_scope_owner"},
         codex_session_affinity=False,
         openai_cache_affinity=False,
+        allow_native_tool_types=False,
         api_key=None,
     )
 
@@ -7605,6 +7739,7 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
         {"session_id": "sid_owner_lookup_failure"},
         codex_session_affinity=False,
         openai_cache_affinity=False,
+        allow_native_tool_types=False,
         api_key=None,
     )
 

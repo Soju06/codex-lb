@@ -1320,6 +1320,27 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_mark_temporary_cooldown_updates_runtime_without_persisting_status(monkeypatch) -> None:
+    now = 1_700_000_000.0
+    monkeypatch.setattr(load_balancer_module.time, "time", lambda: now)
+
+    account = _make_account("acc-temp-cooldown", "temp-cooldown@example.com")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    await balancer.mark_temporary_cooldown(account, 15.0)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.cooldown_until == pytest.approx(now + 15.0)
+    assert runtime.last_error_at == pytest.approx(now)
+    assert runtime.error_count == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
 async def test_select_account_does_not_hold_runtime_lock_during_input_loading(monkeypatch) -> None:
     accounts_started = asyncio.Event()
     release_accounts = asyncio.Event()

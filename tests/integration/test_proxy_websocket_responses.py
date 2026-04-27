@@ -844,6 +844,103 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
     ]
 
 
+def test_backend_responses_websocket_allows_native_codex_tool_surface(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_native_tools", "object": "response", "status": "in_progress"},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_native_tools",
+                        "object": "response",
+                        "status": "completed",
+                        "service_tier": "fast",
+                        "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(id="acct_ws_native_tools"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": "draw something",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "description": "Run JS",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"},
+            },
+            {"type": "image_generation"},
+            {"type": "web_search_preview"},
+        ],
+        "tool_choice": "auto",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    sent_payloads = [json.loads(message) for message in fake_upstream.sent_text]
+    assert len(sent_payloads) == 1
+    assert sent_payloads[0]["type"] == "response.create"
+    assert sent_payloads[0]["model"] == "gpt-5.4"
+    assert sent_payloads[0]["instructions"] == ""
+    assert sent_payloads[0]["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "draw something"}]}
+    ]
+    assert sent_payloads[0]["tools"] == [
+        request_payload["tools"][1],
+        {"type": "web_search"},
+        request_payload["tools"][0],
+    ]
+    assert sent_payloads[0]["tool_choice"] == "auto"
+
+
 def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_instance, monkeypatch):
     called = {"connect": False}
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType
@@ -369,6 +370,63 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         )
 
 
+class _TransactionalFakeApiKeysRepository(_FakeApiKeysRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rollback_count = 0
+        self.commit_count = 0
+        self._limit_snapshot: dict[int, int] | None = None
+
+    async def try_reserve_usage(
+        self,
+        limit_id: int,
+        *,
+        delta: int,
+        expected_reset_at: datetime,
+    ) -> ReservationResult:
+        if self._limit_snapshot is None:
+            self._limit_snapshot = {
+                limit.id: limit.current_value
+                for limits in self._limits.values()
+                for limit in limits
+                if limit.id is not None
+            }
+        return await super().try_reserve_usage(limit_id, delta=delta, expected_reset_at=expected_reset_at)
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+        self._limit_snapshot = None
+
+    async def rollback(self) -> None:
+        self.rollback_count += 1
+        if self._limit_snapshot is None:
+            return
+        for limits in self._limits.values():
+            for limit in limits:
+                if limit.id in self._limit_snapshot:
+                    limit.current_value = self._limit_snapshot[limit.id]
+        self._limit_snapshot = None
+
+
+class _LockedOnceReservationRepository(_TransactionalFakeApiKeysRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_attempts = 0
+
+    async def create_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        key_id: str,
+        model: str,
+        items: list[UsageReservationItemData],
+    ) -> None:
+        self.create_attempts += 1
+        if self.create_attempts == 1:
+            raise _sqlite_locked_error()
+        await super().create_usage_reservation(reservation_id, key_id=key_id, model=model, items=items)
+
+
 def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:
     if limit.limit_type == LimitType.TOTAL_TOKENS:
         return input_tokens + output_tokens
@@ -389,6 +447,14 @@ def _find_limit_by_id(
         for limit in limits:
             if limit.id == limit_id:
                 return limit
+    return None
+
+
+def _sqlite_locked_error() -> OperationalError:
+    return OperationalError("insert into api_key_usage_reservations", {}, Exception("database is locked"))
+
+
+async def _no_sleep(_: float) -> None:
     return None
 
 
@@ -615,6 +681,31 @@ async def test_validate_key_checks_expiry_and_limit() -> None:
     row.expires_at = utcnow() - timedelta(seconds=1)
     with pytest.raises(ApiKeyInvalidError):
         await service.validate_key(created.key)
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_retries_sqlite_locked_reservation_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.db.sqlite_retry.asyncio.sleep", _no_sleep)
+    repo = _LockedOnceReservationRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="sqlite-lock-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="daily", max_value=20_000),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    limits = await repo.get_limits_by_key(created.id)
+    assert reservation.key_id == created.id
+    assert repo.create_attempts == 2
+    assert repo.rollback_count == 1
+    assert limits[0].current_value == 8192
 
 
 @pytest.mark.asyncio

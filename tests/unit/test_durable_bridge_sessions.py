@@ -5,11 +5,13 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import delete
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.time import utcnow
 from app.db.models import Base, HttpBridgeSessionAlias
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 
 pytestmark = pytest.mark.unit
 
@@ -148,6 +150,43 @@ async def test_durable_bridge_claim_renews_same_owner_epoch(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_claim_retries_sqlite_locked_write(
+    monkeypatch: pytest.MonkeyPatch,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    monkeypatch.setattr("app.db.sqlite_retry.asyncio.sleep", _no_sleep)
+    original_claim = DurableBridgeRepository.claim_session
+    attempts = 0
+
+    async def claim_with_one_lock(self: DurableBridgeRepository, *args: object, **kwargs: object):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError("claim durable bridge session", {}, Exception("database is locked"))
+        return await original_claim(self, *args, **kwargs)
+
+    monkeypatch.setattr(DurableBridgeRepository, "claim_session", claim_with_one_lock)
+    coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-locked",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert claimed.canonical_key == "sid-locked"
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_claim_takes_over_after_release(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
@@ -236,6 +275,10 @@ async def test_durable_bridge_release_without_draining_marks_session_closed(
 
     assert reclaimed.owner_instance_id == "instance-b"
     assert reclaimed.latest_response_id == "resp_2"
+
+
+async def _no_sleep(_: float) -> None:
+    return None
 
 
 @pytest.mark.asyncio

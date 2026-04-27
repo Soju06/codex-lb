@@ -57,6 +57,8 @@ docker run -d --name codex-lb \
 uvx codex-lb
 ```
 
+SQLite is the conservative direct-container profile. Keep `CODEX_LB_UVICORN_WORKERS=1` when `CODEX_LB_DATABASE_URL` points at SQLite; this trades throughput for fewer single-writer lock failures while preserving zero-config storage. Use PostgreSQL before increasing workers for sustained multi-worker traffic.
+
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
 ## Remote Setup
@@ -362,7 +364,7 @@ The protected proxy routes covered by this setting are:
 ## Configuration
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
-SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
+SQLite is the default database backend and the SQLite live profile should stay on one request worker. PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`) and is the recommended backend for sustained multi-worker throughput.
 
 ### Dashboard authentication modes
 
@@ -383,6 +385,19 @@ CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User
 If the trusted header is missing and no fallback password is configured, the dashboard fails closed and shows a reverse-proxy-required message instead of loading the UI.
 
 ### Docker examples
+
+**SQLite-conservative / local persistence**
+
+```bash
+docker run -d --name codex-lb \
+  -p 2455:2455 -p 1455:1455 \
+  -e CODEX_LB_DATABASE_URL=sqlite+aiosqlite:////var/lib/codex-lb/store.db \
+  -e CODEX_LB_UVICORN_WORKERS=1 \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
+Use PostgreSQL via `CODEX_LB_DATABASE_URL=postgresql+asyncpg://...` before raising `CODEX_LB_UVICORN_WORKERS` for sustained multi-worker traffic. Keep the standard `2455` and `1455` ports unchanged.
 
 **Authelia / trusted header**
 

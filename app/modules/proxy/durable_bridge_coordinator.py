@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import HttpBridgeSessionState
+from app.db.sqlite_retry import retry_sqlite_lock
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeRepository,
     DurableBridgeSessionSnapshot,
@@ -17,6 +20,8 @@ from app.modules.proxy.durable_bridge_repository import (
 _DURABLE_TURN_STATE_ALIAS = "turn_state"
 _DURABLE_PREVIOUS_RESPONSE_ALIAS = "previous_response_id"
 _DURABLE_SESSION_HEADER_ALIAS = "session_header"
+_T = TypeVar("_T")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,21 +113,24 @@ class DurableBridgeSessionCoordinator:
         allow_takeover: bool,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
-        async with self._session() as session:
-            snapshot = await DurableBridgeRepository(session).claim_session(
-                session_key_kind=session_key_kind,
-                session_key_value=session_key_value,
-                api_key_scope=api_key_scope,
-                instance_id=instance_id,
-                lease_ttl_seconds=lease_ttl_seconds,
-                account_id=account_id,
-                model=model,
-                service_tier=service_tier,
-                latest_turn_state=latest_turn_state,
-                latest_response_id=latest_response_id,
-                allow_takeover=allow_takeover,
-            )
-        return _to_lookup(snapshot)
+        async def _claim_once() -> DurableBridgeLookup:
+            async with self._session() as session:
+                snapshot = await DurableBridgeRepository(session).claim_session(
+                    session_key_kind=session_key_kind,
+                    session_key_value=session_key_value,
+                    api_key_scope=api_key_scope,
+                    instance_id=instance_id,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    account_id=account_id,
+                    model=model,
+                    service_tier=service_tier,
+                    latest_turn_state=latest_turn_state,
+                    latest_response_id=latest_response_id,
+                    allow_takeover=allow_takeover,
+                )
+            return _to_lookup(snapshot)
+
+        return await self._write_with_sqlite_retry("durable_bridge_claim", _claim_once)
 
     async def renew_live_session(
         self,
@@ -137,19 +145,22 @@ class DurableBridgeSessionCoordinator:
         state: HttpBridgeSessionState | None = None,
     ) -> DurableBridgeLookup | None:
         del api_key_id
-        async with self._session() as session:
-            snapshot = await DurableBridgeRepository(session).renew_session(
-                session_id=session_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
-                lease_ttl_seconds=lease_ttl_seconds,
-                latest_turn_state=latest_turn_state,
-                latest_response_id=latest_response_id,
-                state=state,
-            )
-        if snapshot is None:
-            return None
-        return _to_lookup(snapshot)
+        async def _renew_once() -> DurableBridgeLookup | None:
+            async with self._session() as session:
+                snapshot = await DurableBridgeRepository(session).renew_session(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    latest_turn_state=latest_turn_state,
+                    latest_response_id=latest_response_id,
+                    state=state,
+                )
+            if snapshot is None:
+                return None
+            return _to_lookup(snapshot)
+
+        return await self._write_with_sqlite_retry("durable_bridge_renew", _renew_once)
 
     async def release_live_session(
         self,
@@ -159,20 +170,26 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         draining: bool,
     ) -> DurableBridgeLookup | None:
-        async with self._session() as session:
-            snapshot = await DurableBridgeRepository(session).release_session(
-                session_id=session_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
-                draining=draining,
-            )
-        if snapshot is None:
-            return None
-        return _to_lookup(snapshot)
+        async def _release_once() -> DurableBridgeLookup | None:
+            async with self._session() as session:
+                snapshot = await DurableBridgeRepository(session).release_session(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    draining=draining,
+                )
+            if snapshot is None:
+                return None
+            return _to_lookup(snapshot)
+
+        return await self._write_with_sqlite_retry("durable_bridge_release", _release_once)
 
     async def mark_instance_draining(self, *, instance_id: str) -> int:
-        async with self._session() as session:
-            return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)
+        async def _mark_once() -> int:
+            async with self._session() as session:
+                return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)
+
+        return await self._write_with_sqlite_retry("durable_bridge_mark_draining", _mark_once)
 
     async def register_turn_state(
         self,
@@ -185,21 +202,24 @@ class DurableBridgeSessionCoordinator:
         lease_ttl_seconds: float,
     ) -> None:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
-        async with self._session() as session:
-            repository = DurableBridgeRepository(session)
-            await repository.upsert_alias(
-                session_id=session_id,
-                alias_kind=_DURABLE_TURN_STATE_ALIAS,
-                alias_value=turn_state,
-                api_key_scope=api_key_scope,
-            )
-            await repository.renew_session(
-                session_id=session_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
-                lease_ttl_seconds=lease_ttl_seconds,
-                latest_turn_state=turn_state,
-            )
+        async def _register_once() -> None:
+            async with self._session() as session:
+                repository = DurableBridgeRepository(session)
+                await repository.upsert_alias(
+                    session_id=session_id,
+                    alias_kind=_DURABLE_TURN_STATE_ALIAS,
+                    alias_value=turn_state,
+                    api_key_scope=api_key_scope,
+                )
+                await repository.renew_session(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    latest_turn_state=turn_state,
+                )
+
+        await self._write_with_sqlite_retry("durable_bridge_turn_state", _register_once)
 
     async def register_previous_response_id(
         self,
@@ -212,21 +232,24 @@ class DurableBridgeSessionCoordinator:
         lease_ttl_seconds: float,
     ) -> None:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
-        async with self._session() as session:
-            repository = DurableBridgeRepository(session)
-            await repository.upsert_alias(
-                session_id=session_id,
-                alias_kind=_DURABLE_PREVIOUS_RESPONSE_ALIAS,
-                alias_value=response_id,
-                api_key_scope=api_key_scope,
-            )
-            await repository.renew_session(
-                session_id=session_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
-                lease_ttl_seconds=lease_ttl_seconds,
-                latest_response_id=response_id,
-            )
+        async def _register_once() -> None:
+            async with self._session() as session:
+                repository = DurableBridgeRepository(session)
+                await repository.upsert_alias(
+                    session_id=session_id,
+                    alias_kind=_DURABLE_PREVIOUS_RESPONSE_ALIAS,
+                    alias_value=response_id,
+                    api_key_scope=api_key_scope,
+                )
+                await repository.renew_session(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    latest_response_id=response_id,
+                )
+
+        await self._write_with_sqlite_retry("durable_bridge_previous_response", _register_once)
 
     async def register_session_header(
         self,
@@ -236,19 +259,32 @@ class DurableBridgeSessionCoordinator:
         session_header: str,
     ) -> None:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
-        async with self._session() as session:
-            await DurableBridgeRepository(session).upsert_alias(
-                session_id=session_id,
-                alias_kind=_DURABLE_SESSION_HEADER_ALIAS,
-                alias_value=session_header,
-                api_key_scope=api_key_scope,
-            )
+        async def _register_once() -> None:
+            async with self._session() as session:
+                await DurableBridgeRepository(session).upsert_alias(
+                    session_id=session_id,
+                    alias_kind=_DURABLE_SESSION_HEADER_ALIAS,
+                    alias_value=session_header,
+                    api_key_scope=api_key_scope,
+                )
+
+        await self._write_with_sqlite_retry("durable_bridge_session_header", _register_once)
+
+    async def _write_with_sqlite_retry(
+        self,
+        operation_name: str,
+        operation: Callable[[], Awaitable[_T]],
+    ) -> _T:
+        return await retry_sqlite_lock(operation, operation_name=operation_name, logger=logger)
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[AsyncSession]:
         session = self._session_factory()
         try:
             yield session
+        except BaseException:
+            await session.rollback()
+            raise
         finally:
             await session.close()
 

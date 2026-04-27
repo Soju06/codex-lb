@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.time import utcnow
@@ -71,6 +74,23 @@ async def test_register_replaces_prior_owner_for_same_endpoint(ring_service: Rin
     assert await ring_service.list_active(require_endpoint=True) == ["pod-new"]
     assert await ring_service.resolve_endpoint("pod-old") is None
     assert await ring_service.resolve_endpoint("pod-new") == "http://127.0.0.1:3455"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_retries_sqlite_locked_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.db.sqlite_retry.asyncio.sleep", _no_sleep)
+    state = _LockedSessionState()
+
+    def session_factory() -> _LockedOnceAsyncSession:
+        return _LockedOnceAsyncSession(state)
+
+    service = RingMembershipService(session_factory)  # type: ignore[arg-type]
+
+    await service.heartbeat("pod-new")
+
+    assert state.execute_calls == 2
+    assert state.rollback_calls == 1
+    assert state.commit_calls == 1
 
 
 @pytest.mark.asyncio
@@ -227,3 +247,37 @@ async def test_mark_stale_preserves_endpoint_within_grace_window(ring_service: R
     endpoint = await ring_service.resolve_endpoint("pod-grace-endpoint")
 
     assert endpoint == "http://10.0.0.15:8080"
+
+
+class _LockedSessionState:
+    def __init__(self) -> None:
+        self.execute_calls = 0
+        self.rollback_calls = 0
+        self.commit_calls = 0
+        self.close_calls = 0
+
+
+class _LockedOnceAsyncSession:
+    def __init__(self, state: _LockedSessionState) -> None:
+        self._state = state
+
+    def get_bind(self) -> Any:
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def execute(self, _: object) -> None:
+        self._state.execute_calls += 1
+        if self._state.execute_calls == 1:
+            raise OperationalError("upsert bridge ring member", {}, Exception("database is locked"))
+
+    async def commit(self) -> None:
+        self._state.commit_calls += 1
+
+    async def rollback(self) -> None:
+        self._state.rollback_calls += 1
+
+    async def close(self) -> None:
+        self._state.close_calls += 1
+
+
+async def _no_sleep(_: float) -> None:
+    return None

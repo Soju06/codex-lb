@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
+from app.db.sqlite_retry import retry_sqlite_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 RING_HEARTBEAT_INTERVAL_SECONDS = 10
 RING_STALE_THRESHOLD_SECONDS = 30
 RING_STALE_GRACE_SECONDS = RING_HEARTBEAT_INTERVAL_SECONDS + 5
+logger = logging.getLogger(__name__)
 
 
 class RingMembershipService:
@@ -36,106 +39,115 @@ class RingMembershipService:
 
     async def register(self, instance_id: str, *, endpoint_base_url: str | None = None) -> None:
         """Upsert pod into ring. Safe to call multiple times."""
-        async with self._session() as session:
-            # Dialect-specific upsert
-            dialect = session.get_bind().dialect.name
-            metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
-            await _delete_endpoint_owner_conflicts(session, instance_id=instance_id, metadata_json=metadata_json)
-            if dialect == "postgresql":
-                stmt = (
-                    pg_insert(BridgeRingMember)
-                    .values(
-                        id=str(uuid.uuid4()),
-                        instance_id=instance_id,
-                        registered_at=utcnow(),
-                        last_heartbeat_at=utcnow(),
-                        metadata_json=metadata_json,
+        async def _register_once() -> None:
+            async with self._session() as session:
+                # Dialect-specific upsert
+                dialect = session.get_bind().dialect.name
+                metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
+                await _delete_endpoint_owner_conflicts(session, instance_id=instance_id, metadata_json=metadata_json)
+                if dialect == "postgresql":
+                    stmt = (
+                        pg_insert(BridgeRingMember)
+                        .values(
+                            id=str(uuid.uuid4()),
+                            instance_id=instance_id,
+                            registered_at=utcnow(),
+                            last_heartbeat_at=utcnow(),
+                            metadata_json=metadata_json,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["instance_id"],
+                            set_={
+                                "last_heartbeat_at": utcnow(),
+                                "registered_at": utcnow(),
+                                "metadata_json": metadata_json,
+                            },
+                        )
                     )
-                    .on_conflict_do_update(
-                        index_elements=["instance_id"],
-                        set_={
-                            "last_heartbeat_at": utcnow(),
-                            "registered_at": utcnow(),
-                            "metadata_json": metadata_json,
-                        },
+                elif dialect == "sqlite":
+                    stmt = (
+                        sqlite_insert(BridgeRingMember)
+                        .values(
+                            id=str(uuid.uuid4()),
+                            instance_id=instance_id,
+                            registered_at=utcnow(),
+                            last_heartbeat_at=utcnow(),
+                            metadata_json=metadata_json,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["instance_id"],
+                            set_={
+                                "last_heartbeat_at": utcnow(),
+                                "registered_at": utcnow(),
+                                "metadata_json": metadata_json,
+                            },
+                        )
                     )
-                )
-            elif dialect == "sqlite":
-                stmt = (
-                    sqlite_insert(BridgeRingMember)
-                    .values(
-                        id=str(uuid.uuid4()),
-                        instance_id=instance_id,
-                        registered_at=utcnow(),
-                        last_heartbeat_at=utcnow(),
-                        metadata_json=metadata_json,
-                    )
-                    .on_conflict_do_update(
-                        index_elements=["instance_id"],
-                        set_={
-                            "last_heartbeat_at": utcnow(),
-                            "registered_at": utcnow(),
-                            "metadata_json": metadata_json,
-                        },
-                    )
-                )
-            else:
-                raise RuntimeError(f"RingMembershipService unsupported for dialect={dialect!r}")
-            await session.execute(stmt)
-            await session.commit()
+                else:
+                    raise RuntimeError(f"RingMembershipService unsupported for dialect={dialect!r}")
+                await session.execute(stmt)
+                await session.commit()
+
+        await retry_sqlite_lock(_register_once, operation_name="bridge_ring_register", logger=logger)
 
     async def heartbeat(self, instance_id: str, *, endpoint_base_url: str | None = None) -> None:
         """Upsert heartbeat — recovers from mark_stale or unregister by sibling workers."""
-        async with self._session() as session:
-            dialect = session.get_bind().dialect.name
-            now = utcnow()
-            metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
-            await _delete_endpoint_owner_conflicts(session, instance_id=instance_id, metadata_json=metadata_json)
-            if dialect == "postgresql":
-                stmt = (
-                    pg_insert(BridgeRingMember)
-                    .values(
-                        id=str(uuid.uuid4()),
-                        instance_id=instance_id,
-                        registered_at=now,
-                        last_heartbeat_at=now,
-                        metadata_json=metadata_json,
+        async def _heartbeat_once() -> None:
+            async with self._session() as session:
+                dialect = session.get_bind().dialect.name
+                now = utcnow()
+                metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
+                await _delete_endpoint_owner_conflicts(session, instance_id=instance_id, metadata_json=metadata_json)
+                if dialect == "postgresql":
+                    stmt = (
+                        pg_insert(BridgeRingMember)
+                        .values(
+                            id=str(uuid.uuid4()),
+                            instance_id=instance_id,
+                            registered_at=now,
+                            last_heartbeat_at=now,
+                            metadata_json=metadata_json,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["instance_id"],
+                            set_={"last_heartbeat_at": now, "metadata_json": metadata_json},
+                        )
                     )
-                    .on_conflict_do_update(
-                        index_elements=["instance_id"],
-                        set_={"last_heartbeat_at": now, "metadata_json": metadata_json},
+                elif dialect == "sqlite":
+                    stmt = (
+                        sqlite_insert(BridgeRingMember)
+                        .values(
+                            id=str(uuid.uuid4()),
+                            instance_id=instance_id,
+                            registered_at=now,
+                            last_heartbeat_at=now,
+                            metadata_json=metadata_json,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["instance_id"],
+                            set_={"last_heartbeat_at": now, "metadata_json": metadata_json},
+                        )
                     )
-                )
-            elif dialect == "sqlite":
-                stmt = (
-                    sqlite_insert(BridgeRingMember)
-                    .values(
-                        id=str(uuid.uuid4()),
-                        instance_id=instance_id,
-                        registered_at=now,
-                        last_heartbeat_at=now,
-                        metadata_json=metadata_json,
+                else:
+                    stmt = (
+                        update(BridgeRingMember)
+                        .where(BridgeRingMember.instance_id == instance_id)
+                        .values(last_heartbeat_at=now, metadata_json=metadata_json)
                     )
-                    .on_conflict_do_update(
-                        index_elements=["instance_id"],
-                        set_={"last_heartbeat_at": now, "metadata_json": metadata_json},
-                    )
-                )
-            else:
-                stmt = (
-                    update(BridgeRingMember)
-                    .where(BridgeRingMember.instance_id == instance_id)
-                    .values(last_heartbeat_at=now, metadata_json=metadata_json)
-                )
-            await session.execute(stmt)
-            await session.commit()
+                await session.execute(stmt)
+                await session.commit()
+
+        await retry_sqlite_lock(_heartbeat_once, operation_name="bridge_ring_heartbeat", logger=logger)
 
     async def unregister(self, instance_id: str) -> None:
         """Remove pod from ring."""
-        async with self._session() as session:
-            stmt = delete(BridgeRingMember).where(BridgeRingMember.instance_id == instance_id)
-            await session.execute(stmt)
-            await session.commit()
+        async def _unregister_once() -> None:
+            async with self._session() as session:
+                stmt = delete(BridgeRingMember).where(BridgeRingMember.instance_id == instance_id)
+                await session.execute(stmt)
+                await session.commit()
+
+        await retry_sqlite_lock(_unregister_once, operation_name="bridge_ring_unregister", logger=logger)
 
     async def mark_stale(
         self,
@@ -155,14 +167,17 @@ class RingMembershipService:
         active_for_seconds = max(grace_seconds, 0)
         age_seconds = max(stale_threshold_seconds - active_for_seconds, 0)
         stale_time = utcnow() - timedelta(seconds=age_seconds)
-        async with self._session() as session:
-            stmt = (
-                update(BridgeRingMember)
-                .where(BridgeRingMember.instance_id == instance_id)
-                .values(last_heartbeat_at=stale_time)
-            )
-            await session.execute(stmt)
-            await session.commit()
+        async def _mark_stale_once() -> None:
+            async with self._session() as session:
+                stmt = (
+                    update(BridgeRingMember)
+                    .where(BridgeRingMember.instance_id == instance_id)
+                    .values(last_heartbeat_at=stale_time)
+                )
+                await session.execute(stmt)
+                await session.commit()
+
+        await retry_sqlite_lock(_mark_stale_once, operation_name="bridge_ring_mark_stale", logger=logger)
 
     async def list_active(
         self,
@@ -213,6 +228,9 @@ class RingMembershipService:
         session = self._session_factory()
         try:
             yield session
+        except BaseException:
+            await session.rollback()
+            raise
         finally:
             await session.close()
 

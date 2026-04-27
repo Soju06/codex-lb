@@ -780,23 +780,19 @@ async def _proxy_images_generation_request(
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> Response:
-    try:
-        payload = images_service_module.validate_generations_payload(payload)
-    except ClientPayloadError as exc:
-        return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
-
-    # ``validate_generations_payload`` resolves missing ``model`` to the
-    # configured ``images_default_model`` and re-validates the matrix
-    # against the resolved value. After this call ``payload.model`` is
-    # always a concrete ``gpt-image-*`` string.
-    # Apply the API key's enforced model exactly the way ``/v1/responses``
-    # and ``/v1/chat/completions`` do, so a key that is configured to
-    # pin a specific image model cannot be bypassed through the image
-    # routes. The enforced value must still belong to the public
-    # ``gpt-image-*`` family or the request fails closed.
-    requested_model = payload.model
-    assert requested_model is not None
-    effective_model = _effective_model_for_api_key(api_key, requested_model)
+    # Apply the API key's enforced model BEFORE running the cross-field
+    # validation matrix. Otherwise a request that passes validation
+    # under the client-supplied ``model`` (e.g. gpt-image-2 with a 16-
+    # multiple custom size) could silently be swapped to a different
+    # ``gpt-image-*`` variant whose validation matrix it does not
+    # satisfy, leading to a non-canonical upstream failure instead of
+    # a deterministic 400 at the API boundary.
+    settings = proxy_service_module.get_settings()
+    requested_model = payload.model  # may be None; resolved below.
+    effective_model = _effective_model_for_api_key(
+        api_key,
+        requested_model or settings.images_default_model,
+    )
     if not images_service_module.is_supported_image_model(effective_model):
         return _logged_error_json_response(
             request,
@@ -808,12 +804,19 @@ async def _proxy_images_generation_request(
                 param="model",
             ),
         )
-    public_model = effective_model
     if effective_model != requested_model:
-        # Rebind ``payload.model`` so downstream translation, request
-        # logging, and tool config all see the enforced value.
+        # Rebind ``payload.model`` so the validation matrix below, the
+        # downstream translation, request logging, and tool config all
+        # see the enforced (or default-resolved) value.
         payload = payload.model_copy(update={"model": effective_model})
-    settings = proxy_service_module.get_settings()
+
+    try:
+        payload = images_service_module.validate_generations_payload(payload)
+    except ClientPayloadError as exc:
+        return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
+
+    public_model = payload.model
+    assert public_model is not None
     host_model = settings.images_host_model
 
     try:
@@ -948,17 +951,16 @@ async def _proxy_images_edit_request(
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> Response:
-    try:
-        payload = images_service_module.validate_edits_payload(payload)
-    except ClientPayloadError as exc:
-        return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
-
-    # Mirror the ``/v1/images/generations`` handler: apply the API key's
-    # enforced model so image edits respect the same key-pinning policy as
-    # the rest of the proxy.
+    # Apply the API key's enforced model BEFORE validating the
+    # cross-field matrix, so the matrix is checked against the model we
+    # will actually send upstream. See the matching comment in
+    # ``_proxy_images_generation_request``.
+    settings = proxy_service_module.get_settings()
     requested_model = payload.model
-    assert requested_model is not None
-    effective_model = _effective_model_for_api_key(api_key, requested_model)
+    effective_model = _effective_model_for_api_key(
+        api_key,
+        requested_model or settings.images_default_model,
+    )
     if not images_service_module.is_supported_image_model(effective_model):
         return _logged_error_json_response(
             request,
@@ -970,10 +972,16 @@ async def _proxy_images_edit_request(
                 param="model",
             ),
         )
-    public_model = effective_model
     if effective_model != requested_model:
         payload = payload.model_copy(update={"model": effective_model})
-    settings = proxy_service_module.get_settings()
+
+    try:
+        payload = images_service_module.validate_edits_payload(payload)
+    except ClientPayloadError as exc:
+        return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
+
+    public_model = payload.model
+    assert public_model is not None
     host_model = settings.images_host_model
 
     validate_model_access(api_key, effective_model)

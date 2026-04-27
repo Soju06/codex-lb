@@ -106,6 +106,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
         "totalUsd": None,
     }
     assert latest["transport"] == "websocket"
+    assert latest["requestKind"] == "normal"
 
     older = payload[1]
     assert older["status"] == "ok"
@@ -122,6 +123,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
         "totalUsd": pytest.approx(0.002125),
     }
     assert older["transport"] == "http"
+    assert older["requestKind"] == "normal"
 
 
 @pytest.mark.asyncio
@@ -152,7 +154,7 @@ async def test_request_logs_api_excludes_limit_warmup_from_normal_traffic(async_
             status="success",
             error_code=None,
             plan_type="plus",
-            source="limit_warmup",
+            request_kind="warmup",
         )
 
     response = await async_client.get("/api/request-logs?limit=10")

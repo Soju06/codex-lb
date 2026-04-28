@@ -33,7 +33,7 @@ from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
-from app.core.clients.http import get_http_client
+from app.core.clients.http import lease_http_session
 from app.core.config.settings import Settings, get_settings
 from app.core.errors import (
     OpenAIErrorDetail,
@@ -1774,6 +1774,30 @@ async def stream_responses(
     session: aiohttp.ClientSession | None = None,
     upstream_stream_transport_override: str | None = None,
 ) -> AsyncIterator[str]:
+    async with lease_http_session(session) as client_session:
+        async for event_block in _stream_responses_with_session(
+            payload=payload,
+            headers=headers,
+            access_token=access_token,
+            account_id=account_id,
+            base_url=base_url,
+            raise_for_status=raise_for_status,
+            session=client_session,
+            upstream_stream_transport_override=upstream_stream_transport_override,
+        ):
+            yield event_block
+
+
+async def _stream_responses_with_session(
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    session: aiohttp.ClientSession,
+    base_url: str | None = None,
+    raise_for_status: bool = False,
+    upstream_stream_transport_override: str | None = None,
+) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/responses"
@@ -1792,7 +1816,7 @@ async def stream_responses(
     status_code: int | None = None
     error_code: str | None = None
     error_message: str | None = None
-    client_session = session or get_http_client().session
+    client_session = session
     payload_dict = payload.to_payload()
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
@@ -2153,14 +2177,15 @@ async def compact_responses(
     account_id: str | None,
     session: aiohttp.ClientSession | None = None,
 ) -> CompactResponsePayload:
-    transport = _CompactCommandTransport(
-        payload=payload,
-        headers=headers,
-        access_token=access_token,
-        account_id=account_id,
-        session=session or get_http_client().session,
-    )
-    return await transport.execute()
+    async with lease_http_session(session) as client_session:
+        transport = _CompactCommandTransport(
+            payload=payload,
+            headers=headers,
+            access_token=access_token,
+            account_id=account_id,
+            session=client_session,
+        )
+        return await transport.execute()
 
 
 def _is_retryable_compact_status(status_code: int) -> bool:
@@ -2378,6 +2403,32 @@ async def transcribe_audio(
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
 ) -> dict[str, JsonValue]:
+    async with lease_http_session(session) as client_session:
+        return await _transcribe_audio_with_session(
+            audio_bytes,
+            filename=filename,
+            content_type=content_type,
+            prompt=prompt,
+            headers=headers,
+            access_token=access_token,
+            account_id=account_id,
+            base_url=base_url,
+            session=client_session,
+        )
+
+
+async def _transcribe_audio_with_session(
+    audio_bytes: bytes,
+    *,
+    filename: str,
+    content_type: str | None,
+    prompt: str | None,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    session: aiohttp.ClientSession,
+    base_url: str | None = None,
+) -> dict[str, JsonValue]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/transcribe"
@@ -2414,7 +2465,7 @@ async def transcribe_audio(
     if prompt is not None:
         form.add_field("prompt", prompt)
 
-    client_session = session or get_http_client().session
+    client_session = session
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None

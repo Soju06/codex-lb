@@ -25,6 +25,11 @@ class _LeaderElectionLike(Protocol):
     async def try_acquire(self) -> bool: ...
 
 
+@dataclass(slots=True)
+class _TransportRecoveryState:
+    attempted: bool = False
+
+
 def _get_leader_election() -> _LeaderElectionLike:
     module = importlib.import_module("app.core.scheduling.leader_election")
     return cast(_LeaderElectionLike, module.get_leader_election())
@@ -121,6 +126,11 @@ def _error_summary(exc: BaseException) -> str:
         if exc.message:
             summary = f"{summary} message={_compact_error_message(exc.message)}"
         return summary
+    if isinstance(exc, RefreshError):
+        summary = f"code={exc.code} permanent={exc.is_permanent} transport={exc.transport_error}"
+        if exc.message:
+            summary = f"{summary} message={_compact_error_message(exc.message)}"
+        return summary
 
     message = _compact_error_message(str(exc))
     if message:
@@ -137,26 +147,35 @@ async def _fetch_with_failover(
     encryptor: TokenEncryptor,
     accounts_repo: AccountsRepository,
 ) -> list[UpstreamModel] | None:
-    transport_recovery_attempted = False
+    transport_recovery = _TransportRecoveryState()
 
     for account in candidates:
         auth_manager = AuthManager(accounts_repo)
         try:
-            account = await auth_manager.ensure_fresh(account)
-            models, transport_recovery_attempted = await _fetch_models_with_transport_recovery(
+            account = await _ensure_fresh_with_transport_recovery(
+                auth_manager,
+                account,
+                transport_recovery=transport_recovery,
+            )
+            models = await _fetch_models_with_transport_recovery(
                 account,
                 encryptor,
-                transport_recovery_attempted=transport_recovery_attempted,
+                transport_recovery=transport_recovery,
             )
             return models
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
-                    account = await auth_manager.ensure_fresh(account, force=True)
-                    models, transport_recovery_attempted = await _fetch_models_with_transport_recovery(
+                    account = await _ensure_fresh_with_transport_recovery(
+                        auth_manager,
+                        account,
+                        force=True,
+                        transport_recovery=transport_recovery,
+                    )
+                    models = await _fetch_models_with_transport_recovery(
                         account,
                         encryptor,
-                        transport_recovery_attempted=transport_recovery_attempted,
+                        transport_recovery=transport_recovery,
                     )
                     return models
                 except (ModelFetchError, RefreshError) as retry_exc:
@@ -195,28 +214,47 @@ async def _fetch_with_failover(
     return None
 
 
+async def _ensure_fresh_with_transport_recovery(
+    auth_manager: AuthManager,
+    account: Account,
+    *,
+    transport_recovery: _TransportRecoveryState,
+    force: bool = False,
+) -> Account:
+    try:
+        return await auth_manager.ensure_fresh(account, force=force)
+    except RefreshError as exc:
+        if not exc.transport_error or transport_recovery.attempted:
+            raise
+
+        await _refresh_http_client_after_transport_error(account, exc)
+        transport_recovery.attempted = True
+        return await auth_manager.ensure_fresh(account, force=force)
+
+
 async def _fetch_models_with_transport_recovery(
     account: Account,
     encryptor: TokenEncryptor,
     *,
-    transport_recovery_attempted: bool,
-) -> tuple[list[UpstreamModel], bool]:
+    transport_recovery: _TransportRecoveryState,
+) -> list[UpstreamModel]:
     access_token = encryptor.decrypt(account.access_token_encrypted)
     account_id = account.chatgpt_account_id
 
     try:
-        return await fetch_models_for_plan(access_token, account_id), transport_recovery_attempted
+        return await fetch_models_for_plan(access_token, account_id)
     except ModelFetchError as exc:
-        if not exc.transport_error or transport_recovery_attempted:
+        if not exc.transport_error or transport_recovery.attempted:
             raise
 
         await _refresh_http_client_after_transport_error(account, exc)
+        transport_recovery.attempted = True
         access_token = encryptor.decrypt(account.access_token_encrypted)
         account_id = account.chatgpt_account_id
-        return await fetch_models_for_plan(access_token, account_id), True
+        return await fetch_models_for_plan(access_token, account_id)
 
 
-async def _refresh_http_client_after_transport_error(account: Account, transport_exc: ModelFetchError) -> None:
+async def _refresh_http_client_after_transport_error(account: Account, transport_exc: BaseException) -> None:
     try:
         await refresh_http_client()
     except Exception as refresh_exc:

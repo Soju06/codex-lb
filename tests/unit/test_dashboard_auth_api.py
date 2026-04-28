@@ -5,6 +5,7 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
 from app.core.exceptions import DashboardAuthError
@@ -145,6 +146,7 @@ async def test_login_password_uses_configured_dashboard_session_ttl_for_cookie()
                     context,
                 )
 
+    assert isinstance(response, JSONResponse)
     assert response.headers["set-cookie"]
     assert "Max-Age=7200" in response.headers["set-cookie"]
     limiter.check_and_increment.assert_awaited_once()

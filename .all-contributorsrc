@@ -402,6 +402,17 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "mikabytes",
+      "name": "Mika",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1054229?v=4",
+      "profile": "https://mikabytes.com",
+      "contributions": [
+        "code",
+        "doc",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

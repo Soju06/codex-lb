@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 
+import { ensureLocalStorageShim } from "@/test/local-storage-shim";
 import { resetMockState } from "@/test/mocks/handlers";
 import { server, startMockServer } from "@/test/mocks/server";
 
@@ -24,6 +25,8 @@ if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
 if (typeof document !== "undefined" && typeof document.elementFromPoint !== "function") {
   document.elementFromPoint = () => null;
 }
+
+ensureLocalStorageShim();
 
 if (typeof globalThis.ResizeObserver === "undefined") {
   class ResizeObserverMock {

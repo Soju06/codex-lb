@@ -242,3 +242,48 @@ async def test_backend_files_routes_require_api_key_when_enabled(async_client, e
         response = await async_client.post(endpoint, json=payload)
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_backend_files_finalize_pins_to_create_account(async_client, monkeypatch):
+    """Regression for cross-account finalize routing.
+
+    Two accounts are imported and the upstream contract is
+    account-scoped (``chatgpt-account-id``). After ``create_file``
+    routes through ``acc_pin_a``, the matching ``finalize_file`` for
+    the same ``file_id`` must be routed to ``acc_pin_a`` even if the
+    load balancer would otherwise pick a different account.
+    """
+    await _import_account(async_client, "acc_pin_a", "pin-a@example.com")
+    await _import_account(async_client, "acc_pin_b", "pin-b@example.com")
+
+    create_seen: dict[str, object] = {}
+    finalize_seen: dict[str, object] = {}
+
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+        create_seen["account_id"] = account_id
+        return {"file_id": "file_pinned", "upload_url": "https://blob.example/sas?token=p"}
+
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None):
+        finalize_seen["account_id"] = account_id
+        finalize_seen["file_id"] = file_id
+        return {"status": "success", "download_url": "https://blob.example/dl/p"}
+
+    monkeypatch.setattr(proxy_module, "core_create_file", fake_create_file)
+    monkeypatch.setattr(proxy_module, "core_finalize_file", fake_finalize_file)
+
+    create_resp = await async_client.post(
+        "/backend-api/files",
+        json={"file_name": "a.png", "file_size": 100, "use_case": "codex"},
+    )
+    assert create_resp.status_code == 200
+    creating_account = create_seen["account_id"]
+    assert creating_account in {"acc_pin_a", "acc_pin_b"}
+
+    finalize_resp = await async_client.post("/backend-api/files/file_pinned/uploaded")
+    assert finalize_resp.status_code == 200
+    assert finalize_seen["file_id"] == "file_pinned"
+    # The pin from create_file must drive finalize routing to the same
+    # upstream chatgpt-account-id, regardless of which account the
+    # load balancer would have picked otherwise.
+    assert finalize_seen["account_id"] == creating_account

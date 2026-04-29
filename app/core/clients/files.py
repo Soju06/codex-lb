@@ -260,17 +260,30 @@ async def finalize_file(
     # of the standard 60 s request budget and the override (if set).
     effective_per_poll_total = _effective_files_total_timeout()
     effective_connect = _effective_files_connect_timeout(settings.upstream_connect_timeout_seconds)
-    timeout = aiohttp.ClientTimeout(
-        total=effective_per_poll_total,
-        sock_connect=effective_connect,
-    )
     client_session = session or get_http_client().session
 
     # The finalize budget cannot exceed the caller's per-request budget;
     # otherwise we would keep polling well past the parent timeout.
     finalize_budget = min(_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS, effective_per_poll_total)
     deadline = time.monotonic() + finalize_budget
+    parsed: dict[str, JsonValue] = {"status": "retry"}
     while True:
+        # Recompute the per-poll timeout each iteration from the time
+        # left until ``deadline``. A late retry must not start with the
+        # full original budget when only a few hundred ms remain --
+        # otherwise we can blow past both the 30 s finalize budget and
+        # the parent request budget on slow networks.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Already past the deadline before issuing the next ``POST``;
+            # surface the previous payload (or the seeded ``retry``
+            # placeholder when we have not yet polled even once).
+            return parsed
+        per_poll_total = min(effective_per_poll_total, remaining)
+        timeout = aiohttp.ClientTimeout(
+            total=per_poll_total,
+            sock_connect=min(effective_connect, per_poll_total),
+        )
         try:
             async with client_session.post(
                 url,

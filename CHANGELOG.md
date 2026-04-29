@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.15.2](https://github.com/CINEV/codex-lb-cinamon/compare/v1.15.1...v1.15.2) (2026-04-29)
+
+
+### Bug Fixes
+
+* **proxy:** protect codex continuity fallback ([eb9caaf](https://github.com/CINEV/codex-lb-cinamon/commit/eb9caafe7d2108528335dfc873696a5a226ff060))
+* **proxy:** protect codex continuity fallback ([1c9f7d3](https://github.com/CINEV/codex-lb-cinamon/commit/1c9f7d335fdaaedb31201d7cb5310e52e8892a72))
+
 ## [1.12.0](https://github.com/Soju06/codex-lb/compare/v1.11.0...v1.12.0) (2026-04-08)
 
 

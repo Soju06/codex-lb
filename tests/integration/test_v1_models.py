@@ -272,7 +272,18 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
 @pytest.mark.asyncio
 async def test_model_context_window_override(async_client, monkeypatch):
     registry = get_model_registry()
-    models = [_make_upstream_model("gpt-5.4")]
+    models = [
+        _make_upstream_model(
+            "gpt-5.4",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "availability_nux": None,
+                "max_context_window": 272000,
+                "auto_compact_token_limit": 244800,
+            },
+        )
+    ]
     await registry.update({"pro": models})
 
     from app.core.config.settings import get_settings
@@ -287,6 +298,8 @@ async def test_model_context_window_override(async_client, monkeypatch):
     assert resp.status_code == 200
     entry = next(m for m in resp.json()["models"] if m["slug"] == "gpt-5.4")
     assert entry["context_window"] == 515000
+    assert entry["max_context_window"] == 515000
+    assert entry["auto_compact_token_limit"] == 463500
 
     # /v1/models
     resp_v1 = await async_client.get("/v1/models")
@@ -296,10 +309,17 @@ async def test_model_context_window_override(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_context_window_no_override(async_client):
+async def test_model_context_window_no_override(async_client, monkeypatch):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-5.4")]
     await registry.update({"pro": models})
+
+    from app.core.config.settings import get_settings
+    from app.modules.proxy import api as proxy_api_module
+
+    original_settings = get_settings()
+    patched = original_settings.model_copy(update={"model_context_window_overrides": {}})
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
 
     resp = await async_client.get("/backend-api/codex/models")
     assert resp.status_code == 200

@@ -1391,6 +1391,7 @@ def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
 
 def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
     raw = model.raw
+    effective_context_window = _effective_context_window(model)
 
     extra: dict[str, JsonValue] = {}
     skip_keys = {
@@ -1417,10 +1418,7 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
         if key not in skip_keys and isinstance(value, (bool, int, float, str, type(None), list, Mapping)):
             extra[key] = value
 
-    # If context_window is overridden, also override max_context_window to match
-    effective_cw = _effective_context_window(model)
-    if effective_cw != model.context_window and "max_context_window" in extra:
-        extra["max_context_window"] = effective_cw
+    _align_codex_context_window_extra(model, extra, effective_context_window)
 
     return CodexModelEntry(
         slug=model.slug,
@@ -1439,7 +1437,7 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
         support_verbosity=model.support_verbosity,
         default_verbosity=model.default_verbosity,
         supports_parallel_tool_calls=model.supports_parallel_tool_calls,
-        context_window=_effective_context_window(model),
+        context_window=effective_context_window,
         input_modalities=list(model.input_modalities),
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
@@ -1451,6 +1449,18 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
 def _effective_context_window(model: UpstreamModel) -> int:
     overrides = get_settings().model_context_window_overrides
     return overrides.get(model.slug, model.context_window)
+
+
+def _align_codex_context_window_extra(
+    model: UpstreamModel,
+    extra: dict[str, JsonValue],
+    effective_context_window: int,
+) -> None:
+    if model.slug not in get_settings().model_context_window_overrides:
+        return
+    extra["max_context_window"] = effective_context_window
+    if isinstance(model.raw.get("auto_compact_token_limit"), int):
+        extra["auto_compact_token_limit"] = (effective_context_window * 9) // 10
 
 
 def _model_visibility(model: UpstreamModel) -> str:

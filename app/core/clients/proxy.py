@@ -35,6 +35,7 @@ from multidict import CIMultiDict
 
 from app.core.clients.http import get_http_client
 from app.core.config.settings import Settings, get_settings
+from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
@@ -1265,6 +1266,17 @@ async def _stream_responses_via_websocket(
             request_started_at,
             time.monotonic(),
         )
+        archive_json(
+            direction="codex_to_server",
+            kind="responses",
+            transport="websocket",
+            payload=request_payload,
+            account_id=account_id,
+            method="GET",
+            url=websocket_url,
+            headers=headers,
+            extra={"frame_type": "text"},
+        )
         if callable(send_json):
             await asyncio.wait_for(
                 cast(Callable[[JsonObject], Awaitable[None]], send_json)(request_payload),
@@ -1286,6 +1298,17 @@ async def _stream_responses_via_websocket(
             total_timeout_seconds=remaining_total_timeout,
             max_event_bytes=max_event_bytes,
         ):
+            archive_text(
+                direction="server_to_codex",
+                kind="responses",
+                transport="websocket",
+                text=event,
+                account_id=account_id,
+                method="GET",
+                url=websocket_url,
+                headers=headers,
+                extra={"event_format": "sse"},
+            )
             parsed_event = parse_sse_event(event)
             if parsed_event and parsed_event.type in ("response.completed", "response.failed", "response.incomplete"):
                 seen_terminal = True
@@ -1853,7 +1876,20 @@ async def stream_responses(
                     raise ProxyResponseError(resp.status, error_payload)
                 event = await _error_event_from_response(resp)
                 error_code, error_message = _error_details_from_failed_event(event)
-                yield format_sse_event(event)
+                event_block = format_sse_event(event)
+                archive_text(
+                    direction="server_to_codex",
+                    kind="responses",
+                    transport="http",
+                    text=event_block,
+                    account_id=account_id,
+                    method="POST",
+                    url=url,
+                    status_code=status_code,
+                    headers=current_headers,
+                    extra={"event_format": "sse"},
+                )
+                yield event_block
                 return
 
             async for event_block in _iter_sse_events(
@@ -1867,6 +1903,18 @@ async def stream_responses(
                     event_type = event.type
                     if event_type in ("response.completed", "response.failed", "response.incomplete"):
                         seen_terminal = True
+                archive_text(
+                    direction="server_to_codex",
+                    kind="responses",
+                    transport="http",
+                    text=event_block,
+                    account_id=account_id,
+                    method="POST",
+                    url=url,
+                    status_code=status_code,
+                    headers=current_headers,
+                    extra={"event_format": "sse"},
+                )
                 yield event_block
                 if seen_terminal:
                     break
@@ -1881,6 +1929,17 @@ async def stream_responses(
         if settings.log_upstream_request_payload
         else None,
     )
+    if transport == "http":
+        archive_json(
+            direction="codex_to_server",
+            kind="responses",
+            transport="http",
+            payload=payload_dict,
+            account_id=account_id,
+            method=method,
+            url=url,
+            headers=upstream_headers,
+        )
     try:
         if transport == "websocket":
             try:
@@ -1962,6 +2021,16 @@ async def stream_responses(
                     payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
                     if settings.log_upstream_request_payload
                     else None,
+                )
+                archive_json(
+                    direction="codex_to_server",
+                    kind="responses",
+                    transport="http",
+                    payload=payload_dict,
+                    account_id=account_id,
+                    method=method,
+                    url=url,
+                    headers=upstream_headers,
                 )
                 async for event_block in _stream_via_http(upstream_headers, timeout):
                     yield event_block
@@ -2234,6 +2303,16 @@ class _CompactCommandTransport:
             if settings.log_upstream_request_payload
             else None,
         )
+        archive_json(
+            direction="codex_to_server",
+            kind="compact",
+            transport="http",
+            payload=payload_dict,
+            account_id=self.account_id,
+            method="POST",
+            url=url,
+            headers=upstream_headers,
+        )
         try:
             async with _service_circuit_breaker_context(
                 self.session.post(
@@ -2248,6 +2327,17 @@ class _CompactCommandTransport:
                 status_code = resp.status
                 if resp.status >= 400:
                     error_payload = await _error_payload_from_response(resp)
+                    archive_json(
+                        direction="server_to_codex",
+                        kind="compact",
+                        transport="http",
+                        payload=error_payload,
+                        account_id=self.account_id,
+                        method="POST",
+                        url=url,
+                        status_code=status_code,
+                        headers=upstream_headers,
+                    )
                     error_code, error_message = _error_details_from_envelope(error_payload)
                     failure_phase = "status"
                     failure_detail = error_message
@@ -2294,6 +2384,17 @@ class _CompactCommandTransport:
                         upstream_status_code=resp.status,
                     ) from exc
                 parsed = parse_compact_response_payload(data)
+                archive_json(
+                    direction="server_to_codex",
+                    kind="compact",
+                    transport="http",
+                    payload=data,
+                    account_id=self.account_id,
+                    method="POST",
+                    url=url,
+                    status_code=status_code,
+                    headers=upstream_headers,
+                )
                 if parsed:
                     payload_object = parsed.object
                     return parsed

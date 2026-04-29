@@ -412,7 +412,7 @@ async def verify_totp(
         ) from exc
     try:
         session_ttl_seconds = (await get_settings_cache().get()).dashboard_session_ttl_seconds
-        session_id = await context.service.verify_totp(
+        session_id, applied_ttl_seconds = await context.service.verify_totp(
             session_id=current_session_id,
             code=payload.code,
             ttl_seconds=session_ttl_seconds,
@@ -432,7 +432,7 @@ async def verify_totp(
         password_session_id=session_id,
     )
     json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
-    _set_session_cookie(json_response, session_id, request, max_age_seconds=session_ttl_seconds)
+    _set_session_cookie(json_response, session_id, request, max_age_seconds=applied_ttl_seconds)
     return json_response
 
 

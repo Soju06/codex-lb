@@ -254,7 +254,7 @@ class DashboardAuthService:
         code: str,
         ttl_seconds: int,
         actor_ip: str | None = None,
-    ) -> str:
+    ) -> tuple[str, int]:
         settings = await self._require_active_password_session(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
@@ -274,7 +274,27 @@ class DashboardAuthService:
             AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "totp"})
             raise TotpInvalidCodeError("Invalid TOTP code")
         AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "totp"})
-        return self._session_store.create(password_verified=True, totp_verified=True, ttl_seconds=ttl_seconds)
+        # Honor the existing password-session expiry so that a TTL change
+        # mid-flow (between password login and TOTP submission) cannot extend
+        # or shorten an already-issued session. We reuse the original embedded
+        # expiry from the current password session and only fall back to
+        # ttl_seconds when no live state is available.
+        existing_state = self._session_store.get(session_id)
+        if existing_state is not None:
+            now = int(time())
+            inherited_ttl = max(1, existing_state.expires_at - now)
+            new_session_id = self._session_store.create(
+                password_verified=True,
+                totp_verified=True,
+                ttl_seconds=inherited_ttl,
+            )
+            return new_session_id, inherited_ttl
+        new_session_id = self._session_store.create(
+            password_verified=True,
+            totp_verified=True,
+            ttl_seconds=ttl_seconds,
+        )
+        return new_session_id, ttl_seconds
 
     async def disable_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> None:
         settings = await self._require_totp_verified_session(session_id)

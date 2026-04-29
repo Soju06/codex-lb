@@ -124,3 +124,114 @@ async def test_remove_password_clears_password_and_totp() -> None:
 
     with pytest.raises(PasswordNotConfiguredError):
         await service.verify_password("password123")
+
+
+@pytest.mark.asyncio
+async def test_verify_totp_inherits_existing_password_session_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pyotp
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as service_module
+    from app.core.crypto import TokenEncryptor
+
+    current = {"value": 1_700_000_000}
+    monkeypatch.setattr(service_module, "time", lambda: current["value"])
+    monkeypatch.setattr(totp_module, "time", lambda: current["value"])
+
+    repository = _FakeRepository()
+    store = DashboardSessionStore()
+    service = DashboardAuthService(repository, store)
+    await service.setup_password("password123")
+
+    secret = pyotp.random_base32()
+    encryptor = TokenEncryptor()
+    repository.settings.totp_secret_encrypted = encryptor.encrypt(secret)
+
+    # Issue an existing password session with the previous TTL setting
+    # (12 hours), then change the TTL setting on the operator side and submit
+    # TOTP. The new session must inherit the original session's remaining
+    # lifetime, not adopt the new TTL.
+    original_ttl = 12 * 60 * 60
+    new_ttl_after_change = 24 * 60 * 60
+    password_session_id = store.create(
+        password_verified=True,
+        totp_verified=False,
+        ttl_seconds=original_ttl,
+    )
+    expected_remaining = original_ttl  # nothing has elapsed yet
+
+    code = pyotp.TOTP(secret).at(current["value"])
+    new_session_id, applied_ttl = await service.verify_totp(
+        session_id=password_session_id,
+        code=code,
+        ttl_seconds=new_ttl_after_change,
+    )
+
+    assert applied_ttl == expected_remaining
+    state = store.get(new_session_id)
+    assert state is not None
+    assert state.password_verified is True
+    assert state.totp_verified is True
+    assert state.expires_at == current["value"] + expected_remaining
+
+
+@pytest.mark.asyncio
+async def test_verify_totp_falls_back_to_supplied_ttl_when_session_state_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyotp
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as service_module
+    from app.core.crypto import TokenEncryptor
+
+    current = {"value": 1_700_000_000}
+    monkeypatch.setattr(service_module, "time", lambda: current["value"])
+    monkeypatch.setattr(totp_module, "time", lambda: current["value"])
+
+    repository = _FakeRepository()
+    store = DashboardSessionStore()
+    service = DashboardAuthService(repository, store)
+    await service.setup_password("password123")
+
+    secret = pyotp.random_base32()
+    encryptor = TokenEncryptor()
+    repository.settings.totp_secret_encrypted = encryptor.encrypt(secret)
+
+    # Issue a password session, but advance time past its expiry before
+    # verifying TOTP so the store no longer reports a live state. The fallback
+    # should mint a fresh session with the supplied ttl_seconds.
+    original_ttl = 12 * 60 * 60
+    fallback_ttl = 6 * 60 * 60
+    password_session_id = store.create(
+        password_verified=True,
+        totp_verified=False,
+        ttl_seconds=original_ttl,
+    )
+    current["value"] += original_ttl + 1
+
+    code = pyotp.TOTP(secret).at(current["value"])
+
+    # _require_active_password_session will reject the now-expired session,
+    # so we instead exercise the fallback by patching the password-session
+    # check to a no-op and feeding a session_id the store can no longer
+    # decode as live.
+    async def _stub_require_active_password_session(self, _session_id: str | None):
+        return repository.settings
+
+    monkeypatch.setattr(
+        service_module.DashboardAuthService,
+        "_require_active_password_session",
+        _stub_require_active_password_session,
+    )
+
+    new_session_id, applied_ttl = await service.verify_totp(
+        session_id=password_session_id,
+        code=code,
+        ttl_seconds=fallback_ttl,
+    )
+
+    assert applied_ttl == fallback_ttl
+    state = store.get(new_session_id)
+    assert state is not None
+    assert state.expires_at == current["value"] + fallback_ttl

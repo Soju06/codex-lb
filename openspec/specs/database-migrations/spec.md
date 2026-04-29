@@ -3,9 +3,7 @@
 ## Purpose
 
 See context docs for background.
-
 ## Requirements
-
 ### Requirement: Alembic as migration source of truth
 
 The system SHALL use Alembic as the only runtime migration mechanism and SHALL NOT execute custom migration runners.
@@ -37,3 +35,13 @@ After startup migrations report success, the system SHALL verify that the live d
 - **WHEN** application startup continues
 - **THEN** the system logs the drift details as an error
 - **AND** it does not silently suppress the drift context
+
+### Requirement: Peer fallback targets are migrated
+
+The system SHALL add persistent peer fallback target storage through Alembic so dashboard-managed peer fallback targets are available on supported database backends.
+
+#### Scenario: Migration creates peer fallback target storage
+
+- **WHEN** the database is upgraded to the migration containing peer fallback target storage
+- **THEN** the schema contains a `peer_fallback_targets` table with stable target identifiers, normalized base URLs, enabled flags, and timestamps
+- **AND** the base URL is constrained to be unique

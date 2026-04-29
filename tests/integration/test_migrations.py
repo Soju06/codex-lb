@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from anyio import to_thread
 from sqlalchemy import text
@@ -33,9 +35,11 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 
 try:
-    from app.db.migrate import check_migration_policy
+    from app.db.migrate import check_migration_policy as _check_migration_policy
 except ImportError:
-    check_migration_policy = None  # type: ignore[assignment]
+    check_migration_policy: Callable[[str], tuple[str, ...]] | None = None
+else:
+    check_migration_policy = _check_migration_policy
 pytestmark = pytest.mark.integration
 _DATABASE_URL = get_settings().database_url
 _HEAD_REVISION = inspect_migration_state(_DATABASE_URL).head_revision

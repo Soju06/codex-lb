@@ -9,19 +9,26 @@ hit.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.strict_schema import validate_strict_json_schema
+from app.core.types import JsonValue
 from app.modules.proxy.request_policy import (
     enforce_strict_text_format,
     normalize_responses_request_payload,
 )
 
 
+def _json_object(value: object) -> dict[str, JsonValue]:
+    return cast(dict[str, JsonValue], value)
+
+
 def test_strict_root_missing_additional_properties():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"name": {"type": "string"}},
         "required": ["name"],
@@ -36,7 +43,7 @@ def test_strict_root_missing_additional_properties():
 
 
 def test_strict_root_additional_properties_true_rejected():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"name": {"type": "string"}},
         "required": ["name"],
@@ -48,7 +55,7 @@ def test_strict_root_additional_properties_true_rejected():
 
 
 def test_strict_nested_missing_additional_properties():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {
             "nodes": {
@@ -71,7 +78,7 @@ def test_strict_nested_missing_additional_properties():
 def test_strict_dict_str_any_pattern_rejected():
     """Pydantic ``dict[str, Any]`` -> ``additionalProperties: true``."""
 
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {
             "name": {"type": "string"},
@@ -88,7 +95,7 @@ def test_strict_dict_str_any_pattern_rejected():
 def test_strict_empty_schema_node_rejected():
     """``Any`` typed Pydantic field -> ``{}`` schema node."""
 
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {
             "name": {"type": "string"},
@@ -104,7 +111,7 @@ def test_strict_empty_schema_node_rejected():
 
 
 def test_strict_valid_schema_passes():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
         "required": ["name", "age"],
@@ -120,7 +127,7 @@ def test_strict_required_must_list_every_property():
     of whether the request hit the local pre-check or the upstream API.
     """
 
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"x": {"type": "string"}, "y": {"type": "integer"}},
         "required": ["x"],
@@ -136,7 +143,7 @@ def test_strict_required_must_list_every_property():
 def test_strict_required_empty_array_rejected():
     """Even an empty ``required`` is rejected when ``properties`` is non-empty."""
 
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"x": {"type": "string"}},
         "required": [],
@@ -148,7 +155,7 @@ def test_strict_required_empty_array_rejected():
 
 
 def test_strict_required_missing_array_rejected():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"x": {"type": "string"}},
         "additionalProperties": False,
@@ -159,7 +166,7 @@ def test_strict_required_missing_array_rejected():
 
 
 def test_strict_combinator_recurses_into_branches():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {
             "value": {
@@ -183,23 +190,25 @@ def test_strict_combinator_recurses_into_branches():
 
 
 def test_normalize_responses_payload_rejects_strict_violation():
-    payload = {
-        "model": "gpt-5.5",
-        "instructions": "",
-        "input": "hi",
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "person",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"],
-                },
-            }
-        },
-    }
+    payload = _json_object(
+        {
+            "model": "gpt-5.5",
+            "instructions": "",
+            "input": "hi",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "person",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                }
+            },
+        }
+    )
     with pytest.raises(ClientPayloadError) as exc_info:
         normalize_responses_request_payload(payload, openai_compat=False)
     err = exc_info.value
@@ -210,23 +219,25 @@ def test_normalize_responses_payload_rejects_strict_violation():
 
 
 def test_normalize_responses_payload_accepts_strict_false():
-    payload = {
-        "model": "gpt-5.5",
-        "instructions": "",
-        "input": "hi",
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "person",
-                "strict": False,
-                "schema": {
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"],
-                },
-            }
-        },
-    }
+    payload = _json_object(
+        {
+            "model": "gpt-5.5",
+            "instructions": "",
+            "input": "hi",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "person",
+                    "strict": False,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                }
+            },
+        }
+    )
     # Strict=False schemas are passed through unchanged.
     request = normalize_responses_request_payload(payload, openai_compat=False)
     assert request.text is not None
@@ -235,24 +246,26 @@ def test_normalize_responses_payload_accepts_strict_false():
 
 
 def test_normalize_responses_payload_accepts_valid_strict_schema():
-    payload = {
-        "model": "gpt-5.5",
-        "instructions": "",
-        "input": "hi",
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "person",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
-                    "required": ["name", "age"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-    }
+    payload = _json_object(
+        {
+            "model": "gpt-5.5",
+            "instructions": "",
+            "input": "hi",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "person",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+                        "required": ["name", "age"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+        }
+    )
     request = normalize_responses_request_payload(payload, openai_compat=False)
     assert request.text is not None
     assert request.text.format is not None

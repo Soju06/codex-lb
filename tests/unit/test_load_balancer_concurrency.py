@@ -11,8 +11,11 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.repository import AdditionalUsageRepository
 
 pytestmark = pytest.mark.unit
 
@@ -82,10 +85,10 @@ async def _repo_factory(
     yield ProxyRepositories(
         accounts=cast(Any, accounts_repo),
         usage=cast(Any, usage_repo),
-        request_logs=object(),  # type: ignore[arg-type]
+        request_logs=cast(RequestLogsRepository, object()),
         sticky_sessions=cast(Any, _StubStickySessionsRepository()),
-        api_keys=object(),  # type: ignore[arg-type]
-        additional_usage=object(),  # type: ignore[arg-type]
+        api_keys=cast(ApiKeysRepository, object()),
+        additional_usage=cast(AdditionalUsageRepository, object()),
     )
 
 

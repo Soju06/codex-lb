@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.pool import NullPool
@@ -402,7 +403,7 @@ async def test_init_background_db_uses_smaller_pool_for_postgres() -> None:
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
         assert isinstance(pool, NullPool)
     else:
-        assert pool.size() == 3  # type: ignore[attr-defined]
+        assert cast(Any, pool).size() == 3
 
     if session_module._background_engine is not None:
         await session_module._background_engine.dispose()

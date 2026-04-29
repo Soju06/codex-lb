@@ -194,13 +194,19 @@ class DashboardAuthService:
         await self._repository.clear_password_and_totp()
 
     async def _require_active_password_session(self, session_id: str | None) -> DashboardAuthSettingsProtocol:
+        settings, _state = await self._require_active_password_session_with_state(session_id)
+        return settings
+
+    async def _require_active_password_session_with_state(
+        self, session_id: str | None
+    ) -> tuple[DashboardAuthSettingsProtocol, DashboardSessionState]:
         settings = await self._repository.get_settings()
         if settings.password_hash is None:
             raise PasswordSessionRequiredError("Password-authenticated session is required")
         session = self._session_store.get(session_id)
         if session is None or not session.password_verified:
             raise PasswordSessionRequiredError("Password-authenticated session is required")
-        return settings
+        return settings, session
 
     async def _require_totp_verified_session(self, session_id: str | None) -> DashboardAuthSettingsProtocol:
         settings = await self._require_active_password_session(session_id)
@@ -255,7 +261,7 @@ class DashboardAuthService:
         ttl_seconds: int,
         actor_ip: str | None = None,
     ) -> tuple[str, int]:
-        settings = await self._require_active_password_session(session_id)
+        settings, existing_state = await self._require_active_password_session_with_state(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
             raise TotpNotConfiguredError("TOTP is not configured")
@@ -276,25 +282,18 @@ class DashboardAuthService:
         AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "totp"})
         # Honor the existing password-session expiry so that a TTL change
         # mid-flow (between password login and TOTP submission) cannot extend
-        # or shorten an already-issued session. We reuse the original embedded
-        # expiry from the current password session and only fall back to
-        # ttl_seconds when no live state is available.
-        existing_state = self._session_store.get(session_id)
-        if existing_state is not None:
-            now = int(time())
-            inherited_ttl = max(1, existing_state.expires_at - now)
-            new_session_id = self._session_store.create(
-                password_verified=True,
-                totp_verified=True,
-                ttl_seconds=inherited_ttl,
-            )
-            return new_session_id, inherited_ttl
+        # or shorten an already-issued session. We use the state captured by
+        # _require_active_password_session_with_state above so a second
+        # store.get() race cannot turn a near-expiry password session into a
+        # full-length ttl_seconds session.
+        now = int(time())
+        inherited_ttl = max(1, existing_state.expires_at - now)
         new_session_id = self._session_store.create(
             password_verified=True,
             totp_verified=True,
-            ttl_seconds=ttl_seconds,
+            ttl_seconds=inherited_ttl,
         )
-        return new_session_id, ttl_seconds
+        return new_session_id, inherited_ttl
 
     async def disable_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> None:
         settings = await self._require_totp_verified_session(session_id)

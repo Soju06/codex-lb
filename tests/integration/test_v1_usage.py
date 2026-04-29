@@ -110,7 +110,7 @@ async def _seed_upstream_usage_partial(
     suffix = str(int(now.timestamp() * 1_000_000))
     account_id = f"acc-plus-partial-{suffix}"
 
-    entries = [
+    entries: list[Account | UsageHistory] = [
         Account(
             id=account_id,
             chatgpt_account_id=f"chatgpt-plus-partial-{suffix}",

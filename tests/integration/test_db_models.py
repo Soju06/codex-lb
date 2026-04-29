@@ -49,7 +49,7 @@ async def test_status_enum_rejects_invalid_value(db_setup):
         await session.commit()
 
         bad = _make_account("acc4", "enum2@example.com", AccountStatus.ACTIVE)
-        bad.status = "invalid"  # type: ignore[assignment]
+        setattr(bad, "status", "invalid")
         session.add(bad)
         with pytest.raises((LookupError, StatementError)):
             await session.commit()

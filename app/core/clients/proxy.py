@@ -1322,7 +1322,7 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
             max_bytes=_UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
         )
         if slim_summary is not None:
-            request_payload = cast(JsonObject, slimmed_payload)
+            request_payload = slimmed_payload
             slimmed_text = json.dumps(request_payload, ensure_ascii=True, separators=(",", ":"))
             logger.warning(
                 (

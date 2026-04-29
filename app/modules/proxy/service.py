@@ -8978,32 +8978,35 @@ def _summarize_response_create_input(input_value: JsonValue) -> dict[str, JsonVa
     if not isinstance(input_value, list):
         return None
 
+    input_items = cast(list[JsonValue], input_value)
     role_counts: dict[str, int] = {}
     item_type_counts: dict[str, int] = {}
     content_part_type_counts: dict[str, int] = {}
     largest_items: list[dict[str, JsonValue]] = []
 
-    for index, item in enumerate(input_value):
+    for index, item in enumerate(input_items):
         item_summary: dict[str, JsonValue] = {
             "index": index,
             "size_bytes": _json_size_bytes(item),
         }
         if isinstance(item, dict):
-            role = item.get("role")
+            item_object = cast(dict[str, JsonValue], item)
+            role = item_object.get("role")
             if isinstance(role, str):
                 item_summary["role"] = role
                 role_counts[role] = role_counts.get(role, 0) + 1
-            item_type = item.get("type")
+            item_type = item_object.get("type")
             if isinstance(item_type, str):
                 item_summary["type"] = item_type
                 item_type_counts[item_type] = item_type_counts.get(item_type, 0) + 1
-            content = item.get("content")
+            content = item_object.get("content")
             if isinstance(content, list):
                 item_summary["content_parts"] = len(content)
                 for part in content:
                     if not isinstance(part, dict):
                         continue
-                    part_type = part.get("type")
+                    part_object = cast(dict[str, JsonValue], part)
+                    part_type = part_object.get("type")
                     if isinstance(part_type, str):
                         content_part_type_counts[part_type] = content_part_type_counts.get(part_type, 0) + 1
         largest_items.append(item_summary)

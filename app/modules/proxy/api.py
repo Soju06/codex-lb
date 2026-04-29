@@ -566,6 +566,13 @@ async def backend_transcribe(
     )
 
 
+# Synthetic ``model`` strings used for API-key limit accounting +
+# request-log filtering on the file upload protocol. They never reach
+# upstream -- this is a proxy-internal name only.
+_FILES_CREATE_LIMIT_MODEL: Final = "files-create"
+_FILES_FINALIZE_LIMIT_MODEL: Final = "files-finalize"
+
+
 @files_router.post("/files")
 async def backend_files_create(
     request: Request,
@@ -582,6 +589,11 @@ async def backend_files_create(
     apply here -- upstream caps file size at 512 MiB which we enforce in
     ``FileCreateRequest``.
     """
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=_FILES_CREATE_LIMIT_MODEL,
+        request_service_tier=None,
+    )
     try:
         result = await context.service.create_file(
             payload.model_dump(mode="json", exclude_none=True),
@@ -602,6 +614,8 @@ async def backend_files_create(
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
         )
+    finally:
+        await _release_reservation(reservation)
     return JSONResponse(content=result)
 
 
@@ -619,6 +633,11 @@ async def backend_files_finalize(
     polls upstream for up to 30 s while ``status == "retry"``; we return
     the final payload verbatim so the caller sees what upstream saw.
     """
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=_FILES_FINALIZE_LIMIT_MODEL,
+        request_service_tier=None,
+    )
     try:
         result = await context.service.finalize_file(
             file_id,
@@ -639,6 +658,8 @@ async def backend_files_finalize(
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
         )
+    finally:
+        await _release_reservation(reservation)
     return JSONResponse(content=result)
 
 

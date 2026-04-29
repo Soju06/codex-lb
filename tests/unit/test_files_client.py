@@ -253,10 +253,12 @@ async def test_finalize_file_returns_last_retry_after_budget_exhaustion(monkeypa
     )
 
     assert result == {"status": "retry"}
-    # Two upstream calls: initial returned ``retry``, sleep pushes the
-    # clock past the 30 s budget, the second poll also returns ``retry``
-    # and the deadline check ends the loop with the most recent payload.
-    assert len(session.calls) == 2
+    # Exactly one upstream call: the initial poll returned ``retry``,
+    # the inter-poll sleep pushed the clock past the 30 s budget, and
+    # the post-sleep deadline check stops the loop *before* issuing
+    # another ``POST``. This protects callers from one overshoot poll
+    # whose own request timeout could blow well past the budget.
+    assert len(session.calls) == 1
 
 
 @pytest.mark.asyncio

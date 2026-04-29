@@ -27,6 +27,7 @@ client (``codex-rs/codex-api/src/files.rs::upload_local_file``).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import time
 from collections.abc import Mapping
@@ -59,6 +60,55 @@ _FILE_FINALIZE_POLL_DELAY_SECONDS: float = 0.25
 # client fingerprint as a direct Codex request. Matches the
 # ``_TRANSCRIBE_FORWARD_HEADER_PREFIXES`` policy in proxy.py.
 _FILES_FORWARD_HEADER_PREFIXES: tuple[str, ...] = ("x-openai-", "x-codex-")
+
+# Per-call timeout overrides set by the proxy service so that file
+# create / finalize calls inherit the per-request budget the same way
+# the transcribe path does. ``None`` means "use the module default".
+_FILES_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "_FILES_CONNECT_TIMEOUT_OVERRIDE", default=None
+)
+_FILES_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "_FILES_TOTAL_TIMEOUT_OVERRIDE", default=None
+)
+
+
+def push_files_timeout_overrides(
+    *,
+    connect_timeout_seconds: float | None = None,
+    total_timeout_seconds: float | None = None,
+) -> tuple[contextvars.Token[float | None], contextvars.Token[float | None]]:
+    """Push per-call timeout overrides for the file create/finalize calls.
+
+    Mirrors ``push_transcribe_timeout_overrides`` so ``ProxyService`` can
+    propagate the remaining request budget into ``create_file`` /
+    ``finalize_file`` instead of letting them use the fixed 60 s default.
+    """
+    return (
+        _FILES_CONNECT_TIMEOUT_OVERRIDE.set(connect_timeout_seconds),
+        _FILES_TOTAL_TIMEOUT_OVERRIDE.set(total_timeout_seconds),
+    )
+
+
+def pop_files_timeout_overrides(
+    tokens: tuple[contextvars.Token[float | None], contextvars.Token[float | None]],
+) -> None:
+    connect_token, total_token = tokens
+    _FILES_CONNECT_TIMEOUT_OVERRIDE.reset(connect_token)
+    _FILES_TOTAL_TIMEOUT_OVERRIDE.reset(total_token)
+
+
+def _effective_files_total_timeout(default_seconds: float = _DEFAULT_FILE_REQUEST_TIMEOUT_SECONDS) -> float:
+    override = _FILES_TOTAL_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return default_seconds
+    return max(0.001, override)
+
+
+def _effective_files_connect_timeout(default_seconds: float) -> float:
+    override = _FILES_CONNECT_TIMEOUT_OVERRIDE.get()
+    if override is None:
+        return default_seconds
+    return max(0.001, override)
 
 
 class FileProxyError(Exception):
@@ -130,9 +180,11 @@ async def create_file(
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/files"
     upstream_headers = _build_files_headers(headers, access_token, account_id)
+    effective_total = _effective_files_total_timeout()
+    effective_connect = _effective_files_connect_timeout(settings.upstream_connect_timeout_seconds)
     timeout = aiohttp.ClientTimeout(
-        total=_DEFAULT_FILE_REQUEST_TIMEOUT_SECONDS,
-        sock_connect=settings.upstream_connect_timeout_seconds,
+        total=effective_total,
+        sock_connect=effective_connect,
     )
     client_session = session or get_http_client().session
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -202,13 +254,22 @@ async def finalize_file(
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/files/{file_id}/uploaded"
     upstream_headers = _build_files_headers(headers, access_token, account_id)
+    # The finalize-poll loop runs up to ``_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS``
+    # but each individual ``POST`` should never block longer than the
+    # remaining request budget. Cap the per-poll timeout at the smaller
+    # of the standard 60 s request budget and the override (if set).
+    effective_per_poll_total = _effective_files_total_timeout()
+    effective_connect = _effective_files_connect_timeout(settings.upstream_connect_timeout_seconds)
     timeout = aiohttp.ClientTimeout(
-        total=_DEFAULT_FILE_REQUEST_TIMEOUT_SECONDS,
-        sock_connect=settings.upstream_connect_timeout_seconds,
+        total=effective_per_poll_total,
+        sock_connect=effective_connect,
     )
     client_session = session or get_http_client().session
 
-    deadline = time.monotonic() + _DEFAULT_FILE_FINALIZE_BUDGET_SECONDS
+    # The finalize budget cannot exceed the caller's per-request budget;
+    # otherwise we would keep polling well past the parent timeout.
+    finalize_budget = min(_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS, effective_per_poll_total)
+    deadline = time.monotonic() + finalize_budget
     while True:
         try:
             async with client_session.post(
@@ -255,3 +316,8 @@ async def finalize_file(
             # failure that the client should surface).
             return parsed
         await asyncio.sleep(_FILE_FINALIZE_POLL_DELAY_SECONDS)
+        if time.monotonic() >= deadline:
+            # Re-check after sleeping so we never overshoot the budget by
+            # issuing one extra ``POST`` whose own request timeout could
+            # block well past ``_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS``.
+            return parsed

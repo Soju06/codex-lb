@@ -34,7 +34,11 @@ from app.core.auth.refresh import (
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
-from app.core.clients.files import FileProxyError
+from app.core.clients.files import (
+    FileProxyError,
+    pop_files_timeout_overrides,
+    push_files_timeout_overrides,
+)
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.proxy import (
@@ -1981,10 +1985,21 @@ class ProxyService:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
+                # Propagate the per-request budget so file create/finalize
+                # calls inherit the same effective timeout as the rest of
+                # the request, instead of letting them block on the
+                # module-default 60 s timeout regardless of how much
+                # budget is left.
+                timeout_tokens = push_files_timeout_overrides(
+                    connect_timeout_seconds=remaining_budget,
+                    total_timeout_seconds=remaining_budget,
+                )
                 try:
                     return await invoke(access_token, account_id, filtered)
                 except FileProxyError as files_exc:
                     raise ProxyResponseError(files_exc.status_code, files_exc.payload) from files_exc
+                finally:
+                    pop_files_timeout_overrides(timeout_tokens)
 
             try:
                 remaining_budget = _remaining_budget_seconds(deadline)

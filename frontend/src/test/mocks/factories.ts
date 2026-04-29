@@ -43,6 +43,8 @@ import {
 } from "@/features/dashboard/schemas";
 import type { DashboardSettings } from "@/features/settings/schemas";
 import { DashboardSettingsSchema } from "@/features/settings/schemas";
+import type { PeerFallbackTarget } from "@/features/peer-fallback-targets/schemas";
+import { PeerFallbackTargetSchema } from "@/features/peer-fallback-targets/schemas";
 
 // Backward-compatible type aliases
 export type RequestLogEntry = RequestLog;
@@ -56,6 +58,7 @@ export type {
 	RequestLogsResponse,
 	RequestLogFilterOptions,
 	DashboardSettings,
+	PeerFallbackTarget,
 	OauthStartResponse,
 	OauthStatusResponse,
 	ApiKey,
@@ -355,6 +358,19 @@ export function createDashboardSettings(
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
 		apiKeyAuthEnabled: true,
+		...overrides,
+	});
+}
+
+export function createPeerFallbackTarget(
+	overrides: Partial<PeerFallbackTarget> = {},
+): PeerFallbackTarget {
+	return PeerFallbackTargetSchema.parse({
+		id: "peer_1",
+		baseUrl: "http://127.0.0.1:2456",
+		enabled: true,
+		createdAt: offsetIso(0),
+		updatedAt: offsetIso(0),
 		...overrides,
 	});
 }

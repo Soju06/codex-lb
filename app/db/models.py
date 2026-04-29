@@ -482,6 +482,27 @@ class BridgeRingMember(Base):
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class PeerFallbackTarget(Base):
+    __tablename__ = "peer_fallback_targets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    base_url: Mapped[str] = mapped_column(String(2048), nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class HttpBridgeSessionState(str, Enum):
     ACTIVE = "active"
     DRAINING = "draining"

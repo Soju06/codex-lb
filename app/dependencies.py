@@ -26,6 +26,8 @@ from app.modules.dashboard_auth.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.oauth.service import OauthService
+from app.modules.peer_fallback_targets.repository import PeerFallbackTargetRepository
+from app.modules.peer_fallback_targets.service import PeerFallbackTargetRepositoryPort, PeerFallbackTargetService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -109,6 +111,13 @@ class FirewallContext:
     session: AsyncSession
     repository: FirewallRepository
     service: FirewallService
+
+
+@dataclass(slots=True)
+class PeerFallbackTargetsContext:
+    session: AsyncSession
+    repository: PeerFallbackTargetRepository
+    service: PeerFallbackTargetService
 
 
 @dataclass(slots=True)
@@ -250,6 +259,14 @@ def get_firewall_context(
     repository = FirewallRepository(session)
     service = FirewallService(cast(FirewallRepositoryPort, repository))
     return FirewallContext(session=session, repository=repository, service=service)
+
+
+def get_peer_fallback_targets_context(
+    session: AsyncSession = Depends(get_session),
+) -> PeerFallbackTargetsContext:
+    repository = PeerFallbackTargetRepository(session)
+    service = PeerFallbackTargetService(cast(PeerFallbackTargetRepositoryPort, repository))
+    return PeerFallbackTargetsContext(session=session, repository=repository, service=service)
 
 
 def get_sticky_sessions_context(

@@ -20,10 +20,12 @@ import {
 	createOauthCompleteResponse,
 	createOauthStartResponse,
 	createOauthStatusResponse,
+	createPeerFallbackTarget,
 	createRequestLogFilterOptions,
 	createRequestLogsResponse,
 	type DashboardAuthSession,
 	type DashboardSettings,
+	type PeerFallbackTarget,
 	type RequestLogEntry,
 } from "@/test/mocks/factories";
 
@@ -47,6 +49,20 @@ const ApiKeyCreatePayloadSchema = z
 const FirewallIpCreatePayloadSchema = z
 	.object({
 		ipAddress: z.string().optional(),
+	})
+	.passthrough();
+
+const PeerFallbackTargetCreatePayloadSchema = z
+	.object({
+		baseUrl: z.string().optional(),
+		enabled: z.boolean().optional(),
+	})
+	.passthrough();
+
+const PeerFallbackTargetUpdatePayloadSchema = z
+	.object({
+		baseUrl: z.string().optional(),
+		enabled: z.boolean().optional(),
 	})
 	.passthrough();
 
@@ -108,6 +124,7 @@ type MockState = {
 	settings: DashboardSettings;
 	apiKeys: ApiKey[];
 	firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
+	peerFallbackTargets: PeerFallbackTarget[];
 	stickySessions: Array<{
 		key: string;
 		displayName: string;
@@ -127,6 +144,7 @@ function createInitialState(): MockState {
 		settings: createDashboardSettings(),
 		apiKeys: createDefaultApiKeys(),
 		firewallEntries: [],
+		peerFallbackTargets: [],
 		stickySessions: [],
 	};
 }
@@ -499,6 +517,85 @@ export const handlers = [
 		state.firewallEntries = state.firewallEntries.filter(
 			(entry) => entry.ipAddress !== ipAddress,
 		);
+		return HttpResponse.json({ status: "deleted" });
+	}),
+
+	http.get("/api/peer-fallback-targets", () => {
+		return HttpResponse.json({ targets: state.peerFallbackTargets });
+	}),
+
+	http.post("/api/peer-fallback-targets", async ({ request }) => {
+		const payload = await parseJsonBody(request, PeerFallbackTargetCreatePayloadSchema);
+		const baseUrl = String(payload?.baseUrl || "").trim().replace(/\/+$/, "");
+		if (!baseUrl) {
+			return HttpResponse.json(
+				{ error: { code: "invalid_peer_fallback_target", message: "Peer fallback target URL is required" } },
+				{ status: 400 },
+			);
+		}
+		if (state.peerFallbackTargets.some((target) => target.baseUrl === baseUrl)) {
+			return HttpResponse.json(
+				{ error: { code: "peer_fallback_target_exists", message: "Peer fallback target already exists" } },
+				{ status: 409 },
+			);
+		}
+		const created = createPeerFallbackTarget({
+			id: `peer_${state.peerFallbackTargets.length + 1}`,
+			baseUrl,
+			enabled: payload?.enabled ?? true,
+		});
+		state.peerFallbackTargets = [...state.peerFallbackTargets, created];
+		return HttpResponse.json(created);
+	}),
+
+	http.patch("/api/peer-fallback-targets/:targetId", async ({ params, request }) => {
+		const targetId = String(params.targetId);
+		const payload = await parseJsonBody(request, PeerFallbackTargetUpdatePayloadSchema);
+		const existing = state.peerFallbackTargets.find((target) => target.id === targetId);
+		if (!existing) {
+			return HttpResponse.json(
+				{ error: { code: "peer_fallback_target_not_found", message: "Peer fallback target not found" } },
+				{ status: 404 },
+			);
+		}
+		const baseUrl =
+			payload?.baseUrl === undefined ? existing.baseUrl : payload.baseUrl.trim().replace(/\/+$/, "");
+		if (!baseUrl) {
+			return HttpResponse.json(
+				{ error: { code: "invalid_peer_fallback_target", message: "Peer fallback target URL is required" } },
+				{ status: 400 },
+			);
+		}
+		if (
+			state.peerFallbackTargets.some((target) => target.id !== targetId && target.baseUrl === baseUrl)
+		) {
+			return HttpResponse.json(
+				{ error: { code: "peer_fallback_target_exists", message: "Peer fallback target already exists" } },
+				{ status: 409 },
+			);
+		}
+		const updated = createPeerFallbackTarget({
+			...existing,
+			baseUrl,
+			enabled: payload?.enabled ?? existing.enabled,
+			updatedAt: new Date().toISOString(),
+		});
+		state.peerFallbackTargets = state.peerFallbackTargets.map((target) =>
+			target.id === targetId ? updated : target,
+		);
+		return HttpResponse.json(updated);
+	}),
+
+	http.delete("/api/peer-fallback-targets/:targetId", ({ params }) => {
+		const targetId = String(params.targetId);
+		const exists = state.peerFallbackTargets.some((target) => target.id === targetId);
+		if (!exists) {
+			return HttpResponse.json(
+				{ error: { code: "peer_fallback_target_not_found", message: "Peer fallback target not found" } },
+				{ status: 404 },
+			);
+		}
+		state.peerFallbackTargets = state.peerFallbackTargets.filter((target) => target.id !== targetId);
 		return HttpResponse.json({ status: "deleted" });
 	}),
 

@@ -17,6 +17,7 @@ from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
+from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, HTTPBridgeForwardedRequest
 
 pytestmark = pytest.mark.unit
 
@@ -232,6 +233,60 @@ async def test_validate_internal_bridge_api_key_preserves_local_request_exemptio
 
     assert api_key is None
     assert response is None
+
+
+@pytest.mark.asyncio
+async def test_internal_bridge_responses_disables_budget_reallocation_for_forwarded_turn_state(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [(b"x-codex-turn-state", b"turn_forwarded")],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    captured: dict[str, object] = {}
+    forwarded = HTTPBridgeForwardedRequest(
+        context=HTTPBridgeForwardContext(
+            origin_instance="instance-a",
+            target_instance="instance-b",
+            codex_session_affinity=True,
+            downstream_turn_state="turn_forwarded",
+            original_affinity_kind="codex_session",
+            original_affinity_key="turn_forwarded",
+        )
+    )
+
+    def fake_parse_forwarded_request(*_args, **_kwargs):
+        return forwarded, None
+
+    async def fake_validate_internal_bridge_api_key(_request):
+        return None, None
+
+    async def fake_stream_responses(*_args, **kwargs):
+        captured.update(kwargs)
+        return JSONResponse(content={"ok": True})
+
+    monkeypatch.setattr(
+        proxy_api_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_instance_id="instance-b"),
+    )
+    monkeypatch.setattr(proxy_api_module, "parse_forwarded_request", fake_parse_forwarded_request)
+    monkeypatch.setattr(proxy_api_module, "_validate_internal_bridge_api_key", fake_validate_internal_bridge_api_key)
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", fake_stream_responses)
+
+    response = await proxy_api_module.internal_bridge_responses(
+        request,
+        payload,
+        cast(proxy_api_module.ProxyContext, SimpleNamespace()),
+    )
+
+    assert response.status_code == 200
+    assert captured["codex_session_budget_reallocation_enabled"] is False
+    assert captured["forwarded_downstream_turn_state"] == "turn_forwarded"
 
 
 @pytest.mark.asyncio

@@ -199,6 +199,7 @@ async def responses(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        codex_session_budget_reallocation_enabled=not _backend_codex_turn_state_header_present(request.headers),
     )
 
 
@@ -370,6 +371,7 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        codex_session_budget_reallocation_enabled=forwarded_request_context.context.downstream_turn_state is None,
     )
 
 
@@ -1066,6 +1068,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    codex_session_budget_reallocation_enabled: bool = True,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -1110,6 +1113,7 @@ async def _stream_responses(
             forwarded_request=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
     else:
         stream = context.service.stream_responses(
@@ -1121,6 +1125,7 @@ async def _stream_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
     stream = _normalize_public_responses_stream(stream)
     try:
@@ -1338,6 +1343,7 @@ async def _compact_responses(
             route_class=route_class,
             transport="http",
             model=effective_model,
+            headers=request.headers,
         ),
         api_key=api_key,
         sticky_key=affinity.key,
@@ -1477,6 +1483,11 @@ def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
     return parse_sse_data_json(line)
 
 
+def _backend_codex_turn_state_header_present(headers: Mapping[str, str]) -> bool:
+    value = headers.get("x-codex-turn-state")
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _derive_request_capabilities(
     *,
     route_family: str,
@@ -1487,14 +1498,20 @@ def _derive_request_capabilities(
     headers: Mapping[str, str] | None = None,
 ) -> proxy_service_module.RequestCapabilities:
     continuity_param = None
-    if payload is not None and headers is not None:
-        continuity_param = _platform_continuity_param(route_family, payload, headers)
+    continuity_hint = None
+    if headers is not None:
+        if payload is not None:
+            continuity_param = _platform_continuity_param(route_family, payload, headers)
+            continuity_hint = _platform_continuity_hint(route_family, payload, headers)
+        else:
+            continuity_hint = _platform_session_header_continuity_hint(route_family, headers)
     return proxy_service_module.RequestCapabilities(
         route_family=route_family,
         route_class=route_class,
         transport=transport,
         model=model,
         continuity_param=continuity_param,
+        continuity_hint=continuity_hint,
     )
 
 
@@ -2209,6 +2226,29 @@ def _platform_continuity_param(
     if payload.previous_response_id:
         return "previous_response_id"
     if route_family == BACKEND_CODEX_HTTP_ROUTE_FAMILY:
+        return None
+    for key in ("session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"):
+        value = headers.get(key)
+        if isinstance(value, str) and value.strip():
+            return key
+    return None
+
+
+def _platform_continuity_hint(
+    route_family: str,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+) -> str | None:
+    if payload.conversation or payload.previous_response_id:
+        return None
+    return _platform_session_header_continuity_hint(route_family, headers)
+
+
+def _platform_session_header_continuity_hint(
+    route_family: str,
+    headers: Mapping[str, str],
+) -> str | None:
+    if route_family != BACKEND_CODEX_HTTP_ROUTE_FAMILY:
         return None
     for key in ("session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"):
         value = headers.get(key)

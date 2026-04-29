@@ -735,6 +735,56 @@ async def test_sticky_chatgpt_target_is_healthy_for_platform_fallback_respects_r
 
 
 @pytest.mark.asyncio
+async def test_sticky_chatgpt_target_is_selectable_for_platform_fallback_ignores_usage_drain_thresholds(
+    monkeypatch,
+):
+    balancer = LoadBalancer(
+        lambda: _sticky_repo_factory(
+            StickyRoutingTarget(
+                provider_kind="chatgpt_web",
+                routing_subject_id="a",
+                account_id="a",
+            )
+        )
+    )
+    accounts = [_make_test_account("a", status=AccountStatus.ACTIVE)]
+    selection_inputs = SelectionInputs(
+        accounts=accounts,
+        latest_primary={"a": _make_test_usage("a", window="primary", used_percent=95.0)},
+        latest_secondary={"a": _make_test_usage("a", window="secondary", used_percent=95.0)},
+    )
+
+    async def fake_load_selection_inputs(*, model=None, additional_limit_name=None, account_ids=None):
+        del model, additional_limit_name, account_ids
+        return selection_inputs
+
+    balancer._load_selection_inputs = fake_load_selection_inputs  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(
+            platform_fallback_force_enabled=False,
+            platform_fallback_primary_remaining_threshold_pct=10.0,
+            platform_fallback_secondary_remaining_threshold_pct=5.0,
+            prefer_earlier_reset_accounts=False,
+        ),
+    )
+
+    sticky_healthy = await balancer.sticky_chatgpt_target_is_healthy_for_platform_fallback(
+        sticky_key="session-1",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        model="gpt-5.1",
+    )
+    sticky_selectable = await balancer.sticky_chatgpt_target_is_selectable_for_platform_fallback(
+        sticky_key="session-1",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        model="gpt-5.1",
+    )
+
+    assert sticky_healthy is False
+    assert sticky_selectable is True
+
+
+@pytest.mark.asyncio
 async def test_sticky_chatgpt_target_is_healthy_for_platform_fallback_returns_false_when_active_target_is_in_cooldown(
     monkeypatch,
 ):

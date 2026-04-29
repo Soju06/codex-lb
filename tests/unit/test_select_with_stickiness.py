@@ -58,6 +58,7 @@ async def _invoke_stickiness(
     sticky_kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
+    sticky_budget_reallocation_enabled: bool = True,
     budget_threshold_pct: float = 95.0,
     routing_strategy: RoutingStrategy = "usage_weighted",
 ):
@@ -81,6 +82,7 @@ async def _invoke_stickiness(
         sticky_kind=sticky_kind,
         reallocate_sticky=reallocate_sticky,
         sticky_max_age_seconds=sticky_max_age_seconds,
+        sticky_budget_reallocation_enabled=sticky_budget_reallocation_enabled,
         budget_threshold_pct=budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
         routing_strategy=routing_strategy,
@@ -758,6 +760,29 @@ async def test_budget_threshold_reallocates_codex_session_affinity():
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
     repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_can_preserve_codex_session_affinity():
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "codex-session-123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        sticky_budget_reallocation_enabled=False,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_not_called()
 
 
 @pytest.mark.asyncio

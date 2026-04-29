@@ -1134,6 +1134,14 @@ class ProxyService:
                     and request_state.error_http_status_override is not None
                     and request_state.error_http_status_override >= 400
                 ):
+                    if request_state.previous_response_not_found_rewritten:
+                        raise ProxyResponseError(
+                            request_state.error_http_status_override,
+                            openai_error(
+                                "bridge_previous_response_not_found",
+                                "Upstream websocket closed before response.completed",
+                            ),
+                        )
                     raise ProxyResponseError(
                         request_state.error_http_status_override,
                         _openai_error_envelope_from_response_failed_payload(block_payload),
@@ -5095,9 +5103,11 @@ class ProxyService:
             status_request_state is not None
             and status_request_state.previous_response_id is not None
             and is_previous_response_not_found_event
-            and (response_id is not None or has_other_pending_requests)
         ):
             status_request_state.error_http_status_override = 502
+            status_request_state.previous_response_not_found_rewritten = (
+                response_id is None and not has_other_pending_requests
+            )
             event, payload, event_type, rewritten_text = _maybe_rewrite_websocket_previous_response_not_found_event(
                 request_state=status_request_state,
                 event=event,
@@ -7842,6 +7852,7 @@ class _WebSocketRequestState:
     error_type_override: str | None = None
     error_param_override: str | None = None
     error_http_status_override: int | None = None
+    previous_response_not_found_rewritten: bool = False
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -10155,6 +10166,7 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     code = error.get("code")
     if code in {
         "bridge_owner_unreachable",
+        "bridge_previous_response_not_found",
         "previous_response_not_found",
         "bridge_instance_mismatch",
     }:

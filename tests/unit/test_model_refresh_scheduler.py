@@ -71,6 +71,7 @@ async def test_fetch_models_for_plan_marks_transport_errors(monkeypatch: pytest.
         "get_codex_version_cache",
         lambda: SimpleNamespace(get_version=AsyncMock(return_value="1.2.3")),
     )
+
     @contextlib.asynccontextmanager
     async def lease_session():
         yield session

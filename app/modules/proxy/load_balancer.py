@@ -140,6 +140,7 @@ class LoadBalancer:
         sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
+        sticky_budget_reallocation_enabled: bool = True,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
@@ -337,6 +338,7 @@ class LoadBalancer:
                         sticky_kind=sticky_kind,
                         reallocate_sticky=reallocate_sticky,
                         sticky_max_age_seconds=sticky_max_age_seconds,
+                        sticky_budget_reallocation_enabled=sticky_budget_reallocation_enabled,
                         budget_threshold_pct=budget_threshold_pct,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
@@ -712,6 +714,60 @@ class LoadBalancer:
             secondary_remaining_threshold=secondary_remaining_threshold,
         )
 
+    async def sticky_chatgpt_target_is_selectable_for_platform_fallback(
+        self,
+        *,
+        sticky_key: str | None,
+        sticky_kind: StickySessionKind | None,
+        sticky_max_age_seconds: int | None = None,
+        model: str | None = None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+    ) -> bool:
+        if not sticky_key or sticky_kind is None:
+            return False
+
+        async with self._repo_factory() as repos:
+            sticky_repo = repos.sticky_sessions
+            if sticky_repo is None:
+                return False
+            sticky_target = await sticky_repo.get_target(
+                sticky_key,
+                kind=sticky_kind,
+                provider_kind=CHATGPT_WEB_PROVIDER_KIND,
+                max_age_seconds=sticky_max_age_seconds,
+            )
+
+        if sticky_target is None or sticky_target.account_id is None:
+            return False
+
+        selection_inputs = await self._load_selection_inputs(
+            model=model,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+        )
+        if not selection_inputs.accounts:
+            return False
+
+        self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+        states, _account_map = _build_states(
+            accounts=selection_inputs.accounts,
+            latest_primary=selection_inputs.latest_primary,
+            latest_secondary=selection_inputs.latest_secondary,
+            runtime=self._runtime,
+        )
+        pinned_state = next((state for state in states if state.account_id == sticky_target.account_id), None)
+        if pinned_state is None or pinned_state.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+            return False
+
+        settings = get_settings()
+        selected_state = _select_state_for_platform_fallback(
+            pinned_state,
+            allow_rate_limit_grace=True,
+            prefer_earlier_reset_accounts=bool(getattr(settings, "prefer_earlier_reset_accounts", False)),
+        )
+        return selected_state is not None
+
     async def _load_selection_inputs(
         self,
         *,
@@ -962,6 +1018,7 @@ class LoadBalancer:
         sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
+        sticky_budget_reallocation_enabled: bool,
         budget_threshold_pct: float = 95.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
@@ -1001,7 +1058,8 @@ class LoadBalancer:
                 # once the session is skating on the edge of exhaustion.
                 now = time.time()
                 budget_pressured = (
-                    sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
+                    sticky_budget_reallocation_enabled
+                    and sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_budget_threshold(pinned, budget_threshold_pct)
                 )

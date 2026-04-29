@@ -1886,6 +1886,79 @@ async def test_backend_codex_compact_keeps_sticky_chatgpt_session_during_rate_li
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_compact_keeps_chatgpt_when_sticky_session_usage_drained(
+    async_client,
+    monkeypatch,
+):
+    raw_sticky_account_id = "acc_backend_compact_sticky_drained"
+    sticky_account_id = await _import_account(
+        async_client,
+        raw_sticky_account_id,
+        "backend-compact-sticky-drained@example.com",
+    )
+    await _seed_primary_usage(sticky_account_id, 96.0)
+    await _seed_secondary_usage(sticky_account_id, 96.0)
+    other_account_id = await _import_account(
+        async_client,
+        "acc_backend_compact_sticky_drained_other",
+        "backend-compact-sticky-drained-other@example.com",
+    )
+    await _seed_primary_usage(other_account_id, 10.0)
+    await _seed_secondary_usage(other_account_id, 10.0)
+    await _create_platform_identity(async_client, monkeypatch)
+
+    session_key = "backend-compact-session-sticky-drained"
+    async with SessionLocal() as session:
+        session.add(
+            StickySession(
+                key=session_key,
+                kind=StickySessionKind.CODEX_SESSION,
+                provider_kind="chatgpt_web",
+                routing_subject_id=sticky_account_id,
+                account_id=sticky_account_id,
+            )
+        )
+        await session.commit()
+
+    async def fail_create_platform_compact_response(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, payload, api_key, organization, project
+        raise AssertionError("selectable sticky ChatGPT session must keep backend compact on ChatGPT")
+
+    async def fake_chatgpt_compact(payload, headers, access_token, account_id):
+        del headers, access_token
+        assert payload.model == "gpt-5.1"
+        assert account_id in {raw_sticky_account_id, "acc_backend_compact_sticky_drained_other"}
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "status": "completed",
+                "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                "output": [],
+            }
+        )
+
+    monkeypatch.setattr(
+        provider_adapters_module,
+        "create_platform_compact_response",
+        fail_create_platform_compact_response,
+    )
+    monkeypatch.setattr(provider_adapters_module, "core_compact_responses", fake_chatgpt_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"x-codex-session-id": session_key},
+        json={"model": "gpt-5.1", "instructions": "compact", "input": []},
+    )
+    assert response.status_code == 200
+    assert response.json()["object"] == "response.compaction"
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "chatgpt_web"
+    assert log.route_class == "chatgpt_private"
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_compact_keeps_chatgpt_when_any_account_in_pool_is_healthy(async_client, monkeypatch):
     drained_account_id = await _import_account(
         async_client,
@@ -2365,6 +2438,144 @@ async def test_backend_codex_responses_uses_platform_when_other_candidate_has_pa
     assert lines == [
         'data: {"type":"response.created"}',
         'data: {"type":"response.completed","response":{"id":"resp_backend_http_partial_usage_platform"}}',
+    ]
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "openai_platform"
+    assert log.routing_subject_id == identity_id
+    assert log.route_class == "chatgpt_private"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_with_sticky_turn_state_keeps_chatgpt_when_usage_drained(
+    async_client,
+    monkeypatch,
+):
+    raw_account_id = "acc_backend_http_sticky_turn_state"
+    sticky_account_id = await _import_account(
+        async_client,
+        raw_account_id,
+        "backend-http-sticky-turn-state@example.com",
+    )
+    await _seed_primary_usage(sticky_account_id, 96.0)
+    await _seed_secondary_usage(sticky_account_id, 96.0)
+    other_account_id = await _import_account(
+        async_client,
+        "acc_backend_http_sticky_turn_state_other",
+        "backend-http-sticky-turn-state-other@example.com",
+    )
+    await _seed_primary_usage(other_account_id, 10.0)
+    await _seed_secondary_usage(other_account_id, 10.0)
+    await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
+
+    turn_state = "turn_state_chatgpt_sticky"
+    async with SessionLocal() as session:
+        session.add(
+            StickySession(
+                key=turn_state,
+                kind=StickySessionKind.CODEX_SESSION,
+                provider_kind="chatgpt_web",
+                routing_subject_id=sticky_account_id,
+                account_id=sticky_account_id,
+            )
+        )
+        await session.commit()
+
+    async def fail_stream_platform_responses(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, payload, api_key, organization, project
+        raise AssertionError("sticky backend Codex continuity must keep selectable ChatGPT owner")
+
+    async def fake_core_stream_responses(payload, headers, access_token, account_id, base_url=None, **kwargs):
+        del headers, access_token, base_url, kwargs
+        assert payload.model == "gpt-5.1"
+        assert account_id == raw_account_id
+        yield 'data: {"type":"response.created"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_backend_http_sticky_chatgpt"}}\n\n'
+
+    monkeypatch.setattr(provider_adapters_module, "stream_platform_responses", fail_stream_platform_responses)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fake_core_stream_responses)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"x-codex-turn-state": turn_state},
+        json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ")]
+    assert [event.get("type") for event in events] == ["response.created", "response.completed"]
+    assert events[-1]["response"]["id"] == "resp_backend_http_sticky_chatgpt"
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "chatgpt_web"
+    assert log.account_id == sticky_account_id
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_force_fallback_overrides_sticky_turn_state(
+    async_client,
+    monkeypatch,
+):
+    settings = proxy_service_module.get_settings()
+    settings.platform_fallback_force_enabled = True
+    sticky_account_id = await _import_account(
+        async_client,
+        "acc_backend_http_force_sticky_turn_state",
+        "backend-http-force-sticky-turn-state@example.com",
+    )
+    await _seed_primary_usage(sticky_account_id, 96.0)
+    await _seed_secondary_usage(sticky_account_id, 96.0)
+    identity_id = await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
+
+    turn_state = "turn_state_chatgpt_force_sticky"
+    async with SessionLocal() as session:
+        session.add(
+            StickySession(
+                key=turn_state,
+                kind=StickySessionKind.CODEX_SESSION,
+                provider_kind="chatgpt_web",
+                routing_subject_id=sticky_account_id,
+                account_id=sticky_account_id,
+            )
+        )
+        await session.commit()
+
+    async def fake_stream_platform_responses(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        assert payload["model"] == "gpt-5.1"
+        return PlatformStreamResponse(
+            event_stream=_stream_lines(
+                [
+                    'data: {"type":"response.created"}\n\n',
+                    'data: {"type":"response.completed","response":{"id":"resp_backend_http_force_platform"}}\n\n',
+                ]
+            ),
+            upstream_request_id="up_req_backend_http_force_sticky_stream",
+        )
+
+    def fail_stream_http_responses(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError("force fallback must override sticky backend Codex continuity")
+
+    monkeypatch.setattr(provider_adapters_module, "stream_platform_responses", fake_stream_platform_responses)
+    monkeypatch.setattr(proxy_service_module.ProxyService, "stream_http_responses", fail_stream_http_responses)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"x-codex-turn-state": turn_state},
+        json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert lines == [
+        'data: {"type":"response.created"}',
+        'data: {"type":"response.completed","response":{"id":"resp_backend_http_force_platform"}}',
     ]
 
     log = await _latest_request_log()

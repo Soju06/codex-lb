@@ -136,6 +136,7 @@ class RequestCapabilities:
     transport: str
     model: str | None
     continuity_param: str | None = None
+    continuity_hint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

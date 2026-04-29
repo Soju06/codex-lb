@@ -276,6 +276,7 @@ class _AffinityPolicy:
     kind: StickySessionKind | None = None
     reallocate_sticky: bool = False
     max_age_seconds: int | None = None
+    budget_reallocation_enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,6 +507,25 @@ class ProxyService:
             account_ids=account_ids,
         )
 
+    async def sticky_chatgpt_target_is_selectable_for_platform_fallback(
+        self,
+        *,
+        sticky_key: str | None,
+        sticky_kind: StickySessionKind | None,
+        sticky_max_age_seconds: int | None,
+        model: str | None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+    ) -> bool:
+        return await self._load_balancer.sticky_chatgpt_target_is_selectable_for_platform_fallback(
+            sticky_key=sticky_key,
+            sticky_kind=sticky_kind,
+            sticky_max_age_seconds=sticky_max_age_seconds,
+            model=model,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+        )
+
     @staticmethod
     def _hard_affinity_for_provider_fallback(
         *,
@@ -703,6 +723,33 @@ class ProxyService:
                 )
                 if sticky_chatgpt_healthy:
                     should_fallback = False
+                    logger.info(
+                        "Suppressed usage-drain Platform fallback for healthy sticky ChatGPT target "
+                        "request_id=%s route_family=%s sticky_kind=%s continuity_hint=%s",
+                        get_request_id(),
+                        capabilities.route_family,
+                        sticky_kind.value if sticky_kind is not None else None,
+                        capabilities.continuity_hint,
+                    )
+                elif capabilities.continuity_hint is not None:
+                    sticky_chatgpt_selectable = await self.sticky_chatgpt_target_is_selectable_for_platform_fallback(
+                        sticky_key=sticky_key,
+                        sticky_kind=cast(StickySessionKind, sticky_kind),
+                        sticky_max_age_seconds=sticky_max_age_seconds,
+                        model=capabilities.model,
+                        additional_limit_name=additional_limit_name,
+                        account_ids=scoped_account_ids,
+                    )
+                    if sticky_chatgpt_selectable:
+                        should_fallback = False
+                        logger.info(
+                            "Suppressed usage-drain Platform fallback for selectable sticky ChatGPT target "
+                            "request_id=%s route_family=%s sticky_kind=%s continuity_hint=%s",
+                            get_request_id(),
+                            capabilities.route_family,
+                            sticky_kind.value if sticky_kind is not None else None,
+                            capabilities.continuity_hint,
+                        )
             if should_fallback:
                 if identity is not None:
                     (
@@ -1201,6 +1248,7 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         request_transport: str = _REQUEST_TRANSPORT_HTTP,
+        codex_session_budget_reallocation_enabled: bool = True,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
@@ -1214,6 +1262,7 @@ class ProxyService:
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             request_transport=request_transport,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
 
     def stream_http_responses(
@@ -1231,6 +1280,7 @@ class ProxyService:
         forwarded_request: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        codex_session_budget_reallocation_enabled: bool = True,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -1249,6 +1299,7 @@ class ProxyService:
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -1267,6 +1318,7 @@ class ProxyService:
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        codex_session_budget_reallocation_enabled: bool = True,
     ) -> AsyncIterator[str]:
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
@@ -1281,6 +1333,7 @@ class ProxyService:
                 api_key_reservation=api_key_reservation,
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
+                codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
             ):
                 yield line
             return
@@ -1304,6 +1357,7 @@ class ProxyService:
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         ):
             yield line
 
@@ -1328,6 +1382,7 @@ class ProxyService:
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        codex_session_budget_reallocation_enabled: bool = True,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
@@ -1344,6 +1399,7 @@ class ProxyService:
             openai_cache_affinity_max_age_seconds=dashboard_settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=dashboard_settings.sticky_threads_enabled,
             api_key=api_key,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
@@ -2287,6 +2343,7 @@ class ProxyService:
         selected_subject: SelectedChatGPTSubject | SelectedPlatformSubject | None = None,
         route_family: str = BACKEND_CODEX_HTTP_ROUTE_FAMILY,
         route_class: str = CHATGPT_PRIVATE_ROUTE_CLASS,
+        codex_session_budget_reallocation_enabled: bool = True,
     ) -> CompactResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
@@ -2317,6 +2374,7 @@ class ProxyService:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
@@ -2483,6 +2541,7 @@ class ProxyService:
                     sticky_kind=affinity.kind,
                     reallocate_sticky=affinity.reallocate_sticky,
                     sticky_max_age_seconds=affinity.max_age_seconds,
+                    sticky_budget_reallocation_enabled=affinity.budget_reallocation_enabled,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     routing_strategy=routing_strategy,
                     model=payload.model,
@@ -5333,6 +5392,7 @@ class ProxyService:
                 sticky_kind=affinity.kind,
                 reallocate_sticky=affinity.reallocate_sticky,
                 sticky_max_age_seconds=affinity.max_age_seconds,
+                sticky_budget_reallocation_enabled=affinity.budget_reallocation_enabled,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                 routing_strategy=_routing_strategy(settings),
                 model=request_model,
@@ -5953,6 +6013,7 @@ class ProxyService:
                 sticky_kind=session.affinity.kind,
                 reallocate_sticky=session.affinity.reallocate_sticky,
                 sticky_max_age_seconds=session.affinity.max_age_seconds,
+                sticky_budget_reallocation_enabled=session.affinity.budget_reallocation_enabled,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                 routing_strategy=_routing_strategy(settings),
                 model=session.request_model,
@@ -7426,6 +7487,7 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
         request_transport: str,
+        codex_session_budget_reallocation_enabled: bool = True,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         start = time.monotonic()
@@ -7444,6 +7506,7 @@ class ProxyService:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+            codex_session_budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
@@ -7508,6 +7571,7 @@ class ProxyService:
                         sticky_kind=affinity.kind,
                         reallocate_sticky=affinity.reallocate_sticky,
                         sticky_max_age_seconds=affinity.max_age_seconds,
+                        sticky_budget_reallocation_enabled=affinity.budget_reallocation_enabled,
                         prefer_earlier_reset_accounts=prefer_earlier_reset,
                         routing_strategy=routing_strategy,
                         model=payload.model,
@@ -8670,6 +8734,7 @@ class ProxyService:
         sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
+        sticky_budget_reallocation_enabled: bool = True,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
@@ -8702,6 +8767,7 @@ class ProxyService:
                         sticky_kind=sticky_kind,
                         reallocate_sticky=reallocate_sticky,
                         sticky_max_age_seconds=sticky_max_age_seconds,
+                        sticky_budget_reallocation_enabled=sticky_budget_reallocation_enabled,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
                         model=model,
@@ -8723,6 +8789,7 @@ class ProxyService:
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
                     sticky_max_age_seconds=sticky_max_age_seconds,
+                    sticky_budget_reallocation_enabled=sticky_budget_reallocation_enabled,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
                     model=model,
@@ -10802,6 +10869,7 @@ def _sticky_key_for_responses_request(
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
+    codex_session_budget_reallocation_enabled: bool = True,
 ) -> _AffinityPolicy:
     cache_key, _ = _resolve_prompt_cache_key(
         payload,
@@ -10813,6 +10881,7 @@ def _sticky_key_for_responses_request(
         return _AffinityPolicy(
             key=turn_state_key,
             kind=StickySessionKind.CODEX_SESSION,
+            budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
         )
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
@@ -10820,6 +10889,7 @@ def _sticky_key_for_responses_request(
             return _AffinityPolicy(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
+                budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
             )
     if openai_cache_affinity:
         return _AffinityPolicy(
@@ -11448,6 +11518,7 @@ def _sticky_key_for_compact_request(
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
+    codex_session_budget_reallocation_enabled: bool = True,
 ) -> _AffinityPolicy:
     cache_key, _ = _resolve_prompt_cache_key(
         payload,
@@ -11460,6 +11531,7 @@ def _sticky_key_for_compact_request(
             return _AffinityPolicy(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
+                budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
             )
     if openai_cache_affinity:
         return _AffinityPolicy(

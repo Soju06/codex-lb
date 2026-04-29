@@ -334,15 +334,16 @@ class ResponsesRequest(BaseModel):
     @field_validator("input")
     @classmethod
     def _validate_input_type(cls, value: JsonValue) -> JsonValue:
+        # ``input_file`` content items with a ``file_id`` are now allowed
+        # and forwarded verbatim. They reference uploads registered via
+        # ``POST /backend-api/files`` (see the file upload protocol),
+        # which lets large attachments bypass the 16 MiB websocket
+        # ceiling on `/responses`.
         if isinstance(value, str):
             normalized = _normalize_input_text(value)
-            if _has_input_file_id(normalized):
-                raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(normalized)
         if is_json_list(value):
             input_items = value
-            if _has_input_file_id(input_items):
-                raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(input_items)
         raise ValueError("input must be a string or array")
 
@@ -417,15 +418,13 @@ class ResponsesCompactRequest(BaseModel):
     @field_validator("input")
     @classmethod
     def _validate_input_type(cls, value: JsonValue) -> JsonValue:
+        # ``input_file`` content items with a ``file_id`` are forwarded
+        # verbatim; see ``ResponsesRequest._validate_input_type``.
         if isinstance(value, str):
             normalized = _normalize_input_text(value)
-            if _has_input_file_id(normalized):
-                raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(normalized)
         if is_json_list(value):
             input_items = value
-            if _has_input_file_id(input_items):
-                raise ValueError("input_file.file_id is not supported")
             return _sanitize_input_items(input_items)
         raise ValueError("input must be a string or array")
 

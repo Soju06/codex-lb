@@ -73,7 +73,22 @@ async def test_v1_responses_forwards_input_file_url(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_input_file_id(async_client):
+async def test_v1_responses_forwards_input_file_id(async_client, monkeypatch):
+    """`input_file.file_id` was previously rejected because uploads via
+    `POST /backend-api/files` were not supported. With the file upload
+    protocol in place, the proxy now forwards these references verbatim
+    so callers can attach pre-uploaded files (bypassing the 16 MiB
+    websocket ceiling on `/responses`)."""
+    await _import_account(async_client, "acc_input_file_id", "input-file-id@example.com")
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_input_file_id")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     payload = {
         "model": "gpt-5.2",
         "input": [
@@ -87,11 +102,9 @@ async def test_v1_responses_rejects_input_file_id(async_client):
         ],
     }
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
-    payload = resp.json()
-    assert payload["error"]["type"] == "invalid_request_error"
-    assert payload["error"]["message"] == "Invalid request payload"
-    assert payload["error"]["param"] == "input"
+    assert resp.status_code == 200
+    forwarded_input = seen["payload"].input  # type: ignore[attr-defined]
+    assert forwarded_input == payload["input"]
 
 
 @pytest.mark.asyncio

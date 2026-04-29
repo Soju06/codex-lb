@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.clients.files import OPENAI_FILE_UPLOAD_LIMIT_BYTES, OPENAI_FILE_USE_CASE
 from app.core.types import JsonValue
 from app.modules.proxy.types import (
     AdditionalRateLimitData,
@@ -10,6 +11,22 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+
+
+class FileCreateRequest(BaseModel):
+    """Inbound payload for ``POST /backend-api/files``.
+
+    Mirrors upstream ChatGPT ``/backend-api/files`` registration body. The
+    proxy enforces the upstream-side ``OPENAI_FILE_UPLOAD_LIMIT_BYTES``
+    (512 MiB) at the edge so a misbehaving client does not allocate an
+    oversized SAS upload URL on a shared account.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    file_name: str = Field(min_length=1)
+    file_size: int = Field(gt=0, le=OPENAI_FILE_UPLOAD_LIMIT_BYTES)
+    use_case: str = Field(default=OPENAI_FILE_USE_CASE, min_length=1)
 
 
 class RateLimitWindowSnapshot(BaseModel):

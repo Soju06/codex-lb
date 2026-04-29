@@ -8,7 +8,7 @@ import logging
 import re
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Collection, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +34,9 @@ from app.core.auth.refresh import (
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.clients.files import FileProxyError
+from app.core.clients.files import create_file as core_create_file
+from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.proxy import (
     ProxyResponseError,
     filter_inbound_headers,
@@ -1856,6 +1859,220 @@ class ProxyService:
                 api_key=api_key,
                 request_id=request_id,
                 model=transcribe_model,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                status=log_status,
+                error_code=log_error_code,
+                error_message=log_error_message,
+                transport=_REQUEST_TRANSPORT_HTTP,
+            )
+
+    async def create_file(
+        self,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None = None,
+    ) -> dict[str, JsonValue]:
+        """Forward an inbound `POST /backend-api/files` registration to upstream.
+
+        The body is whatever the caller sent (already validated as
+        ``FileCreateRequest`` at the API edge). Returns the upstream
+        ``{file_id, upload_url, ...}`` JSON verbatim. Mirrors the
+        account-selection / refresh / 401-retry pattern from ``transcribe``.
+        """
+        return await self._proxy_files_call(
+            log_model="files-create",
+            kind="files-create",
+            api_key=api_key,
+            headers=headers,
+            invoke=lambda access_token, account_id, filtered_headers: core_create_file(
+                payload=payload,
+                headers=filtered_headers,
+                access_token=access_token,
+                account_id=account_id,
+            ),
+        )
+
+    async def finalize_file(
+        self,
+        file_id: str,
+        headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None = None,
+    ) -> dict[str, JsonValue]:
+        """Forward an inbound `POST /backend-api/files/{file_id}/uploaded` finalize call.
+
+        The upstream client (Codex CLI) polls this endpoint while
+        ``status == "retry"``; ``core_finalize_file`` mirrors that loop
+        server-side with a 30 s budget. Returns the upstream JSON
+        verbatim.
+        """
+        return await self._proxy_files_call(
+            log_model="files-finalize",
+            kind="files-finalize",
+            api_key=api_key,
+            headers=headers,
+            invoke=lambda access_token, account_id, filtered_headers: core_finalize_file(
+                file_id=file_id,
+                headers=filtered_headers,
+                access_token=access_token,
+                account_id=account_id,
+            ),
+        )
+
+    async def _proxy_files_call(
+        self,
+        *,
+        log_model: str,
+        kind: str,
+        api_key: ApiKeyData | None,
+        headers: Mapping[str, str],
+        invoke: Callable[[str, str | None, Mapping[str, str]], Awaitable[dict[str, JsonValue]]],
+    ) -> dict[str, JsonValue]:
+        """Shared account-selection / refresh / 401-retry plumbing for `/files` calls.
+
+        Mirrors the structure of ``transcribe``: pick an account with budget,
+        ensure freshness, invoke upstream, on 401 force-refresh and retry once,
+        translate ``FileProxyError`` -> ``ProxyResponseError``, and always
+        write a request-log entry on the way out.
+        """
+        filtered = filter_inbound_headers(headers)
+        request_id = get_request_id() or ensure_request_id(None)
+        start = time.monotonic()
+        base_settings = get_settings()
+        deadline = start + base_settings.transcription_request_budget_seconds
+        account_id_value: str | None = None
+        log_status = "error"
+        log_error_code: str | None = None
+        log_error_message: str | None = None
+
+        settings = await get_settings_cache().get()
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        routing_strategy = _routing_strategy(settings)
+        try:
+            selection = await self._select_account_with_budget_compatible(
+                deadline,
+                request_id=request_id,
+                kind=kind,
+                api_key=api_key,
+                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                routing_strategy=routing_strategy,
+                model=None,
+            )
+            account = selection.account
+            if not account:
+                log_error_code = selection.error_code or "no_accounts"
+                log_error_message = selection.error_message or "No active accounts available"
+                raise ProxyResponseError(
+                    503,
+                    openai_error(log_error_code, log_error_message),
+                )
+            account_id_value = account.id
+
+            async def _call(target: Account) -> dict[str, JsonValue]:
+                access_token = self._encryptor.decrypt(target.access_token_encrypted)
+                account_id = _header_account_id(target.chatgpt_account_id)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "%s request budget exhausted before upstream call request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        target.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                try:
+                    return await invoke(access_token, account_id, filtered)
+                except FileProxyError as files_exc:
+                    raise ProxyResponseError(files_exc.status_code, files_exc.payload) from files_exc
+
+            try:
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "%s request budget exhausted before freshness check request_id=%s",
+                        kind,
+                        request_id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                try:
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "%s refresh/connect failed request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                result = await _call(account)
+                await self._load_balancer.record_success(account)
+                log_status = "success"
+                return result
+            except RefreshError as refresh_exc:
+                if refresh_exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                raise ProxyResponseError(
+                    401,
+                    openai_error(
+                        "invalid_api_key",
+                        refresh_exc.message,
+                        error_type="invalid_request_error",
+                    ),
+                ) from refresh_exc
+            except ProxyResponseError as exc:
+                if exc.status_code != 401:
+                    await self._handle_proxy_error(account, exc)
+                    raise
+                try:
+                    remaining_budget = _remaining_budget_seconds(deadline)
+                    if remaining_budget <= 0:
+                        logger.warning(
+                            "%s request budget exhausted before forced refresh retry request_id=%s account_id=%s",
+                            kind,
+                            request_id,
+                            account.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    account = await self._ensure_fresh_with_budget(
+                        account, force=True, timeout_seconds=remaining_budget
+                    )
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    raise exc
+                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                    logger.warning(
+                        "%s forced refresh/connect failed request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                try:
+                    result = await _call(account)
+                    await self._load_balancer.record_success(account)
+                    log_status = "success"
+                    return result
+                except ProxyResponseError as retry_exc:
+                    await self._handle_proxy_error(account, retry_exc)
+                    raise
+        except ProxyResponseError as exc:
+            error = _parse_openai_error(exc.payload)
+            log_error_code = log_error_code or _normalize_error_code(
+                error.code if error else None,
+                error.type if error else None,
+            )
+            log_error_message = log_error_message or (error.message if error else None)
+            raise
+        finally:
+            await self._write_request_log(
+                account_id=account_id_value,
+                api_key=api_key,
+                request_id=request_id,
+                model=log_model,
                 latency_ms=int((time.monotonic() - start) * 1000),
                 status=log_status,
                 error_code=log_error_code,

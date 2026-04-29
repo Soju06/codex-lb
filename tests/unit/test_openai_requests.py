@@ -864,3 +864,52 @@ def test_v1_rejects_unknown_message_role():
     }
     with pytest.raises(ClientPayloadError, match="Unsupported message role"):
         V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+
+def test_responses_accepts_input_file_with_file_id_content_item():
+    """Regression: ``input_file`` content items with a ``file_id`` were
+    previously rejected. They are now allowed and forwarded verbatim so
+    callers can reference uploads registered through the
+    ``POST /backend-api/files`` upload protocol."""
+    content = [
+        {"type": "input_text", "text": "Summarize this file."},
+        {"type": "input_file", "file_id": "file_abc"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": content}],
+    }
+    request = ResponsesRequest.model_validate(payload)
+    assert request.input == [{"role": "user", "content": content}]
+
+
+def test_responses_compact_accepts_input_file_with_file_id_content_item():
+    content = [
+        {"type": "input_text", "text": "Summarize this file."},
+        {"type": "input_file", "file_id": "file_abc"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": content}],
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+    assert request.input == [{"role": "user", "content": content}]
+
+
+def test_responses_accepts_top_level_input_file_with_file_id():
+    """Top-level ``input_file`` items (sibling of role messages) were
+    also rejected; they should now be forwarded as-is."""
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "input_file", "file_id": "file_root"},
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+    forwarded = request.input
+    assert isinstance(forwarded, list)
+    assert {"type": "input_file", "file_id": "file_root"} in forwarded

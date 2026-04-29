@@ -39,7 +39,6 @@ from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.types import JsonValue
 
-
 # Matches the upstream Codex client constant.
 OPENAI_FILE_UPLOAD_LIMIT_BYTES: int = 512 * 1024 * 1024
 

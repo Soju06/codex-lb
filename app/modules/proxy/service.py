@@ -1982,8 +1982,16 @@ class ProxyService:
         # client supplied them. Derived ``prompt_cache_key`` values
         # added by the affinity helper itself must not block file-pin
         # routing for first-turn upload-then-converse flows.
+        # Honor both the canonical ``prompt_cache_key`` and the
+        # OpenAI-compat camelCase ``promptCacheKey`` alias as
+        # client-supplied. Pydantic populates ``model_fields_set`` with
+        # the canonical name when V1 normalization runs ahead of us, but
+        # raw clients posting directly to ``/backend-api/codex/responses``
+        # bypass that normalization and we still want to respect their
+        # explicit cache key.
         explicit_fields = getattr(payload, "model_fields_set", set())
-        if "prompt_cache_key" in explicit_fields and _prompt_cache_key_from_request_model(payload) is not None:
+        explicit_cache_key = "prompt_cache_key" in explicit_fields or "promptCacheKey" in explicit_fields
+        if explicit_cache_key and _prompt_cache_key_from_request_model(payload) is not None:
             return None
         # ``ensure_downstream_turn_state`` / ``ensure_http_downstream_turn_state``
         # synthesize a fresh ``x-codex-turn-state`` header on first turns when

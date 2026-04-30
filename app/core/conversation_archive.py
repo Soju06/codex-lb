@@ -150,7 +150,7 @@ def _redact_headers(headers: Mapping[str, str] | None) -> dict[str, str] | None:
 
 def _archive_path() -> Path:
     settings = get_settings()
-    directory = Path(getattr(settings, "conversation_archive_dir"))
+    directory = Path(getattr(settings, "conversation_archive_dir")).expanduser()
     filename = f"{datetime.now(UTC).strftime('%Y-%m-%dT%H')}.jsonl.gz"
     return directory / filename
 

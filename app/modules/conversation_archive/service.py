@@ -96,7 +96,7 @@ def read_archive_records(
 
 
 def _archive_dir() -> Path:
-    return Path(getattr(get_settings(), "conversation_archive_dir"))
+    return Path(getattr(get_settings(), "conversation_archive_dir")).expanduser()
 
 
 def _iter_archive_paths(directory: Path) -> Iterator[Path]:

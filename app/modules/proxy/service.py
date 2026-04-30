@@ -91,7 +91,7 @@ from app.core.metrics.prometheus import (
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
@@ -590,6 +590,14 @@ class ProxyService:
                 api_key=api_key,
                 session_id=request_state.session_id,
                 surface="http_bridge",
+            )
+        if request_state.preferred_account_id is None:
+            # ``input_file.file_id`` references must land on the account
+            # that registered the upload (chatgpt-account-id-scoped).
+            # The helper returns ``None`` when stronger affinity signals
+            # are present, so this never overrides existing routing.
+            request_state.preferred_account_id = await self._resolve_file_account_for_responses(
+                effective_payload, headers
             )
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
@@ -1435,6 +1443,12 @@ class ProxyService:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
+        # ``input_file.file_id`` references must land on the account that
+        # registered the upload (chatgpt-account-id-scoped). The helper
+        # returns ``None`` when stronger affinity signals are present
+        # (prompt_cache_key / session header / turn_state header /
+        # previous_response_id), so existing routing wins.
+        file_preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
         try:
 
             async def _call_compact(target: Account) -> CompactResponsePayload:
@@ -1480,6 +1494,7 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=payload.model,
                     exclude_account_ids=excluded_account_ids,
+                    preferred_account_id=file_preferred_account_id,
                 )
                 account = selection.account
                 if not account:
@@ -1920,6 +1935,66 @@ class ProxyService:
         expired = [file_id for file_id, (_, expires_at) in self._file_account_pins.items() if expires_at <= now]
         for file_id in expired:
             self._file_account_pins.pop(file_id, None)
+
+    async def _resolve_file_account_for_responses(
+        self,
+        payload: ResponsesRequest | ResponsesCompactRequest,
+        headers: Mapping[str, str],
+    ) -> str | None:
+        """Resolve a ``preferred_account_id`` from ``input_file.file_id`` pins.
+
+        Looks up the in-memory ``file_id -> account_id`` pin table built
+        by ``create_file``. Used by ``/responses`` flows so a request
+        carrying an ``{type: "input_file", file_id: "file_xxx"}`` part
+        is routed to the same upstream account that registered the
+        upload (the upstream contract is account-scoped via
+        ``chatgpt-account-id``).
+
+        The pin is only consulted when the request has *no* stronger
+        affinity signal: an explicit ``prompt_cache_key``, a session /
+        turn-state header (codex_session affinity), or a
+        ``previous_response_id`` all imply an existing conversation
+        continuation and must keep their routing intact. Returning
+        ``None`` from here means "fall back to the standard sticky /
+        codex / cache affinity path".
+
+        Tie-breaking when the payload references multiple ``file_id``s:
+        prefer the most-recently-pinned one (matches the most recent
+        upload in a multi-attachment thread). If two pins share the
+        same expiry timestamp, the lexicographically smallest
+        ``file_id`` wins for determinism.
+        """
+        # Stronger affinity signals always win.
+        if _prompt_cache_key_from_request_model(payload) is not None:
+            return None
+        if _sticky_key_from_turn_state_header(headers) is not None:
+            return None
+        if _sticky_key_from_session_header(headers) is not None:
+            return None
+        if getattr(payload, "previous_response_id", None):
+            return None
+
+        file_ids = extract_input_file_ids(payload.input)
+        if not file_ids:
+            return None
+
+        async with self._file_account_pin_lock:
+            self._evict_expired_file_pins_locked()
+            best_account: str | None = None
+            best_expires_at = -1.0
+            best_file_id: str | None = None
+            for file_id in file_ids:
+                entry = self._file_account_pins.get(file_id)
+                if entry is None:
+                    continue
+                account_id, expires_at = entry
+                if expires_at > best_expires_at or (
+                    expires_at == best_expires_at and (best_file_id is None or file_id < best_file_id)
+                ):
+                    best_account = account_id
+                    best_expires_at = expires_at
+                    best_file_id = file_id
+            return best_account
 
     async def create_file(
         self,
@@ -6754,6 +6829,14 @@ class ProxyService:
                     surface="http_stream",
                 )
                 require_preferred_account = preferred_account_id is not None
+            if preferred_account_id is None:
+                # ``input_file.file_id`` references must land on the account
+                # that registered the upload; otherwise upstream rejects the
+                # request with not-found / 401. The helper itself enforces
+                # priority -- it returns ``None`` when stronger affinity
+                # signals (prompt_cache_key / session header / turn_state
+                # header) are present, so this never overrides them.
+                preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:

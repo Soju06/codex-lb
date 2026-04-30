@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
 
@@ -913,3 +913,38 @@ def test_responses_accepts_top_level_input_file_with_file_id():
     forwarded = request.input
     assert isinstance(forwarded, list)
     assert {"type": "input_file", "file_id": "file_root"} in forwarded
+
+
+def test_extract_input_file_ids_string_input_returns_empty_set():
+    assert extract_input_file_ids("Hello world") == set()
+
+
+def test_extract_input_file_ids_finds_top_level_and_nested_ids():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Summarize."},
+                {"type": "input_file", "file_id": "file_a"},
+            ],
+        },
+        {"type": "input_file", "file_id": "file_b"},
+        # Duplicates and missing/blank ids are filtered out.
+        {"type": "input_file", "file_id": "file_a"},
+        {"type": "input_file", "file_id": ""},
+        {"type": "input_file"},
+    ]
+    assert extract_input_file_ids(input_value) == {"file_a", "file_b"}
+
+
+def test_extract_input_file_ids_ignores_non_input_file_types():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "file_id": "file_should_not_match"},
+                {"type": "input_text", "text": "ignore"},
+            ],
+        },
+    ]
+    assert extract_input_file_ids(input_value) == set()

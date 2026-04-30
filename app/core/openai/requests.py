@@ -118,6 +118,46 @@ def _is_input_file_with_id(item: Mapping[str, JsonValue]) -> bool:
     return isinstance(file_id, str) and bool(file_id)
 
 
+def extract_input_file_ids(input_value: JsonValue) -> set[str]:
+    """Return all ``file_id`` strings referenced by ``input_file`` items.
+
+    Walks both top-level items and nested role-message ``content`` parts,
+    matching the shapes accepted by ``ResponsesRequest.input`` /
+    ``ResponsesCompactRequest.input``. Returns an empty set when the
+    input is a plain string or has no ``input_file`` parts. Used by the
+    ``/responses`` flow to look up account pins recorded by
+    ``POST /backend-api/files`` so the response request lands on the
+    upstream account that registered the file (the upstream contract is
+    account-scoped via ``chatgpt-account-id``).
+    """
+    if not is_json_list(input_value):
+        return set()
+    file_ids: set[str] = set()
+    for item in input_value:
+        if not is_json_mapping(item):
+            continue
+        item_mapping = item
+        if _is_input_file_with_id(item_mapping):
+            file_id = item_mapping.get("file_id")
+            if isinstance(file_id, str) and file_id:
+                file_ids.add(file_id)
+        content = item_mapping.get("content")
+        if is_json_list(content):
+            parts: list[JsonValue] = content
+        elif is_json_mapping(content):
+            parts = [content]
+        else:
+            parts = []
+        for part in parts:
+            if not is_json_mapping(part):
+                continue
+            if _is_input_file_with_id(part):
+                file_id = part.get("file_id")
+                if isinstance(file_id, str) and file_id:
+                    file_ids.add(file_id)
+    return file_ids
+
+
 def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     sanitized_input: list[JsonValue] = []
     for item in input_items:

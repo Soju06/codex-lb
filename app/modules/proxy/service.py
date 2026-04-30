@@ -1980,7 +1980,16 @@ class ProxyService:
         explicit_fields = getattr(payload, "model_fields_set", set())
         if "prompt_cache_key" in explicit_fields and _prompt_cache_key_from_request_model(payload) is not None:
             return None
-        if _sticky_key_from_turn_state_header(headers) is not None:
+        # ``ensure_downstream_turn_state`` / ``ensure_http_downstream_turn_state``
+        # synthesize a fresh ``x-codex-turn-state`` header on first turns when
+        # the client did not supply one (see
+        # ``app/modules/proxy/api.py`` websocket / HTTP handlers). Treat those
+        # synthetic values as "no client-supplied turn state" so the file-pin
+        # lookup still runs on first-turn upload-then-converse flows. Only a
+        # turn-state value that does *not* match the synthesizer prefix counts
+        # as a client-supplied continuation marker.
+        turn_state_value = _sticky_key_from_turn_state_header(headers)
+        if turn_state_value is not None and not _is_synthesized_turn_state(turn_state_value):
             return None
         if _sticky_key_from_session_header(headers) is not None:
             return None
@@ -10012,6 +10021,22 @@ def _owner_lookup_session_id_from_headers(headers: Mapping[str, str]) -> str | N
     if turn_state is not None:
         return turn_state
     return _sticky_key_from_session_header(headers)
+
+
+# Pattern matching turn-state values synthesized by the helpers below.
+# A 32-char lowercase hex (uuid4().hex) suffix follows the prefix.
+_SYNTHESIZED_TURN_STATE_PATTERN = re.compile(r"^(?:http_)?turn_[0-9a-f]{32}$")
+
+
+def _is_synthesized_turn_state(value: str) -> bool:
+    """True when ``value`` matches a turn-state synthesized by codex-lb itself.
+
+    Used by the file-pin resolver to distinguish a client-supplied
+    continuation marker from a synthesizer-generated placeholder so
+    first-turn upload-then-converse requests still benefit from
+    file_id pin routing on the websocket / HTTP entry points.
+    """
+    return bool(_SYNTHESIZED_TURN_STATE_PATTERN.match(value))
 
 
 def ensure_downstream_turn_state(headers: Mapping[str, str]) -> str:

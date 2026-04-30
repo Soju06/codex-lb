@@ -472,3 +472,54 @@ async def test_derived_prompt_cache_key_does_not_block_file_id_pin(async_client)
 
     resolved = await service._resolve_file_account_for_responses(payload, {})
     assert resolved == "acc_derived_a"
+
+
+@pytest.mark.asyncio
+async def test_synthesized_turn_state_does_not_block_file_id_pin(async_client):
+    """Regression: ``ensure_downstream_turn_state`` synthesizes a
+    fresh ``x-codex-turn-state`` header on first turns when the client
+    did not supply one (websocket / HTTP entry points always inject
+    it). The file-pin resolver must treat that synthesizer-generated
+    placeholder as "no turn state" so first-turn upload-then-converse
+    flows still hit the file_id pin. A *client-supplied* turn-state
+    value (anything not matching the synthesizer prefix) must still
+    block the pin lookup.
+    """
+    await _import_account(async_client, "acc_ts_a", "ts-a@example.com")
+
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
+    from app.modules.proxy.service import ensure_downstream_turn_state
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_synth_ts", "acc_ts_a")
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe."},
+                        {"type": "input_file", "file_id": "file_synth_ts"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    # 1) Synthesizer-generated turn_state must NOT block the pin.
+    synth_turn_state = ensure_downstream_turn_state({})
+    assert synth_turn_state.startswith("turn_")
+    headers_synth = {"x-codex-turn-state": synth_turn_state}
+    resolved = await service._resolve_file_account_for_responses(payload, headers_synth)
+    assert resolved == "acc_ts_a"
+
+    # 2) Client-supplied turn_state (anything not matching the
+    # synthesizer pattern) MUST still block the pin -- a real
+    # continuation marker takes precedence.
+    headers_client = {"x-codex-turn-state": "client-conversation-handle-42"}
+    resolved_blocked = await service._resolve_file_account_for_responses(payload, headers_client)
+    assert resolved_blocked is None

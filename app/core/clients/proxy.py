@@ -1873,6 +1873,17 @@ async def stream_responses(
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)
                     error_code, error_message = _error_details_from_envelope(error_payload)
+                    archive_json(
+                        direction="server_to_codex",
+                        kind="responses",
+                        transport="http",
+                        payload=error_payload,
+                        account_id=account_id,
+                        method="POST",
+                        url=url,
+                        status_code=status_code,
+                        headers=current_headers,
+                    )
                     raise ProxyResponseError(resp.status, error_payload)
                 event = await _error_event_from_response(resp)
                 error_code, error_message = _error_details_from_failed_event(event)

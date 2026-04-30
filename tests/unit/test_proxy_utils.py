@@ -1469,6 +1469,70 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        stream_idle_timeout_seconds = 1.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+        log_upstream_request_summary = False
+
+    class ErrorPostResponse:
+        status = 429
+        reason = "Too Many Requests"
+        content = _DummyContent([])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, *, content_type=None):
+            del content_type
+            return {"error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"}}
+
+        async def text(self):
+            return "slow down"
+
+    archived: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "archive_json", lambda **kwargs: archived.append(kwargs))
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        _ = [
+            event
+            async for event in proxy_module.stream_responses(
+                payload,
+                headers={},
+                access_token="token",
+                account_id="acc_1",
+                session=cast(proxy_module.aiohttp.ClientSession, _SseSession(ErrorPostResponse())),
+                raise_for_status=True,
+            )
+        ]
+
+    assert exc_info.value.status_code == 429
+    assert len(archived) == 2
+    assert archived[-1]["direction"] == "server_to_codex"
+    assert archived[-1]["status_code"] == 429
+    assert archived[-1]["payload"] == {
+        "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"}
+    }
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

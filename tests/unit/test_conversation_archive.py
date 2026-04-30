@@ -154,6 +154,18 @@ def test_archive_uses_hourly_gzip_files(monkeypatch, tmp_path):
     assert "T" in path.name
 
 
+def test_archive_path_expands_user_home(monkeypatch, tmp_path):
+    archive_dir = tmp_path / "archive"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=Path("~/archive")),
+    )
+
+    assert conversation_archive._archive_path().parent == archive_dir
+
+
 def test_archive_writer_recovers_corrupt_gzip_tail_before_append(tmp_path):
     path = tmp_path / "2026-04-30.jsonl.gz"
     conversation_archive._RECOVERY_CHECKED_PATHS.discard(path.resolve())
@@ -358,6 +370,24 @@ def test_archive_service_reads_gzip_and_legacy_jsonl(monkeypatch, tmp_path):
         request_id="req_gzip",
     )
     assert [record["request_id"] for record in all_files_page.records] == ["req_gzip"]
+
+
+def test_archive_service_expands_user_home(monkeypatch, tmp_path):
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    archive_path = archive_dir / "2026-04-29T10.jsonl.gz"
+    with gzip.open(archive_path, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"timestamp": "2026-04-29T10:00:00+00:00"}) + "\n")
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        conversation_archive_service,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=Path("~/archive")),
+    )
+
+    [file] = conversation_archive_service.list_archive_files()
+    assert file.name == archive_path.name
 
 
 def test_archive_service_keeps_readable_records_before_corrupt_gzip_tail(monkeypatch, tmp_path):

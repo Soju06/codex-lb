@@ -59,3 +59,38 @@ The direct Docker helper MUST rebuild the current checkout and recreate the loca
 - **AND** `.env.local` configures `CODEX_LB_UVICORN_WORKERS` greater than one
 - **THEN** the helper does not add a conflicting `CODEX_LB_UVICORN_WORKERS=1` override
 - **AND** the container startup path is responsible for selecting the safe worker-pool runtime
+
+### Requirement: Docker guidance includes a SQLite-conservative profile
+
+Docker installation guidance MUST include a SQLite-conservative runtime profile for operators who intentionally stay on SQLite. This profile MUST be distinct from the PostgreSQL higher-concurrency profile.
+
+#### Scenario: SQLite-conservative Docker profile limits request workers
+
+- **WHEN** an operator follows the documented SQLite-conservative Docker profile
+- **THEN** the example keeps the SQLite database URL
+- **AND** the example configures a single request worker or an equivalent write-serialized runtime
+- **AND** the guidance explains that this profile trades throughput for fewer SQLite writer-lock failures
+
+#### Scenario: Higher-concurrency Docker guidance remains PostgreSQL-backed
+
+- **WHEN** an operator needs sustained multi-worker throughput
+- **THEN** Docker guidance points to the PostgreSQL-backed profile rather than recommending unconstrained multi-worker SQLite
+- **AND** the standard listener and OAuth callback ports remain unchanged
+
+### Requirement: Docker installation documents a PostgreSQL performance profile
+
+Docker-based installation guidance MUST provide a PostgreSQL-backed path for operators who need throughput beyond the default SQLite profile. This guidance MUST preserve the existing SQLite-first quick start for simple local usage.
+
+#### Scenario: Docker quick start remains SQLite-first
+
+- **WHEN** an operator follows the default Docker quick-start flow
+- **THEN** the documented path continues to use the SQLite-backed default storage path
+- **AND** PostgreSQL is not required for basic local startup
+
+#### Scenario: Docker performance profile uses PostgreSQL
+
+- **WHEN** an operator wants the documented higher-throughput Docker deployment profile
+- **THEN** the guidance provides a PostgreSQL-backed example using `CODEX_LB_DATABASE_URL`
+- **AND** the example keeps the standard `2455` and `1455` service ports
+- **AND** the guidance identifies PostgreSQL as the recommended backend for that profile
+

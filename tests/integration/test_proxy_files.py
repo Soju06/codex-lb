@@ -329,9 +329,11 @@ async def test_resolve_file_account_for_responses_returns_pin_when_no_other_affi
     )
     resolved = await service._resolve_file_account_for_responses(payload, {})
     assert resolved == "acc_resp_a"
-    # The websocket prep path also surfaces the pin via the same helper:
+    # The websocket prep path also surfaces the pin via the same helper.
+    ws_payload = dict(payload.to_payload())
+    ws_payload["type"] = "response.create"
     prepared = await service._prepare_websocket_response_create_request(
-        payload.to_payload() | {"type": "response.create"},
+        ws_payload,
         headers={},
         codex_session_affinity=False,
         openai_cache_affinity=False,
@@ -421,3 +423,52 @@ async def test_v1_responses_prompt_cache_key_overrides_file_id_pin(async_client,
     )
     resolved = await service._resolve_file_account_for_responses(payload, {})
     assert resolved is None
+
+
+@pytest.mark.asyncio
+async def test_derived_prompt_cache_key_does_not_block_file_id_pin(async_client):
+    """Regression: a ``prompt_cache_key`` that the proxy itself derived
+    (via ``_sticky_key_for_responses_request`` when openai cache
+    affinity is on) must NOT block file-pin routing -- only an
+    *explicitly client-supplied* key should win.
+
+    We simulate the derivation by setting the field on the model
+    *programmatically* (without including it in ``model_fields_set``).
+    The helper must still return the file_id pin.
+    """
+    await _import_account(async_client, "acc_derived_a", "derived-a@example.com")
+
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_derived", "acc_derived_a")
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What's in this?"},
+                        {"type": "input_file", "file_id": "file_derived"},
+                    ],
+                }
+            ],
+        }
+    )
+    # Simulate the affinity helper deriving a cache key onto the
+    # payload without it being part of the original client input.
+    # The proxy's affinity-helper assigns to the attribute directly,
+    # but it does so without marking the field as explicitly set
+    # (the tracker is used to distinguish client-supplied keys
+    # from derived ones). Reproduce that contract by removing the
+    # field from ``model_fields_set`` after the assignment.
+    payload.prompt_cache_key = "derived-key-load-balancer-set"
+    payload.model_fields_set.discard("prompt_cache_key")
+    assert "prompt_cache_key" not in payload.model_fields_set
+
+    resolved = await service._resolve_file_account_for_responses(payload, {})
+    assert resolved == "acc_derived_a"

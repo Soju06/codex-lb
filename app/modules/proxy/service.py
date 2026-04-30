@@ -1951,12 +1951,21 @@ class ProxyService:
         ``chatgpt-account-id``).
 
         The pin is only consulted when the request has *no* stronger
-        affinity signal: an explicit ``prompt_cache_key``, a session /
-        turn-state header (codex_session affinity), or a
-        ``previous_response_id`` all imply an existing conversation
-        continuation and must keep their routing intact. Returning
-        ``None`` from here means "fall back to the standard sticky /
-        codex / cache affinity path".
+        client-supplied affinity signal: a ``prompt_cache_key`` that
+        the client itself sent, a session / turn-state header
+        (codex_session affinity), or a ``previous_response_id`` all
+        imply an existing conversation continuation and must keep
+        their routing intact. Returning ``None`` from here means
+        "fall back to the standard sticky / codex / cache affinity
+        path".
+
+        Note: ``_sticky_key_for_responses_request`` can *derive* and
+        write a ``prompt_cache_key`` onto the payload when openai cache
+        affinity is enabled. We must not treat that derived key as a
+        stronger signal -- it is itself the load balancer's choice to
+        route consistently, not a client-supplied continuation marker.
+        Inspect ``model_fields_set`` so we only honor an *explicit*
+        client-supplied cache key.
 
         Tie-breaking when the payload references multiple ``file_id``s:
         prefer the most-recently-pinned one (matches the most recent
@@ -1964,8 +1973,12 @@ class ProxyService:
         same expiry timestamp, the lexicographically smallest
         ``file_id`` wins for determinism.
         """
-        # Stronger affinity signals always win.
-        if _prompt_cache_key_from_request_model(payload) is not None:
+        # Stronger affinity signals always win, but only when the
+        # client supplied them. Derived ``prompt_cache_key`` values
+        # added by the affinity helper itself must not block file-pin
+        # routing for first-turn upload-then-converse flows.
+        explicit_fields = getattr(payload, "model_fields_set", set())
+        if "prompt_cache_key" in explicit_fields and _prompt_cache_key_from_request_model(payload) is not None:
             return None
         if _sticky_key_from_turn_state_header(headers) is not None:
             return None

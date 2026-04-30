@@ -31,12 +31,15 @@ async def inject_sse_keepalives(
             yield chunk
         return
 
+    async def _next_chunk(it: AsyncIterator[str]) -> str:
+        return await it.__anext__()
+
     iterator = source.__aiter__()
     pending: asyncio.Task[str] | None = None
     try:
         while True:
             if pending is None:
-                pending = asyncio.create_task(iterator.__anext__())
+                pending = asyncio.create_task(_next_chunk(iterator))
             try:
                 chunk = await asyncio.wait_for(
                     asyncio.shield(pending),

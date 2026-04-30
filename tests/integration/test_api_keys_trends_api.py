@@ -18,6 +18,12 @@ async def _create_api_key(async_client, *, name: str) -> str:
     return response.json()["id"]
 
 
+def _only_limit(payload: dict) -> dict:
+    limits = payload["limits"]
+    assert len(limits) == 1
+    return limits[0]
+
+
 async def _insert_request_logs(*rows: RequestLog) -> None:
     async with SessionLocal() as session:
         session.add_all(rows)
@@ -41,6 +47,181 @@ def _hour_bucket(value: datetime) -> datetime:
 async def test_api_key_detail_endpoints_return_404_for_missing_key(async_client, endpoint: str):
     response = await async_client.get(f"/api/api-keys/missing-key/{endpoint}")
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_adding_limit_backfills_current_window_usage(async_client, monkeypatch: pytest.MonkeyPatch):
+    key_id = await _create_api_key(async_client, name="limit-backfill-key")
+    other_key_id = await _create_api_key(async_client, name="limit-backfill-other-key")
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_request_logs(
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-limit-backfill-a",
+            requested_at=now - timedelta(hours=2),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=8_000,
+            output_tokens=1_500,
+            cached_input_tokens=200,
+            cost_usd=0.25,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-limit-backfill-b",
+            requested_at=now - timedelta(minutes=30),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=300,
+            output_tokens=None,
+            reasoning_tokens=200,
+            cached_input_tokens=20,
+            cost_usd=0.03,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-limit-backfill-error",
+            requested_at=now - timedelta(minutes=20),
+            model="gpt-5.1",
+            status="error",
+            error_code="response.incomplete",
+            input_tokens=40_000,
+            output_tokens=10_000,
+            cached_input_tokens=0,
+            cost_usd=5.0,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-limit-backfill-old",
+            requested_at=now - timedelta(days=2),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=10_000,
+            output_tokens=10_000,
+            cached_input_tokens=0,
+            cost_usd=2.0,
+        ),
+        RequestLog(
+            api_key_id=other_key_id,
+            request_id="req-limit-backfill-other-key",
+            requested_at=now - timedelta(minutes=10),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=50_000,
+            output_tokens=50_000,
+            cached_input_tokens=0,
+            cost_usd=10.0,
+        ),
+    )
+
+    response = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {
+                    "limitType": "total_tokens",
+                    "limitWindow": "daily",
+                    "maxValue": 100_000,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    limit = _only_limit(response.json())
+    assert limit["currentValue"] == 10_000
+    assert limit["maxValue"] == 100_000
+
+
+@pytest.mark.asyncio
+async def test_adding_model_scoped_limit_backfills_only_matching_model(async_client, monkeypatch: pytest.MonkeyPatch):
+    key_id = await _create_api_key(async_client, name="limit-model-backfill-key")
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_request_logs(
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-limit-model-match",
+            requested_at=now - timedelta(hours=1),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=400,
+            output_tokens=100,
+            cached_input_tokens=0,
+            cost_usd=0.04,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-limit-model-other",
+            requested_at=now - timedelta(minutes=45),
+            model="gpt-5.4",
+            status="success",
+            input_tokens=9_000,
+            output_tokens=1_000,
+            cached_input_tokens=0,
+            cost_usd=0.5,
+        ),
+    )
+
+    response = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {
+                    "limitType": "total_tokens",
+                    "limitWindow": "daily",
+                    "maxValue": 50_000,
+                    "modelFilter": "gpt-5.1",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    limit = _only_limit(response.json())
+    assert limit["currentValue"] == 500
+    assert limit["modelFilter"] == "gpt-5.1"
+
+
+@pytest.mark.asyncio
+async def test_adding_limit_with_reset_usage_keeps_current_value_zero(async_client, monkeypatch: pytest.MonkeyPatch):
+    key_id = await _create_api_key(async_client, name="limit-reset-backfill-key")
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_request_logs(
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-limit-reset-existing",
+            requested_at=now - timedelta(hours=2),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=2_000,
+            output_tokens=500,
+            cached_input_tokens=0,
+            cost_usd=0.1,
+        )
+    )
+
+    response = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "resetUsage": True,
+            "limits": [
+                {
+                    "limitType": "total_tokens",
+                    "limitWindow": "daily",
+                    "maxValue": 100_000,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert _only_limit(response.json())["currentValue"] == 0
 
 
 @pytest.mark.asyncio

@@ -1149,6 +1149,32 @@ def _state_from_account(
     )
 
 
+def background_recovery_state_from_account(
+    *,
+    account: Account,
+    primary_entry: UsageHistory | None,
+    secondary_entry: UsageHistory | None,
+) -> AccountState:
+    """Evaluate recovery for a persisted blocked account without live runtime state.
+
+    The usage refresh scheduler only needs to know whether a persisted blocked
+    account can safely return to `active`. Seed a throwaway runtime snapshot
+    from the persisted block marker so fresh post-block usage rows can clear a
+    stale reset guard even when the original balancer process is gone.
+    """
+
+    runtime = RuntimeState()
+    if account.blocked_at is not None:
+        runtime.blocked_at = float(account.blocked_at)
+        runtime.cooldown_until = float(account.blocked_at)
+    return _state_from_account(
+        account=account,
+        primary_entry=primary_entry,
+        secondary_entry=secondary_entry,
+        runtime=runtime,
+    )
+
+
 def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
     if recorded_at is None:
         return False

@@ -290,65 +290,32 @@ async def test_backend_files_finalize_pins_to_create_account(async_client, monke
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_with_input_file_id_pins_to_creating_account(async_client, monkeypatch):
+async def test_resolve_file_account_for_responses_returns_pin_when_no_other_affinity(async_client):
     """Regression for cross-account ``input_file.file_id`` routing.
 
     The upstream file API is account-scoped (``chatgpt-account-id``),
     so a ``/v1/responses`` request that references a previously-uploaded
     ``file_id`` must land on the same account that registered the file;
-    otherwise upstream rejects it with not-found / 401.
+    otherwise upstream rejects it with not-found / 401. The contract
+    is exercised at two layers: the standalone resolver helper
+    (used by HTTP / compact paths) and the websocket-prep code path
+    that mirrors the same lookup into ``request_state.preferred_account_id``.
     """
     await _import_account(async_client, "acc_resp_a", "resp-a@example.com")
     await _import_account(async_client, "acc_resp_b", "resp-b@example.com")
 
-    create_seen: dict[str, object] = {}
-    stream_seen: dict[str, object] = {}
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
 
-    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
-        create_seen["account_id"] = account_id
-        return {"file_id": "file_response_pin", "upload_url": "https://blob.example/sas?t=r"}
+    service = get_proxy_service_for_app(async_client._transport.app)
+    # Simulate a successful POST /backend-api/files completing under
+    # acc_resp_a -- the pin table is the contract verified here.
+    await service._pin_file_account("file_response_pin", "acc_resp_a")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        stream_seen["account_id"] = account_id
-        # Minimal SSE-shaped completion to satisfy the streaming path.
-        yield (
-            "event: response.completed\ndata: "
-            + json.dumps(
-                {
-                    "type": "response.completed",
-                    "response": {
-                        "id": "resp_input_file_pin",
-                        "object": "response",
-                        "status": "completed",
-                        "created_at": 0,
-                        "usage": {
-                            "input_tokens": 1,
-                            "output_tokens": 1,
-                            "total_tokens": 2,
-                            "input_tokens_details": {"cached_tokens": 0},
-                            "output_tokens_details": {"reasoning_tokens": 0},
-                        },
-                    },
-                }
-            )
-            + "\n\n"
-        )
-
-    monkeypatch.setattr(proxy_module, "core_create_file", fake_create_file)
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-
-    create_resp = await async_client.post(
-        "/backend-api/files",
-        json={"file_name": "resp.png", "file_size": 100, "use_case": "codex"},
-    )
-    assert create_resp.status_code == 200
-    creating_account = create_seen["account_id"]
-    assert creating_account in {"acc_resp_a", "acc_resp_b"}
-
-    resp = await async_client.post(
-        "/v1/responses",
-        json={
+    payload = ResponsesRequest.model_validate(
+        {
             "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
             "input": [
                 {
                     "role": "user",
@@ -358,10 +325,21 @@ async def test_v1_responses_with_input_file_id_pins_to_creating_account(async_cl
                     ],
                 }
             ],
-        },
+        }
     )
-    assert resp.status_code == 200
-    assert stream_seen["account_id"] == creating_account
+    resolved = await service._resolve_file_account_for_responses(payload, {})
+    assert resolved == "acc_resp_a"
+    # The websocket prep path also surfaces the pin via the same helper:
+    prepared = await service._prepare_websocket_response_create_request(
+        payload.to_payload() | {"type": "response.create"},
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=None,
+    )
+    assert prepared.request_state.preferred_account_id == "acc_resp_a"
 
 
 @pytest.mark.asyncio

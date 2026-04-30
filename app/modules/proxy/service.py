@@ -2770,6 +2770,19 @@ class ProxyService:
         )
         request_state.affinity_policy = affinity_policy
 
+        # First-turn ``input_file.file_id`` references must land on the
+        # account that registered the upload (chatgpt-account-id-scoped).
+        # Codex CLI's typical flow is upload-then-converse, so a fresh
+        # turn often references a file_id with no other affinity signal
+        # set. The helper short-circuits to ``None`` when stronger
+        # affinity signals (prompt_cache_key / session header /
+        # turn_state header / previous_response_id) are present, so this
+        # never overrides existing routing.
+        if request_state.preferred_account_id is None:
+            request_state.preferred_account_id = await self._resolve_file_account_for_responses(
+                responses_payload, headers
+            )
+
         return _PreparedWebSocketRequest(
             text_data=text_data,
             request_state=request_state,

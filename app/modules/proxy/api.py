@@ -50,7 +50,7 @@ from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event, inject_sse_keepalives, parse_sse_data_json
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -1274,6 +1274,11 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
         if key not in skip_keys and isinstance(value, (bool, int, float, str, type(None), list, Mapping)):
             extra[key] = value
 
+    # If context_window is overridden, also override max_context_window to match
+    effective_cw = _effective_context_window(model)
+    if effective_cw != model.context_window and "max_context_window" in extra:
+        extra["max_context_window"] = effective_cw
+
     return CodexModelEntry(
         slug=model.slug,
         display_name=model.display_name,
@@ -1393,7 +1398,10 @@ async def v1_chat_completions(
         stream_options = payload.stream_options
         include_usage = bool(stream_options and stream_options.include_usage)
         return StreamingResponse(
-            stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
+            inject_sse_keepalives(
+                stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
+                get_settings().sse_keepalive_interval_seconds,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
@@ -1495,7 +1503,10 @@ async def _stream_responses(
         first = await stream.__anext__()
     except StopAsyncIteration:
         return StreamingResponse(
-            _prepend_first(None, stream),
+            inject_sse_keepalives(
+                _prepend_first(None, stream),
+                get_settings().sse_keepalive_interval_seconds,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
@@ -1509,7 +1520,10 @@ async def _stream_responses(
             headers=rate_limit_headers,
         )
     return StreamingResponse(
-        _prepend_first(first, stream),
+        inject_sse_keepalives(
+            _prepend_first(first, stream),
+            get_settings().sse_keepalive_interval_seconds,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
     )

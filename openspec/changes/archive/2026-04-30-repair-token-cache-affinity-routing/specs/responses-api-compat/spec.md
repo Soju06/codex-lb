@@ -8,6 +8,8 @@ For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions 
 - **THEN** the service does not persist a durable `codex_session` mapping solely from that header
 - **AND** bounded prompt-cache affinity behavior remains in effect
 
+## ADDED Requirements
+
 ### Requirement: Codex backend session_id preserves account affinity
 When a backend Codex Responses or compact request includes a non-empty accepted session header, the service MUST use that value as the routing affinity key for upstream account selection. If the request lacks a client-supplied `prompt_cache_key`, the service MUST derive and attach a stable `prompt_cache_key` before upstream forwarding so account affinity and upstream prompt-cache routing can coexist. Accepted session headers are `session_id`, `x-codex-session-id`, and `x-codex-conversation-id`, in that priority order.
 

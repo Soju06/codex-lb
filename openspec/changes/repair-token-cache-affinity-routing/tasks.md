@@ -1,5 +1,0 @@
-- [ ] 1. Add spec deltas for `/v1/*` prompt-cache affinity, backend Codex session+prompt-cache coexistence, derivation flag behavior, and affinity observability fields.
-- [ ] 2. Add failing unit tests for session header alias priority, early prompt-cache-key derivation on backend Codex paths, derivation-flag behavior, and request-shape affinity logging.
-- [ ] 3. Add failing integration tests for `/v1/*` route wiring, backend Codex prompt-cache-key forwarding, and websocket parity.
-- [ ] 4. Implement route wiring, affinity helper changes, header alias support, observability, and derivation flag with minimal diffs.
-- [ ] 5. Run targeted lint/type/test/spec validation and confirm no affected-file diagnostics remain.

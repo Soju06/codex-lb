@@ -1,0 +1,5 @@
+- [x] 1. Add an OpenSpec requirement for native `/backend-api/codex` tool-surface acceptance while preserving `/v1/*` restrictions.
+- [x] 2. Make tool validation context-aware so native backend routes can opt into the Codex tool surface.
+- [x] 3. Update backend HTTP and websocket request handling to enable native tool validation on `/backend-api/codex/responses`.
+- [x] 4. Add regression tests for backend native tool acceptance and `/v1/*` compatibility preservation.
+- [x] 5. Validate the relevant test suites and rebuild the VM Docker container.

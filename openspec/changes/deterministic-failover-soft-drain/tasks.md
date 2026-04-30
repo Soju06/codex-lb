@@ -39,5 +39,5 @@
 - [x] T26: Add `drain_primary_threshold_pct`, `drain_secondary_threshold_pct`, `probe_quiet_seconds`, `probe_success_streak_required` to `Settings`
 - [x] T27: Guard soft-drain logic behind `soft_drain_enabled` flag; guard failover logic behind `deterministic_failover_enabled` flag
 - [x] T28: Add structured failover decision logs (request_id, transport, account_id, attempt, failure_class, action)
-- [ ] T29: Add Prometheus counters (`codex_lb_failover_total`, `codex_lb_drain_transitions_total`, `codex_lb_client_exposed_errors_total`) gated by `metrics_enabled`
+- [x] T29: Add Prometheus counters (`codex_lb_failover_total`, `codex_lb_drain_transitions_total`, `codex_lb_client_exposed_errors_total`) gated by `metrics_enabled`
 - [x] T30: Verify full existing test suite passes without regression (940 passed, 3 skipped)

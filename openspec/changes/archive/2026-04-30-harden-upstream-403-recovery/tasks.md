@@ -3,7 +3,7 @@
 - [x] 1.1 Add a `responses-api-compat` requirement for pre-commit ambiguous websocket `403` failover on the same transport.
 - [x] 1.2 Add a `model-registry-refresh` capability spec for auth-like cooldown and last-good snapshot preservation.
 - [x] 1.3 Extend `proxy-runtime-observability` with structured upstream `403` diagnostics and failover metrics requirements.
-- [ ] 1.4 Validate the OpenSpec artifacts.
+- [x] 1.4 Validate the OpenSpec artifacts.
 
 ## 2. Runtime
 
@@ -16,4 +16,4 @@
 
 - [x] 3.1 Add or update unit/integration tests for connect-phase `403` failover, cooldown behavior, model-refresh cooldown, and metrics wiring.
 - [x] 3.2 Run targeted validation for the affected test suites.
-- [ ] 3.3 Rebuild the local Docker image/container and verify the updated runtime starts cleanly.
+- [x] 3.3 Rebuild the local Docker image/container and verify the updated runtime starts cleanly.

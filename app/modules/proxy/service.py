@@ -1894,11 +1894,16 @@ class ProxyService:
                 transport=_REQUEST_TRANSPORT_HTTP,
             )
 
-    # File-account pin TTL: long enough to cover a Codex CLI upload
-    # (large file PUT + finalize-poll, default 30 s + retries) and any
-    # follow-up ``/responses`` that references the file_id, but short
-    # enough that pins do not accumulate forever in long-lived workers.
-    _FILE_ACCOUNT_PIN_TTL_SECONDS: float = 5 * 60.0
+    # File-account pin TTL: long enough to cover a slow client-side
+    # PUT of a 512 MiB upload (the upstream limit) plus the finalize
+    # poll loop and a follow-up ``/responses`` that references the
+    # file_id, while still bounding how long stale pins can sit in
+    # memory on long-lived workers. 30 minutes covers a 512 MiB
+    # upload at ~280 KiB/s -- well below typical broadband uplink --
+    # while keeping the table size negligible (each pin is a short
+    # string tuple). Eviction runs opportunistically on every write,
+    # so this acts as an upper bound, not a fixed retention.
+    _FILE_ACCOUNT_PIN_TTL_SECONDS: float = 30 * 60.0
 
     async def _pin_file_account(self, file_id: str, account_id: str) -> None:
         """Remember that ``file_id`` was registered through ``account_id``.

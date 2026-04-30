@@ -399,6 +399,18 @@ docker run -d --name codex-lb \
 
 Use PostgreSQL via `CODEX_LB_DATABASE_URL=postgresql+asyncpg://...` before raising `CODEX_LB_UVICORN_WORKERS` for sustained multi-worker traffic. Keep the standard `2455` and `1455` ports unchanged.
 
+**PostgreSQL performance profile**
+
+```bash
+# Edit .env.local so these keys are set
+CODEX_LB_DATABASE_URL=postgresql+asyncpg://codex_lb:codex_lb@postgres:5432/codex_lb
+CODEX_LB_UVICORN_WORKERS=2
+
+docker compose --profile postgres up --build
+```
+
+Use this profile for sustained concurrent traffic or multi-worker serving. The app remains on port `2455`, and the OAuth callback remains on port `1455`.
+
 **Authelia / trusted header**
 
 ```bash

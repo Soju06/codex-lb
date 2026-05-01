@@ -1,0 +1,6 @@
+- [x] 1. Add backend account auth export schema/service/API route.
+- [x] 2. Add dashboard account export client, hook, dialog, and account action.
+- [x] 3. Add backend integration coverage for successful export and missing account.
+- [x] 4. Add frontend schema/component coverage for OpenCode auth export.
+- [ ] 5. Run targeted backend/frontend tests and `openspec validate --specs`.
+  - Backend targeted tests passed in `.venv`; remaining blocker is the unavailable `openspec` CLI in this environment.

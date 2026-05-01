@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   deleteAccount,
   exportAccount,
+  exportAccountOpenCodeAuth,
   getAccountTrends,
   importAccount,
   listAccounts,
@@ -113,6 +114,16 @@ export function useAccountMutations() {
     },
   });
 
+  const exportOpenCodeAuthMutation = useMutation({
+    mutationFn: exportAccountOpenCodeAuth,
+    onSuccess: () => {
+      toast.success("OpenCode auth export generated");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Export failed");
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
@@ -121,6 +132,7 @@ export function useAccountMutations() {
     deleteMutation,
     exportMutation,
     limitWarmupMutation,
+    exportOpenCodeAuthMutation,
   };
 }
 

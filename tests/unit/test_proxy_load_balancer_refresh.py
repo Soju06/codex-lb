@@ -1175,9 +1175,9 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
             accounts=accounts_repo,
             usage=usage_repo,
             additional_usage=StubAdditionalUsageRepository(),
-            request_logs=object(),  # type: ignore[arg-type]
+            request_logs=cast(RequestLogsRepository, object()),
             sticky_sessions=sticky_repo,
-            api_keys=object(),  # type: ignore[arg-type]
+            api_keys=cast(ApiKeysRepository, object()),
         )
 
     balancer = LoadBalancer(repo_factory)

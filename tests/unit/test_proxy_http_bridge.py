@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -5604,3 +5605,66 @@ async def test_websocket_reader_unexpected_processing_error_fails_pending_reques
     assert "reader" in terminal_payload
     assert list(pending_requests) == []
     write_request_log.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_buffers_nonterminal_events_until_response_created() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-http-precreated-buffer",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=event_queue,
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    delta_text = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_precreated",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "hello",
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, delta_text)
+
+    assert event_queue.empty()
+    assert request_state.pre_response_created_event_texts == [delta_text]
+
+    created_text = json.dumps(
+        {
+            "type": "response.created",
+            "response": {"id": "resp_http_precreated_buffer", "status": "in_progress"},
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, created_text)
+
+    assert await asyncio.wait_for(event_queue.get(), timeout=0.1) == f"data: {created_text}\n\n"
+    assert await asyncio.wait_for(event_queue.get(), timeout=0.1) == f"data: {delta_text}\n\n"
+    assert request_state.pre_response_created_event_texts == []
+    assert request_state.awaiting_response_created is False
+    assert request_state.response_id == "resp_http_precreated_buffer"

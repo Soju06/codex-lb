@@ -205,6 +205,9 @@ async def _await_cancelled_task(
 
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
+_RESPONSE_STREAM_TERMINAL_EVENT_TYPES = frozenset(
+    {"response.completed", "response.failed", "response.incomplete", "error"}
+)
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -5430,6 +5433,7 @@ class ProxyService:
         async with session.pending_lock:
             matched_request_state = None
             created_request_state = None
+            precreated_request_state = None
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             if event_type == "response.created":
@@ -5459,8 +5463,11 @@ class ProxyService:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
 
+            if _should_buffer_pre_response_created_event(matched_request_state, event_type=event_type):
+                precreated_request_state = matched_request_state
+
             terminal_request_state = None
-            if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+            if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
                 terminal_request_state = _pop_terminal_websocket_request_state(
                     session.pending_requests,
                     response_id=response_id,
@@ -5492,6 +5499,10 @@ class ProxyService:
                             session.queued_request_count - len(grouped_previous_response_request_states),
                         )
                 has_other_pending_requests = bool(session.pending_requests)
+
+        if precreated_request_state is not None:
+            precreated_request_state.pre_response_created_event_texts.append(text)
+            return
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
@@ -5575,12 +5586,18 @@ class ProxyService:
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
+            buffered_event_texts = created_request_state.pre_response_created_event_texts
+            created_request_state.pre_response_created_event_texts = []
+        else:
+            buffered_event_texts = []
 
         if response_id is not None and matched_request_state is not None:
             await self._register_http_bridge_previous_response_id(session, response_id)
 
         if matched_request_state is not None and matched_request_state.event_queue is not None:
             await matched_request_state.event_queue.put(event_block)
+            for buffered_text in buffered_event_texts:
+                await matched_request_state.event_queue.put(f"data: {buffered_text}\n\n")
 
         if terminal_request_state is None:
             return
@@ -5996,6 +6013,7 @@ class ProxyService:
         async with pending_lock:
             request_state = None
             created_request_state = None
+            precreated_request_state = None
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             if event_type == "response.created":
@@ -6020,10 +6038,9 @@ class ProxyService:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
-            if (
-                event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
-                and pending_requests
-            ):
+            if _should_buffer_pre_response_created_event(request_state, event_type=event_type):
+                precreated_request_state = request_state
+            if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES and pending_requests:
                 request_state = _pop_terminal_websocket_request_state(
                     pending_requests,
                     response_id=response_id,
@@ -6051,8 +6068,18 @@ class ProxyService:
             else:
                 request_state = None
 
+        if precreated_request_state is not None:
+            precreated_request_state.pre_response_created_event_texts.append(text)
+            upstream_control.suppress_downstream_event = True
+            return text
+
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, response_create_gate)
+            if created_request_state.pre_response_created_event_texts:
+                buffered_texts = created_request_state.pre_response_created_event_texts
+                created_request_state.pre_response_created_event_texts = []
+                upstream_control.suppress_downstream_event = True
+                upstream_control.downstream_texts = [text, *buffered_texts]
 
         if len(grouped_previous_response_request_states) > 1:
             upstream_control.reconnect_requested = True
@@ -8260,6 +8287,7 @@ class _WebSocketRequestState:
     actual_service_tier: str | None = None
     response_id: str | None = None
     awaiting_response_created: bool = False
+    pre_response_created_event_texts: list[str] = field(default_factory=list)
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     api_key: ApiKeyData | None = None
@@ -8391,6 +8419,19 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     if isinstance(payload_type, str):
         return payload_type
     return None
+
+
+def _should_buffer_pre_response_created_event(
+    request_state: _WebSocketRequestState | None,
+    *,
+    event_type: str | None,
+) -> bool:
+    return (
+        request_state is not None
+        and request_state.awaiting_response_created
+        and event_type != "response.created"
+        and event_type not in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+    )
 
 
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:

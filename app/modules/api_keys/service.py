@@ -17,7 +17,7 @@ from app.core.usage.pricing import (
 )
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, ApiKey, ApiKeyLimit, LimitType, LimitWindow
-from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
+from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -43,6 +43,15 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
+    async def get_limit_usage_value(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None,
+    ) -> int: ...
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]: ...
 
     async def update(
@@ -373,12 +382,13 @@ class ApiKeysService:
             now = utcnow()
             existing_limits = await self._repository.get_limits_by_key(key_id)
             submitted_limits = payload.limits or []
-            limit_rows = _build_limit_rows_for_update(
+            limit_rows = await _build_limit_rows_for_update(
                 key_id=key_id,
                 now=now,
                 submitted_limits=submitted_limits,
                 existing_limits=existing_limits,
                 reset_usage=payload.reset_usage,
+                repository=self._repository,
             )
         elif payload.reset_usage:
             now = utcnow()
@@ -1166,13 +1176,14 @@ def _limit_input_to_row(
     )
 
 
-def _build_limit_rows_for_update(
+async def _build_limit_rows_for_update(
     *,
     key_id: str,
     now: datetime,
     submitted_limits: list[LimitRuleInput],
     existing_limits: list[ApiKeyLimit],
     reset_usage: bool,
+    repository: ApiKeysRepositoryProtocol,
 ) -> list[ApiKeyLimit]:
     existing_by_key = {_limit_identity_from_row(limit): limit for limit in existing_limits}
     submitted_by_key = {_limit_identity_from_input(limit): limit for limit in submitted_limits}
@@ -1183,8 +1194,11 @@ def _build_limit_rows_for_update(
     for submitted in submitted_limits:
         identity = _limit_identity_from_input(submitted)
         matched = existing_by_key.get(identity)
-        if matched is None or reset_usage:
+        if reset_usage:
             rows.append(_limit_input_to_row(submitted, key_id, now))
+            continue
+        if matched is None:
+            rows.append(await _new_limit_input_to_backfilled_row(submitted, key_id, now, repository))
             continue
         rows.append(
             _limit_input_to_row(
@@ -1196,6 +1210,32 @@ def _build_limit_rows_for_update(
             )
         )
     return rows
+
+
+async def _new_limit_input_to_backfilled_row(
+    submitted: LimitRuleInput,
+    key_id: str,
+    now: datetime,
+    repository: ApiKeysRepositoryProtocol,
+) -> ApiKeyLimit:
+    limit_type = LimitType(submitted.limit_type)
+    window = LimitWindow(submitted.limit_window)
+    reset_at = next_limit_reset(now, window)
+    since = now - limit_window_delta(window)
+    current_value = await repository.get_limit_usage_value(
+        key_id,
+        limit_type=limit_type,
+        since=since,
+        until=now,
+        model_filter=submitted.model_filter,
+    )
+    return _limit_input_to_row(
+        submitted,
+        key_id,
+        now,
+        current_value=current_value,
+        reset_at=reset_at,
+    )
 
 
 def _build_reset_limit_rows(

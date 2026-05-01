@@ -72,6 +72,18 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
         return {}
 
+    async def get_limit_usage_value(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None,
+    ) -> int:
+        del key_id, limit_type, since, until, model_filter
+        return 0
+
     async def update(
         self,
         key_id: str,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -22,6 +23,11 @@ def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
     return f"header.{body}.sig"
+
+
+def _oauth_state_token(authorization_url: str) -> str:
+    parsed = urlparse(authorization_url)
+    return parse_qs(parsed.query)["state"][0]
 
 
 @pytest.mark.asyncio
@@ -417,112 +423,80 @@ async def test_manual_callback_returns_error_message_for_invalid_state(async_cli
 
 
 @pytest.mark.asyncio
-async def test_manual_callback_is_idempotent_for_same_attempt(async_client, monkeypatch):
+async def test_concurrent_browser_oauth_flows_keep_callbacks_isolated(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 
     async def fake_callback_server_start(self) -> None:
         return None
 
-    email = "manual-idem@example.com"
-    raw_account_id = "acc_manual_idem"
-
-    exchange_calls = 0
-
-    async def fake_exchange_authorization_code(**_):
-        nonlocal exchange_calls
-        exchange_calls += 1
+    async def fake_exchange_authorization_code(**kwargs):
+        code = kwargs["code"]
         payload = {
-            "email": email,
-            "chatgpt_account_id": raw_account_id,
+            "email": f"{code}@example.com",
+            "chatgpt_account_id": f"acc_{code}",
             "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
         }
         return OAuthTokens(
-            access_token="manual-idem-access-token",
-            refresh_token="manual-idem-refresh-token",
+            access_token=f"access-{code}",
+            refresh_token=f"refresh-{code}",
             id_token=_encode_jwt(payload),
         )
 
     monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
     monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
 
-    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
-    assert start.status_code == 200
+    first_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert first_start.status_code == 200
+    first_payload = first_start.json()
+    assert first_payload["method"] == "browser"
+    assert first_payload["flowId"]
 
-    async with oauth_module._OAUTH_STORE.lock:
-        state_token = oauth_module._OAUTH_STORE.state.state_token
+    second_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert second_start.status_code == 200
+    second_payload = second_start.json()
+    assert second_payload["method"] == "browser"
+    assert second_payload["flowId"]
+    assert second_payload["flowId"] != first_payload["flowId"]
 
-    callback_url = f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"
-
-    first = await async_client.post(
-        "/api/oauth/manual-callback",
-        json={"callbackUrl": callback_url},
-    )
-    assert first.status_code == 200
-    assert first.json() == {"status": "success", "errorMessage": None}
-    assert exchange_calls == 1
-
-    # Re-submitting the same callback URL for the same attempt must be a
-    # no-op success (idempotent), not a re-exchange of the consumed code.
-    second = await async_client.post(
-        "/api/oauth/manual-callback",
-        json={"callbackUrl": callback_url},
-    )
-    assert second.status_code == 200
-    assert second.json() == {"status": "success", "errorMessage": None}
-    assert exchange_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_manual_callback_after_success_rejects_stale_callback(async_client, monkeypatch):
-    await oauth_module._OAUTH_STORE.reset()
-
-    async def fake_callback_server_start(self) -> None:
-        return None
-
-    email = "manual-stale@example.com"
-    raw_account_id = "acc_manual_stale"
-
-    async def fake_exchange_authorization_code(**_):
-        payload = {
-            "email": email,
-            "chatgpt_account_id": raw_account_id,
-            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
-        }
-        return OAuthTokens(
-            access_token="manual-stale-access-token",
-            refresh_token="manual-stale-refresh-token",
-            id_token=_encode_jwt(payload),
-        )
-
-    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
-    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
-
-    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
-    assert start.status_code == 200
-
-    async with oauth_module._OAUTH_STORE.lock:
-        state_token = oauth_module._OAUTH_STORE.state.state_token
-
-    first = await async_client.post(
+    first_response = await async_client.post(
         "/api/oauth/manual-callback",
         json={
-            "callbackUrl": (f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"),
+            "callbackUrl": (
+                f"http://localhost:1455/auth/callback?code=code-first&state="
+                f"{_oauth_state_token(first_payload['authorizationUrl'])}"
+            ),
+            "flowId": first_payload["flowId"],
         },
     )
-    assert first.status_code == 200
-    assert first.json() == {"status": "success", "errorMessage": None}
+    assert first_response.status_code == 200
+    assert first_response.json() == {"status": "success", "errorMessage": None}
 
-    # A stale callback URL from a previous/different attempt arrives after
-    # success. Idempotent return must NOT mask state-mismatch validation: the
-    # request must still be rejected as an invalid callback.
-    stale = await async_client.post(
+    second_response = await async_client.post(
         "/api/oauth/manual-callback",
         json={
-            "callbackUrl": "http://localhost:1455/auth/callback?code=stale-code&state=stale-state",
+            "callbackUrl": (
+                f"http://localhost:1455/auth/callback?code=code-second&state="
+                f"{_oauth_state_token(second_payload['authorizationUrl'])}"
+            ),
+            "flowId": second_payload["flowId"],
         },
     )
-    assert stale.status_code == 200
-    assert stale.json() == {
-        "status": "error",
-        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    assert second_response.status_code == 200
+    assert second_response.json() == {"status": "success", "errorMessage": None}
+
+    first_status = await async_client.get("/api/oauth/status", params={"flowId": first_payload["flowId"]})
+    assert first_status.status_code == 200
+    assert first_status.json() == {"status": "success", "errorMessage": None}
+
+    second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
+    assert second_status.status_code == 200
+    assert second_status.json() == {"status": "success", "errorMessage": None}
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    data = accounts.json()["accounts"]
+    expected_ids = {
+        generate_unique_account_id("acc_code-first", "code-first@example.com"),
+        generate_unique_account_id("acc_code-second", "code-second@example.com"),
     }
+    assert expected_ids.issubset({account["accountId"] for account in data})

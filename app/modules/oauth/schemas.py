@@ -8,6 +8,7 @@ class OauthStartRequest(DashboardModel):
 
 
 class OauthStartResponse(DashboardModel):
+    flow_id: str | None = None
     method: str
     authorization_url: str | None = None
     callback_url: str | None = None
@@ -24,6 +25,7 @@ class OauthStatusResponse(DashboardModel):
 
 
 class OauthCompleteRequest(DashboardModel):
+    flow_id: str | None = None
     device_auth_id: str | None = None
     user_code: str | None = None
 
@@ -34,6 +36,7 @@ class OauthCompleteResponse(DashboardModel):
 
 class ManualCallbackRequest(DashboardModel):
     callback_url: str
+    flow_id: str | None = None
 
 
 class ManualCallbackResponse(DashboardModel):

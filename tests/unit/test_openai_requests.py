@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
 
@@ -864,3 +864,87 @@ def test_v1_rejects_unknown_message_role():
     }
     with pytest.raises(ClientPayloadError, match="Unsupported message role"):
         V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+
+def test_responses_accepts_input_file_with_file_id_content_item():
+    """Regression: ``input_file`` content items with a ``file_id`` were
+    previously rejected. They are now allowed and forwarded verbatim so
+    callers can reference uploads registered through the
+    ``POST /backend-api/files`` upload protocol."""
+    content = [
+        {"type": "input_text", "text": "Summarize this file."},
+        {"type": "input_file", "file_id": "file_abc"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": content}],
+    }
+    request = ResponsesRequest.model_validate(payload)
+    assert request.input == [{"role": "user", "content": content}]
+
+
+def test_responses_compact_accepts_input_file_with_file_id_content_item():
+    content = [
+        {"type": "input_text", "text": "Summarize this file."},
+        {"type": "input_file", "file_id": "file_abc"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": content}],
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+    assert request.input == [{"role": "user", "content": content}]
+
+
+def test_responses_accepts_top_level_input_file_with_file_id():
+    """Top-level ``input_file`` items (sibling of role messages) were
+    also rejected; they should now be forwarded as-is."""
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "input_file", "file_id": "file_root"},
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+    forwarded = request.input
+    assert isinstance(forwarded, list)
+    assert {"type": "input_file", "file_id": "file_root"} in forwarded
+
+
+def test_extract_input_file_ids_string_input_returns_empty_set():
+    assert extract_input_file_ids("Hello world") == set()
+
+
+def test_extract_input_file_ids_finds_top_level_and_nested_ids():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Summarize."},
+                {"type": "input_file", "file_id": "file_a"},
+            ],
+        },
+        {"type": "input_file", "file_id": "file_b"},
+        # Duplicates and missing/blank ids are filtered out.
+        {"type": "input_file", "file_id": "file_a"},
+        {"type": "input_file", "file_id": ""},
+        {"type": "input_file"},
+    ]
+    assert extract_input_file_ids(input_value) == {"file_a", "file_b"}
+
+
+def test_extract_input_file_ids_ignores_non_input_file_types():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "file_id": "file_should_not_match"},
+                {"type": "input_text", "text": "ignore"},
+            ],
+        },
+    ]
+    assert extract_input_file_ids(input_value) == set()

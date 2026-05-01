@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import Final, cast
 
-from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, Security, UploadFile, WebSocket
+from fastapi import APIRouter, Body, Depends, File, Form, Path, Request, Response, Security, UploadFile, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -21,6 +21,7 @@ from app.core.auth.dependencies import (
     validate_proxy_api_key_authorization,
     validate_usage_api_key,
 )
+from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -79,6 +80,7 @@ from app.modules.proxy.request_policy import (
 from app.modules.proxy.schemas import (
     CodexModelEntry,
     CodexModelsResponse,
+    FileCreateRequest,
     ModelListItem,
     ModelListResponse,
     ModelMetadata,
@@ -136,6 +138,11 @@ usage_router = APIRouter(
     dependencies=[Depends(set_openai_error_format)],
 )
 transcribe_router = APIRouter(
+    prefix="/backend-api",
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
+files_router = APIRouter(
     prefix="/backend-api",
     tags=["proxy"],
     dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
@@ -557,6 +564,103 @@ async def backend_transcribe(
         context=context,
         api_key=api_key,
     )
+
+
+# Synthetic ``model`` strings used for API-key limit accounting +
+# request-log filtering on the file upload protocol. They never reach
+# upstream -- this is a proxy-internal name only.
+_FILES_CREATE_LIMIT_MODEL: Final = "files-create"
+_FILES_FINALIZE_LIMIT_MODEL: Final = "files-finalize"
+
+
+@files_router.post("/files")
+async def backend_files_create(
+    request: Request,
+    payload: FileCreateRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> JSONResponse:
+    """Forward a `POST /backend-api/files` upload registration to upstream.
+
+    Accepts ``{file_name, file_size, use_case}`` and returns the upstream
+    JSON verbatim (typically ``{file_id, upload_url}``) so callers can
+    PUT the bytes directly to the SAS upload URL without going through
+    the proxy. The 16 MiB websocket ceiling on ``/responses`` does not
+    apply here -- upstream caps file size at 512 MiB which we enforce in
+    ``FileCreateRequest``.
+    """
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=_FILES_CREATE_LIMIT_MODEL,
+        request_service_tier=None,
+    )
+    try:
+        result = await context.service.create_file(
+            payload.model_dump(mode="json", exclude_none=True),
+            request.headers,
+            api_key=api_key,
+        )
+    except FileProxyError as exc:
+        error = _parse_error_envelope(exc.payload)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            error.model_dump(mode="json", exclude_none=True),
+        )
+    except ProxyResponseError as exc:
+        error = _parse_error_envelope(exc.payload)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            error.model_dump(mode="json", exclude_none=True),
+        )
+    finally:
+        await _release_reservation(reservation)
+    return JSONResponse(content=result)
+
+
+@files_router.post("/files/{file_id}/uploaded")
+async def backend_files_finalize(
+    request: Request,
+    file_id: str = Path(..., min_length=1),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> JSONResponse:
+    """Forward a `POST /backend-api/files/{file_id}/uploaded` finalize call.
+
+    The upstream contract returns ``{status: success|retry|failed,
+    download_url, file_name, mime_type, ...}``. ``service.finalize_file``
+    polls upstream for up to 30 s while ``status == "retry"``; we return
+    the final payload verbatim so the caller sees what upstream saw.
+    """
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=_FILES_FINALIZE_LIMIT_MODEL,
+        request_service_tier=None,
+    )
+    try:
+        result = await context.service.finalize_file(
+            file_id,
+            request.headers,
+            api_key=api_key,
+        )
+    except FileProxyError as exc:
+        error = _parse_error_envelope(exc.payload)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            error.model_dump(mode="json", exclude_none=True),
+        )
+    except ProxyResponseError as exc:
+        error = _parse_error_envelope(exc.payload)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            error.model_dump(mode="json", exclude_none=True),
+        )
+    finally:
+        await _release_reservation(reservation)
+    return JSONResponse(content=result)
 
 
 @v1_router.post("/audio/transcriptions")

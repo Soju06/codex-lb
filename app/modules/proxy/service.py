@@ -8,7 +8,7 @@ import logging
 import re
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Collection, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +34,13 @@ from app.core.auth.refresh import (
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.clients.files import (
+    FileProxyError,
+    pop_files_timeout_overrides,
+    push_files_timeout_overrides,
+)
+from app.core.clients.files import create_file as core_create_file
+from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.proxy import (
     ProxyResponseError,
     filter_inbound_headers,
@@ -84,7 +91,7 @@ from app.core.metrics.prometheus import (
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
@@ -273,6 +280,15 @@ class ProxyService:
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
+        # In-memory pin from upstream-issued file_id -> codex-lb account_id.
+        # Used so ``finalize_file`` for a given ``file_id`` is routed to
+        # the same account that handled ``create_file``. Cross-instance
+        # routing is best-effort: if the finalize request lands on a
+        # different replica with no pin, we fall back to a fresh load-
+        # balancer selection. The TTL is short enough (5 min) that we
+        # never hold stale pins after the upstream upload window closes.
+        self._file_account_pins: dict[str, tuple[str, float]] = {}
+        self._file_account_pin_lock = asyncio.Lock()
         self._http_bridge_lock = anyio.Lock()
         self._work_admission: WorkAdmissionController | None = None
 
@@ -574,6 +590,14 @@ class ProxyService:
                 api_key=api_key,
                 session_id=request_state.session_id,
                 surface="http_bridge",
+            )
+        if request_state.preferred_account_id is None:
+            # ``input_file.file_id`` references must land on the account
+            # that registered the upload (chatgpt-account-id-scoped).
+            # The helper returns ``None`` when stronger affinity signals
+            # are present, so this never overrides existing routing.
+            request_state.preferred_account_id = await self._resolve_file_account_for_responses(
+                effective_payload, headers
             )
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
@@ -1419,6 +1443,12 @@ class ProxyService:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
+        # ``input_file.file_id`` references must land on the account that
+        # registered the upload (chatgpt-account-id-scoped). The helper
+        # returns ``None`` when stronger affinity signals are present
+        # (prompt_cache_key / session header / turn_state header /
+        # previous_response_id), so existing routing wins.
+        file_preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
         try:
 
             async def _call_compact(target: Account) -> CompactResponsePayload:
@@ -1464,6 +1494,7 @@ class ProxyService:
                     routing_strategy=routing_strategy,
                     model=payload.model,
                     exclude_account_ids=excluded_account_ids,
+                    preferred_account_id=file_preferred_account_id,
                 )
                 account = selection.account
                 if not account:
@@ -1856,6 +1887,399 @@ class ProxyService:
                 api_key=api_key,
                 request_id=request_id,
                 model=transcribe_model,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                status=log_status,
+                error_code=log_error_code,
+                error_message=log_error_message,
+                transport=_REQUEST_TRANSPORT_HTTP,
+            )
+
+    # File-account pin TTL: long enough to cover a slow client-side
+    # PUT of a 512 MiB upload (the upstream limit) plus the finalize
+    # poll loop and a follow-up ``/responses`` that references the
+    # file_id, while still bounding how long stale pins can sit in
+    # memory on long-lived workers. 30 minutes covers a 512 MiB
+    # upload at ~280 KiB/s -- well below typical broadband uplink --
+    # while keeping the table size negligible (each pin is a short
+    # string tuple). Eviction runs opportunistically on every write,
+    # so this acts as an upper bound, not a fixed retention.
+    _FILE_ACCOUNT_PIN_TTL_SECONDS: float = 30 * 60.0
+
+    async def _pin_file_account(self, file_id: str, account_id: str) -> None:
+        """Remember that ``file_id`` was registered through ``account_id``.
+
+        Used so a subsequent ``finalize_file`` can be routed to the same
+        account that created the file. Cross-instance handoff is
+        best-effort: if the finalize lands on a different replica with
+        no pin, we fall back to a fresh load-balancer selection.
+        """
+        if not file_id or not account_id:
+            return
+        expires_at = time.monotonic() + self._FILE_ACCOUNT_PIN_TTL_SECONDS
+        async with self._file_account_pin_lock:
+            self._file_account_pins[file_id] = (account_id, expires_at)
+            self._evict_expired_file_pins_locked()
+
+    async def _resolve_file_account(self, file_id: str) -> str | None:
+        """Return the pinned account_id for ``file_id`` if still live."""
+        if not file_id:
+            return None
+        async with self._file_account_pin_lock:
+            entry = self._file_account_pins.get(file_id)
+            if entry is None:
+                return None
+            account_id, expires_at = entry
+            if expires_at <= time.monotonic():
+                self._file_account_pins.pop(file_id, None)
+                return None
+            return account_id
+
+    def _evict_expired_file_pins_locked(self) -> None:
+        """Drop pins past their TTL. Called under ``_file_account_pin_lock``."""
+        now = time.monotonic()
+        expired = [file_id for file_id, (_, expires_at) in self._file_account_pins.items() if expires_at <= now]
+        for file_id in expired:
+            self._file_account_pins.pop(file_id, None)
+
+    async def _resolve_file_account_for_responses(
+        self,
+        payload: ResponsesRequest | ResponsesCompactRequest,
+        headers: Mapping[str, str],
+    ) -> str | None:
+        """Resolve a ``preferred_account_id`` from ``input_file.file_id`` pins.
+
+        Looks up the in-memory ``file_id -> account_id`` pin table built
+        by ``create_file``. Used by ``/responses`` flows so a request
+        carrying an ``{type: "input_file", file_id: "file_xxx"}`` part
+        is routed to the same upstream account that registered the
+        upload (the upstream contract is account-scoped via
+        ``chatgpt-account-id``).
+
+        The pin is only consulted when the request has *no* stronger
+        client-supplied affinity signal: a ``prompt_cache_key`` that
+        the client itself sent, a session / turn-state header
+        (codex_session affinity), or a ``previous_response_id`` all
+        imply an existing conversation continuation and must keep
+        their routing intact. Returning ``None`` from here means
+        "fall back to the standard sticky / codex / cache affinity
+        path".
+
+        Note: ``_sticky_key_for_responses_request`` can *derive* and
+        write a ``prompt_cache_key`` onto the payload when openai cache
+        affinity is enabled. We must not treat that derived key as a
+        stronger signal -- it is itself the load balancer's choice to
+        route consistently, not a client-supplied continuation marker.
+        Inspect ``model_fields_set`` so we only honor an *explicit*
+        client-supplied cache key.
+
+        Tie-breaking when the payload references multiple ``file_id``s:
+        prefer the most-recently-pinned one (matches the most recent
+        upload in a multi-attachment thread). If two pins share the
+        same expiry timestamp, the lexicographically smallest
+        ``file_id`` wins for determinism.
+        """
+        # Stronger affinity signals always win, but only when the
+        # client supplied them. Derived ``prompt_cache_key`` values
+        # added by the affinity helper itself must not block file-pin
+        # routing for first-turn upload-then-converse flows.
+        # Honor both the canonical ``prompt_cache_key`` and the
+        # OpenAI-compat camelCase ``promptCacheKey`` alias as
+        # client-supplied. Pydantic populates ``model_fields_set`` with
+        # the canonical name when V1 normalization runs ahead of us, but
+        # raw clients posting directly to ``/backend-api/codex/responses``
+        # bypass that normalization and we still want to respect their
+        # explicit cache key.
+        explicit_fields = getattr(payload, "model_fields_set", set())
+        explicit_cache_key = "prompt_cache_key" in explicit_fields or "promptCacheKey" in explicit_fields
+        if explicit_cache_key and _prompt_cache_key_from_request_model(payload) is not None:
+            return None
+        # ``ensure_downstream_turn_state`` / ``ensure_http_downstream_turn_state``
+        # synthesize a fresh ``x-codex-turn-state`` header on first turns when
+        # the client did not supply one (see
+        # ``app/modules/proxy/api.py`` websocket / HTTP handlers). Treat those
+        # synthetic values as "no client-supplied turn state" so the file-pin
+        # lookup still runs on first-turn upload-then-converse flows. Only a
+        # turn-state value that does *not* match the synthesizer prefix counts
+        # as a client-supplied continuation marker.
+        turn_state_value = _sticky_key_from_turn_state_header(headers)
+        if turn_state_value is not None and not _is_synthesized_turn_state(turn_state_value):
+            return None
+        if _sticky_key_from_session_header(headers) is not None:
+            return None
+        if getattr(payload, "previous_response_id", None):
+            return None
+
+        file_ids = extract_input_file_ids(payload.input)
+        if not file_ids:
+            return None
+
+        async with self._file_account_pin_lock:
+            self._evict_expired_file_pins_locked()
+            best_account: str | None = None
+            best_expires_at = -1.0
+            best_file_id: str | None = None
+            for file_id in file_ids:
+                entry = self._file_account_pins.get(file_id)
+                if entry is None:
+                    continue
+                account_id, expires_at = entry
+                if expires_at > best_expires_at or (
+                    expires_at == best_expires_at and (best_file_id is None or file_id < best_file_id)
+                ):
+                    best_account = account_id
+                    best_expires_at = expires_at
+                    best_file_id = file_id
+            return best_account
+
+    async def create_file(
+        self,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None = None,
+    ) -> dict[str, JsonValue]:
+        """Forward an inbound `POST /backend-api/files` registration to upstream.
+
+        The body is whatever the caller sent (already validated as
+        ``FileCreateRequest`` at the API edge). Returns the upstream
+        ``{file_id, upload_url, ...}`` JSON verbatim. Mirrors the
+        account-selection / refresh / 401-retry pattern from ``transcribe``.
+
+        On success we record a ``file_id -> account_id`` pin so a
+        subsequent ``finalize_file`` for the same ``file_id`` is routed
+        to the same account; the upstream contract is account-scoped
+        (chatgpt-account-id) so a finalize on a different account would
+        fail with not-found / unauthorized.
+        """
+        result, account_id = await self._proxy_files_call(
+            log_model="files-create",
+            kind="files-create",
+            api_key=api_key,
+            headers=headers,
+            invoke=lambda access_token, upstream_account_id, filtered_headers: core_create_file(
+                payload=payload,
+                headers=filtered_headers,
+                access_token=access_token,
+                account_id=upstream_account_id,
+            ),
+        )
+        # Best-effort pin so finalize lands on the same account.
+        if isinstance(result, dict) and account_id:
+            file_id = result.get("file_id")
+            if isinstance(file_id, str) and file_id:
+                await self._pin_file_account(file_id, account_id)
+        return result
+
+    async def finalize_file(
+        self,
+        file_id: str,
+        headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None = None,
+    ) -> dict[str, JsonValue]:
+        """Forward an inbound `POST /backend-api/files/{file_id}/uploaded` finalize call.
+
+        The upstream client (Codex CLI) polls this endpoint while
+        ``status == "retry"``; ``core_finalize_file`` mirrors that loop
+        server-side with a 30 s budget. Returns the upstream JSON
+        verbatim.
+
+        Routes to the account that handled the matching ``create_file``
+        (via the in-memory pin table) so the upstream finalize call
+        carries the same ``chatgpt-account-id`` that registered the
+        file. Falls back to a fresh load-balancer selection when no
+        pin is found (unknown ``file_id`` or pin expired / missed across
+        a replica boundary).
+        """
+        pinned_account_id = await self._resolve_file_account(file_id)
+        result, _ = await self._proxy_files_call(
+            log_model="files-finalize",
+            kind="files-finalize",
+            api_key=api_key,
+            headers=headers,
+            preferred_account_id=pinned_account_id,
+            invoke=lambda access_token, upstream_account_id, filtered_headers: core_finalize_file(
+                file_id=file_id,
+                headers=filtered_headers,
+                access_token=access_token,
+                account_id=upstream_account_id,
+            ),
+        )
+        return result
+
+    async def _proxy_files_call(
+        self,
+        *,
+        log_model: str,
+        kind: str,
+        api_key: ApiKeyData | None,
+        headers: Mapping[str, str],
+        invoke: Callable[[str, str | None, Mapping[str, str]], Awaitable[dict[str, JsonValue]]],
+        preferred_account_id: str | None = None,
+    ) -> tuple[dict[str, JsonValue], str | None]:
+        """Shared account-selection / refresh / 401-retry plumbing for `/files` calls.
+
+        Mirrors the structure of ``transcribe``: pick an account with budget,
+        ensure freshness, invoke upstream, on 401 force-refresh and retry once,
+        translate ``FileProxyError`` -> ``ProxyResponseError``, and always
+        write a request-log entry on the way out. When
+        ``preferred_account_id`` is provided (e.g. from the file_id pin
+        for ``finalize_file``), prefer that account if it is still live;
+        fall back to a fresh selection otherwise.
+        """
+        filtered = filter_inbound_headers(headers)
+        request_id = get_request_id() or ensure_request_id(None)
+        start = time.monotonic()
+        base_settings = get_settings()
+        deadline = start + base_settings.transcription_request_budget_seconds
+        account_id_value: str | None = None
+        log_status = "error"
+        log_error_code: str | None = None
+        log_error_message: str | None = None
+
+        settings = await get_settings_cache().get()
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        routing_strategy = _routing_strategy(settings)
+        try:
+            selection = await self._select_account_with_budget_compatible(
+                deadline,
+                request_id=request_id,
+                kind=kind,
+                api_key=api_key,
+                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                routing_strategy=routing_strategy,
+                model=None,
+                preferred_account_id=preferred_account_id,
+            )
+            account = selection.account
+            if not account:
+                log_error_code = selection.error_code or "no_accounts"
+                log_error_message = selection.error_message or "No active accounts available"
+                raise ProxyResponseError(
+                    503,
+                    openai_error(log_error_code, log_error_message),
+                )
+            account_id_value = account.id
+
+            async def _call(target: Account) -> dict[str, JsonValue]:
+                access_token = self._encryptor.decrypt(target.access_token_encrypted)
+                account_id = _header_account_id(target.chatgpt_account_id)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "%s request budget exhausted before upstream call request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        target.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                # Propagate the per-request budget so file create/finalize
+                # calls inherit the same effective timeout as the rest of
+                # the request, instead of letting them block on the
+                # module-default 60 s timeout regardless of how much
+                # budget is left.
+                timeout_tokens = push_files_timeout_overrides(
+                    connect_timeout_seconds=remaining_budget,
+                    total_timeout_seconds=remaining_budget,
+                )
+                try:
+                    return await invoke(access_token, account_id, filtered)
+                except FileProxyError as files_exc:
+                    raise ProxyResponseError(files_exc.status_code, files_exc.payload) from files_exc
+                finally:
+                    pop_files_timeout_overrides(timeout_tokens)
+
+            try:
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "%s request budget exhausted before freshness check request_id=%s",
+                        kind,
+                        request_id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                try:
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "%s refresh/connect failed request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                result = await _call(account)
+                await self._load_balancer.record_success(account)
+                log_status = "success"
+                return result, account_id_value
+            except RefreshError as refresh_exc:
+                if refresh_exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                raise ProxyResponseError(
+                    401,
+                    openai_error(
+                        "invalid_api_key",
+                        refresh_exc.message,
+                        error_type="invalid_request_error",
+                    ),
+                ) from refresh_exc
+            except ProxyResponseError as exc:
+                if exc.status_code != 401:
+                    await self._handle_proxy_error(account, exc)
+                    raise
+                try:
+                    remaining_budget = _remaining_budget_seconds(deadline)
+                    if remaining_budget <= 0:
+                        logger.warning(
+                            "%s request budget exhausted before forced refresh retry request_id=%s account_id=%s",
+                            kind,
+                            request_id,
+                            account.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    account = await self._ensure_fresh_with_budget(
+                        account, force=True, timeout_seconds=remaining_budget
+                    )
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    raise exc
+                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                    logger.warning(
+                        "%s forced refresh/connect failed request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                try:
+                    result = await _call(account)
+                    # The forced-refresh retry can swap to a refreshed
+                    # account row -- re-pin to that account id so the
+                    # caller's pin is consistent with the upstream call.
+                    account_id_value = account.id
+                    await self._load_balancer.record_success(account)
+                    log_status = "success"
+                    return result, account_id_value
+                except ProxyResponseError as retry_exc:
+                    await self._handle_proxy_error(account, retry_exc)
+                    raise
+        except ProxyResponseError as exc:
+            error = _parse_openai_error(exc.payload)
+            log_error_code = log_error_code or _normalize_error_code(
+                error.code if error else None,
+                error.type if error else None,
+            )
+            log_error_message = log_error_message or (error.message if error else None)
+            raise
+        finally:
+            await self._write_request_log(
+                account_id=account_id_value,
+                api_key=api_key,
+                request_id=request_id,
+                model=log_model,
                 latency_ms=int((time.monotonic() - start) * 1000),
                 status=log_status,
                 error_code=log_error_code,
@@ -2380,6 +2804,19 @@ class ProxyService:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(responses_payload) is not None,
         )
         request_state.affinity_policy = affinity_policy
+
+        # First-turn ``input_file.file_id`` references must land on the
+        # account that registered the upload (chatgpt-account-id-scoped).
+        # Codex CLI's typical flow is upload-then-converse, so a fresh
+        # turn often references a file_id with no other affinity signal
+        # set. The helper short-circuits to ``None`` when stronger
+        # affinity signals (prompt_cache_key / session header /
+        # turn_state header / previous_response_id) are present, so this
+        # never overrides existing routing.
+        if request_state.preferred_account_id is None:
+            request_state.preferred_account_id = await self._resolve_file_account_for_responses(
+                responses_payload, headers
+            )
 
         return _PreparedWebSocketRequest(
             text_data=text_data,
@@ -6440,6 +6877,14 @@ class ProxyService:
                     surface="http_stream",
                 )
                 require_preferred_account = preferred_account_id is not None
+            if preferred_account_id is None:
+                # ``input_file.file_id`` references must land on the account
+                # that registered the upload; otherwise upstream rejects the
+                # request with not-found / 401. The helper itself enforces
+                # priority -- it returns ``None`` when stronger affinity
+                # signals (prompt_cache_key / session header / turn_state
+                # header) are present, so this never overrides them.
+                preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
@@ -9589,6 +10034,22 @@ def _owner_lookup_session_id_from_headers(headers: Mapping[str, str]) -> str | N
     if turn_state is not None:
         return turn_state
     return _sticky_key_from_session_header(headers)
+
+
+# Pattern matching turn-state values synthesized by the helpers below.
+# A 32-char lowercase hex (uuid4().hex) suffix follows the prefix.
+_SYNTHESIZED_TURN_STATE_PATTERN = re.compile(r"^(?:http_)?turn_[0-9a-f]{32}$")
+
+
+def _is_synthesized_turn_state(value: str) -> bool:
+    """True when ``value`` matches a turn-state synthesized by codex-lb itself.
+
+    Used by the file-pin resolver to distinguish a client-supplied
+    continuation marker from a synthesizer-generated placeholder so
+    first-turn upload-then-converse requests still benefit from
+    file_id pin routing on the websocket / HTTP entry points.
+    """
+    return bool(_SYNTHESIZED_TURN_STATE_PATTERN.match(value))
 
 
 def ensure_downstream_turn_state(headers: Mapping[str, str]) -> str:

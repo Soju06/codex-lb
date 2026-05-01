@@ -389,7 +389,7 @@ async def v1_responses_websocket(
         forwarded_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
-        allow_native_tool_types=False,
+        allow_native_tool_types=True,
         api_key=api_key,
     )
 

@@ -527,10 +527,11 @@ def test_v1_input_string_passthrough():
     assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
 
 
-def test_v1_rejects_builtin_tools():
+def test_v1_allows_native_tool_surface_by_default():
     payload = {"model": "gpt-5.1", "input": [], "tools": [{"type": "image_generation"}]}
-    with pytest.raises(ValidationError, match="Unsupported tool type"):
-        V1ResponsesRequest.model_validate(payload)
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    assert request.tools == payload["tools"]
 
 
 def test_compact_strips_tool_fields():

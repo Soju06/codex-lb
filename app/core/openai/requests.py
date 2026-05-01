@@ -74,14 +74,14 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
 
 def allow_native_tool_types(context: object | None) -> bool:
     if not isinstance(context, Mapping):
-        return False
+        return True
     return bool(context.get(ALLOW_NATIVE_TOOL_TYPES_CONTEXT_KEY))
 
 
 def validate_tool_types(
     tools: list[JsonValue],
     *,
-    allow_native_tool_types: bool = False,
+    allow_native_tool_types: bool = True,
 ) -> list[JsonValue]:
     normalized_tools: list[JsonValue] = []
     for tool in tools:

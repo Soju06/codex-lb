@@ -65,7 +65,7 @@ class V1ResponsesRequest(BaseModel):
             raise ValueError("Provide either 'conversation' or 'previous_response_id', not both.")
         return self
 
-    def to_responses_request(self, *, allow_native_tool_types: bool = False) -> ResponsesRequest:
+    def to_responses_request(self, *, allow_native_tool_types: bool = True) -> ResponsesRequest:
         data = self.model_dump(mode="json", exclude_none=True)
         messages = data.pop("messages", None)
         instructions = data.get("instructions")

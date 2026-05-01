@@ -178,6 +178,8 @@ class Settings(BaseSettings):
     log_proxy_service_tier_trace: bool = False
     log_upstream_request_summary: bool = False
     log_upstream_request_payload: bool = False
+    conversation_archive_enabled: bool = False
+    conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)

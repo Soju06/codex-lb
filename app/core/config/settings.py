@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0
+    sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     # Applies to both upstream SSE event buffering and upstream websocket message
     # frames. Keep the default aligned with the common 16 MiB websocket ceiling so

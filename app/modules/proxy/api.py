@@ -2159,6 +2159,7 @@ def _merge_collected_output_items(
 async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
     terminal_seen = False
     contract_violation_kind: str | None = None
+    seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
             if terminal_seen:
@@ -2175,6 +2176,10 @@ async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> Asyn
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
+        if event_type == "response.output_text.delta":
+            seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
+        for synthetic_payload in _synthetic_text_delta_events(normalized_payload, seen_text_delta_keys):
+            yield format_sse_event(synthetic_payload)
         if isinstance(event_type, str) and event_type in {
             "response.completed",
             "response.incomplete",
@@ -2242,6 +2247,98 @@ def _normalize_public_stream_payload(
             violation_kind = "invalid_output_item"
         return normalized_payload, violation_kind
     return payload, None
+
+
+def _synthetic_text_delta_events(
+    payload: Mapping[str, JsonValue],
+    seen_text_delta_keys: set[tuple[str | None, int | None]],
+) -> list[dict[str, JsonValue]]:
+    event_type = payload.get("type")
+    if event_type == "response.output_item.done":
+        output_index = payload.get("output_index")
+        item = payload.get("item")
+        if isinstance(output_index, int) and is_json_mapping(item):
+            synthetic = _synthetic_text_delta_for_output_item(output_index, item, seen_text_delta_keys)
+            return [synthetic] if synthetic is not None else []
+    if event_type not in {"response.completed", "response.incomplete"}:
+        return []
+    response = payload.get("response")
+    if not is_json_mapping(response):
+        return []
+    output = response.get("output")
+    if not isinstance(output, list):
+        return []
+
+    synthetic_events: list[dict[str, JsonValue]] = []
+    for output_index, item in enumerate(output):
+        if not is_json_mapping(item):
+            continue
+        synthetic = _synthetic_text_delta_for_output_item(output_index, item, seen_text_delta_keys)
+        if synthetic is not None:
+            synthetic_events.append(synthetic)
+    return synthetic_events
+
+
+def _synthetic_text_delta_for_output_item(
+    output_index: int,
+    item: Mapping[str, JsonValue],
+    seen_text_delta_keys: set[tuple[str | None, int | None]],
+) -> dict[str, JsonValue] | None:
+    normalized_item = _normalize_public_output_item(item)
+    if normalized_item is None:
+        return None
+    text = _extract_public_output_item_text(normalized_item)
+    if text is None:
+        return None
+    key = _output_item_stream_key(output_index, normalized_item)
+    if _seen_text_delta_for_output_item(key, seen_text_delta_keys):
+        return None
+    seen_text_delta_keys.add(key)
+
+    event: dict[str, JsonValue] = {
+        "type": "response.output_text.delta",
+        "output_index": output_index,
+        "content_index": 0,
+        "delta": text,
+    }
+    item_id = normalized_item.get("id")
+    if isinstance(item_id, str) and item_id:
+        event["item_id"] = item_id
+    return event
+
+
+def _text_delta_stream_key(payload: Mapping[str, JsonValue]) -> tuple[str | None, int | None]:
+    item_id = payload.get("item_id")
+    output_index = payload.get("output_index")
+    return (
+        item_id if isinstance(item_id, str) and item_id else None,
+        output_index if isinstance(output_index, int) else None,
+    )
+
+
+def _output_item_stream_key(
+    output_index: int,
+    item: Mapping[str, JsonValue],
+) -> tuple[str | None, int | None]:
+    item_id = item.get("id")
+    return (item_id if isinstance(item_id, str) and item_id else None, output_index)
+
+
+def _seen_text_delta_for_output_item(
+    key: tuple[str | None, int | None],
+    seen_text_delta_keys: set[tuple[str | None, int | None]],
+) -> bool:
+    item_id, output_index = key
+    return any(
+        candidate in seen_text_delta_keys
+        for candidate in (
+            key,
+            (item_id, None) if item_id is not None else None,
+            (None, output_index) if output_index is not None else None,
+            (None, None),
+        )
+        if candidate is not None
+    )
 
 
 def _normalize_public_response_mapping(

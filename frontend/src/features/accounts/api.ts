@@ -2,6 +2,7 @@ import { del, get, post } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
+  AccountOpenCodeAuthExportResponseSchema,
   AccountImportResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
@@ -48,6 +49,13 @@ export function getAccountTrends(accountId: string) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
     AccountTrendsResponseSchema,
+  );
+}
+
+export function exportAccountOpenCodeAuth(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/opencode-auth`,
+    AccountOpenCodeAuthExportResponseSchema,
   );
 }
 

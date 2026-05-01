@@ -12,6 +12,7 @@ from app.core.auth import (
     claims_from_auth,
     generate_unique_account_id,
     parse_auth_json,
+    token_expiry_epoch_ms,
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
@@ -25,9 +26,13 @@ from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
     AccountImportResponse,
+    AccountOpenCodeAuthExportAccount,
+    AccountOpenCodeAuthExportResponse,
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
+    OpenCodeAuthJson,
+    OpenCodeOAuthAuth,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
@@ -142,6 +147,33 @@ class AccountsService:
             secondary=trend.secondary if trend else [],
         )
 
+    async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return None
+
+        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+        expires = token_expiry_epoch_ms(access_token) or 0
+        opencode_account_id = account.chatgpt_account_id or account.id
+
+        return AccountOpenCodeAuthExportResponse(
+            filename=_opencode_auth_export_filename(account),
+            account=AccountOpenCodeAuthExportAccount(
+                account_id=account.id,
+                chatgpt_account_id=account.chatgpt_account_id,
+                email=account.email,
+            ),
+            auth_json=OpenCodeAuthJson(
+                openai=OpenCodeOAuthAuth(
+                    refresh=refresh_token,
+                    access=access_token,
+                    expires=expires,
+                    account_id=opencode_account_id,
+                ),
+            ),
+        )
+
     async def import_account(self, raw: bytes) -> AccountImportResponse:
         try:
             auth = parse_auth_json(raw)
@@ -201,3 +233,9 @@ class AccountsService:
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
         return result
+
+
+def _opencode_auth_export_filename(account: Account) -> str:
+    source = account.email or account.id
+    safe = "".join(char if char.isalnum() or char in "._-" else "-" for char in source).strip("-._")
+    return f"opencode-auth-{safe or account.id}.json"

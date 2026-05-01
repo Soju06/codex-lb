@@ -89,6 +89,30 @@ class AccountImportResponse(DashboardModel):
     status: str
 
 
+class OpenCodeOAuthAuth(DashboardModel):
+    type: str = "oauth"
+    refresh: str
+    access: str
+    expires: int = Field(ge=0)
+    account_id: str | None = None
+
+
+class OpenCodeAuthJson(DashboardModel):
+    openai: OpenCodeOAuthAuth
+
+
+class AccountOpenCodeAuthExportAccount(DashboardModel):
+    account_id: str
+    chatgpt_account_id: str | None = None
+    email: str
+
+
+class AccountOpenCodeAuthExportResponse(DashboardModel):
+    filename: str
+    account: AccountOpenCodeAuthExportAccount
+    auth_json: OpenCodeAuthJson
+
+
 class AccountPauseResponse(DashboardModel):
     status: str
 

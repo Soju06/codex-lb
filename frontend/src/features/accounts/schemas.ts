@@ -81,6 +81,30 @@ export const AccountImportResponseSchema = z.object({
   status: z.string(),
 });
 
+export const OpenCodeOAuthAuthSchema = z.object({
+  type: z.literal("oauth"),
+  refresh: z.string(),
+  access: z.string(),
+  expires: z.number().int().nonnegative(),
+  accountId: z.string().nullable().optional(),
+});
+
+export const OpenCodeAuthJsonSchema = z.object({
+  openai: OpenCodeOAuthAuthSchema,
+});
+
+export const AccountOpenCodeAuthExportAccountSchema = z.object({
+  accountId: z.string(),
+  chatgptAccountId: z.string().nullable().optional(),
+  email: z.string(),
+});
+
+export const AccountOpenCodeAuthExportResponseSchema = z.object({
+  filename: z.string(),
+  account: AccountOpenCodeAuthExportAccountSchema,
+  authJson: OpenCodeAuthJsonSchema,
+});
+
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
 });
@@ -151,6 +175,10 @@ export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
+export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
+export type AccountOpenCodeAuthExportResponse = z.infer<
+  typeof AccountOpenCodeAuthExportResponseSchema
+>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;

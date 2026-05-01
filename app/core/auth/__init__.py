@@ -90,6 +90,16 @@ def claims_from_auth(auth: AuthFile) -> AccountClaims:
     )
 
 
+def token_expiry_epoch_ms(token: str) -> int | None:
+    claims = extract_id_token_claims(token)
+    exp = claims.exp
+    if isinstance(exp, (int, float)):
+        return max(0, int(float(exp) * 1000))
+    if isinstance(exp, str) and exp.isdigit():
+        return max(0, int(exp) * 1000)
+    return None
+
+
 def generate_unique_account_id(account_id: str | None, email: str | None) -> str:
     if account_id and email and email != DEFAULT_EMAIL:
         email_hash = hashlib.sha256(email.encode()).hexdigest()[:8]

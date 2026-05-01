@@ -157,6 +157,7 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
+    warmup_model: str = "gpt-5.4-mini"
     openai_prompt_cache_key_derivation_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
     http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
@@ -379,6 +380,16 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
         return value
+
+    @field_validator("warmup_model", mode="before")
+    @classmethod
+    def _normalize_warmup_model(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("warmup_model must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("warmup_model must not be blank")
+        return normalized
 
     @model_validator(mode="after")
     def _validate_http_bridge_instance_configuration(self) -> "Settings":

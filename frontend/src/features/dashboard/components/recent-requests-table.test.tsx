@@ -62,6 +62,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Alpha",
             apiKeyId: "key-alpha",
             requestId: "req-1",
+            requestKind: "normal",
             model: "gpt-5.1",
             serviceTier: "default",
             requestedServiceTier: "priority",
@@ -120,6 +121,66 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 
+  it("shows warmup marker only for warmup rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={2}
+        hasMore
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-normal",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-normal",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 1,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            latencyMs: 1,
+          },
+          {
+            requestedAt: ISO,
+            accountId: "acc-warmup",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-warmup",
+            requestKind: "warmup",
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 1,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Warmup")).toBeInTheDocument();
+    expect(screen.queryByText("Normal")).not.toBeInTheDocument();
+  });
+
   it("renders placeholder transport for legacy rows", () => {
     render(
       <RecentRequestsTable
@@ -133,6 +194,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-legacy",
+            requestKind: "normal",
             model: "gpt-5.1",
             serviceTier: null,
             requestedServiceTier: null,
@@ -167,6 +229,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-error-code",
+            requestKind: "normal",
             model: "gpt-5.1",
             serviceTier: null,
             requestedServiceTier: null,

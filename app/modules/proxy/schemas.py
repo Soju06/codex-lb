@@ -217,3 +217,42 @@ class V1UsageResponse(BaseModel):
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
     upstream_limits: list[V1UsageLimitResponse] = []
+
+
+class WarmupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = "normal"
+
+
+class WarmupSubmittedAccount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    request_id: str
+    model: str
+
+
+class WarmupSkippedAccount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    reason: str
+
+
+class WarmupFailedAccount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    error_code: str
+    error_message: str
+
+
+class WarmupResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    total_accounts: int
+    submitted: list[WarmupSubmittedAccount]
+    skipped: list[WarmupSkippedAccount]
+    failed: list[WarmupFailedAccount]

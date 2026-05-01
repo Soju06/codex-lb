@@ -14,7 +14,7 @@ from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestLog
+from app.db.models import Account, ApiKey, RequestKind, RequestLog
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,8 +27,17 @@ class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    @staticmethod
+    def _exclude_warmup_clause() -> ColumnElement[bool]:
+        return RequestLog.request_kind != RequestKind.WARMUP.value
+
     async def list_since(self, since: datetime) -> list[RequestLog]:
-        result = await self._session.execute(select(RequestLog).where(RequestLog.requested_at >= since))
+        result = await self._session.execute(
+            select(RequestLog).where(
+                RequestLog.requested_at >= since,
+                self._exclude_warmup_clause(),
+            )
+        )
         return list(result.scalars().all())
 
     async def find_latest_account_id_for_response_id(
@@ -101,6 +110,7 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
             .where(RequestLog.requested_at >= since)
+            .where(self._exclude_warmup_clause())
             .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
             .order_by(bucket_col)
         )
@@ -132,7 +142,10 @@ class RequestLogsRepository:
             func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-        ).where(RequestLog.requested_at >= since)
+        ).where(
+            RequestLog.requested_at >= since,
+            self._exclude_warmup_clause(),
+        )
         result = await self._session.execute(stmt)
         row = result.one()
         return RequestActivityAggregate(
@@ -149,6 +162,7 @@ class RequestLogsRepository:
             select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
             .where(
                 RequestLog.requested_at >= since,
+                self._exclude_warmup_clause(),
                 RequestLog.status != "success",
                 RequestLog.error_code.is_not(None),
             )
@@ -183,6 +197,7 @@ class RequestLogsRepository:
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
+        request_kind: str = RequestKind.NORMAL.value,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         resolved_plan_type = plan_type
@@ -193,6 +208,7 @@ class RequestLogsRepository:
             api_key_id=api_key_id,
             session_id=session_id,
             request_id=resolved_request_id,
+            request_kind=request_kind,
             model=model,
             plan_type=resolved_plan_type,
             transport=transport,

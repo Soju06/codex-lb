@@ -249,6 +249,7 @@ export function createRequestLogEntry(
 		apiKeyId: "key_1",
 		apiKeyName: "Primary Key",
 		requestId: "req_1",
+		requestKind: "normal",
 		model: "gpt-5.1",
 		transport: "http",
 		serviceTier: null,

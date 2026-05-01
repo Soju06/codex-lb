@@ -59,6 +59,11 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/firewall/ips",
 	"POST /api/firewall/ips",
 	"DELETE /api/firewall/ips/:ipAddress",
+	// peer fallback targets
+	"GET /api/peer-fallback-targets",
+	"POST /api/peer-fallback-targets",
+	"PATCH /api/peer-fallback-targets/:targetId",
+	"DELETE /api/peer-fallback-targets/:targetId",
 	// models
 	"GET /api/models",
 	// api-keys

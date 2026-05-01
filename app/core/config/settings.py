@@ -49,6 +49,21 @@ type StringListInput = str | list[str] | None
 type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
 
+DEFAULT_PEER_FALLBACK_ERROR_CODES = [
+    "no_accounts",
+    "rate_limit_exceeded",
+    "usage_limit_reached",
+    "insufficient_quota",
+    "usage_not_included",
+    "quota_exceeded",
+    "additional_quota_data_unavailable",
+    "no_additional_quota_eligible_accounts",
+    "upstream_unavailable",
+    "upstream_request_timeout",
+    "proxy_overloaded",
+    "proxy_unavailable",
+]
+
 
 def _validate_context_window_entries(data: Mapping[str, object]) -> dict[str, int]:
     result: dict[str, int] = {}
@@ -249,6 +264,12 @@ class Settings(BaseSettings):
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    peer_fallback_base_urls: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    peer_fallback_max_hops: int = Field(default=1, ge=0)
+    peer_fallback_timeout_seconds: float = Field(default=15.0, gt=0)
+    peer_fallback_error_codes: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_PEER_FALLBACK_ERROR_CODES)
+    )
 
     memory_warning_threshold_mb: int = 0
     memory_reject_threshold_mb: int = 0
@@ -353,6 +374,50 @@ class Settings(BaseSettings):
             stripped = value.strip().rstrip("/")
             return stripped or None
         raise TypeError("http_responses_session_bridge_advertise_base_url must be a string")
+
+    @field_validator("peer_fallback_base_urls", mode="before")
+    @classmethod
+    def _normalize_peer_fallback_base_urls(cls, value: StringListInput) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            entries = [entry.strip().rstrip("/") for entry in value.split(",")]
+        elif isinstance(value, list):
+            entries = [entry.strip().rstrip("/") for entry in value if isinstance(entry, str)]
+        else:
+            raise TypeError("peer_fallback_base_urls must be a list or comma-separated string")
+
+        urls: list[str] = []
+        for entry in entries:
+            if not entry:
+                continue
+            if any(char.isspace() for char in entry):
+                raise ValueError("peer_fallback_base_urls entries must be absolute http(s) URLs")
+            try:
+                parsed = urlparse(entry)
+                hostname = parsed.hostname
+                parsed.port
+            except ValueError as exc:
+                raise ValueError("peer_fallback_base_urls entries must be absolute http(s) URLs") from exc
+            if parsed.scheme not in {"http", "https"} or hostname is None:
+                raise ValueError("peer_fallback_base_urls entries must be absolute http(s) URLs")
+            if parsed.params or parsed.query or parsed.fragment:
+                raise ValueError("peer_fallback_base_urls entries must not include params, query, or fragment")
+            urls.append(entry)
+        return urls
+
+    @field_validator("peer_fallback_error_codes", mode="before")
+    @classmethod
+    def _normalize_peer_fallback_error_codes(cls, value: StringListInput) -> list[str]:
+        if value is None:
+            return list(DEFAULT_PEER_FALLBACK_ERROR_CODES)
+        if isinstance(value, str):
+            entries = [entry.strip() for entry in value.split(",")]
+        elif isinstance(value, list):
+            entries = [entry.strip() for entry in value if isinstance(entry, str)]
+        else:
+            raise TypeError("peer_fallback_error_codes must be a list or comma-separated string")
+        return [entry for entry in entries if entry]
 
     @field_validator("model_context_window_overrides", mode="before")
     @classmethod

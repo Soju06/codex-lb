@@ -1,9 +1,5 @@
-# frontend-architecture Specification
+## MODIFIED Requirements
 
-## Purpose
-
-See context docs for background.
-## Requirements
 ### Requirement: Settings page
 
 The Settings page SHALL include sections for: routing settings (sticky threads, reset priority, prompt-cache affinity TTL), peer fallback target management, password management (setup/change/remove), TOTP management (setup/disable), API key auth toggle, API key management (table, create, edit, delete, regenerate), and sticky-session administration.

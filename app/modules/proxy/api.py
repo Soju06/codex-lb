@@ -67,6 +67,7 @@ from app.modules.api_keys.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import images_service as images_service_module
+from app.modules.proxy import peer_fallback
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
@@ -1604,6 +1605,12 @@ async def _stream_responses(
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
     except ProxyResponseError as exc:
+        fallback = await _peer_fallback_stream_for_proxy_error(request, payload, exc)
+        if fallback is not None:
+            await _close_async_iterator(stream)
+            if owns_reservation:
+                await _release_reservation(reservation)
+            return fallback
         if owns_reservation:
             await _release_reservation(reservation)
         return _logged_error_json_response(
@@ -1612,6 +1619,14 @@ async def _stream_responses(
             exc.payload,
             headers=rate_limit_headers,
         )
+    fallback_reason_code = peer_fallback.error_code_from_sse_event(first)
+    if fallback_reason_code is not None:
+        await _drain_async_iterator(stream)
+        fallback = await _peer_fallback_stream_for_error_code(request, payload, fallback_reason_code)
+        if fallback is not None:
+            if owns_reservation:
+                await _release_reservation(reservation)
+            return fallback
     return StreamingResponse(
         _prepend_first(first, stream),
         media_type="text/event-stream",
@@ -1679,6 +1694,10 @@ async def _collect_responses(
     try:
         response_payload = await _collect_responses_payload(stream)
     except ProxyResponseError as exc:
+        fallback = await _peer_fallback_buffered_for_proxy_error(request, payload, exc)
+        if fallback is not None:
+            await _release_reservation(reservation)
+            return fallback
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
         return _logged_error_json_response(
@@ -1690,6 +1709,13 @@ async def _collect_responses(
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
+            fallback = await _peer_fallback_buffered_for_error_code(
+                request,
+                payload,
+                error_payload.error.code if error_payload.error else None,
+            )
+            if fallback is not None:
+                return fallback
             status_code = _status_for_error(error_payload.error)
             return _logged_error_json_response(
                 request,
@@ -1701,6 +1727,13 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **rate_limit_headers},
         )
+    fallback = await _peer_fallback_buffered_for_error_code(
+        request,
+        payload,
+        response_payload.error.code if response_payload.error else None,
+    )
+    if fallback is not None:
+        return fallback
     status_code = _status_for_error(response_payload.error)
     return _logged_error_json_response(
         request,
@@ -1860,6 +1893,76 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
         yield first
     async for line in stream:
         yield line
+
+
+async def _close_async_iterator(stream: AsyncIterator[str]) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if callable(aclose):
+        await aclose()
+
+
+async def _drain_async_iterator(stream: AsyncIterator[str]) -> None:
+    try:
+        async for _ in stream:
+            pass
+    except Exception:
+        logger.warning("stream_drain_before_peer_fallback_failed", exc_info=True)
+    finally:
+        await _close_async_iterator(stream)
+
+
+async def _peer_fallback_stream_for_error_code(
+    request: Request,
+    payload: ResponsesRequest,
+    reason_code: str,
+) -> Response | None:
+    return await peer_fallback.open_stream_response(
+        request,
+        _responses_request_payload(payload, stream=True),
+        reason_code=reason_code,
+    )
+
+
+async def _peer_fallback_stream_for_proxy_error(
+    request: Request,
+    payload: ResponsesRequest,
+    exc: ProxyResponseError,
+) -> Response | None:
+    return await peer_fallback.open_stream_response(
+        request,
+        _responses_request_payload(payload, stream=True),
+        reason_code=peer_fallback.error_code_from_envelope(exc.payload),
+    )
+
+
+async def _peer_fallback_buffered_for_proxy_error(
+    request: Request,
+    payload: ResponsesRequest,
+    exc: ProxyResponseError,
+) -> Response | None:
+    return await peer_fallback.open_buffered_response(
+        request,
+        _responses_request_payload(payload, stream=False),
+        reason_code=peer_fallback.error_code_from_envelope(exc.payload),
+    )
+
+
+async def _peer_fallback_buffered_for_error_code(
+    request: Request,
+    payload: ResponsesRequest,
+    reason_code: str | None,
+) -> Response | None:
+    return await peer_fallback.open_buffered_response(
+        request,
+        _responses_request_payload(payload, stream=False),
+        reason_code=reason_code,
+    )
+
+
+def _responses_request_payload(payload: ResponsesRequest, *, stream: bool) -> dict[str, JsonValue]:
+    forwarded = payload.model_dump(mode="json", exclude_none=True)
+    forwarded["stream"] = stream
+    return cast(dict[str, JsonValue], forwarded)
 
 
 def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
@@ -2159,39 +2262,42 @@ def _merge_collected_output_items(
 async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
     terminal_seen = False
     contract_violation_kind: str | None = None
-    async for event_block in stream:
-        if event_block.strip() == "data: [DONE]":
-            if terminal_seen:
-                yield event_block
-            continue
-        payload = _parse_sse_payload(event_block)
-        if payload is None:
-            if _looks_like_sse_data_block(event_block):
-                contract_violation_kind = contract_violation_kind or "invalid_json"
-            continue
-        normalized_payload, violation_kind = _normalize_public_stream_payload(payload)
-        if violation_kind is not None:
-            contract_violation_kind = contract_violation_kind or violation_kind
-        if normalized_payload is None:
-            continue
-        event_type = normalized_payload.get("type")
-        if isinstance(event_type, str) and event_type in {
-            "response.completed",
-            "response.incomplete",
-            "response.failed",
-            "error",
-        }:
-            terminal_seen = True
-        yield format_sse_event(normalized_payload)
-    if terminal_seen:
-        return
-    error_kind = contract_violation_kind or "upstream_stream_truncated"
-    yield format_sse_event(
-        response_failed_event(
-            error_kind,
-            _public_contract_error_message(error_kind),
+    try:
+        async for event_block in stream:
+            if event_block.strip() == "data: [DONE]":
+                if terminal_seen:
+                    yield event_block
+                continue
+            payload = _parse_sse_payload(event_block)
+            if payload is None:
+                if _looks_like_sse_data_block(event_block):
+                    contract_violation_kind = contract_violation_kind or "invalid_json"
+                continue
+            normalized_payload, violation_kind = _normalize_public_stream_payload(payload)
+            if violation_kind is not None:
+                contract_violation_kind = contract_violation_kind or violation_kind
+            if normalized_payload is None:
+                continue
+            event_type = normalized_payload.get("type")
+            if isinstance(event_type, str) and event_type in {
+                "response.completed",
+                "response.incomplete",
+                "response.failed",
+                "error",
+            }:
+                terminal_seen = True
+            yield format_sse_event(normalized_payload)
+        if terminal_seen:
+            return
+        error_kind = contract_violation_kind or "upstream_stream_truncated"
+        yield format_sse_event(
+            response_failed_event(
+                error_kind,
+                _public_contract_error_message(error_kind),
+            )
         )
-    )
+    finally:
+        await _close_async_iterator(stream)
 
 
 def _normalize_public_stream_payload(

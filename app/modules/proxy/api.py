@@ -1606,10 +1606,12 @@ async def _stream_responses(
     except ProxyResponseError as exc:
         if owns_reservation:
             await _release_reservation(reservation)
+        error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
-            exc.payload,
+            status_code,
+            error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
     return StreamingResponse(
@@ -1681,16 +1683,17 @@ async def _collect_responses(
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
-            status_code = _status_for_error(error_payload.error)
+            status_code, error_payload = _mask_previous_response_not_found_error(error_payload)
             return _logged_error_json_response(
                 request,
                 status_code,
@@ -1701,7 +1704,7 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **rate_limit_headers},
         )
-    status_code = _status_for_error(response_payload.error)
+    status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
@@ -1789,9 +1792,10 @@ async def _compact_responses(
         )
     except ProxyResponseError as exc:
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
@@ -2405,9 +2409,42 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
     return OpenAIErrorEnvelopeModel(error=error_value)
 
 
+def _is_previous_response_not_found_public_error(error_value: OpenAIError | None) -> bool:
+    if error_value is None:
+        return False
+    if error_value.code == "previous_response_not_found":
+        return True
+    message = error_value.message or ""
+    return (
+        error_value.code == "invalid_request_error"
+        and error_value.param == "previous_response_id"
+        and "previous response" in message.lower()
+        and "not found" in message.lower()
+    )
+
+
+def _mask_previous_response_not_found_error(
+    envelope: OpenAIErrorEnvelopeModel,
+    *,
+    default_status: int | None = None,
+) -> tuple[int, OpenAIErrorEnvelopeModel]:
+    if not _is_previous_response_not_found_public_error(envelope.error):
+        return default_status if default_status is not None else _status_for_error(envelope.error), envelope
+    return (
+        502,
+        OpenAIErrorEnvelopeModel(
+            error=OpenAIError(
+                message="Upstream websocket closed before response.completed",
+                type="server_error",
+                code="stream_incomplete",
+            )
+        ),
+    )
+
+
 def _status_for_error(error_value: OpenAIError | None) -> int:
     if error_value and error_value.code == "previous_response_not_found":
-        return 400
+        return 502
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
     return 502

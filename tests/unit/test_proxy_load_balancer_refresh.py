@@ -1976,7 +1976,15 @@ async def test_select_account_returns_plan_support_error_for_ungated_model(monke
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: ModelRegistrySnapshot(
+                models={},
+                model_plans={"gpt-5.3-codex": frozenset({"pro"})},
+                plan_models={"pro": frozenset({"gpt-5.3-codex"})},
+                fetched_at=0.0,
+            ),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
     )
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
@@ -1985,6 +1993,45 @@ async def test_select_account_returns_plan_support_error_for_ungated_model(monke
     assert selection.account is None
     assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
     assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex'"
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_plan_filter_when_registry_snapshot_lacks_model(monkeypatch) -> None:
+    account = _make_account("acc-partial-registry", "partial-registry@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: ModelRegistrySnapshot(
+                models={},
+                model_plans={"gpt-5.3-codex": frozenset({"pro"})},
+                plan_models={"pro": frozenset({"gpt-5.3-codex"})},
+                fetched_at=0.0,
+            ),
+            plan_types_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.5")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
 
 
 @pytest.mark.asyncio

@@ -409,6 +409,38 @@ export const handlers = [
 		return HttpResponse.json(createAccountTrends(accountId));
 	}),
 
+	http.post("/api/accounts/:accountId/export", ({ params }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		return HttpResponse.json({
+			accountId: account.accountId,
+			email: account.email,
+			planType: account.planType,
+			status: account.status,
+			authJson: JSON.stringify(
+				{
+					auth_mode: "chatgpt",
+					OPENAI_API_KEY: null,
+					tokens: {
+						id_token: "id-token",
+						access_token: "access-token",
+						refresh_token: "refresh-token",
+						account_id: accountId,
+					},
+					last_refresh: "2026-01-01T12:00:00.000000Z",
+				},
+				null,
+				2,
+			),
+		});
+	}),
+
 	http.delete("/api/accounts/:accountId", ({ params }) => {
 		const accountId = String(params.accountId);
 		const exists = state.accounts.some(

@@ -26,6 +26,7 @@ export function AccountsPage() {
     pauseMutation,
     resumeMutation,
     deleteMutation,
+    exportMutation,
   } = useAccounts();
   const oauth = useOauth();
 
@@ -65,13 +66,15 @@ export function AccountsPage() {
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
-    deleteMutation.isPending;
+    deleteMutation.isPending ||
+    exportMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
-    getErrorMessageOrNull(deleteMutation.error);
+    getErrorMessageOrNull(deleteMutation.error) ||
+    getErrorMessageOrNull(exportMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -107,6 +110,7 @@ export function AccountsPage() {
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
+            onExport={(accountId) => void exportMutation.mutateAsync(accountId)}
           />
         </div>
       )}

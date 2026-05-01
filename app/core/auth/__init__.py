@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 DEFAULT_EMAIL = "unknown@example.com"
 DEFAULT_PLAN = "unknown"
@@ -27,7 +27,12 @@ class AuthFile(BaseModel):
 
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     tokens: AuthTokens
-    last_refresh_at: datetime | None = Field(default=None, alias="lastRefreshAt")
+    last_refresh_at: datetime | None = Field(
+        default=None,
+        alias="lastRefreshAt",
+        validation_alias=AliasChoices("lastRefreshAt", "last_refresh"),
+        serialization_alias="lastRefreshAt",
+    )
 
 
 class OpenAIAuthClaims(BaseModel):

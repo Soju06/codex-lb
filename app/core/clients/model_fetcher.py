@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import cast
 
 import aiohttp
 
 from app.core.clients.codex_version import get_codex_version_cache
-from app.core.clients.http import get_http_client
+from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
@@ -18,10 +19,11 @@ _FILTERED_FIELDS = {"model_messages"}
 
 
 class ModelFetchError(Exception):
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int, message: str, *, transport_error: bool = False) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+        self.transport_error = transport_error
 
 
 def _str(data: dict[str, JsonValue], key: str, default: str = "") -> str:
@@ -109,14 +111,19 @@ async def fetch_models_for_plan(
         headers["chatgpt-account-id"] = account_id
 
     timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
-    session = get_http_client().session
+    try:
+        async with lease_http_session() as session:
+            async with session.get(url, headers=headers, timeout=timeout) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
 
-    async with session.get(url, headers=headers, timeout=timeout) as resp:
-        if resp.status >= 400:
-            text = await resp.text()
-            raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
-
-        data = await resp.json(content_type=None)
+                data = await resp.json(content_type=None)
+    except ModelFetchError:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        message = str(exc) or exc.__class__.__name__
+        raise ModelFetchError(0, f"Transport error during model fetch: {message}", transport_error=True) from exc
 
     if not isinstance(data, dict):
         raise ModelFetchError(502, "Invalid response format from upstream models API")

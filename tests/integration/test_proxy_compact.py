@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from datetime import timedelta, timezone
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -248,7 +248,12 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
         )
     )
 
-    monkeypatch.setattr(proxy_client_module, "get_http_client", lambda: SimpleNamespace(session=session))
+    @contextlib.asynccontextmanager
+    async def lease_session(session_override=None):
+        assert session_override is None
+        yield session
+
+    monkeypatch.setattr(proxy_client_module, "lease_http_session", lease_session)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)

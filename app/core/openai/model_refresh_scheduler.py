@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from app.core.auth.refresh import RefreshError
+from app.core.clients.http import refresh_http_client
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 class _LeaderElectionLike(Protocol):
     async def try_acquire(self) -> bool: ...
+
+
+@dataclass(slots=True)
+class _TransportRecoveryState:
+    attempted: bool = False
 
 
 def _get_leader_election() -> _LeaderElectionLike:
@@ -114,57 +120,158 @@ def _group_by_plan(accounts: list[Account]) -> dict[str, list[Account]]:
     return grouped
 
 
+def _error_summary(exc: BaseException) -> str:
+    if isinstance(exc, ModelFetchError):
+        summary = f"status={exc.status_code} transport={exc.transport_error}"
+        if exc.message:
+            summary = f"{summary} message={_compact_error_message(exc.message)}"
+        return summary
+    if isinstance(exc, RefreshError):
+        summary = f"code={exc.code} permanent={exc.is_permanent} transport={exc.transport_error}"
+        if exc.message:
+            summary = f"{summary} message={_compact_error_message(exc.message)}"
+        return summary
+
+    message = _compact_error_message(str(exc))
+    if message:
+        return f"{exc.__class__.__name__}: {message}"
+    return exc.__class__.__name__
+
+
+def _compact_error_message(message: str) -> str:
+    return " ".join(message.split())
+
+
 async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
     accounts_repo: AccountsRepository,
 ) -> list[UpstreamModel] | None:
+    transport_recovery = _TransportRecoveryState()
+
     for account in candidates:
         auth_manager = AuthManager(accounts_repo)
         try:
-            account = await auth_manager.ensure_fresh(account)
-            access_token = encryptor.decrypt(account.access_token_encrypted)
-            account_id = account.chatgpt_account_id
-            return await fetch_models_for_plan(access_token, account_id)
+            account = await _ensure_fresh_with_transport_recovery(
+                auth_manager,
+                account,
+                transport_recovery=transport_recovery,
+            )
+            models = await _fetch_models_with_transport_recovery(
+                account,
+                encryptor,
+                transport_recovery=transport_recovery,
+            )
+            return models
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
-                    account = await auth_manager.ensure_fresh(account, force=True)
-                    access_token = encryptor.decrypt(account.access_token_encrypted)
-                    return await fetch_models_for_plan(access_token, account.chatgpt_account_id)
-                except (ModelFetchError, RefreshError):
+                    account = await _ensure_fresh_with_transport_recovery(
+                        auth_manager,
+                        account,
+                        force=True,
+                        transport_recovery=transport_recovery,
+                    )
+                    models = await _fetch_models_with_transport_recovery(
+                        account,
+                        encryptor,
+                        transport_recovery=transport_recovery,
+                    )
+                    return models
+                except (ModelFetchError, RefreshError) as retry_exc:
                     logger.warning(
-                        "Model fetch 401 retry failed account=%s plan=%s",
+                        "Model fetch auth retry failed account=%s plan=%s initial_error=%s retry_error=%s",
                         account.id,
                         account.plan_type,
-                        exc_info=True,
+                        _error_summary(exc),
+                        _error_summary(retry_exc),
                     )
                     continue
             logger.warning(
-                "Model fetch failed account=%s plan=%s status=%d",
+                "Model fetch failed account=%s plan=%s error=%s",
                 account.id,
                 account.plan_type,
-                exc.status_code,
-                exc_info=True,
+                _error_summary(exc),
             )
             continue
-        except RefreshError:
+        except RefreshError as exc:
             logger.warning(
-                "Token refresh failed for model fetch account=%s plan=%s",
+                "Token refresh failed for model fetch account=%s plan=%s error=%s",
                 account.id,
                 account.plan_type,
-                exc_info=True,
+                _error_summary(exc),
             )
             continue
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Unexpected error during model fetch account=%s plan=%s",
+                "Unexpected error during model fetch account=%s plan=%s error=%s",
                 account.id,
                 account.plan_type,
+                _error_summary(exc),
                 exc_info=True,
             )
             continue
     return None
+
+
+async def _ensure_fresh_with_transport_recovery(
+    auth_manager: AuthManager,
+    account: Account,
+    *,
+    transport_recovery: _TransportRecoveryState,
+    force: bool = False,
+) -> Account:
+    try:
+        return await auth_manager.ensure_fresh(account, force=force)
+    except RefreshError as exc:
+        if not exc.transport_error or transport_recovery.attempted:
+            raise
+
+        await _refresh_http_client_after_transport_error(account, exc)
+        transport_recovery.attempted = True
+        return await auth_manager.ensure_fresh(account, force=force)
+
+
+async def _fetch_models_with_transport_recovery(
+    account: Account,
+    encryptor: TokenEncryptor,
+    *,
+    transport_recovery: _TransportRecoveryState,
+) -> list[UpstreamModel]:
+    access_token = encryptor.decrypt(account.access_token_encrypted)
+    account_id = account.chatgpt_account_id
+
+    try:
+        return await fetch_models_for_plan(access_token, account_id)
+    except ModelFetchError as exc:
+        if not exc.transport_error or transport_recovery.attempted:
+            raise
+
+        await _refresh_http_client_after_transport_error(account, exc)
+        transport_recovery.attempted = True
+        access_token = encryptor.decrypt(account.access_token_encrypted)
+        account_id = account.chatgpt_account_id
+        return await fetch_models_for_plan(access_token, account_id)
+
+
+async def _refresh_http_client_after_transport_error(account: Account, transport_exc: BaseException) -> None:
+    try:
+        await refresh_http_client()
+    except Exception as refresh_exc:
+        logger.warning(
+            "Model fetch transport recovery failed account=%s plan=%s transport_error=%s refresh_error=%s",
+            account.id,
+            account.plan_type,
+            _error_summary(transport_exc),
+            _error_summary(refresh_exc),
+        )
+        raise
+    logger.info(
+        "Refreshed shared HTTP client after model fetch transport error; retrying account=%s plan=%s error=%s",
+        account.id,
+        account.plan_type,
+        _error_summary(transport_exc),
+    )
 
 
 def build_model_refresh_scheduler() -> ModelRefreshScheduler:

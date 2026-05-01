@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import {
   deleteAccount,
+  exportAccountOpenCodeAuth,
   getAccountTrends,
   importAccount,
   listAccounts,
@@ -67,7 +68,17 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  const exportOpenCodeAuthMutation = useMutation({
+    mutationFn: exportAccountOpenCodeAuth,
+    onSuccess: () => {
+      toast.success("OpenCode auth export generated");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Export failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, exportOpenCodeAuthMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

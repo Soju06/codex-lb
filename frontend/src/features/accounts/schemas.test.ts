@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AccountOpenCodeAuthExportResponseSchema,
   AccountSummarySchema,
   ImportStateSchema,
   OAuthStateSchema,
@@ -48,6 +49,31 @@ describe("AccountSummarySchema", () => {
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
     expect(parsed.windowMinutesSecondary).toBe(10080);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
+  });
+});
+
+describe("AccountOpenCodeAuthExportResponseSchema", () => {
+  it("parses stock OpenCode auth export payloads", () => {
+    const parsed = AccountOpenCodeAuthExportResponseSchema.parse({
+      filename: "opencode-auth-user.json",
+      account: {
+        accountId: "acc-1",
+        chatgptAccountId: "chatgpt-acc-1",
+        email: "user@example.com",
+      },
+      authJson: {
+        openai: {
+          type: "oauth",
+          refresh: "refresh-token",
+          access: "access-token",
+          expires: 2_000_000_000_000,
+          accountId: "chatgpt-acc-1",
+        },
+      },
+    });
+
+    expect(parsed.authJson.openai.type).toBe("oauth");
+    expect(parsed.authJson.openai.expires).toBe(2_000_000_000_000);
   });
 });
 

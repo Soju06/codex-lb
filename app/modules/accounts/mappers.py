@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
-from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
+from app.core.auth import DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
@@ -177,12 +177,9 @@ def _decrypt_token(encryptor: TokenEncryptor, encrypted: bytes | None) -> str | 
 def _token_expiry(token: str | None) -> datetime | None:
     if not token:
         return None
-    claims = extract_id_token_claims(token)
-    exp = claims.exp
-    if isinstance(exp, (int, float)):
-        return datetime.fromtimestamp(exp, tz=timezone.utc)
-    if isinstance(exp, str) and exp.isdigit():
-        return datetime.fromtimestamp(int(exp), tz=timezone.utc)
+    expires_ms = token_expiry_epoch_ms(token)
+    if expires_ms is not None:
+        return datetime.fromtimestamp(expires_ms / 1000, tz=timezone.utc)
     return None
 
 

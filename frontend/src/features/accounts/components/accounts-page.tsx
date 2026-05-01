@@ -9,8 +9,10 @@ import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
+import { OpenCodeAuthExportDialog } from "@/features/accounts/components/opencode-auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import type { AccountOpenCodeAuthExportResponse } from "@/features/accounts/schemas";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -26,12 +28,14 @@ export function AccountsPage() {
     pauseMutation,
     resumeMutation,
     deleteMutation,
+    exportOpenCodeAuthMutation,
   } = useAccounts();
   const oauth = useOauth();
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
+  const exportDialog = useDialogState<AccountOpenCodeAuthExportResponse>();
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
@@ -65,13 +69,15 @@ export function AccountsPage() {
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
-    deleteMutation.isPending;
+    deleteMutation.isPending ||
+    exportOpenCodeAuthMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
-    getErrorMessageOrNull(deleteMutation.error);
+    getErrorMessageOrNull(deleteMutation.error) ||
+    getErrorMessageOrNull(exportOpenCodeAuthMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -107,6 +113,12 @@ export function AccountsPage() {
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
+            onExportOpenCodeAuth={(accountId) => {
+              void exportOpenCodeAuthMutation
+                .mutateAsync(accountId)
+                .then((result) => exportDialog.show(result))
+                .catch(() => null);
+            }}
           />
         </div>
       )}
@@ -139,6 +151,12 @@ export function AccountsPage() {
           onReset={oauth.reset}
         />
       </Suspense>
+
+      <OpenCodeAuthExportDialog
+        open={exportDialog.open}
+        exportData={exportDialog.data}
+        onOpenChange={exportDialog.onOpenChange}
+      />
 
       <ConfirmDialog
         open={deleteDialog.open}

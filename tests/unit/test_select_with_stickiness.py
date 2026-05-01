@@ -761,6 +761,78 @@ async def test_budget_threshold_reallocates_codex_session_affinity():
 
 
 @pytest.mark.asyncio
+async def test_budget_threshold_reallocates_sticky_thread_affinity():
+    """STICKY_THREAD with the pinned account strictly above the budget
+    threshold must rebind to a healthier candidate (parity with
+    PROMPT_CACHE / CODEX_SESSION)."""
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "thread-X",
+        repo,
+        sticky_kind=StickySessionKind.STICKY_THREAD,
+        reallocate_sticky=True,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("thread-X", kind=StickySessionKind.STICKY_THREAD)
+    repo.upsert.assert_called_once_with("thread-X", "b", kind=StickySessionKind.STICKY_THREAD)
+
+
+@pytest.mark.asyncio
+async def test_sticky_thread_preserves_pinned_when_pool_also_above_threshold():
+    """When every candidate is above the budget threshold, STICKY_THREAD
+    must stay pinned to avoid thrashing (parity with the existing
+    capacity-weighted budget-pressure tests)."""
+    acc_a = _active("a", used_percent=99.0)
+    acc_b = _active("b", used_percent=96.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "thread-Y",
+        repo,
+        sticky_kind=StickySessionKind.STICKY_THREAD,
+        reallocate_sticky=True,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sticky_thread_below_threshold_does_not_reallocate():
+    """Below the budget threshold, STICKY_THREAD must keep affinity
+    (regression guard against over-triggering reallocation)."""
+    acc_a = _active("a", used_percent=85.0)
+    acc_b = _active("b", used_percent=10.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "thread-Z",
+        repo,
+        sticky_kind=StickySessionKind.STICKY_THREAD,
+        reallocate_sticky=True,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_far_away_triggers_reallocation():
     """When the pinned account's rate limit reset is more than 10 minutes away,
     it should be reallocated to avoid waiting."""

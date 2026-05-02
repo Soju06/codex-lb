@@ -1075,7 +1075,7 @@ def test_v1_responses_websocket_forwards_previous_response_id(app_instance, monk
     ]
 
 
-def test_v1_responses_websocket_masks_previous_response_not_found_and_recovers_on_retry(
+def test_v1_responses_websocket_masks_short_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,
 ):
@@ -1227,16 +1227,17 @@ def test_v1_responses_websocket_masks_previous_response_not_found_and_recovers_o
                     }
                 )
             )
-            created_2 = json.loads(websocket.receive_text())
-            completed_2 = json.loads(websocket.receive_text())
+            failed_2 = json.loads(websocket.receive_text())
 
-    assert created_2["type"] == "response.created"
-    assert completed_2["type"] == "response.completed"
-    assert connect_count == 2
-    assert first_upstream.closed is True
+    assert failed_2["type"] == "response.failed"
+    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
+    assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "previous_response_not_found" not in json.dumps(failed_2)
+    assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
+    assert connect_count == 1
 
 
-def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_error_and_recovers_on_retry(
+def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,
 ):
@@ -1388,13 +1389,14 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
                     }
                 )
             )
-            created_2 = json.loads(websocket.receive_text())
-            completed_2 = json.loads(websocket.receive_text())
+            failed_2 = json.loads(websocket.receive_text())
 
-    assert created_2["type"] == "response.created"
-    assert completed_2["type"] == "response.completed"
-    assert connect_count == 2
-    assert first_upstream.closed is True
+    assert failed_2["type"] == "response.failed"
+    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
+    assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "previous_response_not_found" not in json.dumps(failed_2)
+    assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
+    assert connect_count == 1
 
 
 def test_backend_responses_websocket_connect_failure_masks_previous_response_not_found(
@@ -1514,7 +1516,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
     assert event["error"]["message"] == "Upstream websocket closed before response.completed"
 
 
-def test_backend_responses_websocket_masks_previous_response_not_found_and_recovers_on_retry(
+def test_backend_responses_websocket_masks_short_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,
 ):
@@ -1690,16 +1692,15 @@ def test_backend_responses_websocket_masks_previous_response_not_found_and_recov
                     }
                 )
             )
-            created_2 = json.loads(websocket.receive_text())
-            completed_2 = json.loads(websocket.receive_text())
+            failed_2 = json.loads(websocket.receive_text())
 
-    assert created_2["type"] == "response.created"
-    assert completed_2["type"] == "response.completed"
-    assert created_2["response"]["id"] == "resp_ws_prev_retry"
-    assert completed_2["response"]["id"] == "resp_ws_prev_retry"
-    assert connect_count == 2
-    assert captured_preferred_accounts == [None, "acct_ws_prev_mask"]
-    assert first_upstream.closed is True
+    assert failed_2["type"] == "response.failed"
+    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
+    assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "previous_response_not_found" not in json.dumps(failed_2)
+    assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
+    assert connect_count == 1
+    assert captured_preferred_accounts == [None]
 
 
 def test_backend_responses_websocket_masks_anonymous_previous_response_not_found_with_inflight_request(
@@ -1867,7 +1868,7 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert fake_upstream.closed is True
 
 
-def test_backend_responses_websocket_recovers_when_previous_response_not_found_message_omits_response_id(
+def test_backend_responses_websocket_masks_previous_response_not_found_when_message_omits_response_id(
     app_instance,
     monkeypatch,
 ):
@@ -2033,17 +2034,14 @@ def test_backend_responses_websocket_recovers_when_previous_response_not_found_m
                     }
                 )
             )
-            created_2 = json.loads(websocket.receive_text())
-            completed_2 = json.loads(websocket.receive_text())
+            failed_2 = json.loads(websocket.receive_text())
 
-    assert created_2["type"] == "response.created"
-    assert completed_2["type"] == "response.completed"
-    assert created_2["response"]["id"] == "resp_ws_followup_replayed"
-    assert completed_2["response"]["id"] == "resp_ws_followup_replayed"
-    assert "previous_response_not_found" not in json.dumps(created_2)
-    assert "previous_response_not_found" not in json.dumps(completed_2)
-    assert connect_count == 2
-    assert first_upstream.closed is True
+    assert failed_2["type"] == "response.failed"
+    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
+    assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "previous_response_not_found" not in json.dumps(failed_2)
+    assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
+    assert connect_count == 1
 
 
 def test_backend_responses_websocket_keeps_session_alive_after_foreign_previous_response_not_found(

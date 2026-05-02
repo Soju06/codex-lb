@@ -7636,7 +7636,7 @@ def test_remember_websocket_previous_response_owner_eviction_keeps_latest_entrie
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_retries_precreated_previous_response_not_found(monkeypatch):
+async def test_process_upstream_websocket_text_masks_short_previous_response_not_found_without_replay(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -7690,12 +7690,13 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     )
 
     assert '"code":"stream_incomplete"' in downstream_text
-    finalize_request_state.assert_not_awaited()
+    finalize_request_state.assert_awaited_once()
+    assert finalize_request_state.await_args.kwargs["event_type"] == "response.failed"
     handle_stream_error.assert_not_awaited()
     assert upstream_control.reconnect_requested is True
-    assert upstream_control.suppress_downstream_event is True
-    assert upstream_control.replay_request_state is pending_request
-    assert pending_request.replay_count == 1
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert pending_request.replay_count == 0
     assert list(pending_requests) == []
 
 

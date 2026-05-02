@@ -105,6 +105,8 @@ class UsageTrendBucket:
     window: str
     avg_used_percent: float
     samples: int
+    reset_at: int | None = None
+    window_minutes: int | None = None
 
 
 @dataclass(frozen=True)

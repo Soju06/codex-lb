@@ -14,9 +14,19 @@ import { AccountListItem } from "@/features/accounts/components/account-list-ite
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
-import { formatSlug } from "@/utils/formatters";
+import { formatSlug, parseDate } from "@/utils/formatters";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "deactivated"];
+
+function accountResetTimestamp(account: AccountSummary): number {
+  const resets = [account.resetAtPrimary, account.resetAtSecondary]
+    .map((resetAt) => parseDate(resetAt)?.getTime() ?? Number.POSITIVE_INFINITY);
+  return Math.min(...resets);
+}
+
+function accountSortLabel(account: AccountSummary): string {
+  return (account.displayName || account.email || account.accountId).trim().toLowerCase();
+}
 
 export type AccountListProps = {
   accounts: AccountSummary[];
@@ -39,19 +49,33 @@ export function AccountList({
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return accounts.filter((account) => {
-      if (statusFilter !== "all" && account.status !== statusFilter) {
-        return false;
-      }
-      if (!needle) {
-        return true;
-      }
-      return (
-        account.email.toLowerCase().includes(needle) ||
-        account.accountId.toLowerCase().includes(needle) ||
-        account.planType.toLowerCase().includes(needle)
-      );
-    });
+    return accounts
+      .filter((account) => {
+        if (statusFilter !== "all" && account.status !== statusFilter) {
+          return false;
+        }
+        if (!needle) {
+          return true;
+        }
+        return (
+          account.email.toLowerCase().includes(needle) ||
+          account.accountId.toLowerCase().includes(needle) ||
+          account.planType.toLowerCase().includes(needle)
+        );
+      })
+      .slice()
+      .sort((left, right) => {
+        const leftReset = accountResetTimestamp(left);
+        const rightReset = accountResetTimestamp(right);
+        if (leftReset !== rightReset) {
+          return leftReset - rightReset;
+        }
+        const labelComparison = accountSortLabel(left).localeCompare(accountSortLabel(right));
+        if (labelComparison !== 0) {
+          return labelComparison;
+        }
+        return left.accountId.localeCompare(right.accountId);
+      });
   }, [accounts, search, statusFilter]);
 
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);

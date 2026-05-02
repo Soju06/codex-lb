@@ -47,6 +47,73 @@ describe("AccountList", () => {
     expect(onSelect).toHaveBeenCalledWith("acc-2");
   });
 
+  it("sorts accounts by next reset time", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-late",
+            email: "late@example.com",
+            displayName: "Late",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: 18,
+            },
+            resetAtPrimary: "2026-01-01T15:00:00.000Z",
+            resetAtSecondary: "2026-01-02T12:00:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-early",
+            email: "early@example.com",
+            displayName: "Early",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: 73,
+            },
+            resetAtPrimary: "2026-01-01T12:30:00.000Z",
+            resetAtSecondary: "2026-01-02T12:00:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-none",
+            email: "none@example.com",
+            displayName: "None",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 10,
+              secondaryRemainingPercent: 10,
+            },
+            resetAtPrimary: null,
+            resetAtSecondary: null,
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Early|Late|None)$/).map((el) => el.textContent)).toEqual([
+      "Early",
+      "Late",
+      "None",
+    ]);
+  });
+
   it("shows empty state when no items match filter", async () => {
     const user = userEvent.setup();
 

@@ -6126,14 +6126,24 @@ class ProxyService:
             )
             retry_error_code = None
         if retry_error_code is not None:
-            upstream_control.reconnect_requested = True
             if retry_is_previous_response_not_found:
-                request_state.replay_count += 1
-                request_state.awaiting_response_created = True
-                request_state.response_id = None
-                upstream_control.suppress_downstream_event = True
-                upstream_control.replay_request_state = request_state
+                if not (
+                    request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
+                ):
+                    retry_error_code = None
+                else:
+                    upstream_control.reconnect_requested = True
+                    request_state.request_text = request_state.fresh_upstream_request_text
+                    request_state.previous_response_id = None
+                    request_state.proxy_injected_previous_response_id = False
+                    request_state.fresh_upstream_request_is_retry_safe = False
+                    request_state.replay_count += 1
+                    request_state.awaiting_response_created = True
+                    request_state.response_id = None
+                    upstream_control.suppress_downstream_event = True
+                    upstream_control.replay_request_state = request_state
             else:
+                upstream_control.reconnect_requested = True
                 request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
@@ -6144,7 +6154,8 @@ class ProxyService:
                     {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                     retry_error_code,
                 )
-            return downstream_text
+            if retry_error_code is not None:
+                return downstream_text
 
         await self._finalize_websocket_request_state(
             request_state,

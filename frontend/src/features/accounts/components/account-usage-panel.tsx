@@ -189,9 +189,19 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
                 <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
                 Weekly
               </span>
+              {trends.secondaryScheduled.length > 0 ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-0 w-4 border-t border-dashed border-chart-2" />
+                  Weekly plan
+                </span>
+              ) : null}
             </div>
           </div>
-          <AccountTrendChart primary={trends.primary} secondary={trends.secondary} />
+          <AccountTrendChart
+            primary={trends.primary}
+            secondary={trends.secondary}
+            secondaryScheduled={trends.secondaryScheduled}
+          />
         </div>
       )}
     </div>

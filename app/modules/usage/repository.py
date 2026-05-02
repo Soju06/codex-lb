@@ -270,6 +270,8 @@ class UsageRepository:
                 window_expr.label("window"),
                 func.avg(UsageHistory.used_percent).label("avg_used_percent"),
                 func.count(UsageHistory.id).label("samples"),
+                func.max(UsageHistory.reset_at).label("reset_at"),
+                func.max(UsageHistory.window_minutes).label("window_minutes"),
             )
             .where(*conditions)
             .group_by(
@@ -287,6 +289,8 @@ class UsageRepository:
                 window=row.window,
                 avg_used_percent=float(row.avg_used_percent) if row.avg_used_percent is not None else 0.0,
                 samples=int(row.samples),
+                reset_at=int(row.reset_at) if row.reset_at is not None else None,
+                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
             )
             for row in result.all()
         ]

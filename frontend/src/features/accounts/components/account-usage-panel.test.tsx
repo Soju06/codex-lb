@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
-import { createAccountSummary } from "@/test/mocks/factories";
+import { createAccountSummary, createAccountTrends } from "@/test/mocks/factories";
 
 describe("AccountUsagePanel", () => {
   beforeEach(() => {
@@ -86,5 +86,19 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("Request logs total")).toBeInTheDocument();
     expect(screen.getByText(/\$0\.13/)).toBeInTheDocument();
     expect(screen.getByText(/51\.48K tok/)).toBeInTheDocument();
+  });
+
+  it("shows the weekly plan legend when scheduled trend data exists", () => {
+    const account = createAccountSummary();
+    const trends = createAccountTrends(account.accountId, {
+      secondaryScheduled: [
+        { t: "2026-01-01T00:00:00.000Z", v: 100 },
+        { t: "2026-01-01T01:00:00.000Z", v: 99.4 },
+      ],
+    });
+
+    render(<AccountUsagePanel account={account} trends={trends} />);
+
+    expect(screen.getByText("Weekly plan")).toBeInTheDocument();
   });
 });

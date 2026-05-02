@@ -87,6 +87,8 @@ export function createAccountSummary(
 		resetAtSecondary: offsetIso(24 * 60),
 		windowMinutesPrimary: 300,
 		windowMinutesSecondary: 10_080,
+		capacityCreditsSecondary: 7_560,
+		remainingCreditsSecondary: 5_065.2,
 		auth: {
 			access: { expiresAt: offsetIso(30), state: null },
 			refresh: { state: "stored" },
@@ -207,9 +209,11 @@ export function createDashboardOverview(
 				accounts: accounts.map((account) => ({
 					accountId: account.accountId,
 					remainingPercentAvg: account.usage?.secondaryRemainingPercent ?? 0,
-					capacityCredits: 7560,
+					capacityCredits: account.capacityCreditsSecondary ?? 7560,
 					remainingCredits:
-						((account.usage?.secondaryRemainingPercent ?? 0) / 100) * 7560,
+						account.remainingCreditsSecondary ??
+						((account.usage?.secondaryRemainingPercent ?? 0) / 100) *
+							(account.capacityCreditsSecondary ?? 7560),
 				})),
 			},
 		},

@@ -44,6 +44,26 @@ export interface SafeLineView {
   riskLevel: "safe" | "warning" | "danger" | "critical";
 }
 
+export type WeeklyCreditPaceStatus = "behind" | "on_track" | "ahead" | "danger";
+
+export type WeeklyCreditPace = {
+  totalFullCredits: number;
+  totalActualRemainingCredits: number;
+  totalExpectedRemainingCredits: number;
+  actualUsedPercent: number;
+  scheduledUsedPercent: number;
+  deltaPercent: number;
+  overPlanCredits: number;
+  pauseForBreakEvenHours: number | null;
+  paceMultiplier: number | null;
+  throttleToPercent: number | null;
+  reduceByPercent: number | null;
+  proAccountEquivalentToCoverOverPlan: number | null;
+  proAccountsToCoverOverPlan: number | null;
+  status: WeeklyCreditPaceStatus;
+  accountCount: number;
+};
+
 export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
@@ -55,6 +75,7 @@ export type DashboardView = {
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
+  weeklyCreditPace: WeeklyCreditPace | null;
 };
 
 export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
@@ -163,6 +184,7 @@ function avgPerUnit(total: number, units: number): number {
 }
 
 const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b"];
+const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));
@@ -171,6 +193,152 @@ function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
 /** Sum the `value` fields of remaining items (clamped to >= 0). */
 export function sumRemaining(items: RemainingItem[]): number {
   return items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isPositiveFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function weeklyCreditPaceStatus(deltaPercent: number): WeeklyCreditPaceStatus {
+  if (deltaPercent >= 20) return "danger";
+  if (deltaPercent > 5) return "ahead";
+  if (deltaPercent < -5) return "behind";
+  return "on_track";
+}
+
+type WeeklyPaceScheduleSegment = {
+  timeLeftMs: number;
+  burnRateCreditsPerMs: number;
+};
+
+function buildPauseForBreakEvenHours(
+  overPlanCredits: number,
+  segments: WeeklyPaceScheduleSegment[],
+): number | null {
+  if (!Number.isFinite(overPlanCredits) || overPlanCredits <= 0) {
+    return null;
+  }
+
+  const sortedSegments = segments
+    .filter((segment) => segment.timeLeftMs > 0 && segment.burnRateCreditsPerMs > 0)
+    .sort((a, b) => a.timeLeftMs - b.timeLeftMs);
+  if (sortedSegments.length === 0) {
+    return null;
+  }
+
+  let remainingReductionCredits = overPlanCredits;
+  let elapsedMs = 0;
+  let activeRateCreditsPerMs = sortedSegments.reduce((sum, segment) => sum + segment.burnRateCreditsPerMs, 0);
+
+  for (const segment of sortedSegments) {
+    const intervalMs = segment.timeLeftMs - elapsedMs;
+    if (intervalMs < 0) {
+      activeRateCreditsPerMs -= segment.burnRateCreditsPerMs;
+      continue;
+    }
+
+    const scheduledReductionCredits = activeRateCreditsPerMs * intervalMs;
+    if (remainingReductionCredits <= scheduledReductionCredits && activeRateCreditsPerMs > 0) {
+      return (elapsedMs + remainingReductionCredits / activeRateCreditsPerMs) / 3_600_000;
+    }
+
+    remainingReductionCredits -= scheduledReductionCredits;
+    elapsedMs = segment.timeLeftMs;
+    activeRateCreditsPerMs -= segment.burnRateCreditsPerMs;
+  }
+
+  return remainingReductionCredits <= 0.000001 ? elapsedMs / 3_600_000 : null;
+}
+
+export function buildWeeklyCreditPace(
+  accounts: AccountSummary[],
+  now: Date = new Date(),
+): WeeklyCreditPace | null {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    return null;
+  }
+
+  let totalFullCredits = 0;
+  let totalActualRemainingCredits = 0;
+  let totalExpectedRemainingCredits = 0;
+  let accountCount = 0;
+  const scheduleSegments: WeeklyPaceScheduleSegment[] = [];
+
+  for (const account of accounts) {
+    const fullCredits = account.capacityCreditsSecondary;
+    const remainingCredits = account.remainingCreditsSecondary;
+    const resetAtMs = account.resetAtSecondary ? Date.parse(account.resetAtSecondary) : Number.NaN;
+    const windowMinutes = account.windowMinutesSecondary;
+
+    if (
+      !isPositiveFinite(fullCredits) ||
+      !isNonNegativeFinite(remainingCredits) ||
+      !Number.isFinite(resetAtMs) ||
+      !isPositiveFinite(windowMinutes)
+    ) {
+      continue;
+    }
+
+    const windowMs = windowMinutes * 60_000;
+    const timeLeftMs = clamp(resetAtMs - nowMs, 0, windowMs);
+    const expectedRemainingCredits = fullCredits * (timeLeftMs / windowMs);
+    const actualRemainingCredits = clamp(remainingCredits, 0, fullCredits);
+
+    totalFullCredits += fullCredits;
+    totalActualRemainingCredits += actualRemainingCredits;
+    totalExpectedRemainingCredits += expectedRemainingCredits;
+    accountCount += 1;
+    scheduleSegments.push({
+      timeLeftMs,
+      burnRateCreditsPerMs: fullCredits / windowMs,
+    });
+  }
+
+  if (accountCount === 0 || totalFullCredits <= 0) {
+    return null;
+  }
+
+  const actualUsedPercent = (100 * (totalFullCredits - totalActualRemainingCredits)) / totalFullCredits;
+  const scheduledUsedPercent = (100 * (totalFullCredits - totalExpectedRemainingCredits)) / totalFullCredits;
+  const deltaPercent = actualUsedPercent - scheduledUsedPercent;
+  const overPlanCredits = totalExpectedRemainingCredits - totalActualRemainingCredits;
+  const pauseForBreakEvenHours = buildPauseForBreakEvenHours(overPlanCredits, scheduleSegments);
+  const paceMultiplier =
+    overPlanCredits > 0 && scheduledUsedPercent > 0 ? actualUsedPercent / scheduledUsedPercent : null;
+  const throttleToPercent =
+    paceMultiplier != null && paceMultiplier > 0 ? clamp(100 / paceMultiplier, 0, 100) : null;
+  const reduceByPercent = throttleToPercent != null ? 100 - throttleToPercent : null;
+  const proAccountEquivalentToCoverOverPlan =
+    overPlanCredits > 0 ? overPlanCredits / PRO_WEEKLY_CAPACITY_CREDITS : null;
+  const proAccountsToCoverOverPlan =
+    overPlanCredits > 0 ? Math.ceil(overPlanCredits / PRO_WEEKLY_CAPACITY_CREDITS) : null;
+
+  return {
+    totalFullCredits,
+    totalActualRemainingCredits,
+    totalExpectedRemainingCredits,
+    actualUsedPercent,
+    scheduledUsedPercent,
+    deltaPercent,
+    overPlanCredits,
+    pauseForBreakEvenHours,
+    paceMultiplier,
+    throttleToPercent,
+    reduceByPercent,
+    proAccountEquivalentToCoverOverPlan,
+    proAccountsToCoverOverPlan,
+    status: weeklyCreditPaceStatus(deltaPercent),
+    accountCount,
+  };
 }
 
 export function buildDashboardView(
@@ -192,10 +360,14 @@ export function buildDashboardView(
     timeframeHours <= 24
       ? `Avg/hr ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeHours)))}`
       : `Avg/day ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeDays)))}`;
-  const costMeta =
+  const costAverage =
     timeframeHours <= 24
       ? `Avg/hr ${formatCurrency(avgPerUnit(cost, timeframeHours))}`
       : `Avg/day ${formatCurrency(avgPerUnit(cost, timeframeDays))}`;
+  const costMeta =
+    metrics?.cachedInputTokens && metrics.cachedInputTokens > 0
+      ? `${costAverage} · API estimate, ${formatCompactNumber(metrics.cachedInputTokens)} cached`
+      : `${costAverage} · API estimate`;
   const trends = overview.trends;
 
   const stats: DashboardStat[] = [
@@ -216,7 +388,7 @@ export function buildDashboardView(
       trendColor: TREND_COLORS[1],
     },
     {
-      label: `Cost (${timeframeLabel})`,
+      label: `Est. API Cost (${timeframeLabel})`,
       value: formatCurrency(cost),
       meta: costMeta,
       icon: DollarSign,
@@ -250,5 +422,6 @@ export function buildDashboardView(
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),
+    weeklyCreditPace: buildWeeklyCreditPace(overview.accounts),
   };
 }

@@ -205,9 +205,15 @@ def build_account_usage_trends(
     """
     # Group buckets by (account_id, window)
     grouped: dict[tuple[str, str], dict[int, float]] = {}
+    secondary_schedule: dict[str, dict[int, tuple[int, int]]] = {}
     for b in buckets:
         key = (b.account_id, b.window)
         grouped.setdefault(key, {})[b.bucket_epoch] = b.avg_used_percent
+        if b.window == "secondary" and b.reset_at is not None and b.window_minutes:
+            secondary_schedule.setdefault(b.account_id, {})[b.bucket_epoch] = (
+                b.reset_at,
+                b.window_minutes,
+            )
 
     # Generate the full time grid, aligned to bucket boundaries (same as SQL)
     aligned_start = (since_epoch // bucket_seconds) * bucket_seconds
@@ -223,10 +229,15 @@ def build_account_usage_trends(
 
         primary_points = _fill_trend_points(time_grid, primary_data) if primary_data else []
         secondary_points = _fill_trend_points(time_grid, secondary_data) if secondary_data else []
+        secondary_scheduled_points = _fill_scheduled_secondary_points(
+            time_grid,
+            secondary_schedule.get(account_id, {}),
+        )
 
         result[account_id] = AccountUsageTrend(
             primary=primary_points,
             secondary=secondary_points,
+            secondary_scheduled=secondary_scheduled_points,
         )
 
     return result
@@ -251,4 +262,33 @@ def _fill_trend_points(
                 v=round(remaining, 2),
             )
         )
+    return points
+
+
+def _fill_scheduled_secondary_points(
+    time_grid: list[int],
+    schedule_data: dict[int, tuple[int, int]],
+) -> list[UsageTrendPoint]:
+    """Build the ideal weekly remaining line from each sample's own reset deadline."""
+    points: list[UsageTrendPoint] = []
+    current_reset_at: int | None = None
+    current_window_minutes: int | None = None
+
+    for epoch in time_grid:
+        if epoch in schedule_data:
+            current_reset_at, current_window_minutes = schedule_data[epoch]
+
+        if current_reset_at is None or not current_window_minutes:
+            continue
+
+        window_seconds = current_window_minutes * 60
+        remaining_seconds = max(0, min(window_seconds, current_reset_at - epoch))
+        scheduled_remaining = 100.0 * remaining_seconds / window_seconds
+        points.append(
+            UsageTrendPoint(
+                t=datetime.fromtimestamp(epoch, tz=timezone.utc),
+                v=round(scheduled_remaining, 2),
+            )
+        )
+
     return points

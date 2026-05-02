@@ -71,6 +71,8 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     payload = response.json()
 
     assert payload["accounts"][0]["accountId"] == "acc_dash"
+    assert payload["accounts"][0]["capacityCreditsSecondary"] == pytest.approx(7560.0)
+    assert payload["accounts"][0]["remainingCreditsSecondary"] == pytest.approx(4536.0)
     assert payload["timeframe"] == {
         "key": "7d",
         "windowMinutes": 10080,

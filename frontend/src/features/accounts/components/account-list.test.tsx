@@ -28,6 +28,7 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
           {
@@ -36,6 +37,7 @@ describe("AccountList", () => {
             displayName: "Secondary",
             planType: "pro",
             status: "paused",
+            priority: "silver",
             additionalQuotas: [],
           },
         ]}
@@ -69,6 +71,7 @@ describe("AccountList", () => {
             displayName: "Hidden Early",
             planType: "plus",
             status: "active",
+            priority: "silver",
             usage: {
               primaryRemainingPercent: 42,
               secondaryRemainingPercent: 18,
@@ -85,6 +88,7 @@ describe("AccountList", () => {
             displayName: "Visible Early",
             planType: "plus",
             status: "active",
+            priority: "silver",
             usage: {
               primaryRemainingPercent: 82,
               secondaryRemainingPercent: 73,
@@ -119,6 +123,7 @@ describe("AccountList", () => {
             displayName: "Stale",
             planType: "plus",
             status: "active",
+            priority: "silver",
             usage: {
               primaryRemainingPercent: 42,
               secondaryRemainingPercent: 18,
@@ -135,6 +140,7 @@ describe("AccountList", () => {
             displayName: "Fresh",
             planType: "plus",
             status: "active",
+            priority: "silver",
             usage: {
               primaryRemainingPercent: 82,
               secondaryRemainingPercent: 73,
@@ -241,6 +247,7 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
         ]}
@@ -265,6 +272,7 @@ describe("AccountList", () => {
             displayName: "Duplicate A",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
           {
@@ -273,6 +281,7 @@ describe("AccountList", () => {
             displayName: "Duplicate B",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
           {
@@ -281,6 +290,7 @@ describe("AccountList", () => {
             displayName: "Unique",
             planType: "pro",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
         ]}

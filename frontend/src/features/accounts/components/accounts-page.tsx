@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useMemo } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -12,6 +12,7 @@ import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { resolveSelectedAccountId } from "@/features/accounts/selection";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -51,15 +52,24 @@ export function AccountsPage() {
     setSearchParams(nextSearchParams);
   }, [searchParams, setSearchParams]);
 
-  const resolvedSelectedAccountId = useMemo(() => {
-    if (sortedAccounts.length === 0) {
-      return null;
+  const resolvedSelectedAccountId = useMemo(
+    () => resolveSelectedAccountId(accounts, quotaDisplay, selectedAccountId),
+    [accounts, quotaDisplay, selectedAccountId],
+  );
+
+  useEffect(() => {
+    if (resolvedSelectedAccountId === null) {
+      return;
     }
-    if (selectedAccountId && sortedAccounts.some((account) => account.accountId === selectedAccountId)) {
-      return selectedAccountId;
+    if (selectedAccountId === resolvedSelectedAccountId) {
+      return;
     }
-    return sortedAccounts[0].accountId;
-  }, [selectedAccountId, sortedAccounts]);
+    if (sortedAccounts.some((account) => account.accountId === resolvedSelectedAccountId)) {
+      const nextSearchParams = new URLSearchParams(searchParams);
+      nextSearchParams.set("selected", resolvedSelectedAccountId);
+      setSearchParams(nextSearchParams, { replace: true });
+    }
+  }, [resolvedSelectedAccountId, selectedAccountId, searchParams, setSearchParams, sortedAccounts]);
 
   const selectedAccount = useMemo(
     () =>

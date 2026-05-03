@@ -51,6 +51,7 @@ describe("RecentRequestsTable", () => {
              displayName: "Primary Account",
              planType: "plus",
              status: "active",
+             priority: "silver",
              additionalQuotas: [],
            },
          ]}

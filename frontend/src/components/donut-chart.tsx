@@ -184,8 +184,9 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                 animationDuration={600}
                 animationEasing="ease-out"
                 onMouseEnter={(data) => {
-                  if (typeof data?.id === "string") {
-                    setActiveLegendId(data.id);
+                  const payload = data?.payload as { id?: string } | undefined;
+                  if (typeof payload?.id === "string") {
+                    setActiveLegendId(payload.id);
                   }
                 }}
                 onMouseLeave={() => setActiveLegendId(null)}

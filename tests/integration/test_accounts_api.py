@@ -46,7 +46,48 @@ async def test_import_and_list_accounts(async_client):
     list_response = await async_client.get("/api/accounts")
     assert list_response.status_code == 200
     accounts = list_response.json()["accounts"]
-    assert any(account["accountId"] == expected_account_id for account in accounts)
+    matched = next(account for account in accounts if account["accountId"] == expected_account_id)
+    assert matched["priority"] == "silver"
+
+
+@pytest.mark.asyncio
+async def test_update_account_priority(async_client):
+    low_email = "silver@example.com"
+    high_email = "gold@example.com"
+    raw_low_account_id = "acc_silver"
+    raw_high_account_id = "acc_gold"
+
+    for email, raw_account_id in ((low_email, raw_low_account_id), (high_email, raw_high_account_id)):
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        auth_json = {
+            "tokens": {
+                "idToken": _encode_jwt(payload),
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "accountId": raw_account_id,
+            },
+        }
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    update_response = await async_client.patch(
+        f"/api/accounts/{generate_unique_account_id(raw_low_account_id, low_email)}/priority",
+        json={"priority": "gold"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["status"] == "updated"
+
+    list_response = await async_client.get("/api/accounts")
+    assert list_response.status_code == 200
+    accounts = list_response.json()["accounts"]
+    assert accounts[0]["priority"] == "gold"
+    assert accounts[0]["email"] == low_email
+    assert accounts[1]["priority"] == "silver"
 
 
 @pytest.mark.asyncio

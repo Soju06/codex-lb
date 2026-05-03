@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
+from app.core.account_priority import AccountPriority, account_priority_rank
 from app.core.balancer.types import FailureClass, UpstreamError
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
 from app.core.utils.retry import backoff_seconds, parse_retry_after
@@ -49,6 +50,7 @@ PROBE_SUCCESS_STREAK_REQUIRED = 3
 class AccountState:
     account_id: str
     status: AccountStatus
+    priority: AccountPriority = AccountPriority.SILVER
     used_percent: float | None = None
     reset_at: float | None = None
     blocked_at: float | None = None
@@ -232,19 +234,21 @@ def select_account(
     probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
     draining = [s for s in available if s.health_tier == HEALTH_TIER_DRAINING]
     effective_pool = healthy or probing or draining or available
+    top_priority = min(account_priority_rank(state.priority) for state in effective_pool)
+    priority_pool = [state for state in effective_pool if account_priority_rank(state.priority) == top_priority]
 
     if routing_strategy == "round_robin":
-        selected = min(effective_pool, key=_round_robin_sort_key)
+        selected = min(priority_pool, key=_round_robin_sort_key)
     elif routing_strategy == "capacity_weighted":
         candidate_pool = (
-            _prefer_earlier_reset_candidates(effective_pool, current) if prefer_earlier_reset else effective_pool
+            _prefer_earlier_reset_candidates(priority_pool, current) if prefer_earlier_reset else priority_pool
         )
         if deterministic_probe:
             selected = min(candidate_pool, key=_capacity_probe_sort_key)
         else:
             selected = _select_capacity_weighted(candidate_pool)
     else:
-        selected = min(effective_pool, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
+        selected = min(priority_pool, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)
 
 

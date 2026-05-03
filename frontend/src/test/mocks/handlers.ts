@@ -26,6 +26,7 @@ import {
 	type DashboardSettings,
 	type RequestLogEntry,
 } from "@/test/mocks/factories";
+import { accountPriorityRank } from "@/features/accounts/priority";
 
 const MODEL_OPTION_DELIMITER = ":::";
 const STATUS_ORDER = ["ok", "rate_limit", "quota", "error"] as const;
@@ -67,6 +68,12 @@ const ApiKeyUpdatePayloadSchema = z
 				}),
 			)
 			.optional(),
+	})
+	.passthrough();
+
+const AccountPriorityUpdatePayloadSchema = z
+	.object({
+		priority: z.enum(["gold", "silver", "bronze"]),
 	})
 	.passthrough();
 
@@ -132,6 +139,22 @@ function createInitialState(): MockState {
 }
 
 let state: MockState = createInitialState();
+
+function sortAccountsByPriority(accounts: AccountSummary[]): AccountSummary[] {
+	return accounts
+		.slice()
+		.sort((left, right) => {
+			const leftPriority = accountPriorityRank(left.priority);
+			const rightPriority = accountPriorityRank(right.priority);
+			if (leftPriority !== rightPriority) {
+				return leftPriority - rightPriority;
+			}
+			if (left.email !== right.email) {
+				return left.email.localeCompare(right.email);
+			}
+			return left.accountId.localeCompare(right.accountId);
+		});
+}
 
 export function resetMockState(): void {
 	state = createInitialState();
@@ -317,7 +340,7 @@ export const handlers = [
 	http.get("/api/dashboard/overview", () => {
 		return HttpResponse.json(
 			createDashboardOverview({
-				accounts: state.accounts,
+				accounts: sortAccountsByPriority(state.accounts),
 			}),
 		);
 	}),
@@ -351,7 +374,7 @@ export const handlers = [
 	}),
 
 	http.get("/api/accounts", () => {
-		return HttpResponse.json({ accounts: state.accounts });
+		return HttpResponse.json({ accounts: sortAccountsByPriority(state.accounts) });
 	}),
 
 	http.post("/api/accounts/import", async () => {
@@ -369,6 +392,29 @@ export const handlers = [
 			planType: created.planType,
 			status: created.status,
 		});
+	}),
+
+	http.patch("/api/accounts/:accountId/priority", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const payload = await parseJsonBody(request, AccountPriorityUpdatePayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(account);
+		}
+		const updated = createAccountSummary({
+			...account,
+			priority: payload.priority,
+		});
+		state.accounts = state.accounts.map((item) =>
+			item.accountId === accountId ? updated : item,
+		);
+		return HttpResponse.json({ status: "updated" });
 	}),
 
 	http.post("/api/accounts/:accountId/pause", ({ params }) => {

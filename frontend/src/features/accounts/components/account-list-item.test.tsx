@@ -30,8 +30,19 @@ describe("AccountListItem", () => {
     expect(screen.queryByTestId("mini-quota-track-weekly-fill")).not.toBeInTheDocument();
     expect(screen.getByText("5h")).toBeInTheDocument();
     expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByText("Silver")).toBeInTheDocument();
     expect(screen.getByText("Reset in 1h")).toBeInTheDocument();
     expect(screen.getByText("Reset in 1d")).toBeInTheDocument();
+  });
+
+  it("renders the selected priority badge", () => {
+    const account = createAccountSummary({
+      priority: "gold",
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Gold")).toBeInTheDocument();
   });
 
   it("omits the 5h row for weekly-only accounts", () => {

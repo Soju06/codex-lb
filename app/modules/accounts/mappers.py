@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
+from app.core.account_priority import coerce_account_priority
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
@@ -100,6 +101,7 @@ def _account_to_summary(
         display_name=account.email,
         plan_type=plan_type,
         status=account.status.value,
+        priority=coerce_account_priority(getattr(account, "priority", None)),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 
 from app.core import usage as usage_core
+from app.core.account_priority import coerce_account_priority
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -849,6 +850,7 @@ class LoadBalancer:
         return AccountState(
             account_id=account.id,
             status=account.status,
+            priority=coerce_account_priority(getattr(account, "priority", None)),
             used_percent=None,
             reset_at=runtime.reset_at,
             blocked_at=float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at,

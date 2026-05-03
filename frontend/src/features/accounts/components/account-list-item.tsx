@@ -3,6 +3,7 @@ import { Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { StatusBadge } from "@/components/status-badge";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
@@ -58,6 +59,7 @@ function MiniQuotaRow({
 
 export function AccountListItem({ account, selected, showAccountId = false, onSelect }: AccountListItemProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
+  const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
   const titleIsEmail = isEmailLabel(title, account.email);
@@ -68,7 +70,11 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
-  const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+  const hasPrimaryWindow = account.windowMinutesPrimary != null;
+  const hasSecondaryWindow = account.windowMinutesSecondary != null;
+  const showPrimaryRow = hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
+  const showSecondaryRow = hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
+  const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow);
 
   return (
     <button
@@ -92,9 +98,9 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
         </div>
         <StatusBadge status={status} />
       </div>
-      <div className={cn("mt-2 grid gap-2", weeklyOnly ? "grid-cols-1" : "grid-cols-2")}>
-        {!weeklyOnly ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}
-        <MiniQuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} />
+      <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
+        {showPrimaryRow ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}
+        {showSecondaryRow ? <MiniQuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} /> : null}
       </div>
     </button>
   );

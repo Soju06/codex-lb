@@ -2,10 +2,12 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { createAccountSummary } from "@/test/mocks/factories";
 
 describe("AccountListItem", () => {
   beforeEach(() => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
   });
@@ -49,6 +51,22 @@ describe("AccountListItem", () => {
     expect(screen.queryByText("5h")).not.toBeInTheDocument();
     expect(screen.getByText("Weekly")).toBeInTheDocument();
     expect(screen.getByText("Reset in 1d")).toBeInTheDocument();
+  });
+
+  it("shows only the 5h row when the account quota preference is 5h", () => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "5h" });
+
+    const account = createAccountSummary({
+      usage: {
+        primaryRemainingPercent: 82,
+        secondaryRemainingPercent: 73,
+      },
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("5h")).toBeInTheDocument();
+    expect(screen.queryByText("Weekly")).not.toBeInTheDocument();
   });
 
   it("renders quota fill when secondary remaining percent is available", () => {

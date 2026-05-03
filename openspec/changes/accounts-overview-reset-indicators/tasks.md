@@ -12,3 +12,8 @@
 
 - [x] 3.1 Update the compact account list item to show 5h and weekly quota rows with reset countdowns
 - [x] 3.2 Sort the account list by the next upcoming reset time
+
+## 4. Appearance settings
+
+- [x] 4.1 Add an appearance preference for compact account rows with 5H, W, and Both options
+- [x] 4.2 Add tests for the appearance toggle and account-row visibility preference

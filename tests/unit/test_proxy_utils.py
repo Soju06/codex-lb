@@ -1160,7 +1160,7 @@ class _SsePostResponse:
 
 
 class _SseSession:
-    def __init__(self, response: _SsePostResponse) -> None:
+    def __init__(self, response: object) -> None:
         self._response = response
         self.calls: list[dict[str, object]] = []
 

@@ -239,7 +239,7 @@ def test_archive_disk_full_pauses_writes_without_traceback_spam(monkeypatch, tmp
 def test_archive_enqueue_drops_records_while_disk_pressure_pause_is_active(monkeypatch, tmp_path):
     _reset_archive_disk_pressure()
     with conversation_archive._DISK_PRESSURE_LOCK:
-        conversation_archive._DISK_PRESSURE_PAUSED_UNTIL = conversation_archive.time.monotonic() + 60
+        conversation_archive._DISK_PRESSURE_PAUSED_UNTIL = float(conversation_archive.time.monotonic() + 60)
     monkeypatch.setattr(
         conversation_archive,
         "_ensure_writer_thread",

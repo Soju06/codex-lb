@@ -7,6 +7,7 @@ The Accounts page list only shows the weekly quota bar today, so operators canno
 - Show both 5h and weekly quota rows in the compact account list when the account has a 5h window.
 - Display time-to-reset text for each visible quota row in the list.
 - Sort the account list by the next upcoming quota reset, with accounts missing reset timestamps placed last.
+- Add an appearance setting to choose whether compact account views show the 5h row, the weekly row, or both, with Both as the default.
 
 ## Impact
 

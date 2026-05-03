@@ -23,6 +23,7 @@ const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota
 export type AccountListProps = {
   accounts: AccountSummary[];
   selectedAccountId: string | null;
+  showPriorities?: boolean;
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
   onOpenOauth: () => void;
@@ -31,6 +32,7 @@ export type AccountListProps = {
 export function AccountList({
   accounts,
   selectedAccountId,
+  showPriorities = true,
   onSelect,
   onOpenImport,
   onOpenOauth,
@@ -42,7 +44,7 @@ export function AccountList({
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return sortAccountsForDisplay(accounts, quotaDisplay)
+    return sortAccountsForDisplay(accounts, quotaDisplay, showPriorities)
       .filter((account) => {
         if (statusFilter !== "all" && account.status !== statusFilter) {
           return false;
@@ -56,7 +58,7 @@ export function AccountList({
           account.planType.toLowerCase().includes(needle)
         );
       })
-  }, [accounts, quotaDisplay, search, statusFilter]);
+  }, [accounts, quotaDisplay, search, statusFilter, showPriorities]);
 
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 
@@ -125,6 +127,7 @@ export function AccountList({
               account={account}
               selected={account.accountId === selectedAccountId}
               showAccountId={duplicateAccountIds.has(account.accountId)}
+              showPriorities={showPriorities}
               onSelect={onSelect}
             />
           ))

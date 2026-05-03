@@ -1,11 +1,12 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { useThemeStore } from "@/hooks/use-theme";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
+import type { DashboardSettings } from "@/features/settings/schemas";
 
 function installLocalStorageMock() {
   const storage = new Map<string, string>();
@@ -26,6 +27,20 @@ function installLocalStorageMock() {
   });
 }
 
+const BASE_SETTINGS: DashboardSettings = {
+  stickyThreadsEnabled: true,
+  upstreamStreamTransport: "default",
+  preferEarlierResetAccounts: true,
+  prioritiesEnabled: false,
+  routingStrategy: "capacity_weighted",
+  openaiCacheAffinityMaxAgeSeconds: 1800,
+  dashboardSessionTtlSeconds: 43200,
+  importWithoutOverwrite: true,
+  totpRequiredOnLogin: false,
+  totpConfigured: false,
+  apiKeyAuthEnabled: false,
+};
+
 describe("AppearanceSettings", () => {
   beforeEach(() => {
     installLocalStorageMock();
@@ -37,7 +52,7 @@ describe("AppearanceSettings", () => {
   it("exposes selected state for the time-format toggle", async () => {
     const user = userEvent.setup();
 
-    render(<AppearanceSettings />);
+    render(<AppearanceSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
     const button12h = screen.getByRole("button", { name: /12h/i });
     const button24h = screen.getByRole("button", { name: /24h/i });
@@ -55,7 +70,7 @@ describe("AppearanceSettings", () => {
   it("exposes selected state for the account quota toggle", async () => {
     const user = userEvent.setup();
 
-    render(<AppearanceSettings />);
+    render(<AppearanceSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
     const button5h = screen.getByRole("button", { name: "5H" });
     const buttonWeekly = screen.getByRole("button", { name: "W" });
@@ -74,5 +89,30 @@ describe("AppearanceSettings", () => {
 
     expect(buttonWeekly).toHaveAttribute("aria-pressed", "true");
     expect(useAccountQuotaDisplayStore.getState().quotaDisplay).toBe("weekly");
+  });
+
+  it("saves the priorities toggle", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(<AppearanceSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    const prioritiesSwitch = screen.getByRole("switch");
+    expect(prioritiesSwitch).toHaveAttribute("aria-checked", "false");
+
+    await user.click(prioritiesSwitch);
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      prioritiesEnabled: true,
+      routingStrategy: "capacity_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 1800,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: false,
+    });
   });
 });

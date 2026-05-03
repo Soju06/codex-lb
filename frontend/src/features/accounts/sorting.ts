@@ -29,14 +29,17 @@ function accountResetTimestamp(account: AccountSummary, quotaDisplay: AccountQuo
 export function sortAccountsForDisplay(
   accounts: AccountSummary[],
   quotaDisplay: AccountQuotaDisplayPreference,
+  prioritiesEnabled = true,
 ): AccountSummary[] {
   return accounts
     .slice()
     .sort((left, right) => {
-      const leftPriority = accountPriorityRank(left.priority);
-      const rightPriority = accountPriorityRank(right.priority);
-      if (leftPriority !== rightPriority) {
-        return leftPriority - rightPriority;
+      if (prioritiesEnabled) {
+        const leftPriority = accountPriorityRank(left.priority);
+        const rightPriority = accountPriorityRank(right.priority);
+        if (leftPriority !== rightPriority) {
+          return leftPriority - rightPriority;
+        }
       }
       const leftReset = accountResetTimestamp(left, quotaDisplay);
       const rightReset = accountResetTimestamp(right, quotaDisplay);

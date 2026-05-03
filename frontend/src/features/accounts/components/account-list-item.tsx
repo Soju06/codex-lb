@@ -15,6 +15,7 @@ export type AccountListItemProps = {
   account: AccountSummary;
   selected: boolean;
   showAccountId?: boolean;
+  showPriorities?: boolean;
   onSelect: (accountId: string) => void;
 };
 
@@ -58,7 +59,13 @@ function MiniQuotaRow({
   );
 }
 
-export function AccountListItem({ account, selected, showAccountId = false, onSelect }: AccountListItemProps) {
+export function AccountListItem({
+  account,
+  selected,
+  showAccountId = false,
+  showPriorities = true,
+  onSelect,
+}: AccountListItemProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const status = normalizeStatus(account.status);
@@ -99,7 +106,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
         </div>
         <div className="flex items-center gap-1.5">
           <StatusBadge status={status} />
-          <AccountPriorityBadge priority={account.priority} />
+          {showPriorities ? <AccountPriorityBadge priority={account.priority} /> : null}
         </div>
       </div>
       <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>

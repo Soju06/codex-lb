@@ -6,6 +6,7 @@ export function resolveSelectedAccountId(
   accounts: AccountSummary[],
   quotaDisplay: AccountQuotaDisplayPreference,
   selectedAccountId: string | null,
+  prioritiesEnabled = true,
 ): string | null {
   if (selectedAccountId && accounts.some((account) => account.accountId === selectedAccountId)) {
     return selectedAccountId;
@@ -13,5 +14,5 @@ export function resolveSelectedAccountId(
   if (accounts.length === 0) {
     return null;
   }
-  return sortAccountsForDisplay(accounts, quotaDisplay)[0]?.accountId ?? null;
+  return sortAccountsForDisplay(accounts, quotaDisplay, prioritiesEnabled)[0]?.accountId ?? null;
 }

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.account_priority import AccountPriority
 from app.core.balancer import (
     AccountState,
     handle_permanent_failure,
@@ -852,6 +853,34 @@ def test_state_from_account_uses_configured_probe_quiet_seconds(monkeypatch):
     )
 
     assert state.health_tier == 2
+
+
+def test_state_from_account_ignores_priority_when_disabled(monkeypatch):
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(
+            soft_drain_enabled=True,
+            drain_primary_threshold_pct=85.0,
+            drain_secondary_threshold_pct=90.0,
+            drain_error_window_seconds=60.0,
+            drain_error_count_threshold=2,
+            probe_quiet_seconds=60.0,
+            probe_success_streak_required=3,
+        ),
+    )
+
+    account = _make_test_account(status=AccountStatus.ACTIVE)
+    setattr(account, "priority", "gold")
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=None,
+        runtime=RuntimeState(),
+        priorities_enabled=False,
+    )
+
+    assert state.priority == AccountPriority.SILVER
 
 
 def test_error_backoff_resets_error_count_when_expired():

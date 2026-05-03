@@ -35,6 +35,7 @@ describe("useSettings", () => {
     expect(result.current.settingsQuery.data?.stickyThreadsEnabled).toBeTypeOf("boolean");
     expect(result.current.settingsQuery.data?.openaiCacheAffinityMaxAgeSeconds).toBeTypeOf("number");
     expect(result.current.settingsQuery.data?.dashboardSessionTtlSeconds).toBeTypeOf("number");
+    expect(result.current.settingsQuery.data?.prioritiesEnabled).toBeTypeOf("boolean");
 
     await result.current.updateSettingsMutation.mutateAsync({
       stickyThreadsEnabled: false,
@@ -44,6 +45,7 @@ describe("useSettings", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      prioritiesEnabled: true,
     });
 
     await waitFor(() => {

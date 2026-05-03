@@ -149,7 +149,10 @@ class ToolCallIndex:
         if key not in self.indexes:
             self.indexes[key] = self.next_index
             self.next_index += 1
-        return self.indexes[key]
+        idx = self.indexes[key]
+        if output_index is not None and output_index not in self.output_index_map:
+            self.output_index_map[output_index] = idx
+        return idx
 
     def register_alias(self, alias_id: str, index: int) -> None:
         """Register an additional ID that maps to the same index."""
@@ -659,7 +662,14 @@ def _tool_call_delta_from_payload(payload: Mapping[str, JsonValue], indexer: Too
         return None
     call_id, name, arguments, tool_type = fields
     output_index = _resolve_output_index(payload)
-    index = indexer.index_for_output_index(output_index, call_id, name)
+    routing_id = call_id
+    if routing_id is None:
+        item = payload.get("item")
+        routing_id = _first_str(
+            payload.get("item_id"),
+            item.get("id") if isinstance(item, dict) else None,
+        )
+    index = indexer.index_for_output_index(output_index, routing_id, name)
     _register_item_id_alias(payload, index, indexer)
     return ToolCallDelta(
         index=index,
@@ -701,14 +711,12 @@ def _extract_tool_call_fields(
         candidate.get("call_id"),
         candidate.get("tool_call_id"),
         candidate.get("id"),
-        candidate.get("item_id"),
     )
     if call_id is None and delta_map is not None:
         call_id = _first_str(
             delta_map.get("id"),
             delta_map.get("call_id"),
             delta_map.get("tool_call_id"),
-            delta_map.get("item_id"),
         )
 
     name = _first_str(candidate.get("name"), candidate.get("tool_name"))

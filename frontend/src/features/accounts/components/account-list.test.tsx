@@ -1,10 +1,20 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountList } from "@/features/accounts/components/account-list";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 
 describe("AccountList", () => {
+  beforeEach(() => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-01-01T12:00:00.000Z").getTime());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders items and filters by search", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
@@ -47,30 +57,32 @@ describe("AccountList", () => {
     expect(onSelect).toHaveBeenCalledWith("acc-2");
   });
 
-  it("sorts accounts by next reset time", () => {
+  it("sorts accounts by the rows actually rendered", () => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
+
     render(
       <AccountList
         accounts={[
           {
-            accountId: "acc-late",
-            email: "late@example.com",
-            displayName: "Late",
+            accountId: "acc-hidden-early",
+            email: "hidden-early@example.com",
+            displayName: "Hidden Early",
             planType: "plus",
             status: "active",
             usage: {
               primaryRemainingPercent: 42,
               secondaryRemainingPercent: 18,
             },
-            resetAtPrimary: "2026-01-01T15:00:00.000Z",
-            resetAtSecondary: "2026-01-02T12:00:00.000Z",
+            resetAtPrimary: "2026-01-01T12:05:00.000Z",
+            resetAtSecondary: "2026-01-01T13:00:00.000Z",
             windowMinutesPrimary: 300,
             windowMinutesSecondary: 10_080,
             additionalQuotas: [],
           },
           {
-            accountId: "acc-early",
-            email: "early@example.com",
-            displayName: "Early",
+            accountId: "acc-visible-early",
+            email: "visible-early@example.com",
+            displayName: "Visible Early",
             planType: "plus",
             status: "active",
             usage: {
@@ -78,23 +90,7 @@ describe("AccountList", () => {
               secondaryRemainingPercent: 73,
             },
             resetAtPrimary: "2026-01-01T12:30:00.000Z",
-            resetAtSecondary: "2026-01-02T12:00:00.000Z",
-            windowMinutesPrimary: 300,
-            windowMinutesSecondary: 10_080,
-            additionalQuotas: [],
-          },
-          {
-            accountId: "acc-none",
-            email: "none@example.com",
-            displayName: "None",
-            planType: "plus",
-            status: "active",
-            usage: {
-              primaryRemainingPercent: 10,
-              secondaryRemainingPercent: 10,
-            },
-            resetAtPrimary: null,
-            resetAtSecondary: null,
+            resetAtSecondary: "2026-01-01T12:10:00.000Z",
             windowMinutesPrimary: 300,
             windowMinutesSecondary: 10_080,
             additionalQuotas: [],
@@ -107,10 +103,59 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getAllByText(/^(Early|Late|None)$/).map((el) => el.textContent)).toEqual([
-      "Early",
-      "Late",
-      "None",
+    expect(screen.getAllByText(/^(Hidden Early|Visible Early)$/).map((el) => el.textContent)).toEqual([
+      "Visible Early",
+      "Hidden Early",
+    ]);
+  });
+
+  it("ignores elapsed reset timestamps when sorting", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-stale",
+            email: "stale@example.com",
+            displayName: "Stale",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: 18,
+            },
+            resetAtPrimary: "2026-01-01T11:30:00.000Z",
+            resetAtSecondary: "2026-01-01T11:45:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-fresh",
+            email: "fresh@example.com",
+            displayName: "Fresh",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: 73,
+            },
+            resetAtPrimary: "2026-01-01T12:30:00.000Z",
+            resetAtSecondary: "2026-01-01T12:20:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Fresh|Stale)$/).map((el) => el.textContent)).toEqual([
+      "Fresh",
+      "Stale",
     ]);
   });
 

@@ -16,6 +16,7 @@ describe("AccountSummarySchema", () => {
       displayName: "User",
       planType: "pro",
       status: "active",
+      priority: "gold",
       usage: {
         primaryRemainingPercent: 85,
         secondaryRemainingPercent: null,
@@ -45,6 +46,7 @@ describe("AccountSummarySchema", () => {
     });
 
     expect(parsed.accountId).toBe("acc-1");
+    expect(parsed.priority).toBe("gold");
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
     expect(parsed.windowMinutesSecondary).toBe(10080);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);

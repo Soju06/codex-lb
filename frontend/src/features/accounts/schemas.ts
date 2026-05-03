@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { ACCOUNT_PRIORITIES } from "@/features/accounts/priority";
+
 export const UsageTrendPointSchema = z.object({
   t: z.string().datetime({ offset: true }),
   v: z.number(),
@@ -48,12 +50,15 @@ export const AccountAdditionalQuotaSchema = z.object({
   secondaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
 });
 
+export const AccountPrioritySchema = z.enum(ACCOUNT_PRIORITIES);
+
 export const AccountSummarySchema = z.object({
   accountId: z.string(),
   email: z.string(),
   displayName: z.string(),
   planType: z.string(),
   status: z.string(),
+  priority: AccountPrioritySchema.default("silver"),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
@@ -148,6 +153,7 @@ export const ImportStateSchema = z.object({
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type { AccountPriority } from "@/features/accounts/priority";
 export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;

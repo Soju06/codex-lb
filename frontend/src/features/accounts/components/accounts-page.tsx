@@ -11,6 +11,8 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -26,14 +28,20 @@ export function AccountsPage() {
     pauseMutation,
     resumeMutation,
     deleteMutation,
+    updatePriorityMutation,
   } = useAccounts();
   const oauth = useOauth();
+  const quotaDisplay = useAccountQuotaDisplayStore((state) => state.quotaDisplay);
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
+  const sortedAccounts = useMemo(
+    () => sortAccountsForDisplay(accounts, quotaDisplay),
+    [accounts, quotaDisplay],
+  );
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
   const selectedAccountId = searchParams.get("selected");
 
@@ -44,14 +52,14 @@ export function AccountsPage() {
   }, [searchParams, setSearchParams]);
 
   const resolvedSelectedAccountId = useMemo(() => {
-    if (accounts.length === 0) {
+    if (sortedAccounts.length === 0) {
       return null;
     }
-    if (selectedAccountId && accounts.some((account) => account.accountId === selectedAccountId)) {
+    if (selectedAccountId && sortedAccounts.some((account) => account.accountId === selectedAccountId)) {
       return selectedAccountId;
     }
-    return accounts[0].accountId;
-  }, [accounts, selectedAccountId]);
+    return sortedAccounts[0].accountId;
+  }, [selectedAccountId, sortedAccounts]);
 
   const selectedAccount = useMemo(
     () =>
@@ -65,13 +73,15 @@ export function AccountsPage() {
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
-    deleteMutation.isPending;
+    deleteMutation.isPending ||
+    updatePriorityMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
-    getErrorMessageOrNull(deleteMutation.error);
+    getErrorMessageOrNull(deleteMutation.error) ||
+    getErrorMessageOrNull(updatePriorityMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -107,6 +117,9 @@ export function AccountsPage() {
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
+            onPriorityChange={async (accountId, priority) => {
+              await updatePriorityMutation.mutateAsync({ accountId, priority });
+            }}
           />
         </div>
       )}

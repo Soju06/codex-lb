@@ -13,34 +13,12 @@ import {
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
-import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
-import { formatSlug, parseDate } from "@/utils/formatters";
+import { formatSlug } from "@/utils/formatters";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "deactivated"];
-
-function visibleQuotaResetTimestamps(
-  account: AccountSummary,
-  quotaDisplay: AccountQuotaDisplayPreference,
-): number[] {
-  const now = Date.now();
-  const showPrimary = account.windowMinutesPrimary != null && (quotaDisplay !== "weekly" || account.windowMinutesSecondary == null);
-  const showSecondary = account.windowMinutesSecondary != null && (quotaDisplay !== "5h" || account.windowMinutesPrimary == null);
-
-  return [
-    showPrimary ? parseDate(account.resetAtPrimary)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY,
-    showSecondary ? parseDate(account.resetAtSecondary)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY,
-  ].filter((resetAt) => resetAt > now);
-}
-
-function accountResetTimestamp(account: AccountSummary, quotaDisplay: AccountQuotaDisplayPreference): number {
-  const resets = visibleQuotaResetTimestamps(account, quotaDisplay);
-  return resets.length > 0 ? Math.min(...resets) : Number.POSITIVE_INFINITY;
-}
-
-function accountSortLabel(account: AccountSummary): string {
-  return (account.displayName || account.email || account.accountId).trim().toLowerCase();
-}
 
 export type AccountListProps = {
   accounts: AccountSummary[];
@@ -64,7 +42,7 @@ export function AccountList({
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return accounts
+    return sortAccountsForDisplay(accounts, quotaDisplay)
       .filter((account) => {
         if (statusFilter !== "all" && account.status !== statusFilter) {
           return false;
@@ -78,19 +56,6 @@ export function AccountList({
           account.planType.toLowerCase().includes(needle)
         );
       })
-      .slice()
-      .sort((left, right) => {
-        const leftReset = accountResetTimestamp(left, quotaDisplay);
-        const rightReset = accountResetTimestamp(right, quotaDisplay);
-        if (leftReset !== rightReset) {
-          return leftReset - rightReset;
-        }
-        const labelComparison = accountSortLabel(left).localeCompare(accountSortLabel(right));
-        if (labelComparison !== 0) {
-          return labelComparison;
-        }
-        return left.accountId.localeCompare(right.accountId);
-      });
   }, [accounts, quotaDisplay, search, statusFilter]);
 
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);

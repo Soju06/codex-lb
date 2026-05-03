@@ -6,6 +6,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
+from app.core.account_priority import AccountPriority
 from app.core.auth import (
     DEFAULT_EMAIL,
     DEFAULT_PLAN,
@@ -160,6 +161,7 @@ class AccountsService:
             chatgpt_account_id=raw_account_id,
             email=email,
             plan_type=plan_type,
+            priority=AccountPriority.SILVER,
             access_token_encrypted=self._encryptor.encrypt(auth.tokens.access_token),
             refresh_token_encrypted=self._encryptor.encrypt(auth.tokens.refresh_token),
             id_token_encrypted=self._encryptor.encrypt(auth.tokens.id_token),
@@ -179,6 +181,12 @@ class AccountsService:
             plan_type=saved.plan_type,
             status=saved.status,
         )
+
+    async def update_account_priority(self, account_id: str, priority: AccountPriority) -> bool:
+        result = await self._repo.update_priority(account_id, priority.value)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
 
     async def reactivate_account(self, account_id: str) -> bool:
         result = await self._repo.update_status(account_id, AccountStatus.ACTIVE, None, None, blocked_at=None)

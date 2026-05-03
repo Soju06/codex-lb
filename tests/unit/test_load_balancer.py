@@ -31,6 +31,16 @@ def test_select_account_picks_lowest_used_percent():
     assert result.account.account_id == "b"
 
 
+def test_select_account_prefers_higher_priority_before_usage():
+    states = [
+        AccountState("a", AccountStatus.ACTIVE, priority="gold", used_percent=90.0),
+        AccountState("b", AccountStatus.ACTIVE, priority="bronze", used_percent=5.0),
+    ]
+    result = select_account(states, routing_strategy="usage_weighted")
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+
 def test_select_account_prefers_earlier_secondary_reset_bucket():
     now = time.time()
     states = [

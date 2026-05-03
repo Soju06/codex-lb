@@ -19,6 +19,7 @@ from websockets.exceptions import (
 from websockets.typing import Origin
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.upstream_proxy import normalize_upstream_proxy_url
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import OpenAIError
@@ -160,6 +161,7 @@ async def connect_responses_websocket(
     account_id: str | None,
     *,
     base_url: str | None = None,
+    upstream_proxy_url: str | None = None,
 ) -> UpstreamResponsesWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -167,13 +169,18 @@ async def connect_responses_websocket(
     upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
+    proxy = (
+        normalize_upstream_proxy_url(upstream_proxy_url)
+        if upstream_proxy_url
+        else (True if settings.upstream_websocket_trust_env else None)
+    )
     try:
         response = await websocket_connect(
             url,
             origin=origin,
             additional_headers=upstream_headers or None,
             user_agent_header=user_agent,
-            proxy=True if settings.upstream_websocket_trust_env else None,
+            proxy=proxy,
             open_timeout=settings.upstream_connect_timeout_seconds,
             max_size=settings.max_sse_event_bytes,
         )

@@ -153,8 +153,81 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               </Button>
             </div>
           </div>
+
+          <UpstreamProxyControl
+            key={`${settings.upstreamProxyConfigured}:${settings.upstreamProxyUrl ?? ""}`}
+            busy={busy}
+            configured={settings.upstreamProxyConfigured ?? false}
+            currentValue={settings.upstreamProxyUrl ?? ""}
+            onSave={save}
+          />
         </div>
       </div>
     </section>
+  );
+}
+
+type UpstreamProxyControlProps = {
+  busy: boolean;
+  configured: boolean;
+  currentValue: string;
+  onSave: (patch: Partial<SettingsUpdateRequest>) => void;
+};
+
+function UpstreamProxyControl({ busy, configured, currentValue, onSave }: UpstreamProxyControlProps) {
+  const [upstreamProxyUrl, setUpstreamProxyUrl] = useState(currentValue);
+  const upstreamProxyUrlTrimmed = upstreamProxyUrl.trim();
+  const upstreamProxyChanged = upstreamProxyUrlTrimmed !== currentValue;
+
+  return (
+    <div className="flex flex-col gap-3 p-3">
+      <div>
+        <p className="text-sm font-medium">Upstream proxy</p>
+        <p className="text-xs text-muted-foreground">
+          Optional global proxy for all upstream account traffic. Supports http, https, socks5, and socks5h URLs.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <Input
+          type="text"
+          value={upstreamProxyUrl}
+          disabled={busy}
+          placeholder="http://user:pass@host:port"
+          onChange={(event) => setUpstreamProxyUrl(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && upstreamProxyChanged) {
+              onSave({ upstreamProxyUrl: upstreamProxyUrlTrimmed || null });
+            }
+          }}
+          className="h-8 text-xs"
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 text-xs"
+          disabled={busy || !upstreamProxyChanged}
+          onClick={() => onSave({ upstreamProxyUrl: upstreamProxyUrlTrimmed || null })}
+        >
+          Save proxy
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-8 text-xs"
+          disabled={busy || !configured}
+          onClick={() => {
+            setUpstreamProxyUrl("");
+            onSave({ upstreamProxyUrl: null });
+          }}
+        >
+          Clear
+        </Button>
+      </div>
+      {configured ? (
+        <p className="text-xs text-muted-foreground">Current proxy is configured. Credentials are hidden after saving.</p>
+      ) : null}
+    </div>
   );
 }

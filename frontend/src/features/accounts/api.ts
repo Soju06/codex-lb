@@ -1,8 +1,10 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, patch, post } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
   AccountImportResponseSchema,
+  AccountUpstreamProxyUpdateRequestSchema,
+  AccountUpstreamProxyUpdateResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -55,6 +57,15 @@ export function deleteAccount(accountId: string) {
   return del(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
     AccountActionResponseSchema,
+  );
+}
+
+export function updateAccountUpstreamProxy(accountId: string, payload: unknown) {
+  const validated = AccountUpstreamProxyUpdateRequestSchema.parse(payload);
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/upstream-proxy`,
+    AccountUpstreamProxyUpdateResponseSchema,
+    { body: validated },
   );
 }
 

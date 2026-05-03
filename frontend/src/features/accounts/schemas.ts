@@ -33,6 +33,12 @@ export const AccountAuthSchema = z.object({
   idToken: AccountTokenStatusSchema.nullable().optional(),
 });
 
+export const AccountUpstreamProxyStatusSchema = z.object({
+  configured: z.boolean().default(false),
+  proxyUrl: z.string().nullable().optional(),
+  proxyGroup: z.string().nullable().optional(),
+});
+
 export const AccountAdditionalWindowSchema = z.object({
   usedPercent: z.number(),
   resetAt: z.number().nullable().optional(),
@@ -61,6 +67,7 @@ export const AccountSummarySchema = z.object({
   windowMinutesSecondary: z.number().nullable().optional(),
   requestUsage: AccountRequestUsageSchema.nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
+  upstreamProxy: AccountUpstreamProxyStatusSchema.optional(),
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
 });
 
@@ -83,6 +90,16 @@ export const AccountImportResponseSchema = z.object({
 
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
+});
+
+export const AccountUpstreamProxyUpdateRequestSchema = z.object({
+  upstreamProxyUrl: z.string().nullable().optional(),
+  upstreamProxyGroup: z.string().nullable().optional(),
+});
+
+export const AccountUpstreamProxyUpdateResponseSchema = z.object({
+  accountId: z.string(),
+  upstreamProxy: AccountUpstreamProxyStatusSchema,
 });
 
 export const OauthStartRequestSchema = z.object({
@@ -148,6 +165,7 @@ export const ImportStateSchema = z.object({
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type AccountUpstreamProxyStatus = z.infer<typeof AccountUpstreamProxyStatusSchema>;
 export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;

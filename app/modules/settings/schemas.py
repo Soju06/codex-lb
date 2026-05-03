@@ -19,6 +19,8 @@ class DashboardSettingsResponse(DashboardModel):
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    upstream_proxy_configured: bool = False
+    upstream_proxy_url: str | None = None
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
@@ -37,6 +39,16 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None
+    upstream_proxy_url: str | None = None
+
+
+class UpstreamProxyGroupResponse(DashboardModel):
+    name: str
+    proxy_url: str
+
+
+class UpstreamProxyGroupUpsertRequest(DashboardModel):
+    proxy_url: str
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

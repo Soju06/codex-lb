@@ -41,6 +41,12 @@ class AccountAuthStatus(DashboardModel):
     id_token: AccountTokenStatus | None = None
 
 
+class AccountUpstreamProxyStatus(DashboardModel):
+    configured: bool = False
+    proxy_url: str | None = None
+    proxy_group: str | None = None
+
+
 class AccountAdditionalWindow(DashboardModel):
     used_percent: float
     reset_at: int | None = None
@@ -76,6 +82,7 @@ class AccountSummary(DashboardModel):
     additional_quotas: list[AccountAdditionalQuota] = Field(default_factory=list)
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
+    upstream_proxy: AccountUpstreamProxyStatus = Field(default_factory=AccountUpstreamProxyStatus)
 
 
 class AccountsResponse(DashboardModel):
@@ -99,6 +106,16 @@ class AccountReactivateResponse(DashboardModel):
 
 class AccountDeleteResponse(DashboardModel):
     status: str
+
+
+class AccountUpstreamProxyUpdateRequest(DashboardModel):
+    upstream_proxy_url: str | None = None
+    upstream_proxy_group: str | None = None
+
+
+class AccountUpstreamProxyUpdateResponse(DashboardModel):
+    account_id: str
+    upstream_proxy: AccountUpstreamProxyStatus
 
 
 class AccountTrendsResponse(DashboardModel):

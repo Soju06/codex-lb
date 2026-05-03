@@ -50,6 +50,7 @@ class StickySessionKind(str, Enum):
 
 class Account(Base):
     __tablename__ = "accounts"
+    __table_args__ = (Index("ix_accounts_upstream_proxy_group", "upstream_proxy_group"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -76,6 +77,8 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    upstream_proxy_url_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    upstream_proxy_group: Mapped[str | None] = mapped_column(String, nullable=True)
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
@@ -269,6 +272,21 @@ class DashboardSettings(Base):
         server_default=text("95.0"),
         nullable=False,
     )
+    upstream_proxy_url_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class UpstreamProxyGroup(Base):
+    __tablename__ = "upstream_proxy_groups"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    proxy_url_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

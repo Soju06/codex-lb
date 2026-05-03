@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import (
+    Any,
     AsyncContextManager,
     AsyncIterator,
     Awaitable,
@@ -34,6 +35,7 @@ from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
 from app.core.clients.http import get_http_client
+from app.core.clients.upstream_proxy import aiohttp_proxy_url, is_socks_upstream_proxy, socks_proxy_connector
 from app.core.config.settings import Settings, get_settings
 from app.core.errors import (
     OpenAIErrorDetail,
@@ -130,6 +132,17 @@ _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
         "x-codex-beta-features",
     }
 )
+
+
+def _with_optional_aiohttp_proxy(
+    call: Callable[..., Any], *args: Any, upstream_proxy_url: str | None, **kwargs: Any
+) -> Any:
+    proxy_url = aiohttp_proxy_url(upstream_proxy_url)
+    if proxy_url is None:
+        return call(*args, **kwargs)
+    return call(*args, proxy=proxy_url, **kwargs)
+
+
 _HOP_BY_HOP_HEADER_NAMES = frozenset(
     {
         "accept",
@@ -1015,6 +1028,7 @@ async def _open_upstream_websocket(
     max_msg_size: int,
     account_id: str | None = None,
     hold_half_open_probe: bool = False,
+    upstream_proxy_url: str | None = None,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
     settings = get_settings()
     circuit_breaker = get_circuit_breaker_for_account(account_id, settings) if account_id else None
@@ -1025,8 +1039,10 @@ async def _open_upstream_websocket(
     request_obj = getattr(session, "request", None)
     if not callable(request_obj):
         try:
-            websocket_cm = session.ws_connect(
+            websocket_cm = _with_optional_aiohttp_proxy(
+                session.ws_connect,
                 url,
+                upstream_proxy_url=upstream_proxy_url,
                 headers=headers,
                 receive_timeout=None,
                 autoping=True,
@@ -1056,9 +1072,11 @@ async def _open_upstream_websocket(
     timeout = aiohttp.ClientTimeout(total=connect_timeout_seconds, sock_connect=connect_timeout_seconds)
     try:
         try:
-            resp = await request(
+            resp = await _with_optional_aiohttp_proxy(
+                request,
                 hdrs.METH_GET,
                 url,
+                upstream_proxy_url=upstream_proxy_url,
                 headers=request_headers,
                 timeout=timeout,
                 read_until_eof=False,
@@ -1216,6 +1234,7 @@ async def _stream_responses_via_websocket(
     max_event_bytes: int,
     raise_for_status: bool,
     account_id: str | None = None,
+    upstream_proxy_url: str | None = None,
 ) -> AsyncIterator[str]:
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
@@ -1248,15 +1267,27 @@ async def _stream_responses_via_websocket(
         _remaining_total_timeout(effective_total_timeout, request_started_at, time.monotonic())
         or effective_connect_timeout,
     )
-    websocket_cm, websocket = await _open_upstream_websocket(
-        session=client_session,
-        url=websocket_url,
-        headers=headers,
-        connect_timeout_seconds=connect_timeout_seconds,
-        max_msg_size=max_event_bytes,
-        account_id=account_id,
-        hold_half_open_probe=True,
-    )
+    if upstream_proxy_url is not None:
+        websocket_cm, websocket = await _open_upstream_websocket(
+            session=client_session,
+            url=websocket_url,
+            headers=headers,
+            connect_timeout_seconds=connect_timeout_seconds,
+            max_msg_size=max_event_bytes,
+            account_id=account_id,
+            hold_half_open_probe=True,
+            upstream_proxy_url=upstream_proxy_url,
+        )
+    else:
+        websocket_cm, websocket = await _open_upstream_websocket(
+            session=client_session,
+            url=websocket_url,
+            headers=headers,
+            connect_timeout_seconds=connect_timeout_seconds,
+            max_msg_size=max_event_bytes,
+            account_id=account_id,
+            hold_half_open_probe=True,
+        )
 
     try:
         send_json = getattr(websocket, "send_json", None)
@@ -1773,6 +1804,7 @@ async def stream_responses(
     raise_for_status: bool = False,
     session: aiohttp.ClientSession | None = None,
     upstream_stream_transport_override: str | None = None,
+    upstream_proxy_url: str | None = None,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1792,7 +1824,14 @@ async def stream_responses(
     status_code: int | None = None
     error_code: str | None = None
     error_message: str | None = None
-    client_session = session or get_http_client().session
+    managed_socks_session: aiohttp.ClientSession | None = None
+    if upstream_proxy_url and is_socks_upstream_proxy(upstream_proxy_url):
+        managed_socks_session = aiohttp.ClientSession(
+            connector=socks_proxy_connector(upstream_proxy_url),
+            timeout=aiohttp.ClientTimeout(total=None),
+            trust_env=False,
+        )
+    client_session = managed_socks_session or session or get_http_client().session
     payload_dict = payload.to_payload()
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
@@ -1836,8 +1875,10 @@ async def stream_responses(
         nonlocal status_code, error_code, error_message, seen_terminal
 
         async with _service_circuit_breaker_context(
-            client_session.post(
+            _with_optional_aiohttp_proxy(
+                client_session.post,
                 url,
+                upstream_proxy_url=upstream_proxy_url,
                 json=payload_dict,
                 headers=current_headers,
                 timeout=current_timeout,
@@ -1895,6 +1936,7 @@ async def stream_responses(
                     max_event_bytes=settings.max_sse_event_bytes,
                     raise_for_status=raise_for_status,
                     account_id=account_id,
+                    upstream_proxy_url=upstream_proxy_url,
                 ):
                     if status_code is None:
                         status_code = 101
@@ -2054,6 +2096,8 @@ async def stream_responses(
             error_code=error_code,
             error_message=error_message,
         )
+        if managed_socks_session is not None:
+            await managed_socks_session.close()
 
 
 def push_stream_timeout_overrides(
@@ -2152,13 +2196,30 @@ async def compact_responses(
     access_token: str,
     account_id: str | None,
     session: aiohttp.ClientSession | None = None,
+    upstream_proxy_url: str | None = None,
 ) -> CompactResponsePayload:
+    if upstream_proxy_url and is_socks_upstream_proxy(upstream_proxy_url):
+        async with aiohttp.ClientSession(
+            connector=socks_proxy_connector(upstream_proxy_url),
+            timeout=aiohttp.ClientTimeout(total=None),
+            trust_env=False,
+        ) as proxy_session:
+            transport = _CompactCommandTransport(
+                payload=payload,
+                headers=headers,
+                access_token=access_token,
+                account_id=account_id,
+                session=proxy_session,
+                upstream_proxy_url=upstream_proxy_url,
+            )
+            return await transport.execute()
     transport = _CompactCommandTransport(
         payload=payload,
         headers=headers,
         access_token=access_token,
         account_id=account_id,
         session=session or get_http_client().session,
+        upstream_proxy_url=upstream_proxy_url,
     )
     return await transport.execute()
 
@@ -2174,6 +2235,7 @@ class _CompactCommandTransport:
     access_token: str
     account_id: str | None
     session: aiohttp.ClientSession
+    upstream_proxy_url: str | None = None
 
     async def execute(self) -> CompactResponsePayload:
         settings = get_settings()
@@ -2236,8 +2298,10 @@ class _CompactCommandTransport:
         )
         try:
             async with _service_circuit_breaker_context(
-                self.session.post(
+                _with_optional_aiohttp_proxy(
+                    self.session.post,
                     url,
+                    upstream_proxy_url=self.upstream_proxy_url,
                     json=payload_dict,
                     headers=upstream_headers,
                     timeout=timeout,
@@ -2377,6 +2441,7 @@ async def transcribe_audio(
     account_id: str | None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    upstream_proxy_url: str | None = None,
 ) -> dict[str, JsonValue]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2414,7 +2479,14 @@ async def transcribe_audio(
     if prompt is not None:
         form.add_field("prompt", prompt)
 
-    client_session = session or get_http_client().session
+    managed_socks_session: aiohttp.ClientSession | None = None
+    if upstream_proxy_url and is_socks_upstream_proxy(upstream_proxy_url):
+        managed_socks_session = aiohttp.ClientSession(
+            connector=socks_proxy_connector(upstream_proxy_url),
+            timeout=aiohttp.ClientTimeout(total=None),
+            trust_env=False,
+        )
+    client_session = managed_socks_session or session or get_http_client().session
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None
@@ -2437,8 +2509,10 @@ async def transcribe_audio(
     )
     try:
         async with _service_circuit_breaker_context(
-            client_session.post(
+            _with_optional_aiohttp_proxy(
+                client_session.post,
                 url,
+                upstream_proxy_url=upstream_proxy_url,
                 data=form,
                 headers=upstream_headers,
                 timeout=timeout,
@@ -2504,3 +2578,5 @@ async def transcribe_audio(
             error_code=error_code,
             error_message=error_message,
         )
+        if managed_socks_session is not None:
+            await managed_socks_session.close()

@@ -15,12 +15,13 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.clients.upstream_proxy import normalize_upstream_proxy_url, redact_upstream_proxy_url
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import _UNSET, AccountsRepository, _Unset
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
@@ -28,6 +29,7 @@ from app.modules.accounts.schemas import (
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
+    AccountUpstreamProxyStatus,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
@@ -201,3 +203,47 @@ class AccountsService:
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
         return result
+
+    async def update_upstream_proxy(
+        self,
+        account_id: str,
+        *,
+        upstream_proxy_url: str | None | object,
+        upstream_proxy_url_set: bool,
+        upstream_proxy_group: str | None | object,
+        upstream_proxy_group_set: bool,
+    ) -> Account | None:
+        encrypted_url: bytes | None | _Unset = _UNSET
+        if upstream_proxy_url_set:
+            encrypted_url = (
+                self._encryptor.encrypt(normalize_upstream_proxy_url(upstream_proxy_url))
+                if isinstance(upstream_proxy_url, str)
+                else None
+            )
+        group: str | None | _Unset = _UNSET
+        if upstream_proxy_group_set:
+            group = _normalize_proxy_group(upstream_proxy_group) if isinstance(upstream_proxy_group, str) else None
+        return await self._repo.update_upstream_proxy(
+            account_id,
+            upstream_proxy_url_encrypted=encrypted_url,
+            upstream_proxy_group=group,
+        )
+
+    def upstream_proxy_status(self, account: Account) -> AccountUpstreamProxyStatus:
+        proxy_url = None
+        if account.upstream_proxy_url_encrypted is not None:
+            proxy_url = redact_upstream_proxy_url(self._encryptor.decrypt(account.upstream_proxy_url_encrypted))
+        return AccountUpstreamProxyStatus(
+            configured=account.upstream_proxy_url_encrypted is not None or account.upstream_proxy_group is not None,
+            proxy_url=proxy_url,
+            proxy_group=account.upstream_proxy_group,
+        )
+
+
+def _normalize_proxy_group(value: str) -> str:
+    group = value.strip()
+    if not group:
+        raise ValueError("Proxy group name is required")
+    if len(group) > 100:
+        raise ValueError("Proxy group name is too long")
+    return group

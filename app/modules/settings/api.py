@@ -15,6 +15,8 @@ from app.modules.settings.schemas import (
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
     RuntimeConnectAddressResponse,
+    UpstreamProxyGroupResponse,
+    UpstreamProxyGroupUpsertRequest,
 )
 from app.modules.settings.service import DashboardSettingsUpdateData
 
@@ -89,6 +91,8 @@ async def get_settings(
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        upstream_proxy_configured=settings.upstream_proxy_configured,
+        upstream_proxy_url=settings.upstream_proxy_url,
     )
 
 
@@ -151,10 +155,13 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                upstream_proxy_url=payload.upstream_proxy_url,
+                upstream_proxy_url_set="upstream_proxy_url" in payload.model_fields_set,
             )
         )
     except ValueError as exc:
-        raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
+        code = "invalid_totp_config" if "TOTP" in str(exc) else "invalid_upstream_proxy"
+        raise DashboardBadRequestError(str(exc), code=code) from exc
 
     await get_settings_cache().invalidate()
     changed_fields = [
@@ -170,6 +177,7 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "upstream_proxy_configured",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
@@ -192,4 +200,36 @@ async def update_settings(
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,
         api_key_auth_enabled=updated.api_key_auth_enabled,
+        upstream_proxy_configured=updated.upstream_proxy_configured,
+        upstream_proxy_url=updated.upstream_proxy_url,
     )
+
+
+@router.get("/upstream-proxy-groups", response_model=list[UpstreamProxyGroupResponse])
+async def list_upstream_proxy_groups(
+    context: SettingsContext = Depends(get_settings_context),
+) -> list[UpstreamProxyGroupResponse]:
+    groups = await context.service.list_upstream_proxy_groups()
+    return [UpstreamProxyGroupResponse(name=name, proxy_url=proxy_url) for name, proxy_url in groups]
+
+
+@router.put("/upstream-proxy-groups/{name}", response_model=UpstreamProxyGroupResponse)
+async def upsert_upstream_proxy_group(
+    name: str,
+    payload: UpstreamProxyGroupUpsertRequest,
+    context: SettingsContext = Depends(get_settings_context),
+) -> UpstreamProxyGroupResponse:
+    try:
+        group_name, proxy_url = await context.service.upsert_upstream_proxy_group(name, payload.proxy_url)
+    except ValueError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_upstream_proxy") from exc
+    return UpstreamProxyGroupResponse(name=group_name, proxy_url=proxy_url)
+
+
+@router.delete("/upstream-proxy-groups/{name}")
+async def delete_upstream_proxy_group(
+    name: str,
+    context: SettingsContext = Depends(get_settings_context),
+) -> dict[str, str]:
+    deleted = await context.service.delete_upstream_proxy_group(name)
+    return {"status": "deleted" if deleted else "not_found"}

@@ -225,6 +225,7 @@ class DashboardSettings(Base):
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
+    priorities_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     routing_strategy: Mapped[str] = mapped_column(
         String,
         default="capacity_weighted",

@@ -45,6 +45,16 @@ describe("AccountListItem", () => {
     expect(screen.getByText("Gold")).toBeInTheDocument();
   });
 
+  it("hides the priority badge when priorities are disabled", () => {
+    const account = createAccountSummary({
+      priority: "gold",
+    });
+
+    render(<AccountListItem account={account} selected={false} showPriorities={false} onSelect={vi.fn()} />);
+
+    expect(screen.queryByText("Gold")).not.toBeInTheDocument();
+  });
+
   it("omits the 5h row for weekly-only accounts", () => {
     const account = createAccountSummary({
       usage: {

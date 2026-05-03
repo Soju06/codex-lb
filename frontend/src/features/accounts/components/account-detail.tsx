@@ -24,6 +24,7 @@ export type AccountDetailProps = {
   account: AccountSummary | null;
   showAccountId?: boolean;
   busy: boolean;
+  prioritiesEnabled?: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
@@ -35,6 +36,7 @@ export function AccountDetail({
   account,
   showAccountId = false,
   busy,
+  prioritiesEnabled = true,
   onPause,
   onResume,
   onDelete,
@@ -78,41 +80,43 @@ export function AccountDetail({
         ) : null}
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <StatusBadge status={normalizeStatus(account.status)} />
-          <AccountPriorityBadge priority={account.priority} />
+          {prioritiesEnabled ? <AccountPriorityBadge priority={account.priority} /> : null}
         </div>
       </div>
 
-      <div className="rounded-lg border bg-muted/30 p-4">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Priority</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Higher priority accounts are preferred when multiple eligible accounts are available.
-            </p>
+      {prioritiesEnabled ? (
+        <div className="rounded-lg border bg-muted/30 p-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Priority</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Higher priority accounts are preferred when multiple eligible accounts are available.
+              </p>
+            </div>
+            <Select
+              value={account.priority}
+              onValueChange={(value) => {
+                const nextPriority = value as AccountPriority;
+                if (nextPriority !== account.priority) {
+                  void onPriorityChange(account.accountId, nextPriority);
+                }
+              }}
+              disabled={busy}
+            >
+              <SelectTrigger className="h-8 w-36 text-xs" disabled={busy}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {ACCOUNT_PRIORITY_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          <Select
-            value={account.priority}
-            onValueChange={(value) => {
-              const nextPriority = value as AccountPriority;
-              if (nextPriority !== account.priority) {
-                void onPriorityChange(account.accountId, nextPriority);
-              }
-            }}
-            disabled={busy}
-          >
-            <SelectTrigger className="h-8 w-36 text-xs" disabled={busy}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="end">
-              {ACCOUNT_PRIORITY_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
         </div>
-      </div>
+      ) : null}
 
       <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />

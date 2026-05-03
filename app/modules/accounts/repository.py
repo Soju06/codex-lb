@@ -8,7 +8,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.account_priority import account_priority_rank, coerce_account_priority
+from app.core.account_priority import coerce_account_priority
 from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
 
 _SETTINGS_ROW_ID = 1
@@ -41,16 +41,8 @@ class AccountsRepository:
         return await self._session.get(Account, account_id)
 
     async def list_accounts(self) -> list[Account]:
-        result = await self._session.execute(select(Account).order_by(Account.email))
-        accounts = list(result.scalars().all())
-        return sorted(
-            accounts,
-            key=lambda account: (
-                account_priority_rank(getattr(account, "priority", None)),
-                account.email.lower(),
-                account.id,
-            ),
-        )
+        result = await self._session.execute(select(Account).order_by(func.lower(Account.email), Account.id))
+        return list(result.scalars().all())
 
     async def list_request_usage_summary_by_account(
         self,

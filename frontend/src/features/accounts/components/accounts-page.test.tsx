@@ -78,4 +78,25 @@ describe("resolveSelectedAccountId", () => {
 
     expect(resolveSelectedAccountId(accounts, "both", "acc-low")).toBe("acc-low");
   });
+
+  it("falls back to reset ordering when priorities are disabled", () => {
+    const accounts = [
+      createAccountSummary({
+        accountId: "acc-slow",
+        email: "slow@example.com",
+        priority: "gold",
+        resetAtPrimary: "2026-01-01T12:10:00.000Z",
+        resetAtSecondary: "2026-01-01T12:10:00.000Z",
+      }),
+      createAccountSummary({
+        accountId: "acc-fast",
+        email: "fast@example.com",
+        priority: "bronze",
+        resetAtPrimary: "2026-01-01T12:05:00.000Z",
+        resetAtSecondary: "2026-01-01T12:05:00.000Z",
+      }),
+    ];
+
+    expect(resolveSelectedAccountId(accounts, "both", null, false)).toBe("acc-fast");
+  });
 });

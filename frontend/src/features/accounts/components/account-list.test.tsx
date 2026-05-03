@@ -235,6 +235,77 @@ describe("AccountList", () => {
     ]);
   });
 
+  it("ignores priority ordering when priorities are disabled", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-bronze",
+            email: "bronze@example.com",
+            displayName: "Priority Bronze",
+            planType: "plus",
+            status: "active",
+            priority: "bronze",
+            usage: {
+              primaryRemainingPercent: 95,
+              secondaryRemainingPercent: 95,
+            },
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            resetAtSecondary: "2026-01-01T12:10:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-silver",
+            email: "silver@example.com",
+            displayName: "Priority Silver",
+            planType: "plus",
+            status: "active",
+            priority: "silver",
+            usage: {
+              primaryRemainingPercent: 50,
+              secondaryRemainingPercent: 50,
+            },
+            resetAtPrimary: "2026-01-01T12:05:00.000Z",
+            resetAtSecondary: "2026-01-01T12:05:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-gold",
+            email: "gold@example.com",
+            displayName: "Priority Gold",
+            planType: "plus",
+            status: "active",
+            priority: "gold",
+            usage: {
+              primaryRemainingPercent: 10,
+              secondaryRemainingPercent: 10,
+            },
+            resetAtPrimary: "2026-01-01T12:20:00.000Z",
+            resetAtSecondary: "2026-01-01T12:20:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        showPriorities={false}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/Priority (Bronze|Silver|Gold)/).map((el) => el.textContent)).toEqual([
+      "Priority Silver",
+      "Priority Bronze",
+      "Priority Gold",
+    ]);
+  });
+
   it("shows empty state when no items match filter", async () => {
     const user = userEvent.setup();
 

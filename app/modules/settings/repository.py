@@ -23,6 +23,7 @@ class SettingsRepository:
             sticky_threads_enabled=True,
             upstream_stream_transport="default",
             prefer_earlier_reset_accounts=True,
+            priorities_enabled=False,
             routing_strategy="capacity_weighted",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=43200,
@@ -53,6 +54,7 @@ class SettingsRepository:
         sticky_threads_enabled: bool | None = None,
         upstream_stream_transport: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
+        priorities_enabled: bool | None = None,
         routing_strategy: str | None = None,
         openai_cache_affinity_max_age_seconds: int | None = None,
         dashboard_session_ttl_seconds: int | None = None,
@@ -70,6 +72,8 @@ class SettingsRepository:
             settings.upstream_stream_transport = upstream_stream_transport
         if prefer_earlier_reset_accounts is not None:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
+        if priorities_enabled is not None:
+            settings.priorities_enabled = priorities_enabled
         if routing_strategy is not None:
             settings.routing_strategy = routing_strategy
         if openai_cache_affinity_max_age_seconds is not None:

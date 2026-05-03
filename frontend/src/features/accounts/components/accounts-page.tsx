@@ -14,6 +14,7 @@ import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { resolveSelectedAccountId } from "@/features/accounts/selection";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
+import { useSettings } from "@/features/settings/hooks/use-settings";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -33,6 +34,8 @@ export function AccountsPage() {
   } = useAccounts();
   const oauth = useOauth();
   const quotaDisplay = useAccountQuotaDisplayStore((state) => state.quotaDisplay);
+  const { settingsQuery } = useSettings();
+  const prioritiesEnabled = settingsQuery.data?.prioritiesEnabled ?? false;
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
@@ -40,8 +43,8 @@ export function AccountsPage() {
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const sortedAccounts = useMemo(
-    () => sortAccountsForDisplay(accounts, quotaDisplay),
-    [accounts, quotaDisplay],
+    () => sortAccountsForDisplay(accounts, quotaDisplay, prioritiesEnabled),
+    [accounts, prioritiesEnabled, quotaDisplay],
   );
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
   const selectedAccountId = searchParams.get("selected");
@@ -53,8 +56,8 @@ export function AccountsPage() {
   }, [searchParams, setSearchParams]);
 
   const resolvedSelectedAccountId = useMemo(
-    () => resolveSelectedAccountId(accounts, quotaDisplay, selectedAccountId),
-    [accounts, quotaDisplay, selectedAccountId],
+    () => resolveSelectedAccountId(accounts, quotaDisplay, selectedAccountId, prioritiesEnabled),
+    [accounts, prioritiesEnabled, quotaDisplay, selectedAccountId],
   );
 
   useEffect(() => {
@@ -83,8 +86,7 @@ export function AccountsPage() {
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
-    deleteMutation.isPending ||
-    updatePriorityMutation.isPending;
+    deleteMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
@@ -113,6 +115,7 @@ export function AccountsPage() {
             <AccountList
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
+              showPriorities={prioritiesEnabled}
               onSelect={handleSelectAccount}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
@@ -123,6 +126,7 @@ export function AccountsPage() {
             account={selectedAccount}
             showAccountId={selectedAccount ? duplicateAccountIds.has(selectedAccount.accountId) : false}
             busy={mutationBusy}
+            prioritiesEnabled={prioritiesEnabled}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}

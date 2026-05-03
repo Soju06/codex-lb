@@ -8088,6 +8088,7 @@ class ProxyService:
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                priorities_enabled = getattr(settings, "priorities_enabled", False)
                 if (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
@@ -8099,6 +8100,7 @@ class ProxyService:
                         reallocate_sticky=reallocate_sticky,
                         sticky_max_age_seconds=sticky_max_age_seconds,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                        priorities_enabled=priorities_enabled,
                         routing_strategy=routing_strategy,
                         model=model,
                         additional_limit_name=additional_limit_name,
@@ -8120,6 +8122,7 @@ class ProxyService:
                     reallocate_sticky=reallocate_sticky,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                    priorities_enabled=priorities_enabled,
                     routing_strategy=routing_strategy,
                     model=model,
                     additional_limit_name=additional_limit_name,

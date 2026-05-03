@@ -1,4 +1,4 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, patch, post } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
@@ -13,7 +13,9 @@ import {
   OauthStartResponseSchema,
   OauthStatusResponseSchema,
   RuntimeConnectAddressResponseSchema,
+  AccountPrioritySchema,
 } from "@/features/accounts/schemas";
+import type { AccountPriority } from "@/features/accounts/priority";
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
@@ -55,6 +57,18 @@ export function deleteAccount(accountId: string) {
   return del(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
     AccountActionResponseSchema,
+  );
+}
+
+export function updateAccountPriority(accountId: string, priority: AccountPriority) {
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/priority`,
+    AccountActionResponseSchema,
+    {
+      body: {
+        priority: AccountPrioritySchema.parse(priority),
+      },
+    },
   );
 }
 

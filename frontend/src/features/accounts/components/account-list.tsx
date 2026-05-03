@@ -13,6 +13,8 @@ import {
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
 
@@ -21,6 +23,7 @@ const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota
 export type AccountListProps = {
   accounts: AccountSummary[];
   selectedAccountId: string | null;
+  showPriorities?: boolean;
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
   onOpenOauth: () => void;
@@ -29,6 +32,7 @@ export type AccountListProps = {
 export function AccountList({
   accounts,
   selectedAccountId,
+  showPriorities = true,
   onSelect,
   onOpenImport,
   onOpenOauth,
@@ -36,23 +40,25 @@ export function AccountList({
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [helpOpen, setHelpOpen] = useState(false);
+  const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return accounts.filter((account) => {
-      if (statusFilter !== "all" && account.status !== statusFilter) {
-        return false;
-      }
-      if (!needle) {
-        return true;
-      }
-      return (
-        account.email.toLowerCase().includes(needle) ||
-        account.accountId.toLowerCase().includes(needle) ||
-        account.planType.toLowerCase().includes(needle)
-      );
-    });
-  }, [accounts, search, statusFilter]);
+    return sortAccountsForDisplay(accounts, quotaDisplay, showPriorities)
+      .filter((account) => {
+        if (statusFilter !== "all" && account.status !== statusFilter) {
+          return false;
+        }
+        if (!needle) {
+          return true;
+        }
+        return (
+          account.email.toLowerCase().includes(needle) ||
+          account.accountId.toLowerCase().includes(needle) ||
+          account.planType.toLowerCase().includes(needle)
+        );
+      })
+  }, [accounts, quotaDisplay, search, statusFilter, showPriorities]);
 
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 
@@ -121,6 +127,7 @@ export function AccountList({
               account={account}
               selected={account.accountId === selectedAccountId}
               showAccountId={duplicateAccountIds.has(account.accountId)}
+              showPriorities={showPriorities}
               onSelect={onSelect}
             />
           ))

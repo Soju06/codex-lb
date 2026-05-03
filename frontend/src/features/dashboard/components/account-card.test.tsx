@@ -21,6 +21,15 @@ describe("AccountCard", () => {
     expect(screen.getByText("Weekly")).toBeInTheDocument();
   });
 
+  it("hides the priority badge when priorities are disabled", () => {
+    const account = createAccountSummary();
+    render(<AccountCard account={account} showPriorities={false} />);
+
+    expect(screen.queryByText("Gold")).not.toBeInTheDocument();
+    expect(screen.queryByText("Silver")).not.toBeInTheDocument();
+    expect(screen.queryByText("Bronze")).not.toBeInTheDocument();
+  });
+
   it("hides 5h quota bar for weekly-only accounts", () => {
     const account = createAccountSummary({
       planType: "free",

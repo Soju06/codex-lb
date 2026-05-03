@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.core import usage as usage_core
+from app.core.account_priority import account_priority_rank
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
@@ -46,6 +48,16 @@ class DashboardService:
         accounts = await self._repo.list_accounts()
         primary_usage = await self._repo.latest_usage_by_account("primary")
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
+        settings = await get_settings_cache().get()
+        if getattr(settings, "priorities_enabled", False):
+            accounts = sorted(
+                accounts,
+                key=lambda account: (
+                    account_priority_rank(account.priority),
+                    account.email.lower(),
+                    account.id,
+                ),
+            )
 
         account_summaries = build_account_summaries(
             accounts=accounts,

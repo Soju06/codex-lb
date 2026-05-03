@@ -15,6 +15,7 @@ import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
+import { useSettings } from "@/features/settings/hooks/use-settings";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   parseOverviewTimeframe,
@@ -37,8 +38,10 @@ export function DashboardPage() {
     [searchParams],
   );
   const dashboardQuery = useDashboard(overviewTimeframe);
+  const { settingsQuery } = useSettings();
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
   const { resumeMutation } = useAccountMutations();
+  const prioritiesEnabled = settingsQuery.data?.prioritiesEnabled ?? false;
 
   const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
 
@@ -187,7 +190,11 @@ export function DashboardPage() {
               <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
               <div className="h-px flex-1 bg-border" />
             </div>
-            <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+            <AccountCards
+              accounts={overview?.accounts ?? []}
+              showPriorities={prioritiesEnabled}
+              onAction={handleAccountAction}
+            />
           </section>
 
           <section className="space-y-4">

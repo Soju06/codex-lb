@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useMemo } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -11,6 +11,10 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { resolveSelectedAccountId } from "@/features/accounts/selection";
+import { sortAccountsForDisplay } from "@/features/accounts/sorting";
+import { useSettings } from "@/features/settings/hooks/use-settings";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -26,14 +30,22 @@ export function AccountsPage() {
     pauseMutation,
     resumeMutation,
     deleteMutation,
+    updatePriorityMutation,
   } = useAccounts();
   const oauth = useOauth();
+  const quotaDisplay = useAccountQuotaDisplayStore((state) => state.quotaDisplay);
+  const { settingsQuery } = useSettings();
+  const prioritiesEnabled = settingsQuery.data?.prioritiesEnabled ?? false;
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
+  const sortedAccounts = useMemo(
+    () => sortAccountsForDisplay(accounts, quotaDisplay, prioritiesEnabled),
+    [accounts, prioritiesEnabled, quotaDisplay],
+  );
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
   const selectedAccountId = searchParams.get("selected");
 
@@ -43,15 +55,24 @@ export function AccountsPage() {
     setSearchParams(nextSearchParams);
   }, [searchParams, setSearchParams]);
 
-  const resolvedSelectedAccountId = useMemo(() => {
-    if (accounts.length === 0) {
-      return null;
+  const resolvedSelectedAccountId = useMemo(
+    () => resolveSelectedAccountId(accounts, quotaDisplay, selectedAccountId, prioritiesEnabled),
+    [accounts, prioritiesEnabled, quotaDisplay, selectedAccountId],
+  );
+
+  useEffect(() => {
+    if (resolvedSelectedAccountId === null) {
+      return;
     }
-    if (selectedAccountId && accounts.some((account) => account.accountId === selectedAccountId)) {
-      return selectedAccountId;
+    if (selectedAccountId === resolvedSelectedAccountId) {
+      return;
     }
-    return accounts[0].accountId;
-  }, [accounts, selectedAccountId]);
+    if (sortedAccounts.some((account) => account.accountId === resolvedSelectedAccountId)) {
+      const nextSearchParams = new URLSearchParams(searchParams);
+      nextSearchParams.set("selected", resolvedSelectedAccountId);
+      setSearchParams(nextSearchParams, { replace: true });
+    }
+  }, [resolvedSelectedAccountId, selectedAccountId, searchParams, setSearchParams, sortedAccounts]);
 
   const selectedAccount = useMemo(
     () =>
@@ -71,7 +92,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
-    getErrorMessageOrNull(deleteMutation.error);
+    getErrorMessageOrNull(deleteMutation.error) ||
+    getErrorMessageOrNull(updatePriorityMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -93,6 +115,7 @@ export function AccountsPage() {
             <AccountList
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
+              showPriorities={prioritiesEnabled}
               onSelect={handleSelectAccount}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
@@ -103,10 +126,14 @@ export function AccountsPage() {
             account={selectedAccount}
             showAccountId={selectedAccount ? duplicateAccountIds.has(selectedAccount.accountId) : false}
             busy={mutationBusy}
+            prioritiesEnabled={prioritiesEnabled}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
+            onPriorityChange={async (accountId, priority) => {
+              await updatePriorityMutation.mutateAsync({ accountId, priority });
+            }}
           />
         </div>
       )}

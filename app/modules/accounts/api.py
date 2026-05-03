@@ -11,6 +11,7 @@ from app.modules.accounts.schemas import (
     AccountDeleteResponse,
     AccountImportResponse,
     AccountPauseResponse,
+    AccountPriorityUpdateRequest,
     AccountReactivateResponse,
     AccountsResponse,
     AccountTrendsResponse,
@@ -62,6 +63,18 @@ async def import_account(
         raise DashboardBadRequestError("Invalid auth.json payload", code="invalid_auth_json") from exc
     except AccountIdentityConflictError as exc:
         raise DashboardConflictError(str(exc), code="duplicate_identity_conflict") from exc
+
+
+@router.patch("/{account_id}/priority", response_model=AccountPauseResponse)
+async def update_account_priority(
+    account_id: str,
+    payload: AccountPriorityUpdateRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountPauseResponse:
+    success = await context.service.update_account_priority(account_id, payload.priority)
+    if not success:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountPauseResponse(status="updated")
 
 
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)

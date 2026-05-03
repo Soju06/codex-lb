@@ -103,6 +103,61 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_uses_priority_order_only_when_enabled(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_alpha", "alpha@example.com"))
+        await accounts_repo.upsert(_make_account("acc_zeta", "zeta@example.com"))
+        await usage_repo.add_entry(
+            "acc_alpha",
+            20.0,
+            window="primary",
+            recorded_at=now - timedelta(minutes=5),
+        )
+        await usage_repo.add_entry(
+            "acc_zeta",
+            40.0,
+            window="primary",
+            recorded_at=now - timedelta(minutes=2),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+    assert [account["email"] for account in payload["accounts"][:2]] == [
+        "alpha@example.com",
+        "zeta@example.com",
+    ]
+
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "prioritiesEnabled": True,
+        },
+    )
+    assert settings_response.status_code == 200
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.update_priority("acc_alpha", "bronze")
+        await accounts_repo.update_priority("acc_zeta", "gold")
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+    assert [account["email"] for account in payload["accounts"][:2]] == [
+        "zeta@example.com",
+        "alpha@example.com",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 

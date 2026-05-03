@@ -8,7 +8,9 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updateAccountPriority,
 } from "@/features/accounts/api";
+import type { AccountPriority } from "@/features/accounts/priority";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
@@ -67,7 +69,19 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  const updatePriorityMutation = useMutation({
+    mutationFn: ({ accountId, priority }: { accountId: string; priority: AccountPriority }) =>
+      updateAccountPriority(accountId, priority),
+    onSuccess: () => {
+      toast.success("Account priority updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Priority update failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, updatePriorityMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

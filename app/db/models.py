@@ -25,6 +25,8 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from app.core.account_priority import AccountPriority
+
 
 class Base(DeclarativeBase):
     pass
@@ -71,6 +73,17 @@ class Account(Base):
             values_callable=_enum_values,
         ),
         default=AccountStatus.ACTIVE,
+        nullable=False,
+    )
+    priority: Mapped[AccountPriority] = mapped_column(
+        SqlEnum(
+            AccountPriority,
+            name="account_priority",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        default=AccountPriority.SILVER,
+        server_default=text("'silver'"),
         nullable=False,
     )
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -212,6 +225,7 @@ class DashboardSettings(Base):
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
+    priorities_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     routing_strategy: Mapped[str] = mapped_column(
         String,
         default="capacity_weighted",

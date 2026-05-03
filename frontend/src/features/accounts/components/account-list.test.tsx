@@ -1,10 +1,20 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountList } from "@/features/accounts/components/account-list";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 
 describe("AccountList", () => {
+  beforeEach(() => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-01-01T12:00:00.000Z").getTime());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders items and filters by search", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
@@ -18,6 +28,7 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
           {
@@ -26,6 +37,7 @@ describe("AccountList", () => {
             displayName: "Secondary",
             planType: "pro",
             status: "paused",
+            priority: "silver",
             additionalQuotas: [],
           },
         ]}
@@ -47,6 +59,253 @@ describe("AccountList", () => {
     expect(onSelect).toHaveBeenCalledWith("acc-2");
   });
 
+  it("sorts accounts by the rows actually rendered", () => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
+
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-hidden-early",
+            email: "hidden-early@example.com",
+            displayName: "Hidden Early",
+            planType: "plus",
+            status: "active",
+            priority: "silver",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: 18,
+            },
+            resetAtPrimary: "2026-01-01T12:05:00.000Z",
+            resetAtSecondary: "2026-01-01T13:00:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-visible-early",
+            email: "visible-early@example.com",
+            displayName: "Visible Early",
+            planType: "plus",
+            status: "active",
+            priority: "silver",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: 73,
+            },
+            resetAtPrimary: "2026-01-01T12:30:00.000Z",
+            resetAtSecondary: "2026-01-01T12:10:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Hidden Early|Visible Early)$/).map((el) => el.textContent)).toEqual([
+      "Visible Early",
+      "Hidden Early",
+    ]);
+  });
+
+  it("ignores elapsed reset timestamps when sorting", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-stale",
+            email: "stale@example.com",
+            displayName: "Stale",
+            planType: "plus",
+            status: "active",
+            priority: "silver",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: 18,
+            },
+            resetAtPrimary: "2026-01-01T11:30:00.000Z",
+            resetAtSecondary: "2026-01-01T11:45:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-fresh",
+            email: "fresh@example.com",
+            displayName: "Fresh",
+            planType: "plus",
+            status: "active",
+            priority: "silver",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: 73,
+            },
+            resetAtPrimary: "2026-01-01T12:30:00.000Z",
+            resetAtSecondary: "2026-01-01T12:20:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Fresh|Stale)$/).map((el) => el.textContent)).toEqual([
+      "Fresh",
+      "Stale",
+    ]);
+  });
+
+  it("sorts gold ahead of silver ahead of bronze", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-bronze",
+            email: "bronze@example.com",
+            displayName: "Priority Bronze",
+            planType: "plus",
+            status: "active",
+            priority: "bronze",
+            usage: {
+              primaryRemainingPercent: 95,
+              secondaryRemainingPercent: 95,
+            },
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            resetAtSecondary: "2026-01-01T12:10:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-silver",
+            email: "silver@example.com",
+            displayName: "Priority Silver",
+            planType: "plus",
+            status: "active",
+            priority: "silver",
+            usage: {
+              primaryRemainingPercent: 50,
+              secondaryRemainingPercent: 50,
+            },
+            resetAtPrimary: "2026-01-01T12:05:00.000Z",
+            resetAtSecondary: "2026-01-01T12:05:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-gold",
+            email: "gold@example.com",
+            displayName: "Priority Gold",
+            planType: "plus",
+            status: "active",
+            priority: "gold",
+            usage: {
+              primaryRemainingPercent: 10,
+              secondaryRemainingPercent: 10,
+            },
+            resetAtPrimary: "2026-01-01T12:20:00.000Z",
+            resetAtSecondary: "2026-01-01T12:20:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/Priority (Bronze|Silver|Gold)/).map((el) => el.textContent)).toEqual([
+      "Priority Gold",
+      "Priority Silver",
+      "Priority Bronze",
+    ]);
+  });
+
+  it("ignores priority ordering when priorities are disabled", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-bronze",
+            email: "bronze@example.com",
+            displayName: "Priority Bronze",
+            planType: "plus",
+            status: "active",
+            priority: "bronze",
+            usage: {
+              primaryRemainingPercent: 95,
+              secondaryRemainingPercent: 95,
+            },
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            resetAtSecondary: "2026-01-01T12:10:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-silver",
+            email: "silver@example.com",
+            displayName: "Priority Silver",
+            planType: "plus",
+            status: "active",
+            priority: "silver",
+            usage: {
+              primaryRemainingPercent: 50,
+              secondaryRemainingPercent: 50,
+            },
+            resetAtPrimary: "2026-01-01T12:05:00.000Z",
+            resetAtSecondary: "2026-01-01T12:05:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-gold",
+            email: "gold@example.com",
+            displayName: "Priority Gold",
+            planType: "plus",
+            status: "active",
+            priority: "gold",
+            usage: {
+              primaryRemainingPercent: 10,
+              secondaryRemainingPercent: 10,
+            },
+            resetAtPrimary: "2026-01-01T12:20:00.000Z",
+            resetAtSecondary: "2026-01-01T12:20:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        showPriorities={false}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/Priority (Bronze|Silver|Gold)/).map((el) => el.textContent)).toEqual([
+      "Priority Silver",
+      "Priority Bronze",
+      "Priority Gold",
+    ]);
+  });
+
   it("shows empty state when no items match filter", async () => {
     const user = userEvent.setup();
 
@@ -59,6 +318,7 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
         ]}
@@ -83,6 +343,7 @@ describe("AccountList", () => {
             displayName: "Duplicate A",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
           {
@@ -91,6 +352,7 @@ describe("AccountList", () => {
             displayName: "Duplicate B",
             planType: "plus",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
           {
@@ -99,6 +361,7 @@ describe("AccountList", () => {
             displayName: "Unique",
             planType: "pro",
             status: "active",
+            priority: "silver",
             additionalQuotas: [],
           },
         ]}

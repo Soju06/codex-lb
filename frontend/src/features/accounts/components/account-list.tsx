@@ -13,15 +13,29 @@ import {
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { formatSlug, parseDate } from "@/utils/formatters";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "deactivated"];
 
-function accountResetTimestamp(account: AccountSummary): number {
-  const resets = [account.resetAtPrimary, account.resetAtSecondary]
-    .map((resetAt) => parseDate(resetAt)?.getTime() ?? Number.POSITIVE_INFINITY);
-  return Math.min(...resets);
+function visibleQuotaResetTimestamps(
+  account: AccountSummary,
+  quotaDisplay: AccountQuotaDisplayPreference,
+): number[] {
+  const now = Date.now();
+  const showPrimary = account.windowMinutesPrimary != null && (quotaDisplay !== "weekly" || account.windowMinutesSecondary == null);
+  const showSecondary = account.windowMinutesSecondary != null && (quotaDisplay !== "5h" || account.windowMinutesPrimary == null);
+
+  return [
+    showPrimary ? parseDate(account.resetAtPrimary)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY,
+    showSecondary ? parseDate(account.resetAtSecondary)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY,
+  ].filter((resetAt) => resetAt > now);
+}
+
+function accountResetTimestamp(account: AccountSummary, quotaDisplay: AccountQuotaDisplayPreference): number {
+  const resets = visibleQuotaResetTimestamps(account, quotaDisplay);
+  return resets.length > 0 ? Math.min(...resets) : Number.POSITIVE_INFINITY;
 }
 
 function accountSortLabel(account: AccountSummary): string {
@@ -46,6 +60,7 @@ export function AccountList({
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [helpOpen, setHelpOpen] = useState(false);
+  const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -65,8 +80,8 @@ export function AccountList({
       })
       .slice()
       .sort((left, right) => {
-        const leftReset = accountResetTimestamp(left);
-        const rightReset = accountResetTimestamp(right);
+        const leftReset = accountResetTimestamp(left, quotaDisplay);
+        const rightReset = accountResetTimestamp(right, quotaDisplay);
         if (leftReset !== rightReset) {
           return leftReset - rightReset;
         }
@@ -76,7 +91,7 @@ export function AccountList({
         }
         return left.accountId.localeCompare(right.accountId);
       });
-  }, [accounts, search, statusFilter]);
+  }, [accounts, quotaDisplay, search, statusFilter]);
 
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 

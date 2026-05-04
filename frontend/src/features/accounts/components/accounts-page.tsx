@@ -86,7 +86,8 @@ export function AccountsPage() {
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
-    deleteMutation.isPending;
+    deleteMutation.isPending ||
+    updatePriorityMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Route } from "lucide-react";
+import { CircleHelp, Route } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
@@ -28,10 +29,11 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
 
-  const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
+const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const priorityOption = settings.prioritiesEnabled ? "enabled" : "disabled";
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -119,17 +121,42 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
           </div>
 
           <div className="flex items-center justify-between gap-4 p-3">
-            <div>
-              <p className="text-sm font-medium">Priorities</p>
-              <p className="text-xs text-muted-foreground">
-                Show gold, silver, and bronze medals and use them for account selection.
-              </p>
+            <div className="flex items-center gap-2">
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-8 shrink-0 rounded-full"
+                      aria-label="Priorities help"
+                    >
+                      <CircleHelp className="size-4" aria-hidden="true" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="left" className="max-w-64 text-balance">
+                    Show gold, silver, and bronze medals and use them for account selection.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <div>
+                <p className="text-sm font-medium">Priorities</p>
+                <p className="text-xs text-muted-foreground">Use priority-aware account selection.</p>
+              </div>
             </div>
-            <Switch
-              checked={settings.prioritiesEnabled}
-              disabled={busy}
-              onCheckedChange={(checked) => save({ prioritiesEnabled: checked })}
-            />
+            <Select
+              value={priorityOption}
+              onValueChange={(value) => save({ prioritiesEnabled: value === "enabled" })}
+            >
+              <SelectTrigger className="h-8 w-32 text-xs" disabled={busy} aria-label="Priorities">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="enabled">Enabled</SelectItem>
+                <SelectItem value="disabled">Disabled</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">

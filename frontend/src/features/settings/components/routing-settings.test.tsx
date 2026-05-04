@@ -19,6 +19,23 @@ const BASE_SETTINGS: DashboardSettings = {
   apiKeyAuthEnabled: true,
 };
 
+if (!HTMLElement.prototype.hasOwnProperty("hasPointerCapture")) {
+  Object.defineProperties(HTMLElement.prototype, {
+    hasPointerCapture: {
+      value: () => false,
+    },
+    setPointerCapture: {
+      value: () => undefined,
+    },
+    releasePointerCapture: {
+      value: () => undefined,
+    },
+    scrollIntoView: {
+      value: () => undefined,
+    },
+  });
+}
+
 describe("RoutingSettings", () => {
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
     const user = userEvent.setup();
@@ -99,18 +116,19 @@ describe("RoutingSettings", () => {
     });
   });
 
-  it("saves the priorities toggle", async () => {
+  it("shows the priorities tooltip and saves the dropdown", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
 
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
-    const switches = screen.getAllByRole("switch");
-    const prioritiesSwitch = switches[2]!;
+    expect(screen.getByRole("button", { name: "Priorities help" })).toBeInTheDocument();
 
-    expect(prioritiesSwitch).toHaveAttribute("aria-checked", "true");
+    const prioritiesSelect = screen.getByRole("combobox", { name: "Priorities" });
+    expect(prioritiesSelect).toHaveTextContent("Enabled");
 
-    await user.click(prioritiesSwitch);
+    await user.click(prioritiesSelect);
+    await user.click(screen.getByRole("option", { name: "Disabled" }));
 
     expect(onSave).toHaveBeenCalledWith({
       stickyThreadsEnabled: false,

@@ -128,17 +128,6 @@ const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Select
-                value={priorityOption}
-                onValueChange={() => save({ prioritiesEnabled: true })}
-              >
-                <SelectTrigger className="h-8 w-32 text-xs" disabled={busy} aria-label="Priorities">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent align="end">
-                  <SelectItem value="priorities">Priorities</SelectItem>
-                </SelectContent>
-              </Select>
               <TooltipProvider delayDuration={150}>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -157,6 +146,17 @@ const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
+              <Select
+                value={priorityOption}
+                onValueChange={() => save({ prioritiesEnabled: true })}
+              >
+                <SelectTrigger className="h-8 w-32 text-xs" disabled={busy} aria-label="Priorities">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  <SelectItem value="priorities">Priorities</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
 

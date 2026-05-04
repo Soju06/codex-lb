@@ -122,6 +122,24 @@ const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
 
           <div className="flex items-center justify-between gap-4 p-3">
             <div className="flex items-center gap-2">
+              <div>
+                <p className="text-sm font-medium">Priorities</p>
+                <p className="text-xs text-muted-foreground">Use priority-aware account selection.</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Select
+                value={priorityOption}
+                onValueChange={(value) => save({ prioritiesEnabled: value === "enabled" })}
+              >
+                <SelectTrigger className="h-8 w-32 text-xs" disabled={busy} aria-label="Priorities">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  <SelectItem value="enabled">Enabled</SelectItem>
+                  <SelectItem value="disabled">Disabled</SelectItem>
+                </SelectContent>
+              </Select>
               <TooltipProvider delayDuration={150}>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -140,23 +158,7 @@ const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
-              <div>
-                <p className="text-sm font-medium">Priorities</p>
-                <p className="text-xs text-muted-foreground">Use priority-aware account selection.</p>
-              </div>
             </div>
-            <Select
-              value={priorityOption}
-              onValueChange={(value) => save({ prioritiesEnabled: value === "enabled" })}
-            >
-              <SelectTrigger className="h-8 w-32 text-xs" disabled={busy} aria-label="Priorities">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="end">
-                <SelectItem value="enabled">Enabled</SelectItem>
-                <SelectItem value="disabled">Disabled</SelectItem>
-              </SelectContent>
-            </Select>
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">

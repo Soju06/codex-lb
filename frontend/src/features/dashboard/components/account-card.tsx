@@ -106,7 +106,7 @@ export function AccountCard({ account, showAccountId = false, showPriorities = t
             </p>
           ) : null}
         </div>
-        <div className="flex flex-col items-end gap-1">
+        <div className="flex items-center gap-1.5">
           <StatusBadge status={status} />
           {showPriorities ? <AccountPriorityBadge priority={account.priority} /> : null}
         </div>

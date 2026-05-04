@@ -312,7 +312,6 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.id_token_encrypted = source.id_token_encrypted
     target.last_refresh = source.last_refresh
     target.status = source.status
-    target.priority = source.priority
     target.deactivation_reason = source.deactivation_reason
     target.reset_at = source.reset_at
     target.blocked_at = source.blocked_at

@@ -42,9 +42,24 @@ function Invoke-Ssh {
         [switch]$AllowFailure
     )
 
-    $result = & ssh $DevHost $Command 2>&1
-    $exitCode = $LASTEXITCODE
-    $output = ($result | Out-String).TrimEnd()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $stdout = & ssh $DevHost $Command 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+        $stderr = Get-Content -Raw -Path $stderrPath
+    }
+    finally {
+        Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+    }
+
+    $outputParts = @()
+    if ($stdout) {
+        $outputParts += ($stdout | Out-String).TrimEnd()
+    }
+    if ($stderr) {
+        $outputParts += $stderr.TrimEnd()
+    }
+    $output = ($outputParts -join [Environment]::NewLine).Trim()
 
     if (-not $AllowFailure -and $exitCode -ne 0) {
         throw "ssh $DevHost `"$Command`" failed with exit code $exitCode.`n$output"

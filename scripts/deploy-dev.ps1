@@ -42,15 +42,21 @@ function Invoke-Ssh {
         [switch]$AllowFailure
     )
 
-    $stderrPath = [System.IO.Path]::GetTempFileName()
-    try {
-        $stdout = & ssh $DevHost $Command 2> $stderrPath
-        $exitCode = $LASTEXITCODE
-        $stderr = Get-Content -Raw -Path $stderrPath
-    }
-    finally {
-        Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue
-    }
+    $escapedCommand = $Command.Replace('"', '\"')
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "ssh"
+    $startInfo.Arguments = "$DevHost `"$escapedCommand`""
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $process.Start() | Out-Null
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
 
     $outputParts = @()
     if ($stdout) {

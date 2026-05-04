@@ -270,7 +270,7 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
     .filter((account) => account.resetAtMs > nowMs)
     .map((account) => ({
       resetAtMs: account.resetAtMs,
-      topUpCredits: Math.max(0, account.fullCredits - account.remainingCredits),
+      topUpCredits: account.fullCredits,
       recurringTopUpCredits: account.fullCredits,
       windowMs: account.windowMs,
     }));
@@ -296,7 +296,7 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
     const nextEventAtMs = Math.min(event.resetAtMs, horizonMs);
     const intervalMs = nextEventAtMs - cursorMs;
     const intervalBurnCredits = burnRateCreditsPerMs * intervalMs;
-    if (intervalBurnCredits >= balanceCredits) {
+    if (intervalBurnCredits > balanceCredits) {
       const projectedShortfallCredits = intervalBurnCredits - balanceCredits;
       return {
         burnRateCreditsPerMs,

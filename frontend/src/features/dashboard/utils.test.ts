@@ -353,6 +353,19 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.status).toBe("on_track");
   });
 
+  it("does not report a shortfall when the weekly reset replenishes a sustainable account", () => {
+    const pace = buildWeeklyCreditPace(
+      [weeklyAccount({ accountId: "acc-sustainable", fullCredits: 100_000, remainingCredits: 50_000, timeLeftPercent: 50 })],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.overPlanCredits).toBeCloseTo(0);
+    expect(pace?.projectedDepletionHours).toBeNull();
+    expect(pace?.pauseForBreakEvenHours).toBeNull();
+    expect(pace?.status).toBe("on_track");
+  });
+
   it("aggregates credit budgets instead of averaging account percentages", () => {
     const pace = buildWeeklyCreditPace(
       [
@@ -516,7 +529,7 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.reduceByPercent).toBeNull();
     expect(pace?.proAccountEquivalentToCoverOverPlan).toBeNull();
     expect(pace?.proAccountsToCoverOverPlan).toBeNull();
-    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(3_204.38);
+    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(30_821.59);
     expect(pace?.status).toBe("on_track");
   });
 

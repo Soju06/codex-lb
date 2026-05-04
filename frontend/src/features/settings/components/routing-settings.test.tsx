@@ -116,32 +116,13 @@ describe("RoutingSettings", () => {
     });
   });
 
-  it("shows the priorities tooltip and saves the dropdown", async () => {
-    const user = userEvent.setup();
-    const onSave = vi.fn().mockResolvedValue(undefined);
-
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+  it("shows the priorities tooltip and fixed dropdown", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
     expect(screen.getByRole("button", { name: "Priorities help" })).toBeInTheDocument();
 
     const prioritiesSelect = screen.getByRole("combobox", { name: "Priorities" });
-    expect(prioritiesSelect).toHaveTextContent("Enabled");
-
-    await user.click(prioritiesSelect);
-    await user.click(screen.getByRole("option", { name: "Disabled" }));
-
-    expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      prioritiesEnabled: false,
-      routingStrategy: "usage_weighted",
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-    });
+    expect(prioritiesSelect).toHaveTextContent("Priorities");
   });
 
   it("shows the configured upstream transport", () => {

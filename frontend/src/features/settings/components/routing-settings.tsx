@@ -118,6 +118,20 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             />
           </div>
 
+          <div className="flex items-center justify-between gap-4 p-3">
+            <div>
+              <p className="text-sm font-medium">Priorities</p>
+              <p className="text-xs text-muted-foreground">
+                Show gold, silver, and bronze medals and use them for account selection.
+              </p>
+            </div>
+            <Switch
+              checked={settings.prioritiesEnabled}
+              disabled={busy}
+              onCheckedChange={(checked) => save({ prioritiesEnabled: checked })}
+            />
+          </div>
+
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-sm font-medium">Prompt-cache affinity TTL</p>

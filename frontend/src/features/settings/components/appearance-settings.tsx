@@ -1,11 +1,8 @@
 import { Monitor, Moon, Palette, Sun } from "lucide-react";
 
-import { Switch } from "@/components/ui/switch";
-import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
 import { useTimeFormatStore, type TimeFormatPreference } from "@/hooks/use-time-format";
-import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 import { cn } from "@/lib/utils";
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; icon: typeof Sun }[] = [
@@ -25,13 +22,7 @@ const QUOTA_DISPLAY_OPTIONS: { value: AccountQuotaDisplayPreference; label: stri
   { value: "both", label: "Both", description: "Show both quota rows." },
 ];
 
-export type AppearanceSettingsProps = {
-  settings: DashboardSettings;
-  busy: boolean;
-  onSave: (payload: SettingsUpdateRequest) => Promise<void>;
-};
-
-export function AppearanceSettings({ settings, busy, onSave }: AppearanceSettingsProps) {
+export function AppearanceSettings() {
   const preference = useThemeStore((s) => s.preference);
   const setTheme = useThemeStore((s) => s.setTheme);
   const timeFormat = useTimeFormatStore((s) => s.timeFormat);
@@ -130,20 +121,6 @@ export function AppearanceSettings({ settings, busy, onSave }: AppearanceSetting
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="flex items-center justify-between gap-4 p-3">
-            <div>
-              <p className="text-sm font-medium">Priorities</p>
-              <p className="text-xs text-muted-foreground">
-                Show gold, silver, and bronze medals and use them for account selection.
-              </p>
-            </div>
-            <Switch
-              checked={settings.prioritiesEnabled}
-              disabled={busy}
-              onCheckedChange={(checked) => void onSave(buildSettingsUpdateRequest(settings, { prioritiesEnabled: checked }))}
-            />
           </div>
         </div>
       </div>

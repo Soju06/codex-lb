@@ -89,6 +89,34 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      prioritiesEnabled: true,
+      routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+    });
+  });
+
+  it("saves the priorities toggle", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    const switches = screen.getAllByRole("switch");
+    const prioritiesSwitch = switches[2]!;
+
+    expect(prioritiesSwitch).toHaveAttribute("aria-checked", "true");
+
+    await user.click(prioritiesSwitch);
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      prioritiesEnabled: false,
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,

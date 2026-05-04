@@ -33,7 +33,7 @@ const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
-  const priorityOption = "priorities";
+  const priorityOption = settings.prioritiesEnabled ? "priorities" : "disabled";
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -148,12 +148,13 @@ const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
               </TooltipProvider>
               <Select
                 value={priorityOption}
-                onValueChange={() => save({ prioritiesEnabled: true })}
+                onValueChange={(value) => save({ prioritiesEnabled: value === "priorities" })}
               >
                 <SelectTrigger className="h-8 w-32 text-xs" disabled={busy} aria-label="Priorities">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent align="end">
+                  <SelectItem value="disabled">Disabled</SelectItem>
                   <SelectItem value="priorities">Priorities</SelectItem>
                 </SelectContent>
               </Select>

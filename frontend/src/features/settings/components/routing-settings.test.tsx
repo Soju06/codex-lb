@@ -116,13 +116,19 @@ describe("RoutingSettings", () => {
     });
   });
 
-  it("shows the priorities tooltip and fixed dropdown", () => {
+  it("shows the priorities tooltip and dropdown options", async () => {
+    const user = userEvent.setup();
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
     expect(screen.getByRole("button", { name: "Priorities help" })).toBeInTheDocument();
 
     const prioritiesSelect = screen.getByRole("combobox", { name: "Priorities" });
     expect(prioritiesSelect).toHaveTextContent("Priorities");
+
+    await user.click(prioritiesSelect);
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveTextContent("Disabled");
+    expect(options[1]).toHaveTextContent("Priorities");
   });
 
   it("shows the configured upstream transport", () => {

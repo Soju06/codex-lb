@@ -219,7 +219,13 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
         *PERMANENT_FAILURE_CODES.keys(),
     }
 )
-_TRANSIENT_RETRY_CODES = frozenset({"server_error"})
+_TRANSIENT_RETRY_CODES = frozenset(
+    {
+        "server_error",
+        "stream_incomplete",
+        "upstream_request_timeout",
+    }
+)
 _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES = 3
 _COMPACT_MAX_ACCOUNT_ATTEMPTS = 2
 _STREAM_MAX_ACCOUNT_ATTEMPTS = 3

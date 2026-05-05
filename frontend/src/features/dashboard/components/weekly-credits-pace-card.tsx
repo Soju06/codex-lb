@@ -106,6 +106,7 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
     pace.status === "danger" ? "bg-red-500" : pace.status === "ahead" ? "bg-amber-500" : "bg-primary";
   const throttle = throttleLine(pace);
   const proAccounts = proAccountsLine(pace);
+  const showRecovery = pace.overPlanCredits > 0 || Boolean(throttle) || Boolean(proAccounts);
 
   return (
     <section className="rounded-xl border bg-card p-5" aria-label="Weekly credits pace">
@@ -153,28 +154,30 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
           </div>
         </div>
 
-        <div className="rounded-lg border bg-background/60 px-3 py-2 text-xs">
-          <p className="font-medium">Recovery options</p>
-          <div className="mt-2 grid gap-1.5">
-            <div className="flex items-baseline justify-between gap-3">
-              <span className="shrink-0 text-muted-foreground">Pause</span>
-              <span className="min-w-0 text-right tabular-nums">{breakEvenLine(pace)}</span>
+        {showRecovery ? (
+          <div className="rounded-lg border bg-background/60 px-3 py-2 text-xs">
+            <p className="font-medium">Recovery options</p>
+            <div className="mt-2 grid gap-1.5">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="shrink-0 text-muted-foreground">Pause</span>
+                <span className="min-w-0 text-right tabular-nums">{breakEvenLine(pace)}</span>
+              </div>
+              {throttle ? (
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="shrink-0 text-muted-foreground">Throttle</span>
+                  <span className="min-w-0 text-right tabular-nums">{throttle}</span>
+                </div>
+              ) : null}
+              {proAccounts ? (
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="shrink-0 text-muted-foreground">Add capacity</span>
+                  <span className="min-w-0 text-right tabular-nums">{proAccounts}</span>
+                </div>
+              ) : null}
             </div>
-            {throttle ? (
-              <div className="flex items-baseline justify-between gap-3">
-                <span className="shrink-0 text-muted-foreground">Throttle</span>
-                <span className="min-w-0 text-right tabular-nums">{throttle}</span>
-              </div>
-            ) : null}
-            {proAccounts ? (
-              <div className="flex items-baseline justify-between gap-3">
-                <span className="shrink-0 text-muted-foreground">Add capacity</span>
-                <span className="min-w-0 text-right tabular-nums">{proAccounts}</span>
-              </div>
-            ) : null}
+            <p className="mt-2 text-muted-foreground">{scheduleGapLine(pace)}</p>
           </div>
-          <p className="mt-2 text-muted-foreground">{scheduleGapLine(pace)}</p>
-        </div>
+        ) : null}
       </div>
     </section>
   );

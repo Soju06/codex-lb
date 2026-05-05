@@ -48,7 +48,7 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("Schedule marker")).toBeInTheDocument();
   });
 
-  it("shows that no pause is needed when pace is behind schedule", () => {
+  it("hides recovery options when the pool is on the safe side of schedule", () => {
     render(
       <WeeklyCreditsPaceCard
         pace={{
@@ -67,9 +67,10 @@ describe("WeeklyCreditsPaceCard", () => {
       />,
     );
 
-    expect(screen.getByText("No pause needed")).toBeInTheDocument();
+    expect(screen.queryByText("Recovery options")).not.toBeInTheDocument();
+    expect(screen.queryByText("No pause needed")).not.toBeInTheDocument();
     expect(screen.getByText("8% below schedule")).toBeInTheDocument();
-    expect(screen.getByText("80K credits projected low-water mark")).toBeInTheDocument();
+    expect(screen.queryByText("80K credits projected low-water mark")).not.toBeInTheDocument();
   });
 
   it("shows fractional pro account capacity before the rounded account count", () => {

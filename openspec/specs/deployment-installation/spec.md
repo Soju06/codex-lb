@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define installation modes and smoke-test expectations so the Helm chart remains portable across supported deployments.
 
 ## Requirements
 

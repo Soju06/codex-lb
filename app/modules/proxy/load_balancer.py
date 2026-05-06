@@ -1303,10 +1303,14 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
 
 
 def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
-    return any(
-        used_percent is not None and used_percent > budget_threshold_pct
-        for used_percent in (state.used_percent, state.secondary_used_percent)
-    )
+    return state.used_percent is not None and state.used_percent > budget_threshold_pct
+
+
+def _primary_budget_pressure_sort_key(state: AccountState) -> tuple[float, float, float, str]:
+    primary_used = state.used_percent if state.used_percent is not None else 0.0
+    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    last_selected = state.last_selected_at or 0.0
+    return primary_used, secondary_used, last_selected, state.account_id
 
 
 def _select_account_preferring_budget_safe(
@@ -1330,6 +1334,21 @@ def _select_account_preferring_budget_safe(
         )
         if preferred.account is not None:
             return preferred
+    if (
+        routing_strategy == "usage_weighted"
+        and state_list
+        and all(_state_above_budget_threshold(state, budget_threshold_pct) for state in state_list)
+    ):
+        for state in sorted(state_list, key=_primary_budget_pressure_sort_key):
+            candidate = select_account(
+                [state],
+                prefer_earlier_reset=prefer_earlier_reset,
+                routing_strategy=routing_strategy,
+                allow_backoff_fallback=False,
+                deterministic_probe=deterministic_probe,
+            )
+            if candidate.account is not None:
+                return candidate
     return select_account(
         state_list,
         prefer_earlier_reset=prefer_earlier_reset,

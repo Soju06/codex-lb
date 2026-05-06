@@ -1061,7 +1061,7 @@ def test_backend_responses_websocket_trims_replayed_tool_call_items_with_previou
                 "type": "function_call",
                 "call_id": "call_repeat",
                 "name": "exec_command",
-                "arguments": "{\"cmd\":\"date\"}",
+                "arguments": '{"cmd":"date"}',
             },
             {
                 "type": "function_call_output",

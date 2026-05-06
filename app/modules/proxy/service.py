@@ -3151,6 +3151,11 @@ class ProxyService:
         request_id: str | None = None,
         request_log_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
+        if payload.previous_response_id is not None and isinstance(payload.input, list):
+            input_items = cast(list[JsonValue], payload.input)
+            trimmed_input_items = _trim_websocket_previous_response_input_items(input_items)
+            if len(trimmed_input_items) != len(input_items):
+                payload = payload.model_copy(update={"input": trimmed_input_items})
         upstream_payload = dict(payload.to_payload())
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
@@ -5760,18 +5765,18 @@ class ProxyService:
             else:
                 release_create_gate = False
 
-            if matched_request_state is not None:
-                actual_service_tier = _service_tier_from_event_payload(payload)
-                if actual_service_tier is not None:
-                    matched_request_state.actual_service_tier = actual_service_tier
-                    matched_request_state.service_tier = actual_service_tier
-
             if _mark_duplicate_tool_call_downstream_event(
                 payload,
                 upstream_control=session.upstream_control,
                 response_id=_websocket_event_dedupe_response_id(response_id, matched_request_state),
             ):
                 return
+
+            if matched_request_state is not None:
+                actual_service_tier = _service_tier_from_event_payload(payload)
+                if actual_service_tier is not None:
+                    matched_request_state.actual_service_tier = actual_service_tier
+                    matched_request_state.service_tier = actual_service_tier
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -6340,11 +6345,6 @@ class ProxyService:
                 release_create_gate = False
             else:
                 release_create_gate = False
-            if request_state is not None:
-                actual_service_tier = _service_tier_from_event_payload(payload)
-                if actual_service_tier is not None:
-                    request_state.actual_service_tier = actual_service_tier
-                    request_state.service_tier = actual_service_tier
             if _mark_duplicate_tool_call_downstream_event(
                 payload,
                 upstream_control=upstream_control,
@@ -6352,6 +6352,11 @@ class ProxyService:
             ):
                 upstream_control.suppress_downstream_event = True
                 return text
+            if request_state is not None:
+                actual_service_tier = _service_tier_from_event_payload(payload)
+                if actual_service_tier is not None:
+                    request_state.actual_service_tier = actual_service_tier
+                    request_state.service_tier = actual_service_tier
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -8795,6 +8800,15 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     return None
 
 
+def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    if isinstance(status, int):
+        return status
+    return None
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,
@@ -8829,11 +8843,7 @@ def _websocket_continuity_anchor_for_payload(
 
 def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     first_output_index = next(
-        (
-            index
-            for index, item in enumerate(input_items)
-            if _websocket_input_item_type(item) == "function_call_output"
-        ),
+        (index for index, item in enumerate(input_items) if _websocket_input_item_type(item) == "function_call_output"),
         None,
     )
     if first_output_index is None or first_output_index == 0:
@@ -8953,15 +8963,6 @@ def _websocket_event_dedupe_response_id(
     if request_state is None:
         return None
     return request_state.response_id or request_state.request_id
-
-
-def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
-    if not isinstance(payload, dict):
-        return None
-    status = payload.get("status")
-    if isinstance(status, int):
-        return status
-    return None
 
 
 def _openai_error_envelope_from_response_failed_payload(

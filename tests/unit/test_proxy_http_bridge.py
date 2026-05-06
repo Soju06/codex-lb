@@ -572,6 +572,34 @@ def test_http_bridge_owner_check_required_enables_sticky_thread_in_gateway_safe_
     assert proxy_service._http_bridge_owner_check_required(key, gateway_safe_mode=True) is True
 
 
+def test_prepare_http_bridge_request_trims_replayed_tool_call_items_with_previous_response_id() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_prev_tool_call",
+            "input": [
+                {"type": "function_call", "call_id": "call_repeat", "name": "exec_command", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_repeat", "output": "ok"},
+            ],
+        }
+    )
+
+    request_state, text_data = service._prepare_http_bridge_request(
+        payload,
+        {},
+        api_key=None,
+        api_key_reservation=None,
+        request_id="req-trim-direct",
+    )
+
+    sent_payload = json.loads(text_data)
+    assert request_state.previous_response_id == "resp_prev_tool_call"
+    assert sent_payload["previous_response_id"] == "resp_prev_tool_call"
+    assert sent_payload["input"] == [{"type": "function_call_output", "call_id": "call_repeat", "output": "ok"}]
+
+
 @pytest.mark.asyncio
 async def test_select_account_with_budget_prefers_durable_account_id_when_available(
     monkeypatch: pytest.MonkeyPatch,
@@ -871,7 +899,7 @@ async def test_stream_via_http_bridge_trims_replayed_tool_call_items_with_previo
                     "type": "function_call",
                     "call_id": "call_repeat",
                     "name": "exec_command",
-                    "arguments": "{\"cmd\":\"date\"}",
+                    "arguments": '{"cmd":"date"}',
                 },
                 {
                     "type": "function_call_output",

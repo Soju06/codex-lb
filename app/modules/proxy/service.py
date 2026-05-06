@@ -2946,6 +2946,8 @@ class ProxyService:
         original_full_resend_text: str | None = None
         original_input_item_count: int | None = None
         original_input_fingerprint: str | None = None
+        previous_response_trimmed_input_count: int | None = None
+        previous_response_trimmed_input_fingerprint: str | None = None
         session_anchor = _websocket_continuity_anchor_for_payload(
             continuity_state,
             responses_payload=responses_payload,
@@ -2966,6 +2968,13 @@ class ProxyService:
                     "input": original_input_items[session_anchor.stored_input_item_count :],
                 }
             )
+        if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
+            previous_response_input_items = cast(list[JsonValue], responses_payload.input)
+            trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
+            if len(trimmed_input_items) != len(previous_response_input_items):
+                previous_response_trimmed_input_count = len(previous_response_input_items)
+                previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
+                responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -3002,6 +3011,20 @@ class ProxyService:
                 len(cast(list[JsonValue], responses_payload.input))
                 if isinstance(responses_payload.input, list)
                 else None,
+            )
+        elif previous_response_trimmed_input_count is not None:
+            request_state.input_item_count = previous_response_trimmed_input_count
+            request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
+        if previous_response_trimmed_input_count is not None:
+            logger.info(
+                "websocket_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
+                "previous_response_id=%s",
+                request_state.request_id,
+                previous_response_trimmed_input_count,
+                len(cast(list[JsonValue], responses_payload.input))
+                if isinstance(responses_payload.input, list)
+                else None,
+                responses_payload.previous_response_id,
             )
         had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         affinity_policy = _sticky_key_for_responses_request(
@@ -8780,6 +8803,40 @@ def _websocket_continuity_anchor_for_payload(
         previous_response_id=previous_response_id,
         stored_input_item_count=stored_count,
     )
+
+
+def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    first_output_index = next(
+        (
+            index
+            for index, item in enumerate(input_items)
+            if _websocket_input_item_type(item) == "function_call_output"
+        ),
+        None,
+    )
+    if first_output_index is None or first_output_index == 0:
+        return input_items
+    prefix = input_items[:first_output_index]
+    if not all(_is_websocket_previous_response_output_item(item) for item in prefix):
+        return input_items
+    return input_items[first_output_index:]
+
+
+def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:
+    item_type = _websocket_input_item_type(item)
+    if item_type in {"reasoning", "function_call", "custom_tool_call"}:
+        return True
+    if item_type != "message" or not isinstance(item, dict):
+        return False
+    role = item.get("role")
+    return role == "assistant"
+
+
+def _websocket_input_item_type(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    return item_type if isinstance(item_type, str) else None
 
 
 def _record_websocket_continuity_completion(

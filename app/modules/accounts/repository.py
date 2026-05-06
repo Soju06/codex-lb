@@ -136,6 +136,22 @@ class AccountsRepository:
         await self._session.refresh(account)
         return account
 
+    async def upsert_reauthorized(self, account: Account) -> Account:
+        dialect_name = self._dialect_name()
+        if dialect_name == "sqlite":
+            await self._acquire_sqlite_merge_lock()
+        elif dialect_name == "postgresql":
+            await self._acquire_postgresql_identity_lock(account.id)
+
+        existing = await self._session.get(Account, account.id)
+        if existing is not None and existing.status == AccountStatus.DEACTIVATED:
+            _apply_account_updates(existing, account)
+            await self._session.commit()
+            await self._session.refresh(existing)
+            return existing
+
+        return await self.upsert(account)
+
     async def update_status(
         self,
         account_id: str,

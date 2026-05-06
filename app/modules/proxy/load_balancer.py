@@ -1335,13 +1335,15 @@ def _select_account_preferring_budget_safe(
     state_list = list(states)
     burn_first_states = [state for state in state_list if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
     if burn_first_states:
-        return select_account(
+        burn_first = select_account(
             burn_first_states,
             prefer_earlier_reset=prefer_earlier_reset,
             routing_strategy=routing_strategy,
-            allow_backoff_fallback=allow_backoff_fallback,
+            allow_backoff_fallback=False,
             deterministic_probe=deterministic_probe,
         )
+        if burn_first.account is not None:
+            return burn_first
 
     preferred_states = [
         state

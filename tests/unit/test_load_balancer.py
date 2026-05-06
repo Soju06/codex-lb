@@ -216,6 +216,30 @@ def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
     assert result.account.account_id == "temp"
 
 
+def test_budget_safe_selection_falls_back_when_burn_first_unavailable():
+    states = [
+        AccountState(
+            "temp",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(time.time() + 300_000),
+            routing_policy="burn_first",
+        ),
+        AccountState("normal", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),
+        AccountState("review", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="preserve"),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
+
+
 def test_budget_safe_selection_keeps_preserve_behind_over_budget_normal():
     states = [
         AccountState("review", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="preserve"),

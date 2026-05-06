@@ -42,6 +42,12 @@ class AccountStatus(str, Enum):
     DEACTIVATED = "deactivated"
 
 
+class AccountRoutingPolicy(str, Enum):
+    NORMAL = "normal"
+    BURN_FIRST = "burn_first"
+    PRESERVE = "preserve"
+
+
 class StickySessionKind(str, Enum):
     CODEX_SESSION = "codex_session"
     STICKY_THREAD = "sticky_thread"
@@ -55,6 +61,12 @@ class Account(Base):
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    routing_policy: Mapped[str] = mapped_column(
+        String,
+        default="normal",
+        server_default=text("'normal'"),
+        nullable=False,
+    )
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

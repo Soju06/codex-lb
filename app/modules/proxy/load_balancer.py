@@ -26,6 +26,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
+from app.core.plan_types import account_plan_matches_allowed
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
@@ -1164,7 +1165,7 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
     allowed_plans = get_model_registry().plan_types_for_model(model)
     if allowed_plans is None:
         return accounts
-    return [a for a in accounts if a.plan_type in allowed_plans]
+    return [a for a in accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:

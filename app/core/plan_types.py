@@ -6,6 +6,7 @@ ACCOUNT_PLAN_TYPES: Final[set[str]] = {
     "free",
     "plus",
     "pro",
+    "prolite",
     "team",
     "business",
     "enterprise",
@@ -20,6 +21,10 @@ RATE_LIMIT_PLAN_TYPES: Final[set[str]] = {
     "education",
     "quorum",
     "k12",
+}
+
+ACCOUNT_PLAN_EQUIVALENTS: Final[dict[str, frozenset[str]]] = {
+    "prolite": frozenset({"pro"}),
 }
 
 
@@ -62,3 +67,13 @@ def normalize_rate_limit_plan_type(value: str | None) -> str | None:
         return None
     normalized = cleaned.lower()
     return normalized if normalized in RATE_LIMIT_PLAN_TYPES else None
+
+
+def account_plan_matches_allowed(value: str | None, allowed_plans: set[str] | frozenset[str]) -> bool:
+    normalized = normalize_account_plan_type(value)
+    if normalized is None:
+        return False
+    normalized_allowed = {plan.lower() for plan in allowed_plans}
+    if normalized in normalized_allowed:
+        return True
+    return bool(ACCOUNT_PLAN_EQUIVALENTS.get(normalized, frozenset()) & normalized_allowed)

@@ -150,6 +150,46 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_prolite", "prolite@example.com", plan_type="prolite"))
+        await usage_repo.add_entry(
+            "acc_prolite",
+            0.0,
+            window="primary",
+            window_minutes=300,
+            recorded_at=now - timedelta(minutes=2),
+        )
+        await usage_repo.add_entry(
+            "acc_prolite",
+            0.0,
+            window="secondary",
+            window_minutes=10080,
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+    account = payload["accounts"][0]
+
+    assert account["planType"] == "prolite"
+    assert account["capacityCreditsPrimary"] == pytest.approx(1500.0)
+    assert account["remainingCreditsPrimary"] == pytest.approx(1500.0)
+    assert account["capacityCreditsSecondary"] == pytest.approx(50400.0)
+    assert account["remainingCreditsSecondary"] == pytest.approx(50400.0)
+    assert payload["summary"]["primaryWindow"]["capacityCredits"] == pytest.approx(1500.0)
+    assert payload["summary"]["primaryWindow"]["remainingCredits"] == pytest.approx(1500.0)
+    assert payload["summary"]["secondaryWindow"]["capacityCredits"] == pytest.approx(50400.0)
+    assert payload["summary"]["secondaryWindow"]["remainingCredits"] == pytest.approx(50400.0)
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_computes_depletion_from_recent_db_history(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 

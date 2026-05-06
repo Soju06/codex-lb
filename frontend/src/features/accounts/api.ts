@@ -1,9 +1,11 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, patch, post } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
   AccountExportResponseSchema,
   AccountImportResponseSchema,
+  AccountRoutingPolicyResponseSchema,
+  AccountRoutingPolicyUpdateSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -42,6 +44,15 @@ export function reactivateAccount(accountId: string) {
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/reactivate`,
     AccountActionResponseSchema,
+  );
+}
+
+export function updateAccountRoutingPolicy(accountId: string, payload: unknown) {
+  const validated = AccountRoutingPolicyUpdateSchema.parse(payload);
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
+    AccountRoutingPolicyResponseSchema,
+    { body: validated },
   );
 }
 

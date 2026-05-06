@@ -1,0 +1,5 @@
+- [x] 1. Define the manual routing policy contract.
+- [x] 2. Persist routing policy on accounts with a safe default.
+- [x] 3. Add account dashboard API and UI controls.
+- [x] 4. Apply routing policy in account selection.
+- [x] 5. Run focused backend/frontend validation.

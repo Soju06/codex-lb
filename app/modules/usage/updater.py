@@ -17,7 +17,7 @@ from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload
+from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -416,6 +416,7 @@ class UsageUpdater:
                 window_minutes=_window_minutes(secondary.limit_window_seconds),
             )
             usage_written = usage_written or _usage_entry_written(entry)
+        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary)
         return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
@@ -453,6 +454,31 @@ class UsageUpdater:
             chatgpt_account_id=account.chatgpt_account_id,
         )
 
+    async def _recover_quota_status_from_usage(
+        self,
+        account: Account,
+        *,
+        primary: UsageWindow | None,
+        secondary: UsageWindow | None,
+    ) -> None:
+        if account.status != AccountStatus.QUOTA_EXCEEDED or not self._auth_manager:
+            return
+        windows = [window for window in (primary, secondary) if window is not None]
+        if not any(_window_has_available_quota(window) for window in windows):
+            return
+
+        await self._auth_manager._repo.update_status(
+            account.id,
+            AccountStatus.ACTIVE,
+            None,
+            None,
+            blocked_at=None,
+        )
+        account.status = AccountStatus.ACTIVE
+        account.deactivation_reason = None
+        account.reset_at = None
+        account.blocked_at = None
+
     async def _sync_account_from_repo(self, account: Account) -> None:
         if not self._accounts_repo:
             return
@@ -483,6 +509,11 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:
     return entry is not None
+
+
+def _window_has_available_quota(window: UsageWindow) -> bool:
+    used_percent = window.used_percent
+    return used_percent is not None and float(used_percent) < 100.0
 
 
 def _prefer_merged_additional_window(

@@ -14,6 +14,8 @@ from app.core.balancer import (
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    ROUTING_POLICY_BURN_FIRST,
+    ROUTING_POLICY_PRESERVE,
     AccountState,
     RoutingStrategy,
     SelectionResult,
@@ -867,6 +869,7 @@ class LoadBalancer:
             deactivation_reason=account.deactivation_reason,
             plan_type=account.plan_type,
             capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
+            routing_policy=account.routing_policy,
         )
 
     def _sync_runtime_state(
@@ -1112,6 +1115,7 @@ def _state_from_account(
                 last_error_at=runtime.last_error_at,
                 error_count=runtime.error_count,
                 health_tier=runtime.health_tier,
+                routing_policy=account.routing_policy,
             ),
             now=time.time(),
             drain_entered_at=runtime.drain_entered_at,
@@ -1152,6 +1156,7 @@ def _state_from_account(
         plan_type=account.plan_type,
         capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
         health_tier=new_tier,
+        routing_policy=account.routing_policy,
     )
 
 
@@ -1328,7 +1333,22 @@ def _select_account_preferring_budget_safe(
     deterministic_probe: bool = False,
 ) -> SelectionResult:
     state_list = list(states)
-    preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
+    burn_first_states = [state for state in state_list if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
+    if burn_first_states:
+        return select_account(
+            burn_first_states,
+            prefer_earlier_reset=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+        )
+
+    preferred_states = [
+        state
+        for state in state_list
+        if state.routing_policy != ROUTING_POLICY_PRESERVE
+        and not _state_above_budget_threshold(state, budget_threshold_pct)
+    ]
     if preferred_states:
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
         preferred = select_account(
@@ -1349,7 +1369,7 @@ def _select_account_preferring_budget_safe(
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
-            primary_first_usage_weighted=True,
+            usage_weighted_order="primary_first",
         )
     return select_account(
         state_list,

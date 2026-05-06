@@ -238,6 +238,13 @@ class AccountsRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def update_routing_policy(self, account_id: str, routing_policy: str) -> bool:
+        result = await self._session.execute(
+            update(Account).where(Account.id == account_id).values(routing_policy=routing_policy).returning(Account.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def _merge_by_email_enabled(self) -> bool:
         settings = await self._session.get(DashboardSettings, _SETTINGS_ROW_ID)
         if settings is None:

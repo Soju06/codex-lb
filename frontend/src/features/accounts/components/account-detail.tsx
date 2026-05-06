@@ -5,7 +5,7 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
@@ -17,6 +17,7 @@ export type AccountDetailProps = {
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
+  onRoutingPolicyChange: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
 };
 
 export function AccountDetail({
@@ -27,6 +28,7 @@ export function AccountDetail({
   onResume,
   onDelete,
   onReauth,
+  onRoutingPolicyChange,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -74,6 +76,7 @@ export function AccountDetail({
         onResume={onResume}
         onDelete={onDelete}
         onReauth={onReauth}
+        onRoutingPolicyChange={onRoutingPolicyChange}
       />
     </div>
   );

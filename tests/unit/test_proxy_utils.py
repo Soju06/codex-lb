@@ -17,7 +17,7 @@ from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
-from app.core.config.settings import Settings
+from app.core.config.settings import DEFAULT_HOME_DIR, Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.models import OpenAIResponsePayload
@@ -5101,6 +5101,34 @@ def test_slim_response_create_handles_object_valued_content_image():
     first_content = first_item["content"]
     assert isinstance(first_content, dict)
     assert first_content["type"] == "input_text"
+
+
+def test_slim_response_create_omits_oldest_historical_items_to_fit_budget():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "assistant", "content": [{"type": "output_text", "text": "old-a" * 200}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "old-b" * 200}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=360)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_items_omitted"] == 2
+    notice = slimmed_input[0]
+    assert isinstance(notice, dict)
+    assert notice["role"] == "assistant"
+    assert "omitted 2 historical input items" in json.dumps(notice)
+    assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]}
+    assert proxy_service._serialized_json_size(slimmed_payload) <= 360
+
+
+def test_oversized_response_create_dump_dir_uses_default_home_dir():
+    assert proxy_service._OVERSIZED_RESPONSE_CREATE_DUMP_DIR == (DEFAULT_HOME_DIR / "debug" / "response-create-dumps")
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):

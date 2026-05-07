@@ -28,6 +28,7 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/coverage/
+package-lock.json
 
 # Editors/OS
 .DS_Store

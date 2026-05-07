@@ -164,7 +164,15 @@ async def test_health_ready_circuit_breaker_disabled_returns_200():
         patch("app.modules.health.api.get_session") as mock_get_session,
         patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock(return_value=_bridge_ring_ok())),
     ):
-        with patch("app.modules.health.api.get_settings", return_value=SimpleNamespace(circuit_breaker_enabled=False)):
+        with patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(
+                circuit_breaker_enabled=False,
+                http_responses_session_bridge_enabled=True,
+                http_responses_session_bridge_instance_ring=["pod-a"],
+                http_responses_session_bridge_advertise_base_url=None,
+            ),
+        ):
 
             async def mock_get_session_context():
                 yield mock_session
@@ -193,7 +201,11 @@ async def test_health_ready_fails_when_active_ring_exists_but_instance_is_missin
         patch("app.modules.health.api.get_settings") as mock_get_settings,
         patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock()) as mock_bridge_ring,
     ):
-        mock_get_settings.return_value = MagicMock(http_responses_session_bridge_enabled=True)
+        mock_get_settings.return_value = MagicMock(
+            http_responses_session_bridge_enabled=True,
+            http_responses_session_bridge_instance_ring=["pod-a", "pod-b"],
+            http_responses_session_bridge_advertise_base_url=None,
+        )
         mock_bridge_ring.return_value = BridgeRingInfo(
             ring_fingerprint="abc",
             ring_size=2,
@@ -229,7 +241,11 @@ async def test_health_ready_allows_empty_bridge_ring_while_instance_registers():
         patch("app.modules.health.api.get_settings") as mock_get_settings,
         patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock()) as mock_bridge_ring,
     ):
-        mock_get_settings.return_value = MagicMock(http_responses_session_bridge_enabled=True)
+        mock_get_settings.return_value = MagicMock(
+            http_responses_session_bridge_enabled=True,
+            http_responses_session_bridge_instance_ring=["pod-a"],
+            http_responses_session_bridge_advertise_base_url=None,
+        )
         mock_bridge_ring.return_value = BridgeRingInfo(
             ring_fingerprint="abc",
             ring_size=0,
@@ -263,7 +279,11 @@ async def test_health_ready_fails_when_bridge_ring_lookup_errors():
         patch("app.modules.health.api.get_settings") as mock_get_settings,
         patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock()) as mock_bridge_ring,
     ):
-        mock_get_settings.return_value = MagicMock(http_responses_session_bridge_enabled=True)
+        mock_get_settings.return_value = MagicMock(
+            http_responses_session_bridge_enabled=True,
+            http_responses_session_bridge_instance_ring=["pod-a", "pod-b"],
+            http_responses_session_bridge_advertise_base_url=None,
+        )
         mock_bridge_ring.return_value = BridgeRingInfo(
             ring_fingerprint=None,
             ring_size=0,
@@ -297,7 +317,12 @@ async def test_health_ready_fails_when_bridge_registration_is_not_complete():
         patch("app.core.startup._bridge_registration_complete", False),
         patch("app.modules.health.api.get_session") as mock_get_session,
         patch(
-            "app.modules.health.api.get_settings", return_value=MagicMock(http_responses_session_bridge_enabled=True)
+            "app.modules.health.api.get_settings",
+            return_value=MagicMock(
+                http_responses_session_bridge_enabled=True,
+                http_responses_session_bridge_instance_ring=["pod-a", "pod-b"],
+                http_responses_session_bridge_advertise_base_url=None,
+            ),
         ),
         patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock(return_value=_bridge_ring_ok())),
     ):
@@ -312,6 +337,52 @@ async def test_health_ready_fails_when_bridge_registration_is_not_complete():
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Service bridge registration is not complete"
+
+
+@pytest.mark.asyncio
+async def test_health_ready_ignores_bridge_registration_for_single_instance_runtime():
+    from app.modules.health.api import health_ready
+    from app.modules.health.schemas import BridgeRingInfo
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock()
+
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.core.startup._bridge_durable_schema_ready", True),
+        patch("app.core.startup._bridge_registration_complete", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=MagicMock(
+                http_responses_session_bridge_enabled=True,
+                http_responses_session_bridge_instance_ring=["pod-a"],
+                http_responses_session_bridge_advertise_base_url=None,
+            ),
+        ),
+        patch(
+            "app.modules.health.api._get_bridge_ring_info",
+            new=AsyncMock(
+                return_value=BridgeRingInfo(
+                    ring_fingerprint=None,
+                    ring_size=0,
+                    instance_id="pod-a",
+                    is_member=False,
+                    error="unavailable: OperationalError",
+                )
+            ),
+        ),
+    ):
+
+        async def mock_get_session_context():
+            yield mock_session
+
+        mock_get_session.return_value = mock_get_session_context()
+
+        response = await health_ready()
+
+    assert response.status == "ok"
+    assert response.checks == {"database": "ok"}
 
 
 @pytest.mark.asyncio

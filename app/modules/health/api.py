@@ -8,6 +8,7 @@ from sqlalchemy import select as sa_select
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.bridge_registration import requires_cluster_registration
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
@@ -103,6 +104,8 @@ def _bridge_readiness_failure_detail(bridge_ring: BridgeRingInfo) -> str | None:
         return None
     if not startup_module._bridge_durable_schema_ready:
         return "Service bridge durable schema is not ready"
+    if not requires_cluster_registration(settings):
+        return None
     if not startup_module._bridge_registration_complete:
         return "Service bridge registration is not complete"
     if bridge_ring.error is not None:

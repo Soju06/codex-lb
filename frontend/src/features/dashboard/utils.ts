@@ -20,6 +20,7 @@ import {
 
 export type RemainingItem = {
   accountId: string;
+  status: string;
   label: string;
   /** Suffix appended after the label (e.g. compact account ID for duplicates). Not blurred. */
   labelSuffix: string;
@@ -144,6 +145,7 @@ export function buildRemainingItems(
         : "";
       return {
         accountId: account.accountId,
+        status: account.status,
         label: rawLabel,
         labelSuffix,
         isEmail: labelIsEmail,

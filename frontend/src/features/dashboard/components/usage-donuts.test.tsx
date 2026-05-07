@@ -1,11 +1,12 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 
 /** Helper to build a minimal RemainingItem for tests. */
-function item(overrides: { accountId: string; label: string; value: number; remainingPercent: number; color: string }) {
-  return { ...overrides, labelSuffix: "", isEmail: true };
+function item(overrides: { accountId: string; label: string; value: number; remainingPercent: number; color: string; status?: string }) {
+  return { status: "active", ...overrides, labelSuffix: "", isEmail: true };
 }
 
 describe("UsageDonuts", () => {
@@ -97,5 +98,36 @@ describe("UsageDonuts", () => {
 
     const centerValues = Array.from(container.querySelectorAll(".text-base.font-semibold.tabular-nums")).map((node) => node.textContent);
     expect(centerValues).toEqual(["120", "80"]);
+  });
+
+  it("hides deactivated account slices by default and allows choosing multiple statuses", async () => {
+    const user = userEvent.setup();
+    render(
+      <UsageDonuts
+        primaryItems={[
+          item({ accountId: "acc-active", label: "active@example.com", value: 120, remainingPercent: 60, color: "#7bb661" }),
+          item({ accountId: "acc-paused", label: "paused@example.com", value: 80, remainingPercent: 40, color: "#d9a441", status: "paused" }),
+          item({ accountId: "acc-deactivated", label: "inactive@example.com", value: 30, remainingPercent: 30, color: "#d14c7a", status: "deactivated" }),
+        ]}
+        secondaryItems={[
+          item({ accountId: "acc-active", label: "active@example.com", value: 120, remainingPercent: 60, color: "#7bb661" }),
+          item({ accountId: "acc-paused", label: "paused@example.com", value: 80, remainingPercent: 40, color: "#d9a441", status: "paused" }),
+          item({ accountId: "acc-deactivated", label: "inactive@example.com", value: 30, remainingPercent: 30, color: "#d14c7a", status: "deactivated" }),
+        ]}
+        primaryTotal={400}
+        secondaryTotal={400}
+      />,
+    );
+
+    expect(screen.getAllByText("active@example.com")).toHaveLength(2);
+    expect(screen.getAllByText("paused@example.com")).toHaveLength(2);
+    expect(screen.queryByText("inactive@example.com")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /statuses/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /deactivated/i }));
+
+    expect(screen.getAllByText("active@example.com")).toHaveLength(2);
+    expect(screen.getAllByText("paused@example.com")).toHaveLength(2);
+    expect(screen.getAllByText("inactive@example.com")).toHaveLength(2);
   });
 });

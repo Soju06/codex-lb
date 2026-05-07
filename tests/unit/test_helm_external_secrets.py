@@ -278,7 +278,7 @@ def test_external_db_mode_overlay_renders_schema_gate_init_container() -> None:
     assert "wait-for-head" in rendered
 
 
-def test_deployment_prestop_starts_local_drain_before_sleep() -> None:
+def test_deployment_prestop_starts_and_polls_local_drain() -> None:
     rendered = _helm_template(
         "--show-only",
         "templates/deployment.yaml",
@@ -286,8 +286,10 @@ def test_deployment_prestop_starts_local_drain_before_sleep() -> None:
         "service.port=3456",
     )
 
-    assert "http://127.0.0.1:3456/internal/drain/start" in rendered
-    assert "time.sleep(" in rendered
+    assert "http://127.0.0.1:3456" in rendered
+    assert "/internal/drain/start" in rendered
+    assert "/internal/drain/status" in rendered
+    assert "in_flight" in rendered
 
 
 def test_deployment_uses_service_port_for_container_and_probes() -> None:

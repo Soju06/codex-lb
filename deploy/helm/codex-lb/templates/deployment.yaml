@@ -269,7 +269,7 @@ spec:
                 command:
                   - python
                   - -c
-                  - "import time, urllib.error, urllib.request; req = urllib.request.Request('http://127.0.0.1:{{ $httpPort }}/internal/drain/start', method='POST');\ntry: urllib.request.urlopen(req, timeout=2).read()\nexcept Exception: pass\ntime.sleep({{ .Values.preStopSleepSeconds }})"
+                  - "import json, time, urllib.error, urllib.request\nbase = 'http://127.0.0.1:{{ $httpPort }}'\ntry:\n    urllib.request.urlopen(urllib.request.Request(base + '/internal/drain/start', method='POST'), timeout=2).read()\nexcept Exception:\n    pass\ndeadline = time.monotonic() + {{ .Values.preStopSleepSeconds }}\nwhile time.monotonic() < deadline:\n    try:\n        data = json.loads(urllib.request.urlopen(base + '/internal/drain/status', timeout=2).read() or b'{}')\n        if int((data.get('checks') or {}).get('in_flight', '0')) <= 0:\n            break\n    except Exception:\n        pass\n    time.sleep(1)"
           startupProbe:
             httpGet:
               path: /health/startup

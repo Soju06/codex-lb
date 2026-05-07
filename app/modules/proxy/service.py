@@ -13,10 +13,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
-from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import aiohttp
@@ -34,6 +32,7 @@ from app.core.auth.refresh import (
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.bridge_registration import requires_cluster_registration
 from app.core.clients.files import (
     FileProxyError,
     pop_files_timeout_overrides,
@@ -10292,7 +10291,7 @@ async def _http_bridge_should_wait_for_registration(
         return False
     if key.strength != "hard":
         return False
-    if _http_bridge_requires_cluster_registration(settings):
+    if requires_cluster_registration(settings):
         return True
     if self._ring_membership is None:
         return False
@@ -10498,22 +10497,6 @@ def _forwarded_http_bridge_session_key(
         api_key_id=api_key.id if api_key is not None else None,
         strength=strength,
     )
-
-
-def _http_bridge_requires_cluster_registration(settings: Settings) -> bool:
-    if len(settings.http_responses_session_bridge_instance_ring) > 1:
-        return True
-    advertise_base_url = settings.http_responses_session_bridge_advertise_base_url
-    if advertise_base_url is None:
-        return False
-    hostname = urlparse(advertise_base_url).hostname
-    if hostname is None:
-        return False
-    try:
-        parsed_ip = ip_address(hostname)
-    except ValueError:
-        return True
-    return not parsed_ip.is_loopback
 
 
 def _effective_http_bridge_idle_ttl_seconds(

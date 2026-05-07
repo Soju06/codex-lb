@@ -92,6 +92,7 @@ describe("buildDepletionView", () => {
 function remainingItem(overrides: Partial<RemainingItem> & Pick<RemainingItem, "accountId">): RemainingItem {
   return {
     accountId: overrides.accountId,
+    status: overrides.status ?? "active",
     label: overrides.label ?? overrides.accountId,
     labelSuffix: overrides.labelSuffix ?? "",
     isEmail: overrides.isEmail ?? false,

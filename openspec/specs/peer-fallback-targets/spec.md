@@ -19,6 +19,12 @@ The system SHALL allow authenticated dashboard users to create, list, update, en
 - **THEN** the system rejects the request with a dashboard validation error
 - **AND** does not persist the invalid target
 
+#### Scenario: Reject peer fallback target URL params, query, or fragment
+
+- **WHEN** a dashboard user creates or updates a peer fallback target with path params, query, or fragment in the base URL
+- **THEN** the system rejects the request with a dashboard validation error
+- **AND** does not persist the invalid target
+
 #### Scenario: Toggle peer fallback target
 
 - **WHEN** a dashboard user disables an existing peer fallback target

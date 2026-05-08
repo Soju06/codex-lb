@@ -227,6 +227,13 @@ async def test_api_key_peer_fallback_base_urls_crud(async_client):
     assert bare_query_invalid.status_code == 400
     assert bare_query_invalid.json()["error"]["code"] == "invalid_api_key_payload"
 
+    path_params_invalid = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"peerFallbackBaseUrls": ["http://127.0.0.1:2462/a;b/c"]},
+    )
+    assert path_params_invalid.status_code == 400
+    assert path_params_invalid.json()["error"]["code"] == "invalid_api_key_payload"
+
     listed_after_invalid = await async_client.get("/api/api-keys/")
     assert listed_after_invalid.status_code == 200
     assert listed_after_invalid.json()[0]["peerFallbackBaseUrls"] == ["http://127.0.0.1:2462"]

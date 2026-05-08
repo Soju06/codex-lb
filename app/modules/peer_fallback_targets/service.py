@@ -117,6 +117,8 @@ def normalize_peer_fallback_base_url(value: str) -> str:
         raise PeerFallbackTargetValidationError("Peer fallback target URL is required")
     if any(char.isspace() for char in raw):
         raise PeerFallbackTargetValidationError("Peer fallback target must be an absolute http(s) URL")
+    if "?" in raw or "#" in raw:
+        raise PeerFallbackTargetValidationError("Peer fallback target URL must not include params, query, or fragment")
     try:
         parsed = urlparse(raw)
         hostname = parsed.hostname
@@ -125,7 +127,7 @@ def normalize_peer_fallback_base_url(value: str) -> str:
         raise PeerFallbackTargetValidationError("Peer fallback target must be an absolute http(s) URL") from exc
     if parsed.scheme not in {"http", "https"} or hostname is None:
         raise PeerFallbackTargetValidationError("Peer fallback target must be an absolute http(s) URL")
-    if parsed.params or parsed.query or parsed.fragment:
+    if ";" in parsed.path or parsed.params or parsed.query or parsed.fragment:
         raise PeerFallbackTargetValidationError("Peer fallback target URL must not include params, query, or fragment")
     return raw
 

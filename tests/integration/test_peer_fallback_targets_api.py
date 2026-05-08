@@ -44,6 +44,20 @@ async def test_peer_fallback_targets_api_crud(async_client):
     assert invalid_query.status_code == 400
     assert invalid_query.json()["error"]["code"] == "invalid_peer_fallback_target"
 
+    invalid_bare_query = await async_client.post(
+        "/api/peer-fallback-targets",
+        json={"baseUrl": "https://peer.example?"},
+    )
+    assert invalid_bare_query.status_code == 400
+    assert invalid_bare_query.json()["error"]["code"] == "invalid_peer_fallback_target"
+
+    invalid_path_params = await async_client.post(
+        "/api/peer-fallback-targets",
+        json={"baseUrl": "https://peer.example/a;b/c"},
+    )
+    assert invalid_path_params.status_code == 400
+    assert invalid_path_params.json()["error"]["code"] == "invalid_peer_fallback_target"
+
     for malformed_url in ("http://example.com:abc", "http://exa mple.com", "http://[::1"):
         invalid_malformed = await async_client.post(
             "/api/peer-fallback-targets",

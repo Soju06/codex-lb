@@ -39,6 +39,11 @@ The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. U
 - **WHEN** admin submits `PATCH /api/api-keys/{id}` with an invalid peer fallback base URL
 - **THEN** the system rejects the update with a dashboard validation error
 
+#### Scenario: Reject peer fallback URLs with params, query, or fragment
+- **WHEN** admin submits `POST /api/api-keys` or `PATCH /api/api-keys/{id}` with a peer fallback base URL containing path params, query, or fragment
+- **THEN** the system rejects the request with a dashboard validation error
+- **AND** it does not persist the invalid peer fallback URL
+
 ### Requirement: API Key deletion
 
 The system SHALL allow deleting an API key via `DELETE /api/api-keys/{id}`. Deletion MUST be permanent and the key MUST immediately stop authenticating.

@@ -939,7 +939,7 @@ def _normalize_peer_fallback_base_urls(base_urls: list[str] | None) -> list[str]
             raise ValueError("Peer fallback base URLs must be absolute http(s) URLs") from exc
         if parsed.scheme not in {"http", "https"} or hostname is None:
             raise ValueError("Peer fallback base URLs must be absolute http(s) URLs")
-        if parsed.params or parsed.query or parsed.fragment:
+        if ";" in parsed.path or parsed.params or parsed.query or parsed.fragment:
             raise ValueError("Peer fallback base URLs must not include params, query, or fragment")
         normalized.append(value)
         seen.add(value)

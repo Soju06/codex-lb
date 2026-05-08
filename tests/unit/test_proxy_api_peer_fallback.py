@@ -448,7 +448,7 @@ async def test_peer_fallback_loop_marker_disables_forwarding(monkeypatch):
     settings = SimpleNamespace(
         peer_fallback_base_urls=["http://peer.example"],
         peer_fallback_error_codes=["no_accounts"],
-        peer_fallback_max_hops=2,
+        peer_fallback_max_hops=1,
         peer_fallback_timeout_seconds=1.0,
     )
     monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
@@ -457,6 +457,7 @@ async def test_peer_fallback_loop_marker_disables_forwarding(monkeypatch):
         request,
         {"model": "gpt-5.4", "input": "hi", "stream": True},
         reason_code="no_accounts",
+        api_key=cast(ApiKeyData, SimpleNamespace(peer_fallback_base_urls=["http://peer.example"])),
     )
 
     assert response is None

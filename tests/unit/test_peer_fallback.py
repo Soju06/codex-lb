@@ -226,6 +226,76 @@ async def test_open_stream_response_uses_api_key_peer_fallback_urls(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_open_stream_response_allows_peer_forwarded_request_below_max_hops(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "query_string": b"",
+            "headers": [(peer_fallback.PEER_FALLBACK_DEPTH_HEADER.encode("ascii"), b"1")],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    session = _FakeSession()
+    settings = SimpleNamespace(
+        peer_fallback_base_urls=[],
+        peer_fallback_error_codes=["no_accounts"],
+        peer_fallback_max_hops=2,
+        peer_fallback_timeout_seconds=1.0,
+    )
+
+    monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
+    monkeypatch.setattr(peer_fallback, "get_http_client", lambda: SimpleNamespace(session=session))
+
+    response = await peer_fallback.open_stream_response(
+        request,
+        {"model": "gpt-5.4", "input": "hi", "stream": True},
+        reason_code="no_accounts",
+        api_key=cast(ApiKeyData, SimpleNamespace(peer_fallback_base_urls=["http://next-peer.example"])),
+    )
+
+    assert response is not None
+    assert session.request_call is not None
+    assert session.request_call["url"] == "http://next-peer.example/backend-api/codex/responses"
+    forwarded_headers = cast(dict[str, str], session.request_call["headers"])
+    assert forwarded_headers[peer_fallback.PEER_FALLBACK_DEPTH_HEADER] == "2"
+
+
+@pytest.mark.asyncio
+async def test_open_stream_response_blocks_peer_forwarded_request_at_max_hops(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [(peer_fallback.PEER_FALLBACK_DEPTH_HEADER.encode("ascii"), b"2")],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    session = _FakeSession()
+    settings = SimpleNamespace(
+        peer_fallback_base_urls=[],
+        peer_fallback_error_codes=["no_accounts"],
+        peer_fallback_max_hops=2,
+        peer_fallback_timeout_seconds=1.0,
+    )
+
+    monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
+    monkeypatch.setattr(peer_fallback, "get_http_client", lambda: SimpleNamespace(session=session))
+
+    response = await peer_fallback.open_stream_response(
+        request,
+        {"model": "gpt-5.4", "input": "hi", "stream": True},
+        reason_code="no_accounts",
+        api_key=cast(ApiKeyData, SimpleNamespace(peer_fallback_base_urls=["http://next-peer.example"])),
+    )
+
+    assert response is None
+    assert session.request_call is None
+
+
+@pytest.mark.asyncio
 async def test_open_stream_response_without_api_key_does_not_use_env(monkeypatch):
     request = Request(
         {

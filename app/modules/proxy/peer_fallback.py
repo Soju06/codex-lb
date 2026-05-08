@@ -181,7 +181,7 @@ def _is_eligible(
     if settings.peer_fallback_max_hops <= 0:
         _log_no_fallback(request, reason_code, "disabled")
         return False
-    if _has_fallback_marker(request.headers):
+    if _has_fallback_marker(request.headers) and _fallback_depth(request.headers) >= settings.peer_fallback_max_hops:
         _log_no_fallback(request, reason_code, "loop_prevention")
         return False
     if request.method.upper() != "POST":
@@ -307,7 +307,7 @@ def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:
 def _fallback_depth(headers: Mapping[str, str]) -> int:
     raw_depth = headers.get(PEER_FALLBACK_DEPTH_HEADER) or headers.get(PEER_FALLBACK_DEPTH_HEADER.title())
     if raw_depth is None:
-        return 0
+        return 1 if PEER_FALLBACK_REASON_HEADER in {key.lower() for key in headers} else 0
     try:
         return max(0, int(raw_depth))
     except ValueError:

@@ -54,18 +54,21 @@ The service MUST attempt peer fallback only while it can still provide one coher
 - **AND** it does not splice a peer stream into the existing downstream stream
 
 ### Requirement: Peer fallback prevents request loops
-The service MUST mark peer fallback attempts so a request forwarded to a peer cannot be forwarded again through peer fallback. The service MUST detect inbound peer-forwarded requests and MUST NOT initiate another peer fallback for those requests.
+The service MUST mark peer fallback attempts with a numeric fallback depth. The service MUST reject inbound peer-forwarded requests when the recorded depth is greater than or equal to `peer_fallback_max_hops`. The service MAY initiate another peer fallback for an inbound peer-forwarded request only while the recorded depth is below `peer_fallback_max_hops`, and the outbound fallback request MUST increment the recorded depth. The default `peer_fallback_max_hops = 1` MUST preserve single-hop behavior.
 
-#### Scenario: Peer-forwarded request fails locally on the peer
-- **GIVEN** an inbound request contains the service's peer fallback marker
-- **WHEN** that request cannot complete on the receiving peer before downstream-visible output starts
+#### Scenario: Peer-forwarded request below hop limit may fallback again
+- **GIVEN** `peer_fallback_max_hops` is `2`
+- **AND** an inbound request contains fallback depth `1`
+- **WHEN** that request cannot complete before downstream-visible output starts
+- **THEN** the receiving peer may forward the request to another configured peer
+- **AND** the forwarded request contains fallback depth `2`
+
+#### Scenario: Peer-forwarded request at hop limit is not forwarded
+- **GIVEN** `peer_fallback_max_hops` is `2`
+- **AND** an inbound request contains fallback depth `2`
+- **WHEN** that request cannot complete before downstream-visible output starts
 - **THEN** the receiving peer returns a local failure for that attempt
 - **AND** it does not forward the request to another peer
-
-#### Scenario: Existing peer marker is not trusted for repeated fallback
-- **WHEN** a request already contains the service's peer fallback marker
-- **THEN** the service treats the request as ineligible for peer fallback
-- **AND** it records a no-fallback reason indicating loop prevention
 
 ### Requirement: Peer fallback initially supports HTTP and SSE proxy flows
 Peer fallback MUST support non-streaming HTTP proxy responses and SSE proxy responses before adding other transports. The fallback attempt MUST preserve the original request method, path, query string, body, relevant proxy headers, streaming mode, and client-facing response semantics.

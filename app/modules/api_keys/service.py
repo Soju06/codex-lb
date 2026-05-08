@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Protocol
+from urllib.parse import urlparse
 
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
@@ -79,6 +80,9 @@ class ApiKeysRepositoryProtocol(Protocol):
     ) -> list[ApiKeyLimit]: ...
     async def replace_account_assignments(
         self, key_id: str, account_ids: list[str], *, commit: bool = True
+    ) -> None: ...
+    async def replace_peer_fallback_base_urls(
+        self, key_id: str, base_urls: list[str], *, commit: bool = True
     ) -> None: ...
 
     async def increment_limit_usage(
@@ -205,6 +209,7 @@ class ApiKeyCreateData:
     enforced_service_tier: str | None = None
     expires_at: datetime | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
+    peer_fallback_base_urls: list[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +230,8 @@ class ApiKeyUpdateData:
     is_active_set: bool = False
     assigned_account_ids: list[str] | None = None
     assigned_account_ids_set: bool = False
+    peer_fallback_base_urls: list[str] | None = None
+    peer_fallback_base_urls_set: bool = False
     limits: list[LimitRuleInput] | None = None
     limits_set: bool = False
     reset_usage: bool = False
@@ -247,6 +254,7 @@ class ApiKeyData:
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
+    peer_fallback_base_urls: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +289,7 @@ class ApiKeysService:
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
+        peer_fallback_base_urls = _normalize_peer_fallback_base_urls(payload.peer_fallback_base_urls)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
@@ -297,6 +306,12 @@ class ApiKeysService:
             last_used_at=None,
         )
         created = await self._repository.create(row)
+
+        if peer_fallback_base_urls:
+            await self._repository.replace_peer_fallback_base_urls(created.id, peer_fallback_base_urls)
+            created = await self._repository.get_by_id(created.id)
+            if created is None:
+                raise ValueError("Failed to create API key")
 
         if payload.limits:
             limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
@@ -340,6 +355,11 @@ class ApiKeysService:
         else:
             assigned_account_ids = None
             account_assignment_scope_enabled = _UNSET
+
+        if payload.peer_fallback_base_urls_set:
+            peer_fallback_base_urls = _normalize_peer_fallback_base_urls(payload.peer_fallback_base_urls)
+        else:
+            peer_fallback_base_urls = None
 
         if payload.enforced_model_set:
             enforced_model = _normalize_model_slug(payload.enforced_model)
@@ -407,6 +427,14 @@ class ApiKeysService:
                 assert assigned_account_ids is not None
                 await self._repository.replace_account_assignments(key_id, assigned_account_ids, commit=False)
 
+            if payload.peer_fallback_base_urls_set:
+                assert peer_fallback_base_urls is not None
+                await self._repository.replace_peer_fallback_base_urls(
+                    key_id,
+                    peer_fallback_base_urls,
+                    commit=False,
+                )
+
             if limit_rows is not None:
                 await self._repository.upsert_limits(key_id, limit_rows, commit=False)
 
@@ -417,6 +445,7 @@ class ApiKeysService:
 
         if (
             payload.assigned_account_ids_set
+            or payload.peer_fallback_base_urls_set
             or limit_rows is not None
             or payload.name_set
             or payload.allowed_models_set
@@ -887,6 +916,36 @@ def _normalize_assigned_account_ids(account_ids: list[str] | None) -> list[str]:
     return normalized
 
 
+def _normalize_peer_fallback_base_urls(base_urls: list[str] | None) -> list[str]:
+    if not base_urls:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for base_url in base_urls:
+        value = base_url.strip().rstrip("/")
+        if not value:
+            raise ValueError("Peer fallback base URLs must be absolute http(s) URLs")
+        if value in seen:
+            continue
+        if any(char.isspace() for char in value):
+            raise ValueError("Peer fallback base URLs must be absolute http(s) URLs")
+        if "?" in value or "#" in value:
+            raise ValueError("Peer fallback base URLs must not include params, query, or fragment")
+        try:
+            parsed = urlparse(value)
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("Peer fallback base URLs must be absolute http(s) URLs") from exc
+        if parsed.scheme not in {"http", "https"} or hostname is None:
+            raise ValueError("Peer fallback base URLs must be absolute http(s) URLs")
+        if parsed.params or parsed.query or parsed.fragment:
+            raise ValueError("Peer fallback base URLs must not include params, query, or fragment")
+        normalized.append(value)
+        seen.add(value)
+    return normalized
+
+
 def _normalize_model_slug(value: str | None) -> str | None:
     if value is None:
         return None
@@ -1107,6 +1166,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         usage_summary=data.usage_summary,
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
+        peer_fallback_base_urls=data.peer_fallback_base_urls,
         key=key,
     )
 
@@ -1114,6 +1174,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
 def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | None = None) -> ApiKeyData:
     limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     account_assignments = getattr(row, "account_assignments", [])
+    peer_fallback_urls = getattr(row, "peer_fallback_urls", [])
     return ApiKeyData(
         id=row.id,
         name=row.name,
@@ -1130,6 +1191,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         usage_summary=usage_summary,
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
+        peer_fallback_base_urls=[peer_url.base_url for peer_url in peer_fallback_urls],
     )
 
 

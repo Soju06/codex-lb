@@ -5,9 +5,10 @@ from typing import cast
 
 import pytest
 from fastapi.responses import Response
-from sqlalchemy.exc import SQLAlchemyError
+from pydantic import SecretStr
 from starlette.requests import Request
 
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import peer_fallback
 
 pytestmark = pytest.mark.unit
@@ -115,9 +116,13 @@ async def test_open_stream_response_forwards_original_request_shape(monkeypatch)
 
     monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
     monkeypatch.setattr(peer_fallback, "get_http_client", lambda: SimpleNamespace(session=session))
-    monkeypatch.setattr(peer_fallback, "_registered_peer_base_urls", _empty_registered_peer_base_urls)
 
-    response = await peer_fallback.open_stream_response(request, payload, reason_code="no_accounts")
+    response = await peer_fallback.open_stream_response(
+        request,
+        payload,
+        reason_code="no_accounts",
+        api_key=cast(ApiKeyData, SimpleNamespace(peer_fallback_base_urls=["http://peer.example"])),
+    )
 
     assert response is not None
     assert session.health_url == "http://peer.example/health"
@@ -144,7 +149,48 @@ async def test_open_stream_response_forwards_original_request_shape(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_open_stream_response_prefers_registered_targets_over_env(monkeypatch):
+async def test_open_stream_response_uses_codex_api_key_for_peer_authorization(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "query_string": b"",
+            "headers": [
+                (b"authorization", b"Bearer local-key"),
+                (b"x-client", b"client-value"),
+            ],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    session = _FakeSession()
+    settings = SimpleNamespace(
+        codex_api_key=SecretStr("peer-secret-key"),
+        peer_fallback_base_urls=["http://peer.example"],
+        peer_fallback_error_codes=["no_accounts"],
+        peer_fallback_max_hops=1,
+        peer_fallback_timeout_seconds=1.0,
+    )
+
+    monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
+    monkeypatch.setattr(peer_fallback, "get_http_client", lambda: SimpleNamespace(session=session))
+
+    response = await peer_fallback.open_stream_response(
+        request,
+        {"model": "gpt-5.4", "input": "hi", "stream": True},
+        reason_code="no_accounts",
+        api_key=cast(ApiKeyData, SimpleNamespace(peer_fallback_base_urls=["http://peer.example"])),
+    )
+
+    assert response is not None
+    assert session.request_call is not None
+    forwarded_headers = cast(dict[str, str], session.request_call["headers"])
+    assert forwarded_headers["authorization"] == "Bearer peer-secret-key"
+    assert forwarded_headers["x-client"] == "client-value"
+
+
+@pytest.mark.asyncio
+async def test_open_stream_response_uses_api_key_peer_fallback_urls(monkeypatch):
     request = Request(
         {
             "type": "http",
@@ -163,27 +209,24 @@ async def test_open_stream_response_prefers_registered_targets_over_env(monkeypa
         peer_fallback_timeout_seconds=1.0,
     )
 
-    async def registered_targets() -> list[str]:
-        return ["http://registered-peer.example"]
-
     monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
     monkeypatch.setattr(peer_fallback, "get_http_client", lambda: SimpleNamespace(session=session))
-    monkeypatch.setattr(peer_fallback, "_registered_peer_base_urls", registered_targets)
 
     response = await peer_fallback.open_stream_response(
         request,
         {"model": "gpt-5.4", "input": "hi", "stream": True},
         reason_code="no_accounts",
+        api_key=cast(ApiKeyData, SimpleNamespace(peer_fallback_base_urls=["http://assigned-peer.example"])),
     )
 
     assert response is not None
-    assert session.health_url == "http://registered-peer.example/health"
+    assert session.health_url == "http://assigned-peer.example/health"
     assert session.request_call is not None
-    assert session.request_call["url"] == "http://registered-peer.example/backend-api/codex/responses"
+    assert session.request_call["url"] == "http://assigned-peer.example/backend-api/codex/responses"
 
 
 @pytest.mark.asyncio
-async def test_open_stream_response_uses_empty_registered_list_to_disable_env(monkeypatch):
+async def test_open_stream_response_without_api_key_does_not_use_env(monkeypatch):
     request = Request(
         {
             "type": "http",
@@ -201,12 +244,8 @@ async def test_open_stream_response_uses_empty_registered_list_to_disable_env(mo
         peer_fallback_timeout_seconds=1.0,
     )
 
-    async def registered_targets() -> list[str]:
-        return []
-
     monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
     monkeypatch.setattr(peer_fallback, "get_http_client", lambda: SimpleNamespace(session=session))
-    monkeypatch.setattr(peer_fallback, "_registered_peer_base_urls", registered_targets)
 
     response = await peer_fallback.open_stream_response(
         request,
@@ -219,18 +258,33 @@ async def test_open_stream_response_uses_empty_registered_list_to_disable_env(mo
 
 
 @pytest.mark.asyncio
-async def test_registered_peer_base_urls_fails_closed_on_database_error(monkeypatch):
-    class FailingSessionContext:
-        async def __aenter__(self):
-            raise SQLAlchemyError("database unavailable")
+async def test_open_stream_response_without_api_key_peer_fallback_urls_does_not_use_env(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    session = _FakeSession()
+    settings = SimpleNamespace(
+        peer_fallback_base_urls=["http://env-peer.example"],
+        peer_fallback_error_codes=["no_accounts"],
+        peer_fallback_max_hops=1,
+        peer_fallback_timeout_seconds=1.0,
+    )
 
-        async def __aexit__(self, exc_type, exc, traceback) -> None:
-            return None
+    monkeypatch.setattr(peer_fallback, "get_settings", lambda: settings)
+    monkeypatch.setattr(peer_fallback, "get_http_client", lambda: SimpleNamespace(session=session))
 
-    monkeypatch.setattr(peer_fallback, "get_background_session", lambda: FailingSessionContext())
+    response = await peer_fallback.open_stream_response(
+        request,
+        {"model": "gpt-5.4", "input": "hi", "stream": True},
+        reason_code="no_accounts",
+        api_key=cast(ApiKeyData, SimpleNamespace(peer_fallback_base_urls=[])),
+    )
 
-    assert await peer_fallback._registered_peer_base_urls() == []
-
-
-async def _empty_registered_peer_base_urls() -> list[str] | None:
-    return None
+    assert response is None
+    assert session.request_call is None

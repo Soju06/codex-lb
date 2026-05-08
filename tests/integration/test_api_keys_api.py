@@ -16,7 +16,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import LimitWindow, RequestLog
+from app.db.models import ApiKeyPeerFallbackUrl, LimitWindow, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 
@@ -180,6 +180,91 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
     assert cleared.status_code == 200
     assert cleared.json()["accountAssignmentScopeEnabled"] is False
     assert cleared.json()["assignedAccountIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_peer_fallback_base_urls_crud(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "peer-fallback-key",
+            "peerFallbackBaseUrls": ["http://127.0.0.1:2463/", "http://127.0.0.1:2462"],
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    assert create.json()["peerFallbackBaseUrls"] == ["http://127.0.0.1:2463", "http://127.0.0.1:2462"]
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["peerFallbackBaseUrls"] == ["http://127.0.0.1:2463", "http://127.0.0.1:2462"]
+
+    update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"peerFallbackBaseUrls": ["http://127.0.0.1:2462"]},
+    )
+    assert update.status_code == 200
+    assert update.json()["peerFallbackBaseUrls"] == ["http://127.0.0.1:2462"]
+
+    blank_invalid = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"peerFallbackBaseUrls": [" "]},
+    )
+    assert blank_invalid.status_code == 400
+    assert blank_invalid.json()["error"]["code"] == "invalid_api_key_payload"
+
+    invalid = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"peerFallbackBaseUrls": ["ftp://127.0.0.1:2462"]},
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "invalid_api_key_payload"
+
+    bare_query_invalid = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"peerFallbackBaseUrls": ["http://127.0.0.1:2462?"]},
+    )
+    assert bare_query_invalid.status_code == 400
+    assert bare_query_invalid.json()["error"]["code"] == "invalid_api_key_payload"
+
+    listed_after_invalid = await async_client.get("/api/api-keys/")
+    assert listed_after_invalid.status_code == 200
+    assert listed_after_invalid.json()[0]["peerFallbackBaseUrls"] == ["http://127.0.0.1:2462"]
+
+    cleared = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"peerFallbackBaseUrls": []},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["peerFallbackBaseUrls"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_peer_fallback_urls_are_owned_by_api_key(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "peer-fallback-owned-key",
+            "peerFallbackBaseUrls": ["http://127.0.0.1:2464"],
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyPeerFallbackUrl).where(ApiKeyPeerFallbackUrl.api_key_id == key_id)
+        )
+        assert [row.base_url for row in result.scalars().all()] == ["http://127.0.0.1:2464"]
+
+    delete = await async_client.delete(f"/api/api-keys/{key_id}")
+    assert delete.status_code == 204
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyPeerFallbackUrl).where(ApiKeyPeerFallbackUrl.api_key_id == key_id)
+        )
+        assert result.scalars().all() == []
 
 
 @pytest.mark.asyncio

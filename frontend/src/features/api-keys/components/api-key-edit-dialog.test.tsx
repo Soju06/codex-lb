@@ -247,6 +247,84 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.name).toBe("Renamed key");
     expect(payload.assignedAccountIds).toEqual([]);
   });
+
+  it("submits peer fallback base URLs", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Peer fallback base URL"), "http://127.0.0.1:2462");
+    await user.click(screen.getByRole("button", { name: "Add URL" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.peerFallbackBaseUrls).toEqual(["http://127.0.0.1:2462"]);
+  });
+
+  it("submits peer fallback base URLs when only their order changes", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ peerFallbackBaseUrls: ["http://127.0.0.1:2462", "http://127.0.0.1:2463"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Remove http://127.0.0.1:2462" }));
+    await user.type(screen.getByLabelText("Peer fallback base URL"), "http://127.0.0.1:2462");
+    await user.click(screen.getByRole("button", { name: "Add URL" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.peerFallbackBaseUrls).toEqual(["http://127.0.0.1:2463", "http://127.0.0.1:2462"]);
+  });
+
+  it("submits an empty peer fallback URL list when clearing existing URLs", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ peerFallbackBaseUrls: ["http://127.0.0.1:2462"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Remove http://127.0.0.1:2462" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.peerFallbackBaseUrls).toEqual([]);
+  });
 });
 
 describe("hasLimitRuleChanges", () => {

@@ -26,6 +26,7 @@ import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
+import { PeerFallbackUrlList } from "@/features/api-keys/components/peer-fallback-url-list";
 import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType, ServiceTierType } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
 
@@ -71,6 +72,13 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
   return nextIds.some((accountId) => !initialIdSet.has(accountId));
 }
 
+function hasOrderedListChange(initialValues: string[], nextValues: string[]): boolean {
+  if (initialValues.length !== nextValues.length) {
+    return true;
+  }
+  return nextValues.some((value, index) => initialValues[index] !== value);
+}
+
 function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -82,6 +90,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
   const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(apiKey.assignedAccountIds);
+  const [peerFallbackBaseUrls, setPeerFallbackBaseUrls] = useState<string[]>(apiKey.peerFallbackBaseUrls);
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
@@ -98,6 +107,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const shouldSubmitAssignedAccountIds =
       hasSelectionChange(apiKey.assignedAccountIds, selectedAccountIds) ||
       (apiKey.accountAssignmentScopeEnabled && selectedAccountIds.length === 0);
+    const shouldSubmitPeerFallbackBaseUrls = hasOrderedListChange(apiKey.peerFallbackBaseUrls, peerFallbackBaseUrls);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
@@ -109,6 +119,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     };
     if (shouldSubmitAssignedAccountIds) {
       payload.assignedAccountIds = selectedAccountIds;
+    }
+    if (shouldSubmitPeerFallbackBaseUrls) {
+      payload.peerFallbackBaseUrls = peerFallbackBaseUrls;
     }
     if (hasLimitRuleChanges(initialLimitRules, limitRules)) {
       payload.limits = normalizedLimits;
@@ -151,6 +164,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">Assigned accounts</div>
               <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Peer fallback URLs</div>
+              <PeerFallbackUrlList value={peerFallbackBaseUrls} onChange={setPeerFallbackBaseUrls} />
             </div>
 
             <div className="space-y-1">

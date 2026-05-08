@@ -1,29 +1,4 @@
-# peer-fallback-targets Specification
-
-## Purpose
-TBD - created by archiving change register-peer-fallback-targets. Update Purpose after archive.
-## Requirements
-### Requirement: Dashboard manages peer fallback targets
-
-The system SHALL allow authenticated dashboard users to create, list, update, enable/disable, and delete peer fallback targets. Each target MUST have a stable identifier, normalized absolute HTTP(S) base URL, enabled flag, creation timestamp, and update timestamp.
-
-#### Scenario: Create a peer fallback target
-
-- **WHEN** a dashboard user creates a peer fallback target with an absolute HTTP(S) base URL
-- **THEN** the system persists the normalized URL without trailing slashes
-- **AND** returns the created target with a stable identifier and timestamps
-
-#### Scenario: Reject invalid peer fallback target URL
-
-- **WHEN** a dashboard user creates or updates a peer fallback target with a relative URL or non-HTTP(S) URL
-- **THEN** the system rejects the request with a dashboard validation error
-- **AND** does not persist the invalid target
-
-#### Scenario: Toggle peer fallback target
-
-- **WHEN** a dashboard user disables an existing peer fallback target
-- **THEN** the target remains persisted
-- **AND** runtime peer fallback no longer uses that target while it is disabled
+## MODIFIED Requirements
 
 ### Requirement: Runtime resolves API key peer fallback URLs
 

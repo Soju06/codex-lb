@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
@@ -141,6 +141,10 @@ class Settings(BaseSettings):
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
     database_sqlite_startup_check_mode: Literal["quick", "full", "off"] = "quick"
     database_alembic_auto_remap_enabled: bool = True
+    codex_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CODEX_API_KEY", "codex_api_key"),
+    )
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     upstream_connect_timeout_seconds: float = 8.0
@@ -264,7 +268,6 @@ class Settings(BaseSettings):
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
-    peer_fallback_base_urls: Annotated[list[str], NoDecode] = Field(default_factory=list)
     peer_fallback_max_hops: int = Field(default=1, ge=0)
     peer_fallback_timeout_seconds: float = Field(default=15.0, gt=0)
     peer_fallback_error_codes: Annotated[list[str], NoDecode] = Field(
@@ -374,37 +377,6 @@ class Settings(BaseSettings):
             stripped = value.strip().rstrip("/")
             return stripped or None
         raise TypeError("http_responses_session_bridge_advertise_base_url must be a string")
-
-    @field_validator("peer_fallback_base_urls", mode="before")
-    @classmethod
-    def _normalize_peer_fallback_base_urls(cls, value: StringListInput) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            entries = [entry.strip().rstrip("/") for entry in value.split(",")]
-        elif isinstance(value, list):
-            entries = [entry.strip().rstrip("/") for entry in value if isinstance(entry, str)]
-        else:
-            raise TypeError("peer_fallback_base_urls must be a list or comma-separated string")
-
-        urls: list[str] = []
-        for entry in entries:
-            if not entry:
-                continue
-            if any(char.isspace() for char in entry):
-                raise ValueError("peer_fallback_base_urls entries must be absolute http(s) URLs")
-            try:
-                parsed = urlparse(entry)
-                hostname = parsed.hostname
-                parsed.port
-            except ValueError as exc:
-                raise ValueError("peer_fallback_base_urls entries must be absolute http(s) URLs") from exc
-            if parsed.scheme not in {"http", "https"} or hostname is None:
-                raise ValueError("peer_fallback_base_urls entries must be absolute http(s) URLs")
-            if parsed.params or parsed.query or parsed.fragment:
-                raise ValueError("peer_fallback_base_urls entries must not include params, query, or fragment")
-            urls.append(entry)
-        return urls
 
     @field_validator("peer_fallback_error_codes", mode="before")
     @classmethod

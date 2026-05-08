@@ -420,6 +420,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		isActive: true,
 		accountAssignmentScopeEnabled: false,
 		assignedAccountIds: [],
+		peerFallbackBaseUrls: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
 		limits: [

@@ -2,6 +2,8 @@ import { z } from "zod";
 
 export const LIMIT_TYPES = ["total_tokens", "input_tokens", "output_tokens", "cost_usd", "credits"] as const;
 export const LIMIT_WINDOWS = ["daily", "weekly", "monthly", "5h", "7d"] as const;
+const PEER_FALLBACK_BASE_URL_ERROR =
+  "Peer fallback base URL must be an absolute HTTP(S) URL without params, query, or fragment";
 
 export type LimitType = (typeof LIMIT_TYPES)[number];
 export type LimitWindowType = (typeof LIMIT_WINDOWS)[number];
@@ -33,6 +35,37 @@ export const ApiKeyUsageSummarySchema = z.object({
 export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
 
+export function normalizePeerFallbackBaseUrl(value: string): string | null {
+  const normalized = value.trim().replace(/\/+$/, "");
+  if (!normalized || /\s/.test(normalized)) {
+    return null;
+  }
+  if (normalized.includes("?") || normalized.includes("#") || normalized.includes(";")) {
+    return null;
+  }
+  try {
+    const parsed = new URL(normalized);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.search || parsed.hash) {
+      return null;
+    }
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+export const PeerFallbackBaseUrlSchema = z.string().transform((value, context) => {
+  const normalized = normalizePeerFallbackBaseUrl(value);
+  if (!normalized) {
+    context.addIssue({
+      code: "custom",
+      message: PEER_FALLBACK_BASE_URL_ERROR,
+    });
+    return z.NEVER;
+  }
+  return normalized;
+});
+
 export const ApiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -51,6 +84,7 @@ export const ApiKeySchema = z.object({
   isActive: z.boolean(),
   accountAssignmentScopeEnabled: z.boolean().default(false),
   assignedAccountIds: z.array(z.string()).default([]),
+  peerFallbackBaseUrls: z.array(PeerFallbackBaseUrlSchema).default([]),
   createdAt: z.string().datetime({ offset: true }),
   lastUsedAt: z.string().datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
@@ -72,6 +106,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
+  peerFallbackBaseUrls: z.array(PeerFallbackBaseUrlSchema).optional(),
 });
 
 export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
@@ -94,6 +129,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  peerFallbackBaseUrls: z.array(PeerFallbackBaseUrlSchema).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
   resetUsage: z.boolean().optional(),
 });

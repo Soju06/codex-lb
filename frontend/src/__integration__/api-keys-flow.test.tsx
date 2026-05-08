@@ -92,6 +92,15 @@ describe("api keys flow integration", () => {
     expect(within(readOnlyRow).getByText("Disabled")).toBeInTheDocument();
   });
 
+  it("does not show the global peer fallback target catalog on settings", async () => {
+    window.history.pushState({}, "", "/settings");
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Peer fallback targets" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add target" })).not.toBeInTheDocument();
+  });
+
   it("shows usage bars when editing a key with limits", async () => {
     const user = userEvent.setup({ delay: null });
 

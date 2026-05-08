@@ -1501,7 +1501,7 @@ async def _stream_responses(
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
     except ProxyResponseError as exc:
-        fallback = await _peer_fallback_stream_for_proxy_error(request, payload, exc)
+        fallback = await _peer_fallback_stream_for_proxy_error(request, payload, exc, api_key=api_key)
         if fallback is not None:
             await _close_async_iterator(stream)
             if owns_reservation:
@@ -1518,7 +1518,12 @@ async def _stream_responses(
     fallback_reason_code = peer_fallback.error_code_from_sse_event(first)
     if fallback_reason_code is not None:
         await _drain_async_iterator(stream)
-        fallback = await _peer_fallback_stream_for_error_code(request, payload, fallback_reason_code)
+        fallback = await _peer_fallback_stream_for_error_code(
+            request,
+            payload,
+            fallback_reason_code,
+            api_key=api_key,
+        )
         if fallback is not None:
             if owns_reservation:
                 await _release_reservation(reservation)
@@ -1590,7 +1595,7 @@ async def _collect_responses(
     try:
         response_payload = await _collect_responses_payload(stream)
     except ProxyResponseError as exc:
-        fallback = await _peer_fallback_buffered_for_proxy_error(request, payload, exc)
+        fallback = await _peer_fallback_buffered_for_proxy_error(request, payload, exc, api_key=api_key)
         if fallback is not None:
             await _release_reservation(reservation)
             return fallback
@@ -1609,6 +1614,7 @@ async def _collect_responses(
                 request,
                 payload,
                 error_payload.error.code if error_payload.error else None,
+                api_key=api_key,
             )
             if fallback is not None:
                 return fallback
@@ -1627,6 +1633,7 @@ async def _collect_responses(
         request,
         payload,
         response_payload.error.code if response_payload.error else None,
+        api_key=api_key,
     )
     if fallback is not None:
         return fallback
@@ -1811,11 +1818,14 @@ async def _peer_fallback_stream_for_error_code(
     request: Request,
     payload: ResponsesRequest,
     reason_code: str,
+    *,
+    api_key: ApiKeyData | None,
 ) -> Response | None:
     return await peer_fallback.open_stream_response(
         request,
         _responses_request_payload(payload, stream=True),
         reason_code=reason_code,
+        api_key=api_key,
     )
 
 
@@ -1823,11 +1833,14 @@ async def _peer_fallback_stream_for_proxy_error(
     request: Request,
     payload: ResponsesRequest,
     exc: ProxyResponseError,
+    *,
+    api_key: ApiKeyData | None,
 ) -> Response | None:
     return await peer_fallback.open_stream_response(
         request,
         _responses_request_payload(payload, stream=True),
         reason_code=peer_fallback.error_code_from_envelope(exc.payload),
+        api_key=api_key,
     )
 
 
@@ -1835,11 +1848,14 @@ async def _peer_fallback_buffered_for_proxy_error(
     request: Request,
     payload: ResponsesRequest,
     exc: ProxyResponseError,
+    *,
+    api_key: ApiKeyData | None,
 ) -> Response | None:
     return await peer_fallback.open_buffered_response(
         request,
         _responses_request_payload(payload, stream=False),
         reason_code=peer_fallback.error_code_from_envelope(exc.payload),
+        api_key=api_key,
     )
 
 
@@ -1847,11 +1863,14 @@ async def _peer_fallback_buffered_for_error_code(
     request: Request,
     payload: ResponsesRequest,
     reason_code: str | None,
+    *,
+    api_key: ApiKeyData | None,
 ) -> Response | None:
     return await peer_fallback.open_buffered_response(
         request,
         _responses_request_payload(payload, stream=False),
         reason_code=reason_code,
+        api_key=api_key,
     )
 
 

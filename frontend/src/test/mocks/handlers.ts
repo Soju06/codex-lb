@@ -1,7 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
-import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
+import { LIMIT_TYPES, LIMIT_WINDOWS, PeerFallbackBaseUrlSchema } from "@/features/api-keys/schemas";
 import {
 	type AccountSummary,
 	type ApiKey,
@@ -43,6 +43,7 @@ const OauthStartPayloadSchema = z
 const ApiKeyCreatePayloadSchema = z
 	.object({
 		name: z.string().optional(),
+		peerFallbackBaseUrls: z.array(PeerFallbackBaseUrlSchema).optional(),
 	})
 	.passthrough();
 
@@ -72,6 +73,7 @@ const ApiKeyUpdatePayloadSchema = z
 		allowedModels: z.array(z.string()).nullable().optional(),
 		isActive: z.boolean().optional(),
 		assignedAccountIds: z.array(z.string()).optional(),
+		peerFallbackBaseUrls: z.array(PeerFallbackBaseUrlSchema).optional(),
 		resetUsage: z.boolean().optional(),
 		limits: z
 			.array(
@@ -847,11 +849,18 @@ export const handlers = [
 
 	http.post("/api/api-keys/", async ({ request }) => {
 		const payload = await parseJsonBody(request, ApiKeyCreatePayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "invalid_api_key_payload", message: "Invalid API key payload" } },
+				{ status: 400 },
+			);
+		}
 		const sequence = state.apiKeys.length + 1;
 		const created = createApiKeyCreateResponse({
 			...createApiKey({
 				id: `key_${sequence}`,
-				name: payload?.name ?? `API Key ${sequence}`,
+				name: payload.name ?? `API Key ${sequence}`,
+				peerFallbackBaseUrls: payload.peerFallbackBaseUrls ?? [],
 			}),
 			key: `sk-test-generated-${sequence}`,
 		});
@@ -870,7 +879,10 @@ export const handlers = [
 		}
 		const payload = await parseJsonBody(request, ApiKeyUpdatePayloadSchema);
 		if (!payload) {
-			return HttpResponse.json(existing);
+			return HttpResponse.json(
+				{ error: { code: "invalid_api_key_payload", message: "Invalid API key payload" } },
+				{ status: 400 },
+			);
 		}
 
 		// Build override with converted limits (create format → response format)
@@ -885,6 +897,9 @@ export const handlers = [
 				: {}),
 			...(payload.assignedAccountIds !== undefined
 				? { assignedAccountIds: payload.assignedAccountIds }
+				: {}),
+			...(payload.peerFallbackBaseUrls !== undefined
+				? { peerFallbackBaseUrls: payload.peerFallbackBaseUrls }
 				: {}),
 		};
 

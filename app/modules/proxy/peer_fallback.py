@@ -4,19 +4,19 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.clients.http import get_http_client
 from app.core.config.settings import Settings, get_settings
 from app.core.types import JsonValue
 from app.core.utils.sse import parse_sse_data_json
-from app.db.session import get_background_session
-from app.modules.peer_fallback_targets.repository import PeerFallbackTargetRepository
+
+if TYPE_CHECKING:
+    from app.modules.api_keys.service import ApiKeyData
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +93,10 @@ async def open_stream_response(
     payload: Mapping[str, JsonValue],
     *,
     reason_code: str | None,
+    api_key: "ApiKeyData | None" = None,
 ) -> Response | None:
     settings = get_settings()
-    peer_base_urls = await _effective_peer_base_urls(settings)
+    peer_base_urls = await _effective_peer_base_urls(api_key)
     if not _is_eligible(request, settings, reason_code=reason_code, peer_base_urls=peer_base_urls):
         return None
     peer = await _open_peer_stream(
@@ -121,9 +122,10 @@ async def open_buffered_response(
     payload: Mapping[str, JsonValue],
     *,
     reason_code: str | None,
+    api_key: "ApiKeyData | None" = None,
 ) -> Response | None:
     settings = get_settings()
-    peer_base_urls = await _effective_peer_base_urls(settings)
+    peer_base_urls = await _effective_peer_base_urls(api_key)
     if not _is_eligible(request, settings, reason_code=reason_code, peer_base_urls=peer_base_urls):
         return None
 
@@ -239,20 +241,10 @@ async def _open_peer_stream(
     return None
 
 
-async def _effective_peer_base_urls(settings: Settings) -> list[str]:
-    registered = await _registered_peer_base_urls()
-    if registered is not None:
-        return registered
-    return list(settings.peer_fallback_base_urls)
-
-
-async def _registered_peer_base_urls() -> list[str] | None:
-    try:
-        async with get_background_session() as session:
-            return await PeerFallbackTargetRepository(session).list_runtime_base_urls()
-    except SQLAlchemyError:
-        logger.warning("peer_fallback_target_lookup_failed", exc_info=True)
+async def _effective_peer_base_urls(api_key: "ApiKeyData | None") -> list[str]:
+    if api_key is None:
         return []
+    return list(api_key.peer_fallback_base_urls)
 
 
 async def _peer_is_healthy(
@@ -284,10 +276,28 @@ def _request_headers(
     reason_code: str | None,
 ) -> dict[str, str]:
     forwarded = {key: value for key, value in headers.items() if key.lower() not in _REQUEST_STRIP_HEADERS}
+    authorization = _peer_authorization_header(settings)
+    if authorization is not None:
+        forwarded = {key: value for key, value in forwarded.items() if key.lower() != "authorization"}
+        forwarded["authorization"] = authorization
     forwarded[PEER_FALLBACK_DEPTH_HEADER] = str(min(_fallback_depth(headers) + 1, settings.peer_fallback_max_hops))
     if reason_code:
         forwarded[PEER_FALLBACK_REASON_HEADER] = reason_code
     return forwarded
+
+
+def _peer_authorization_header(settings: Settings) -> str | None:
+    api_key = getattr(settings, "codex_api_key", None)
+    if api_key is None:
+        return None
+    if hasattr(api_key, "get_secret_value"):
+        value = api_key.get_secret_value()
+    else:
+        value = str(api_key)
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return f"Bearer {stripped}"
 
 
 def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:

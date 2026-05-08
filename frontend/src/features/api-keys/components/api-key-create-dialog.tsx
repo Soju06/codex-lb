@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
+import { PeerFallbackUrlList } from "@/features/api-keys/components/peer-fallback-url-list";
 import type { ApiKeyCreateRequest, LimitRuleCreate, ServiceTierType } from "@/features/api-keys/schemas";
 import {
   Select,
@@ -51,6 +52,25 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   const [enforcedModel, setEnforcedModel] = useState("");
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState("none");
   const [enforcedServiceTier, setEnforcedServiceTier] = useState("none");
+  const [peerFallbackBaseUrls, setPeerFallbackBaseUrls] = useState<string[]>([]);
+
+  const resetDraft = () => {
+    form.reset();
+    setSelectedModels([]);
+    setLimitRules([]);
+    setExpiresAt(null);
+    setEnforcedModel("");
+    setEnforcedReasoningEffort("none");
+    setEnforcedServiceTier("none");
+    setPeerFallbackBaseUrls([]);
+  };
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      resetDraft();
+    }
+    onOpenChange(nextOpen);
+  };
 
   const handleSubmit = async (values: FormValues) => {
     const validLimits = limitRules.filter((r) => r.maxValue > 0);
@@ -62,24 +82,19 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
       enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
       expiresAt: expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
+      peerFallbackBaseUrls: peerFallbackBaseUrls.length > 0 ? peerFallbackBaseUrls : undefined,
     };
     try {
       await onSubmit(payload);
     } catch {
       return;
     }
-    form.reset();
-    setSelectedModels([]);
-    setLimitRules([]);
-    setExpiresAt(null);
-    setEnforcedModel("");
-    setEnforcedReasoningEffort("none");
-    setEnforcedServiceTier("none");
+    resetDraft();
     onOpenChange(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Create API key</DialogTitle>
@@ -110,6 +125,11 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                 <div className="space-y-1">
                   <label className="text-sm font-medium">Allowed models</label>
                   <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Peer fallback URLs</label>
+                  <PeerFallbackUrlList value={peerFallbackBaseUrls} onChange={setPeerFallbackBaseUrls} />
                 </div>
 
                 <div className="space-y-1">

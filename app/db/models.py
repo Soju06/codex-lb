@@ -319,6 +319,13 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    peer_fallback_urls: Mapped[list["ApiKeyPeerFallbackUrl"]] = relationship(
+        "ApiKeyPeerFallbackUrl",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ApiKeyPeerFallbackUrl.priority",
+    )
 
 
 class ApiKeyAccountAssignment(Base):
@@ -338,6 +345,25 @@ class ApiKeyAccountAssignment(Base):
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="account_assignments")
     account: Mapped["Account"] = relationship("Account", back_populates="api_key_assignments")
+
+
+class ApiKeyPeerFallbackUrl(Base):
+    __tablename__ = "api_key_peer_fallback_urls"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    api_key_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="peer_fallback_urls")
+
+    __table_args__ = (UniqueConstraint("api_key_id", "base_url", name="uq_api_key_peer_fallback_urls_key_base_url"),)
 
 
 class LimitType(str, Enum):
@@ -680,6 +706,7 @@ Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
+Index("idx_api_key_peer_fallback_urls_key_priority", ApiKeyPeerFallbackUrl.api_key_id, ApiKeyPeerFallbackUrl.priority)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)

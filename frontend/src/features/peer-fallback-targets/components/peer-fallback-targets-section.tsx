@@ -134,7 +134,7 @@ export function PeerFallbackTargetsSection() {
         <EmptyState
           icon={ServerCog}
           title="No peer targets registered"
-          description="Env-configured peer targets remain the fallback default."
+          description="Peer fallback URLs are configured directly on API keys."
         />
       ) : (
         <div className="overflow-x-auto rounded-xl border">

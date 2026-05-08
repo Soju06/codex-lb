@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 import app.modules.proxy.api as proxy_api_module
 from app.core.openai.requests import ResponsesRequest
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import peer_fallback
 
 pytestmark = pytest.mark.unit
@@ -74,9 +75,12 @@ async def test_stream_responses_peer_fallback_before_first_downstream_event(monk
         finally:
             closed = True
 
-    async def fake_peer_stream(_request, peer_payload, *, reason_code):
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-1", peer_fallback_base_urls=["http://peer.example"]))
+
+    async def fake_peer_stream(_request, peer_payload, *, reason_code, api_key):
         captured["reason_code"] = reason_code
         captured["stream"] = peer_payload["stream"]
+        captured["api_key"] = api_key
         return StreamingResponse(
             _single_chunk(
                 'data: {"type":"response.completed","response":{"id":"resp_peer","object":"response",'
@@ -101,10 +105,10 @@ async def test_stream_responses_peer_fallback_before_first_downstream_event(monk
         ),
     )
 
-    response = await proxy_api_module._stream_responses(request, payload, context, None)
+    response = await proxy_api_module._stream_responses(request, payload, context, api_key)
 
     body = await _response_body_text(response)
-    assert captured == {"reason_code": "no_accounts", "stream": True}
+    assert captured == {"reason_code": "no_accounts", "stream": True, "api_key": api_key}
     assert closed
     assert settled_after_first
     assert "resp_peer" in body
@@ -148,9 +152,12 @@ async def test_stream_responses_peer_fallback_on_upstream_rate_limit(monkeypatch
             '"type":"rate_limit_error"}}}\n\n'
         )
 
-    async def fake_peer_stream(_request, peer_payload, *, reason_code):
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-1", peer_fallback_base_urls=["http://peer.example"]))
+
+    async def fake_peer_stream(_request, peer_payload, *, reason_code, api_key):
         captured["reason_code"] = reason_code
         captured["stream"] = peer_payload["stream"]
+        captured["api_key"] = api_key
         return StreamingResponse(
             _single_chunk(
                 'data: {"type":"response.completed","response":{"id":"resp_peer","object":"response",'
@@ -175,10 +182,10 @@ async def test_stream_responses_peer_fallback_on_upstream_rate_limit(monkeypatch
         ),
     )
 
-    response = await proxy_api_module._stream_responses(request, payload, context, None)
+    response = await proxy_api_module._stream_responses(request, payload, context, api_key)
 
     body = await _response_body_text(response)
-    assert captured == {"reason_code": "rate_limit_exceeded", "stream": True}
+    assert captured == {"reason_code": "rate_limit_exceeded", "stream": True, "api_key": api_key}
     assert "resp_peer" in body
     assert "rate_limit_exceeded" not in body
 
@@ -275,9 +282,12 @@ async def test_collect_responses_peer_fallback_uses_non_stream_payload(monkeypat
             '"type":"server_error"}}}\n\n'
         )
 
-    async def fake_peer_buffered(_request, peer_payload, *, reason_code):
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-1", peer_fallback_base_urls=["http://peer.example"]))
+
+    async def fake_peer_buffered(_request, peer_payload, *, reason_code, api_key):
         captured["reason_code"] = reason_code
         captured["stream"] = peer_payload["stream"]
+        captured["api_key"] = api_key
         return Response(
             content=b'{"id":"resp_peer","object":"response","status":"completed","output":[]}',
             media_type="application/json",
@@ -298,9 +308,9 @@ async def test_collect_responses_peer_fallback_uses_non_stream_payload(monkeypat
         ),
     )
 
-    response = await proxy_api_module._collect_responses(request, payload, context, None)
+    response = await proxy_api_module._collect_responses(request, payload, context, api_key)
 
-    assert captured == {"reason_code": "no_accounts", "stream": False}
+    assert captured == {"reason_code": "no_accounts", "stream": False, "api_key": api_key}
     assert response.status_code == 200
     assert b"resp_peer" in response.body
 
@@ -357,6 +367,9 @@ async def test_collect_responses_preserves_local_error_when_peer_fallback_unavai
     response = await proxy_api_module._collect_responses(request, payload, context, None)
 
     peer_buffered.assert_awaited_once()
+    await_args = peer_buffered.await_args
+    assert await_args is not None
+    assert await_args.kwargs["api_key"] is None
     assert response.status_code == 503
     payload_body = json.loads(bytes(response.body))
     assert payload_body["error"]["code"] == "no_accounts"

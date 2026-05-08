@@ -20,6 +20,7 @@ describe("ApiKeySchema", () => {
       isActive: true,
       createdAt: ISO,
       lastUsedAt: ISO,
+      peerFallbackBaseUrls: ["http://127.0.0.1:2462", "https://peer.example"],
       limits: [
         {
           id: 1,
@@ -35,6 +36,7 @@ describe("ApiKeySchema", () => {
 
     expect(parsed.id).toBe("key-1");
     expect(parsed.allowedModels).toEqual(["gpt-4.1"]);
+    expect(parsed.peerFallbackBaseUrls).toEqual(["http://127.0.0.1:2462", "https://peer.example"]);
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits[0].limitType).toBe("total_tokens");
   });
@@ -52,6 +54,7 @@ describe("ApiKeySchema", () => {
     });
 
     expect(parsed.limits).toEqual([]);
+    expect(parsed.peerFallbackBaseUrls).toEqual([]);
   });
 });
 
@@ -67,10 +70,12 @@ describe("ApiKeyCreateResponseSchema", () => {
       isActive: true,
       createdAt: ISO,
       lastUsedAt: null,
+      peerFallbackBaseUrls: ["http://127.0.0.1:2462"],
       limits: [],
     });
 
     expect(parsed.key).toBe("sk-test-plaintext");
+    expect(parsed.peerFallbackBaseUrls).toEqual(["http://127.0.0.1:2462"]);
   });
 });
 
@@ -82,10 +87,37 @@ describe("ApiKeyUpdateRequestSchema", () => {
       weeklyTokenLimit: 50000,
       expiresAt: ISO,
       isActive: false,
+      peerFallbackBaseUrls: ["http://127.0.0.1:2462"],
     });
 
     expect(parsed.name).toBe("Updated Key");
     expect(parsed.isActive).toBe(false);
+    expect(parsed.peerFallbackBaseUrls).toEqual(["http://127.0.0.1:2462"]);
+  });
+
+  it("normalizes peer fallback base URLs", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      peerFallbackBaseUrls: [" http://127.0.0.1:2462/ "],
+    });
+
+    expect(parsed.peerFallbackBaseUrls).toEqual(["http://127.0.0.1:2462"]);
+  });
+
+  it("rejects invalid peer fallback base URLs", () => {
+    const invalidUrls = [
+      "ftp://127.0.0.1:2462",
+      "http://127.0.0.1:2462?",
+      "http://127.0.0.1:2462#fragment",
+      "http://exa mple.com",
+    ];
+
+    for (const url of invalidUrls) {
+      const result = ApiKeyUpdateRequestSchema.safeParse({
+        peerFallbackBaseUrls: [url],
+      });
+
+      expect(result.success).toBe(false);
+    }
   });
 
   it("rejects invalid weeklyTokenLimit", () => {

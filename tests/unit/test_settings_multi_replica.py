@@ -27,10 +27,10 @@ def test_settings_multi_replica_defaults():
     assert settings.proxy_response_create_limit == 256
     assert settings.proxy_compact_response_create_limit == 64
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
-    assert settings.peer_fallback_base_urls == []
     assert settings.peer_fallback_max_hops == 1
     assert settings.peer_fallback_timeout_seconds == 15.0
     assert settings.peer_fallback_error_codes == DEFAULT_PEER_FALLBACK_ERROR_CODES
+    assert settings.codex_api_key is None
     assert "rate_limit_exceeded" in settings.peer_fallback_error_codes
     assert "usage_limit_reached" in settings.peer_fallback_error_codes
     assert settings.max_sse_event_bytes == 16 * 1024 * 1024
@@ -142,48 +142,34 @@ def test_settings_proxy_downstream_websocket_idle_timeout_from_env(monkeypatch):
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 45.0
 
 
-def test_settings_peer_fallback_from_env(monkeypatch):
-    monkeypatch.setenv(
-        "CODEX_LB_PEER_FALLBACK_BASE_URLS",
-        " http://127.0.0.1:2456/ , https://peer.example/proxy/ ",
-    )
+def test_settings_peer_fallback_policy_from_env(monkeypatch):
     monkeypatch.setenv("CODEX_LB_PEER_FALLBACK_MAX_HOPS", "1")
     monkeypatch.setenv("CODEX_LB_PEER_FALLBACK_TIMEOUT_SECONDS", "3.5")
     monkeypatch.setenv("CODEX_LB_PEER_FALLBACK_ERROR_CODES", "no_accounts, upstream_unavailable")
 
     settings = Settings()
 
-    assert settings.peer_fallback_base_urls == ["http://127.0.0.1:2456", "https://peer.example/proxy"]
     assert settings.peer_fallback_max_hops == 1
     assert settings.peer_fallback_timeout_seconds == 3.5
     assert settings.peer_fallback_error_codes == ["no_accounts", "upstream_unavailable"]
 
 
-def test_settings_peer_fallback_rejects_relative_url(monkeypatch):
+def test_settings_codex_api_key_from_unprefixed_env(monkeypatch):
+    monkeypatch.setenv("CODEX_API_KEY", "peer-secret-key")
+    monkeypatch.setenv("CODEX_LB_CODEX_API_KEY", "ignored-prefixed-key")
+
+    settings = Settings()
+
+    assert settings.codex_api_key is not None
+    assert settings.codex_api_key.get_secret_value() == "peer-secret-key"
+
+
+def test_settings_ignores_legacy_peer_fallback_base_urls_env(monkeypatch):
     monkeypatch.setenv("CODEX_LB_PEER_FALLBACK_BASE_URLS", "127.0.0.1:2456")
 
-    with pytest.raises(ValidationError) as exc_info:
-        Settings()
+    settings = Settings()
 
-    assert "peer_fallback_base_urls entries must be absolute http(s) URLs" in str(exc_info.value)
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://peer:abc",
-        "http://exa mple.com",
-        "http://[::1",
-        "https://peer.example?token=x",
-    ],
-)
-def test_settings_peer_fallback_rejects_malformed_urls(monkeypatch, url):
-    monkeypatch.setenv("CODEX_LB_PEER_FALLBACK_BASE_URLS", url)
-
-    with pytest.raises(ValidationError) as exc_info:
-        Settings()
-
-    assert "peer_fallback_base_urls entries" in str(exc_info.value)
+    assert not hasattr(settings, "peer_fallback_base_urls")
 
 
 def test_settings_otel_enabled_from_env(monkeypatch):

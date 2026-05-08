@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -14,6 +15,7 @@ from app.db.models import (
     ApiKey,
     ApiKeyAccountAssignment,
     ApiKeyLimit,
+    ApiKeyPeerFallbackUrl,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     LimitType,
@@ -92,6 +94,7 @@ class ApiKeysRepository:
             .options(
                 selectinload(ApiKey.limits),
                 selectinload(ApiKey.account_assignments),
+                selectinload(ApiKey.peer_fallback_urls),
             )
         )
 
@@ -312,6 +315,29 @@ class ApiKeysRepository:
         parent = await self._session.get(ApiKey, key_id)
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["account_assignments"])
+
+    async def replace_peer_fallback_base_urls(
+        self,
+        key_id: str,
+        base_urls: list[str],
+        *,
+        commit: bool = True,
+    ) -> None:
+        await self._session.execute(delete(ApiKeyPeerFallbackUrl).where(ApiKeyPeerFallbackUrl.api_key_id == key_id))
+        for priority, base_url in enumerate(base_urls):
+            self._session.add(
+                ApiKeyPeerFallbackUrl(
+                    id=str(uuid.uuid4()),
+                    api_key_id=key_id,
+                    base_url=base_url,
+                    priority=priority,
+                )
+            )
+        if commit:
+            await self._session.commit()
+        parent = await self._session.get(ApiKey, key_id)
+        if parent is not None:
+            await self._session.refresh(parent, attribute_names=["peer_fallback_urls"])
 
     async def increment_limit_usage(
         self,

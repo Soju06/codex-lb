@@ -252,18 +252,14 @@ async def test_api_key_peer_fallback_urls_are_owned_by_api_key(async_client):
     key_id = create.json()["id"]
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(ApiKeyPeerFallbackUrl).where(ApiKeyPeerFallbackUrl.api_key_id == key_id)
-        )
+        result = await session.execute(select(ApiKeyPeerFallbackUrl).where(ApiKeyPeerFallbackUrl.api_key_id == key_id))
         assert [row.base_url for row in result.scalars().all()] == ["http://127.0.0.1:2464"]
 
     delete = await async_client.delete(f"/api/api-keys/{key_id}")
     assert delete.status_code == 204
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(ApiKeyPeerFallbackUrl).where(ApiKeyPeerFallbackUrl.api_key_id == key_id)
-        )
+        result = await session.execute(select(ApiKeyPeerFallbackUrl).where(ApiKeyPeerFallbackUrl.api_key_id == key_id))
         assert result.scalars().all() == []
 
 

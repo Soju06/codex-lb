@@ -1517,7 +1517,6 @@ async def _stream_responses(
         )
     fallback_reason_code = peer_fallback.error_code_from_sse_event(first)
     if fallback_reason_code is not None:
-        await _drain_async_iterator(stream)
         fallback = await _peer_fallback_stream_for_error_code(
             request,
             payload,
@@ -1525,6 +1524,7 @@ async def _stream_responses(
             api_key=api_key,
         )
         if fallback is not None:
+            await _drain_async_iterator(stream)
             if owns_reservation:
                 await _release_reservation(reservation)
             return fallback

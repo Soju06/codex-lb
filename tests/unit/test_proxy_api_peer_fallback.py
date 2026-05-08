@@ -191,6 +191,64 @@ async def test_stream_responses_peer_fallback_on_upstream_rate_limit(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_preserves_local_stream_when_peer_fallback_unavailable(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    peer_stream = AsyncMock(return_value=None)
+
+    def fake_apply_api_key_enforcement(_payload, _api_key):
+        return None
+
+    def fake_validate_model_access(_api_key, _model):
+        return None
+
+    async def fake_enforce_request_limits(_api_key, *, request_model=None, request_service_tier=None):
+        return None
+
+    async def fake_rate_limit_headers():
+        return {}
+
+    async def fake_stream_responses(*args, **kwargs):
+        del args, kwargs
+        yield (
+            'data: {"type":"response.failed","response":{"id":"resp_local","status":"failed",'
+            '"error":{"code":"no_accounts","message":"No active accounts available",'
+            '"type":"server_error"}}}\n\n'
+        )
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(proxy_api_module, "apply_api_key_enforcement", fake_apply_api_key_enforcement)
+    monkeypatch.setattr(proxy_api_module, "validate_model_access", fake_validate_model_access)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", fake_enforce_request_limits)
+    monkeypatch.setattr(proxy_api_module.peer_fallback, "open_stream_response", peer_stream)
+
+    context = cast(
+        proxy_api_module.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                rate_limit_headers=fake_rate_limit_headers,
+                stream_responses=fake_stream_responses,
+            )
+        ),
+    )
+
+    response = await proxy_api_module._stream_responses(request, payload, context, None)
+
+    body = await _response_body_text(response)
+    peer_stream.assert_awaited_once()
+    assert "resp_local" in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_does_not_peer_fallback_after_first_event(monkeypatch):
     request = Request(
         {

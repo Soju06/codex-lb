@@ -1430,26 +1430,31 @@ def _omit_historical_response_input_items_to_fit(
     if not slimmed_historical:
         return payload, 0
 
-    def candidate_with_omitted_count(omitted_count: int) -> JsonObject:
+    def candidate_with_omitted_count(prefix_omitted_count: int) -> tuple[JsonObject, int]:
+        remaining_historical, orphaned_outputs = _drop_orphaned_function_call_outputs(
+            slimmed_historical[prefix_omitted_count:],
+            recent,
+        )
+        omitted_count = prefix_omitted_count + orphaned_outputs
         candidate_payload = dict(payload)
         candidate_payload["input"] = [
             _response_create_history_omission_notice_item(omitted_count),
-            *slimmed_historical[omitted_count:],
+            *remaining_historical,
             *recent,
         ]
-        return candidate_payload
+        return candidate_payload, omitted_count
 
     low = 1
     high = len(slimmed_historical)
     best: tuple[JsonObject, int] | None = None
     while low <= high:
-        omitted_count = (low + high) // 2
-        candidate_payload = candidate_with_omitted_count(omitted_count)
+        prefix_omitted_count = (low + high) // 2
+        candidate_payload, omitted_count = candidate_with_omitted_count(prefix_omitted_count)
         if _serialized_json_size(candidate_payload) <= max_bytes:
             best = (candidate_payload, omitted_count)
-            high = omitted_count - 1
+            high = prefix_omitted_count - 1
         else:
-            low = omitted_count + 1
+            low = prefix_omitted_count + 1
 
     if best is not None:
         return best
@@ -1459,7 +1464,41 @@ def _omit_historical_response_input_items_to_fit(
     if _serialized_json_size(recent_only_payload) <= max_bytes:
         return recent_only_payload, len(slimmed_historical)
 
-    return candidate_with_omitted_count(len(slimmed_historical)), len(slimmed_historical)
+    return candidate_with_omitted_count(len(slimmed_historical))
+
+
+def _drop_orphaned_function_call_outputs(
+    historical: list[JsonValue],
+    recent: list[JsonValue],
+) -> tuple[list[JsonValue], int]:
+    kept_call_ids = {
+        item.get("call_id")
+        for item in [*historical, *recent]
+        if is_json_mapping(item) and item.get("type") == "function_call" and isinstance(item.get("call_id"), str)
+    }
+    if not kept_call_ids:
+        filtered = [
+            item
+            for item in historical
+            if not (
+                is_json_mapping(item)
+                and item.get("type") == "function_call_output"
+                and isinstance(item.get("call_id"), str)
+            )
+        ]
+        return filtered, len(historical) - len(filtered)
+
+    filtered = [
+        item
+        for item in historical
+        if not (
+            is_json_mapping(item)
+            and item.get("type") == "function_call_output"
+            and isinstance(item.get("call_id"), str)
+            and item.get("call_id") not in kept_call_ids
+        )
+    ]
+    return filtered, len(historical) - len(filtered)
 
 
 def _serialized_json_size(payload: JsonObject) -> int:

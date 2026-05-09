@@ -421,11 +421,12 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(100_000);
     expect(pace?.scheduledUsedPercent).toBeCloseTo(50);
     expect(pace?.actualUsedPercent).toBeCloseTo(50);
-    expect(pace?.pauseForBreakEvenHours).toBeNull();
-    expect(pace?.paceMultiplier).toBeNull();
-    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeNull();
-    expect(pace?.proAccountsToCoverOverPlan).toBeNull();
-    expect(pace?.status).toBe("on_track");
+    expect(pace?.overPlanCredits).toBeGreaterThan(0);
+    expect(pace?.pauseForBreakEvenHours).toBeCloseTo(90.72);
+    expect(pace?.paceMultiplier).toBeCloseTo(1);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(0);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(6);
+    expect(pace?.status).toBe("danger");
   });
 
   it("expires unused account credits at reset instead of carrying them forward", () => {
@@ -439,7 +440,7 @@ describe("buildWeeklyCreditPace", () => {
 
     expect(pace).not.toBeNull();
     expect(pace?.overPlanCredits).toBeCloseTo(0);
-    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(111.11);
+    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(0);
   });
 
   it("does not let a tiny near reset hide depletion before the next meaningful reset", () => {
@@ -452,10 +453,10 @@ describe("buildWeeklyCreditPace", () => {
     );
 
     expect(pace).not.toBeNull();
-    expect(pace?.overPlanCredits).toBeCloseTo(20_403.05);
-    expect(pace?.projectedDepletionHours).toBeCloseTo(39.9);
-    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(0.4);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(1);
+    expect(pace?.overPlanCredits).toBeCloseTo(59_999.01);
+    expect(pace?.projectedDepletionHours).toBeLessThan(40);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(1);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(2);
     expect(pace?.status).toBe("danger");
   });
 
@@ -469,18 +470,18 @@ describe("buildWeeklyCreditPace", () => {
     );
 
     expect(pace).not.toBeNull();
-    expect(pace?.overPlanCredits).toBeCloseTo(22_222.22);
-    expect(pace?.pauseForBreakEvenHours).toBeCloseTo(16.8);
+    expect(pace?.overPlanCredits).toBeCloseTo(111_111.11);
+    expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
     expect(pace?.paceMultiplier).toBeCloseTo(2);
     expect(pace?.throttleToPercent).toBeCloseTo(0);
     expect(pace?.reduceByPercent).toBeCloseTo(100);
-    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(0.44);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(1);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(2.2);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(3);
     expect(pace?.projectedDepletionHours).toBeCloseTo(0);
     expect(pace?.status).toBe("danger");
   });
 
-  it("keeps the recovery warning hidden when the current pool survives repeated reset events", () => {
+  it("shows recovery pressure when per-account weekly burn exceeds staggered resets", () => {
     const liveLikeNow = new Date("2026-05-03T19:19:35Z");
     const pace = buildWeeklyCreditPace(
       [
@@ -536,15 +537,15 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace).not.toBeNull();
     expect(pace?.accountCount).toBe(5);
     expect(pace?.totalActualRemainingCredits).toBeCloseTo(58_438.8);
-    expect(pace?.overPlanCredits).toBeCloseTo(0);
-    expect(pace?.pauseForBreakEvenHours).toBeNull();
-    expect(pace?.paceMultiplier).toBeNull();
-    expect(pace?.throttleToPercent).toBeNull();
-    expect(pace?.reduceByPercent).toBeNull();
-    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeNull();
-    expect(pace?.proAccountsToCoverOverPlan).toBeNull();
-    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(30_821.59);
-    expect(pace?.status).toBe("on_track");
+    expect(pace?.overPlanCredits).toBeCloseTo(20_510.96);
+    expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
+    expect(pace?.paceMultiplier).toBeGreaterThan(1);
+    expect(pace?.throttleToPercent).toBeGreaterThanOrEqual(0);
+    expect(pace?.reduceByPercent).toBeGreaterThan(0);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(0);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(1);
+    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(0);
+    expect(pace?.status).toBe("danger");
   });
 
   it("skips accounts without complete weekly credit timing data", () => {

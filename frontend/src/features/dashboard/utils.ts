@@ -262,21 +262,19 @@ function consumeWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[], am
 
 function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number): WeeklyPoolProjection | null {
   const totalRemainingCredits = accounts.reduce((sum, account) => sum + account.remainingCredits, 0);
-  const totalUsedCredits = accounts.reduce(
-    (sum, account) => sum + Math.max(0, account.fullCredits - account.remainingCredits),
-    0,
-  );
-  const oldestWindowStartMs = Math.min(...accounts.map((account) => account.resetAtMs - account.windowMs));
-  const elapsedMs = nowMs - oldestWindowStartMs;
-  if (
-    totalUsedCredits <= 0 ||
-    !Number.isFinite(elapsedMs) ||
-    elapsedMs <= 0
-  ) {
+  const burnRateCreditsPerMs = accounts.reduce((sum, account) => {
+    const usedCredits = Math.max(0, account.fullCredits - account.remainingCredits);
+    const windowStartMs = account.resetAtMs - account.windowMs;
+    const elapsedMs = nowMs - windowStartMs;
+    if (usedCredits <= 0 || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+      return sum;
+    }
+    return sum + usedCredits / elapsedMs;
+  }, 0);
+  if (burnRateCreditsPerMs <= 0) {
     return null;
   }
 
-  const burnRateCreditsPerMs = totalUsedCredits / elapsedMs;
   const firstResetAtMs = Math.min(...accounts.map((account) => account.resetAtMs));
   if (totalRemainingCredits <= 0) {
     const firstReplenishmentWaitMs = Number.isFinite(firstResetAtMs) ? Math.max(0, firstResetAtMs - nowMs) : 0;

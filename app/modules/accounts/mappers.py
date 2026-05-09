@@ -206,8 +206,11 @@ def build_account_usage_trends(
     # Group buckets by (account_id, window)
     grouped: dict[tuple[str, str], dict[int, float]] = {}
     secondary_schedule: dict[str, dict[int, tuple[int, int]]] = {}
+    secondary_bucket_keys = {(b.account_id, b.bucket_epoch) for b in buckets if b.window == "secondary"}
     for b in buckets:
         is_weekly_primary = b.window == "primary" and usage_core.is_weekly_window_minutes(b.window_minutes)
+        if is_weekly_primary and (b.account_id, b.bucket_epoch) in secondary_bucket_keys:
+            continue
         window = "secondary" if is_weekly_primary else b.window
         key = (b.account_id, window)
         grouped.setdefault(key, {})[b.bucket_epoch] = b.avg_used_percent

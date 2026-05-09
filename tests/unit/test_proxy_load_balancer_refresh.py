@@ -1013,6 +1013,58 @@ async def test_select_account_accepts_legacy_additional_limit_aliases(additional
 
 
 @pytest.mark.asyncio
+async def test_additional_quota_selection_does_not_persist_standard_status_recovery() -> None:
+    account = _make_account("acc-additional-standard-exhausted")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = int(time.time()) + 3600
+    account.blocked_at = int(time.time())
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=61,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=100.0,
+                reset_at=now_epoch + 3600,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                62,
+                account_id=account.id,
+                window="primary",
+                used_percent=5.0,
+                recorded_at=now,
+                reset_at=now_epoch + 300,
+            )
+        }
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(additional_limit_name="codex_other")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
 async def test_select_account_prunes_stale_runtime_for_removed_accounts() -> None:
     account_id = "acc-reused"
     now = utcnow()

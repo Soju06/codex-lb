@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core import usage as usage_core
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
@@ -250,12 +252,15 @@ class LoadBalancer:
                 }
                 pre_persist_cache_generation = self._selection_inputs_cache.generation
 
-                async with self._repo_factory() as repos:
-                    stale_account_ids = await self._persist_selection_state(
-                        repos.accounts,
-                        selected_account_map,
-                        selected_states,
-                    )
+                if selection_inputs.ignore_standard_quota_status:
+                    stale_account_ids = set()
+                else:
+                    async with self._repo_factory() as repos:
+                        stale_account_ids = await self._persist_selection_state(
+                            repos.accounts,
+                            selected_account_map,
+                            selected_states,
+                        )
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
                     if attempt >= _MAX_SELECTION_ATTEMPTS:
@@ -377,11 +382,14 @@ class LoadBalancer:
                     else:
                         error_message = result.error_message
 
-                    stale_account_ids = await self._persist_selection_state(
-                        repos.accounts,
-                        selected_account_map,
-                        selected_states,
-                    )
+                    if selection_inputs.ignore_standard_quota_status:
+                        stale_account_ids = set()
+                    else:
+                        stale_account_ids = await self._persist_selection_state(
+                            repos.accounts,
+                            selected_account_map,
+                            selected_states,
+                        )
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
                     selected_snapshot = None
@@ -454,10 +462,7 @@ class LoadBalancer:
             ignore_standard_quota_status = effective_limit_name is not None
             routing_policy_override: str | None = None
             if effective_limit_name:
-                dashboard_settings = await get_settings_cache().get()
-                routing_overrides = parse_additional_quota_routing_policies(
-                    dashboard_settings.additional_quota_routing_policies_json
-                )
+                routing_overrides = await _load_additional_quota_routing_overrides()
                 additional_routing_policy = get_additional_quota_routing_policy(
                     effective_limit_name,
                     overrides=routing_overrides,
@@ -814,13 +819,34 @@ class LoadBalancer:
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
                 )
+                burn_first_reallocate = pinned.routing_policy != ROUTING_POLICY_BURN_FIRST and any(
+                    state.routing_policy == ROUTING_POLICY_BURN_FIRST for state in states
+                )
+                preserve_reallocate = False
+                if pinned.routing_policy == ROUTING_POLICY_PRESERVE:
+                    non_preserve_candidates = [
+                        state
+                        for state in states
+                        if state.account_id != pinned.account_id and state.routing_policy != ROUTING_POLICY_PRESERVE
+                    ]
+                    non_preserve_selection = _select_account_preferring_budget_safe(
+                        non_preserve_candidates,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        deterministic_probe=True,
+                        budget_threshold_pct=budget_threshold_pct,
+                        traffic_class=traffic_class,
+                        ignore_standard_quota=ignore_standard_quota,
+                    )
+                    preserve_reallocate = non_preserve_selection.account is not None
+                routing_policy_reallocate = burn_first_reallocate or preserve_reallocate
                 rate_limit_far_away = (
                     sticky_kind == StickySessionKind.PROMPT_CACHE
                     and pinned.status == AccountStatus.RATE_LIMITED
                     and pinned.reset_at is not None
                     and pinned.reset_at - now >= 600  # 10 minutes
                 )
-                if not (budget_pressured or rate_limit_far_away):
+                if not (budget_pressured or routing_policy_reallocate or rate_limit_far_away):
                     pinned_result = select_account(
                         [pinned],
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1177,6 +1203,11 @@ def _state_from_account(
     primary_used = primary_entry.used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
+    primary_usage_fresh = (
+        primary_entry is not None
+        and primary_entry.recorded_at is not None
+        and _usage_entry_is_recent_enough(primary_entry.recorded_at)
+    )
     effective_secondary_entry = secondary_entry
     primary_row = _usage_entry_to_window_row(primary_entry) if primary_entry is not None else None
     secondary_row = _usage_entry_to_window_row(secondary_entry) if secondary_entry is not None else None
@@ -1188,6 +1219,11 @@ def _state_from_account(
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
+    secondary_usage_fresh = (
+        effective_secondary_entry is not None
+        and effective_secondary_entry.recorded_at is not None
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
+    )
 
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
@@ -1259,6 +1295,8 @@ def _state_from_account(
                 status=status,
                 used_percent=used_percent,
                 secondary_used_percent=secondary_used,
+                primary_usage_fresh=primary_usage_fresh,
+                secondary_usage_fresh=secondary_usage_fresh,
                 last_error_at=runtime.last_error_at,
                 error_count=runtime.error_count,
                 health_tier=runtime.health_tier,
@@ -1296,6 +1334,8 @@ def _state_from_account(
         cooldown_until=runtime.cooldown_until,
         secondary_used_percent=secondary_used,
         secondary_reset_at=secondary_reset,
+        primary_usage_fresh=primary_usage_fresh,
+        secondary_usage_fresh=secondary_usage_fresh,
         last_error_at=runtime.last_error_at,
         last_selected_at=runtime.last_selected_at,
         last_foreground_selected_at=runtime.last_foreground_selected_at,
@@ -1314,9 +1354,19 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
     current_time = utcnow()
     if current_time.tzinfo is None:
         current_time = current_time.replace(tzinfo=timezone.utc)
-    interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
+    usage_refresh_interval = getattr(get_settings(), "usage_refresh_interval_seconds", 60)
+    interval_seconds = max(usage_refresh_interval * 2, 180)
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)
+
+
+async def _load_additional_quota_routing_overrides() -> dict[str, str]:
+    try:
+        dashboard_settings = await get_settings_cache().get()
+    except SQLAlchemyError:
+        logger.warning("Additional quota routing policy settings unavailable; using inherited policies", exc_info=True)
+        return {}
+    return parse_additional_quota_routing_policies(dashboard_settings.additional_quota_routing_policies_json)
 
 
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
@@ -1491,7 +1541,7 @@ def _select_account_preferring_budget_safe(
     burn_first_states = [state for state in state_list if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
     if burn_first_states:
         burn_first = select_account(
-            burn_first_states,
+            state_list if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC else burn_first_states,
             prefer_earlier_reset=prefer_earlier_reset,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=False,

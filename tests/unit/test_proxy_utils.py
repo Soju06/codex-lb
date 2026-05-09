@@ -6,7 +6,7 @@ import logging
 from collections import deque
 from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Protocol, Self, cast
+from typing import Any, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
@@ -21,6 +21,7 @@ from app.core.clients.proxy import _build_upstream_headers, filter_inbound_heade
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
+from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
@@ -142,6 +143,396 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     proxy_request_policy.apply_api_key_enforcement(payload, api_key)
 
     assert payload.service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_rejects_disallowed_model_before_capacity_check():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(service=SimpleNamespace(check_opportunistic_admission=AsyncMock()))
+    request = Request({"type": "http", "method": "GET", "path": "/backend-api/codex/opportunistic/admission"})
+
+    with pytest.raises(ProxyModelNotAllowed):
+        await proxy_api.opportunistic_admission(
+            request,
+            model="gpt-5.2",
+            context=cast(proxy_api.ProxyContext, context),
+            api_key=api_key,
+        )
+
+    context.service.check_opportunistic_admission.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_uses_enforced_model_for_capacity_check():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=["gpt-5.1"],
+        enforced_model="gpt-5.1",
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    selection = AccountSelection(account=_make_account("acc_opportunistic"), error_message=None)
+    context = SimpleNamespace(service=SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection)))
+    request = Request({"type": "http", "method": "GET", "path": "/backend-api/codex/opportunistic/admission"})
+
+    response = await proxy_api.opportunistic_admission(
+        request,
+        model=None,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 200
+    context.service.check_opportunistic_admission.assert_awaited_once()
+    assert context.service.check_opportunistic_admission.await_args.kwargs["model"] == "gpt-5.1"
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_requires_model_without_enforced_model():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(service=SimpleNamespace(check_opportunistic_admission=AsyncMock()))
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/backend-api/codex/opportunistic/admission",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+    response = await proxy_api.opportunistic_admission(
+        request,
+        model=None,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 400
+    body = json.loads(bytes(response.body))
+    assert body["error"]["param"] == "model"
+    context.service.check_opportunistic_admission.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_files_create_preserves_retry_after_from_proxy_selection(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def skip_release(reservation):
+        del reservation
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", skip_release)
+
+    async def create_file(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+
+    context = SimpleNamespace(service=SimpleNamespace(create_file=create_file))
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/files", "headers": []})
+
+    response = await proxy_api.backend_files_create(
+        request,
+        proxy_api.FileCreateRequest(file_name="input.txt", file_size=1, use_case="assistants"),
+        cast(proxy_api.ProxyContext, context),
+        None,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_files_finalize_preserves_retry_after_from_proxy_selection(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def skip_release(reservation):
+        del reservation
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", skip_release)
+
+    async def finalize_file(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+
+    context = SimpleNamespace(service=SimpleNamespace(finalize_file=finalize_file))
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/files/file_1/uploaded", "headers": []})
+
+    response = await proxy_api.backend_files_finalize(
+        request,
+        "file_1",
+        cast(proxy_api.ProxyContext, context),
+        None,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_preserves_retry_after_from_proxy_selection(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def skip_release(reservation):
+        del reservation
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", skip_release)
+
+    async def read_file():
+        return b"audio"
+
+    async def transcribe(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
+            transcribe=transcribe,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/audio/transcriptions", "headers": []})
+    file = SimpleNamespace(read=read_file, filename="audio.wav", content_type="audio/wav")
+
+    response = await proxy_api._transcribe_request(
+        request=request,
+        file=cast(Any, file),
+        prompt=None,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=None,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert response.headers["X-RateLimit-Limit"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_preserves_retry_after_from_late_selection_denial(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+
+    async def stream_responses(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+        yield ""
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(account=_make_account("acc_opportunistic"), error_message=None)
+            ),
+            rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
+            stream_responses=stream_responses,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="test", input="hello")
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert response.headers["X-RateLimit-Limit"] == "1"
+    release_reservation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_applies_opportunistic_admission_before_limits(monkeypatch):
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="No accounts with available additional quota",
+                    error_code="no_additional_quota_eligible_accounts",
+                )
+            ),
+            compact_responses=AsyncMock(),
+        )
+    )
+    enforce_limits = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", enforce_limits)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses/compact",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+    payload = ResponsesCompactRequest(model="gpt-5.1", instructions="test", input="compact")
+
+    response = await proxy_api._compact_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 429
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "rate_limit_exceeded"
+    enforce_limits.assert_not_awaited()
+    context.service.compact_responses.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_applies_opportunistic_admission_before_limits(monkeypatch):
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={}),
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="No accounts with available additional quota",
+                    error_code="no_additional_quota_eligible_accounts",
+                )
+            ),
+            stream_responses=AsyncMock(),
+        )
+    )
+    enforce_limits = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", enforce_limits)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+    payload = proxy_api.ChatCompletionsRequest.model_validate(
+        {"model": "gpt-5.1", "messages": [{"role": "user", "content": "hello"}]}
+    )
+
+    response = await proxy_api.v1_chat_completions(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 429
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "rate_limit_exceeded"
+    enforce_limits.assert_not_awaited()
+    context.service.stream_responses.assert_not_called()
 
 
 def _build_registry_with_model(slug: str, efforts: list[str]):
@@ -4379,6 +4770,70 @@ async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "no_accounts"
     assert request_logs.calls[0]["transport"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_maps_opportunistic_denial_to_rate_limit(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="No accounts with available additional quota",
+            error_code="no_additional_quota_eligible_accounts",
+        )
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_opportunistic_closed",
+        model="gpt-5.1",
+        service_tier="default",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=api_key,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["status"] == 429
+    assert sent_payload["error"]["code"] == "rate_limit_exceeded"
+    assert sent_payload["error"]["message"].startswith("opportunistic burn window closed")
+    assert request_logs.calls[0]["error_code"] == "rate_limit_exceeded"
 
 
 @pytest.mark.asyncio

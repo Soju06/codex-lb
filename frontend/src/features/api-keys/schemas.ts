@@ -32,6 +32,8 @@ export const ApiKeyUsageSummarySchema = z.object({
 
 export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
+export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
+export type TrafficClassType = (typeof TRAFFIC_CLASSES)[number];
 
 export const ApiKeySchema = z.object({
   id: z.string(),
@@ -49,6 +51,7 @@ export const ApiKeySchema = z.object({
     .default(null),
   expiresAt: z.string().datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
+  trafficClass: z.enum(TRAFFIC_CLASSES).default("foreground"),
   accountAssignmentScopeEnabled: z.boolean().default(false),
   assignedAccountIds: z.array(z.string()).default([]),
   createdAt: z.string().datetime({ offset: true }),
@@ -69,6 +72,7 @@ export const ApiKeyCreateRequestSchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .optional(),
+  trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
@@ -90,6 +94,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .optional(),
+  trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),

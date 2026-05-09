@@ -74,6 +74,8 @@ class AccountState:
     cooldown_until: float | None = None
     secondary_used_percent: float | None = None
     secondary_reset_at: int | None = None
+    primary_usage_fresh: bool = False
+    secondary_usage_fresh: bool = False
     last_error_at: float | None = None
     last_selected_at: float | None = None
     last_foreground_selected_at: float | None = None
@@ -181,6 +183,8 @@ def _short_window_floor_pct(state: AccountState, current: float, *, preserve_cou
 
 
 def _preserve_allows_opportunistic_burn(state: AccountState, current: float, *, preserve_count: int) -> bool:
+    if not state.primary_usage_fresh or not state.secondary_usage_fresh:
+        return False
     if _remaining_pct(state, secondary=True) is None or _remaining_pct(state, secondary=False) is None:
         return False
     if state.secondary_reset_at is None or state.reset_at is None:
@@ -213,7 +217,8 @@ def _has_other_usable_foreground_capacity(
             ):
                 return True
             continue
-        return True
+        if _above_emergency_floor(other):
+            return True
     return False
 
 
@@ -358,12 +363,12 @@ def select_account(
                 state.reset_at = None
             elif not ignore_standard_quota:
                 continue
-        if state.status == AccountStatus.QUOTA_EXCEEDED and not ignore_standard_quota:
+        if state.status == AccountStatus.QUOTA_EXCEEDED:
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.used_percent = 0.0
                 state.reset_at = None
-            else:
+            elif not ignore_standard_quota:
                 continue
         if state.cooldown_until and current >= state.cooldown_until:
             state.cooldown_until = None

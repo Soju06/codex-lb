@@ -25,12 +25,14 @@ def _active(
     account_id: str,
     used_percent: float = 10.0,
     secondary_used_percent: float | None = None,
+    routing_policy: str = "normal",
 ) -> AccountState:
     return AccountState(
         account_id,
         AccountStatus.ACTIVE,
         used_percent=used_percent,
         secondary_used_percent=secondary_used_percent,
+        routing_policy=routing_policy,
     )
 
 
@@ -166,6 +168,44 @@ async def test_fallback_overwrites_sticky_when_reallocate_sticky_true():
     assert result.account.account_id == "b"
     repo.delete.assert_called_once()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.STICKY_THREAD)
+
+
+@pytest.mark.asyncio
+async def test_sticky_reallocates_from_normal_to_burn_first_policy():
+    acc_a = _active("a", used_percent=1.0, routing_policy="normal")
+    acc_b = _active("b", used_percent=80.0, routing_policy="burn_first")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_sticky_reallocates_from_preserve_to_normal_policy():
+    acc_a = _active("a", used_percent=1.0, routing_policy="preserve")
+    acc_b = _active("b", used_percent=10.0, routing_policy="normal")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
 @pytest.mark.asyncio

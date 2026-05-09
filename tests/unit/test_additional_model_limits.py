@@ -57,6 +57,14 @@ def test_canonicalize_additional_quota_key_normalizes_unknown_aliases() -> None:
     assert canonicalize_additional_quota_key(metered_feature="Deep Research") == "deep_research"
 
 
+def test_additional_quota_routing_policy_resolves_limit_name_alias() -> None:
+    assert get_additional_quota_routing_policy("codex_other") == "burn_first"
+
+
+def test_additional_quota_routing_policy_overrides_resolve_limit_name_alias() -> None:
+    assert get_additional_quota_routing_policy("codex_other", overrides={"codex_other": "preserve"}) == "preserve"
+
+
 def test_registry_normalizes_configured_quota_key(monkeypatch, tmp_path: Path) -> None:
     registry = tmp_path / "additional_quota_registry.json"
     registry.write_text(

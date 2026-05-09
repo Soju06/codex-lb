@@ -3225,6 +3225,20 @@ class ProxyService:
                     request_state=request_state,
                 )
                 return None
+            if exc.status_code == 429:
+                error = _parse_openai_error(exc.payload)
+                await self._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=None,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=429,
+                    payload=exc.payload,
+                    error_code=error.code if error and error.code else "rate_limit_exceeded",
+                    error_message=error.message if error and error.message else "opportunistic burn window closed",
+                )
+                return None
             raise
 
         account = selection.account
@@ -3262,6 +3276,26 @@ class ProxyService:
             return account
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
+        if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
+            message = error_message
+            if not message.startswith("opportunistic burn window closed"):
+                message = f"opportunistic burn window closed: {message}"
+            await self._emit_websocket_connect_failure(
+                websocket,
+                client_send_lock=client_send_lock,
+                account_id=None,
+                api_key=api_key,
+                request_state=request_state,
+                status_code=429,
+                payload=openai_error(
+                    "rate_limit_exceeded",
+                    message,
+                    error_type="rate_limit_error",
+                ),
+                error_code="rate_limit_exceeded",
+                error_message=message,
+            )
+            return None
         if require_preferred_account and preferred_account_id is not None:
             message = "Previous response owner account is unavailable; retry later."
             _record_continuity_fail_closed(
@@ -8319,6 +8353,19 @@ class ProxyService:
                         account=None,
                         error_message="No active accounts available",
                         error_code="no_accounts",
+                    )
+                if selection.account is None and effective_traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
+                    message = selection.error_message or "opportunistic burn window closed"
+                    if not message.startswith("opportunistic burn window closed"):
+                        message = f"opportunistic burn window closed: {message}"
+                    raise ProxyResponseError(
+                        429,
+                        openai_error(
+                            "rate_limit_exceeded",
+                            message,
+                            error_type="rate_limit_error",
+                        ),
+                        headers={"Retry-After": "60"},
                     )
                 return selection
         except TimeoutError:

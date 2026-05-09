@@ -15,6 +15,8 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: true,
   apiKeyAuthEnabled: true,
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
 };
 
 describe("SessionSettings", () => {

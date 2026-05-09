@@ -5,6 +5,7 @@ Operators need to intentionally spend or preserve specific upstream accounts wit
 ## Scope
 
 - Add a persisted per-account routing policy with `normal`, `burn_first`, and `preserve`.
+- Add per-additional-quota routing policy overrides with `inherit`, `normal`, `burn_first`, and `preserve`.
 - Surface the policy in account dashboard APIs and controls.
 - Apply the policy after hard eligibility filters and before ordinary budget/usage balancing.
 
@@ -12,4 +13,4 @@ Operators need to intentionally spend or preserve specific upstream accounts wit
 
 - Do not bypass model-plan or additional-quota gates.
 - Do not override sticky affinity when the sticky account is still eligible.
-- Do not create per-model policy rules in this change.
+- Do not create arbitrary per-model policy rules outside the known additional-quota registry.

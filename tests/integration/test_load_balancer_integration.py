@@ -13,6 +13,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -428,6 +429,58 @@ async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_s
 
     assert selection.account is not None
     assert selection.account.id == eligible_account.id
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_burn_first_additional_quota_ignores_standard_quota_exhaustion(db_setup):
+    get_account_selection_cache().invalidate()
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    spark_account = Account(
+        id="acc_spark_standard_full",
+        email="spark_standard_full@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-spark"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-spark"),
+        id_token_encrypted=encryptor.encrypt("id-spark"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        additional_repo = AdditionalUsageRepository(session)
+        await accounts_repo.upsert(spark_account)
+
+        for window, window_minutes in (("primary", 300), ("secondary", 10080)):
+            await usage_repo.add_entry(
+                account_id=spark_account.id,
+                used_percent=100.0,
+                window=window,
+                reset_at=now_epoch + 3600,
+                window_minutes=window_minutes,
+                recorded_at=now,
+            )
+            await additional_repo.add_entry(
+                account_id=spark_account.id,
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window=window,
+                used_percent=20.0,
+                reset_at=now_epoch + 3600,
+                window_minutes=window_minutes,
+                recorded_at=now,
+            )
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account(additional_limit_name="codex_spark")
+
+    assert selection.account is not None
+    assert selection.account.id == spark_account.id
 
 
 @pytest.mark.asyncio

@@ -215,6 +215,22 @@ def test_select_account_can_ignore_standard_quota_for_additional_pool():
     assert result.account.account_id == "spark"
 
 
+def test_select_account_does_not_ignore_live_cooldown_for_additional_pool():
+    now = time.time()
+    states = [
+        AccountState(
+            "spark",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            cooldown_until=now + 60,
+        )
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", ignore_standard_quota=True)
+
+    assert result.account is None
+
+
 def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
     states = [
         AccountState("normal", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),

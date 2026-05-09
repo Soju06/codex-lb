@@ -212,11 +212,17 @@ def list_additional_quota_definitions() -> tuple[AdditionalQuotaDefinition, ...]
 
 
 def get_additional_quota_definition_for_key(quota_key: str | None) -> AdditionalQuotaDefinition | None:
-    by_quota_key, _, _, _, quota_key_alias_to_quota_key = _definition_maps_for_path(str(_registry_path()))
-    normalized_quota_key = _normalize_identifier(quota_key)
-    if normalized_quota_key is None:
-        return None
-    resolved_key = quota_key_alias_to_quota_key.get(normalized_quota_key)
+    by_quota_key, _, _, alias_to_quota_key, quota_key_alias_to_quota_key = _definition_maps_for_path(
+        str(_registry_path())
+    )
+    resolved_key = canonicalize_additional_quota_key(quota_key=quota_key)
+    if resolved_key is None or resolved_key not in by_quota_key:
+        normalized_quota_key = _normalize_identifier(quota_key)
+        resolved_key = (
+            alias_to_quota_key.get(normalized_quota_key, resolved_key)
+            if normalized_quota_key is not None
+            else resolved_key
+        )
     if resolved_key is None:
         return None
     return by_quota_key.get(resolved_key)

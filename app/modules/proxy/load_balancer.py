@@ -355,6 +355,7 @@ class LoadBalancer:
                             account,
                             state,
                             selected=result.account is not None and state.account_id == result.account.account_id,
+                            traffic_class=traffic_class,
                         )
                         selected_states.append(state)
                     if result.account is not None:

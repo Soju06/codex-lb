@@ -338,7 +338,7 @@ def test_opportunistic_normal_can_reach_zero_when_preserve_has_foreground_reserv
             AccountStatus.ACTIVE,
             used_percent=100.0,
             secondary_used_percent=100.0,
-            routing_policy="normal",
+            routing_policy="burn_first",
         ),
         AccountState(
             "review",
@@ -352,6 +352,37 @@ def test_opportunistic_normal_can_reach_zero_when_preserve_has_foreground_reserv
     ]
 
     result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
+
+
+def test_opportunistic_foreground_reserve_honors_ignored_standard_quota():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=100.0,
+            secondary_used_percent=100.0,
+            routing_policy="burn_first",
+        ),
+        AccountState(
+            "additional-quota-backup",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            routing_policy="normal",
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        routing_strategy="usage_weighted",
+        traffic_class="opportunistic",
+        ignore_standard_quota=True,
+    )
 
     assert result.account is not None
     assert result.account.account_id == "normal"
@@ -1325,6 +1356,31 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
     assert result.latest_primary == {}
     assert result.latest_secondary == {}
+
+
+@pytest.mark.asyncio
+async def test_sync_runtime_state_preserves_foreground_timestamp_for_opportunistic_selection():
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    balancer = LoadBalancer(repo_factory=lambda: None)
+    account = _make_test_account("sticky-opportunistic")
+    state = AccountState(
+        account.id,
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+    )
+
+    await balancer._sync_runtime_state_for_account(
+        account,
+        state,
+        selected=True,
+        traffic_class="opportunistic",
+    )
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.last_selected_at is not None
+    assert runtime.last_foreground_selected_at is None
 
 
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():

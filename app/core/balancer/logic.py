@@ -76,6 +76,7 @@ class AccountState:
     secondary_reset_at: int | None = None
     last_error_at: float | None = None
     last_selected_at: float | None = None
+    last_foreground_selected_at: float | None = None
     error_count: int = 0
     deactivation_reason: str | None = None
     plan_type: str | None = None
@@ -134,7 +135,10 @@ def _seconds_until(reset_at: int | float | None, current: float) -> float | None
 
 
 def _recent_foreground_activity(state: AccountState, current: float) -> bool:
-    return state.last_selected_at is not None and current - state.last_selected_at <= RECENT_FOREGROUND_ACTIVITY_SECONDS
+    return (
+        state.last_foreground_selected_at is not None
+        and current - state.last_foreground_selected_at <= RECENT_FOREGROUND_ACTIVITY_SECONDS
+    )
 
 
 def _weekly_pace_floor_pct(state: AccountState, current: float) -> float:
@@ -200,7 +204,11 @@ def _has_other_usable_foreground_capacity(
         if other.status != AccountStatus.ACTIVE:
             continue
         if _routing_policy(other) == ROUTING_POLICY_PRESERVE:
-            if _preserve_allows_opportunistic_burn(other, current, preserve_count=preserve_count):
+            if _above_emergency_floor(other) or _preserve_allows_opportunistic_burn(
+                other,
+                current,
+                preserve_count=preserve_count,
+            ):
                 return True
             continue
         return True

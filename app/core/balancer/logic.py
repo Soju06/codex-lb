@@ -179,7 +179,7 @@ def select_account(
             continue
         if state.status == AccountStatus.PAUSED:
             continue
-        if state.status == AccountStatus.RATE_LIMITED and not ignore_standard_quota:
+        if state.status == AccountStatus.RATE_LIMITED:
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.error_count = 0
@@ -197,7 +197,7 @@ def select_account(
             state.cooldown_until = None
             state.last_error_at = None
             state.error_count = 0
-        if state.cooldown_until and current < state.cooldown_until and not ignore_standard_quota:
+        if state.cooldown_until and current < state.cooldown_until:
             continue
         if state.error_count >= 3:
             backoff = min(300, 30 * (2 ** (state.error_count - 3)))

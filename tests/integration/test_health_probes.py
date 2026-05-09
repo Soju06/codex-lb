@@ -13,6 +13,13 @@ async def test_health_endpoint_unchanged(async_client):
 
 
 @pytest.mark.asyncio
+async def test_codex_backend_health_alias(async_client):
+    response = await async_client.get("/backend-api/codex/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
 async def test_health_live_endpoint(async_client):
     response = await async_client.get("/health/live")
     assert response.status_code == 200

@@ -86,9 +86,9 @@ from app.core.metrics.prometheus import (
     bridge_reattach_total,
     bridge_same_account_takeover_total,
     bridge_soft_local_rebind_total,
+    client_exposed_errors_total,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
-    client_exposed_errors_total,
     failover_total,
 )
 from app.core.openai.exceptions import ClientPayloadError
@@ -225,6 +225,27 @@ async def _await_cancelled_task(
         logger.warning("Timed out waiting for %s cancellation", label)
         return False
     return True
+
+
+async def _await_cleanup_through_cancellation(
+    awaitable: Awaitable[_TaskResultT],
+    *,
+    label: str,
+) -> _TaskResultT:
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancel_exc:
+        try:
+            await task
+        except Exception:
+            logger.warning(
+                "Cleanup failed after caller cancellation label=%s request_id=%s",
+                label,
+                get_request_id(),
+                exc_info=True,
+            )
+        raise cancel_exc
 
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
@@ -6868,10 +6889,16 @@ class ProxyService:
     ) -> None:
         if reservation is None:
             return
-        with anyio.CancelScope(shield=True):
+
+        async def _release_once() -> None:
             async with self._repo_factory() as repos:
                 service = ApiKeysService(repos.api_keys)
                 await service.release_usage_reservation(reservation.reservation_id)
+
+        await _await_cleanup_through_cancellation(
+            _release_once(),
+            label="websocket API key reservation release",
+        )
 
     async def _settle_compact_api_key_usage(
         self,

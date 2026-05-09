@@ -7860,6 +7860,52 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
 
 
 @pytest.mark.asyncio
+async def test_release_websocket_reservation_finishes_after_caller_cancellation(monkeypatch):
+    entered_release = asyncio.Event()
+    finish_release = asyncio.Event()
+    released: list[str] = []
+
+    class _ApiKeysService:
+        def __init__(self, _repo: object) -> None:
+            pass
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            entered_release.set()
+            await finish_release.wait()
+            released.append(reservation_id)
+
+    class _RepoContext:
+        async def __aenter__(self) -> ProxyRepositories:
+            return cast(
+                ProxyRepositories,
+                SimpleNamespace(api_keys=object()),
+            )
+
+        async def __aexit__(self, exc_type: object | None, exc: object | None, tb: object | None) -> bool:
+            return False
+
+    monkeypatch.setattr(proxy_service, "ApiKeysService", _ApiKeysService)
+    service = proxy_service.ProxyService(lambda: _RepoContext())
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_cancelled_release",
+        key_id="key_cancelled_release",
+        model="gpt-5.4",
+    )
+
+    release_task = asyncio.create_task(service._release_websocket_reservation(reservation))
+    await asyncio.wait_for(entered_release.wait(), timeout=1)
+
+    release_task.cancel()
+    await asyncio.sleep(0)
+    assert not release_task.done()
+
+    finish_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+    assert released == [reservation.reservation_id]
+
+
+@pytest.mark.asyncio
 async def test_resolve_websocket_previous_response_owner_rechecks_same_scope_after_initial_miss(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

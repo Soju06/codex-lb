@@ -36,6 +36,11 @@ async def health_check() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
+@router.get("/backend-api/codex/health", response_model=HealthResponse)
+async def codex_backend_health_check() -> HealthResponse:
+    return await health_check()
+
+
 @router.get("/health/live", response_model=HealthCheckResponse)
 async def health_live() -> HealthCheckResponse:
     return HealthCheckResponse(status="ok")

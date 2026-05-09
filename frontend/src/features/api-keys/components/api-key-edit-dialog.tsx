@@ -12,7 +12,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -26,7 +33,14 @@ import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType, ServiceTierType } from "@/features/api-keys/schemas";
+import type {
+  ApiKey,
+  ApiKeyUpdateRequest,
+  LimitRuleCreate,
+  LimitType,
+  ServiceTierType,
+  TrafficClassType,
+} from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
 
 import { hasLimitRuleChanges, normalizeLimitRules } from "./limit-rules-utils";
@@ -71,7 +85,12 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
   return nextIds.some((accountId) => !initialIdSet.has(accountId));
 }
 
-function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
+function ApiKeyEditForm({
+  apiKey,
+  busy,
+  onSubmit,
+  onClose,
+}: ApiKeyEditFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -80,17 +99,32 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     },
   });
 
-  const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
-  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(apiKey.assignedAccountIds);
-  const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
-  const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
-  const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
-  const [enforcedModel, setEnforcedModel] = useState<string>(apiKey.enforcedModel || "");
-  const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState<string>(
-    apiKey.enforcedReasoningEffort || "none",
+  const [selectedModels, setSelectedModels] = useState<string[]>(
+    apiKey.allowedModels || [],
   );
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(
+    apiKey.assignedAccountIds,
+  );
+  const initialLimitRules = useMemo(
+    () => limitsToCreateRules(apiKey),
+    [apiKey],
+  );
+  const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(
+    () => initialLimitRules,
+  );
+  const [expiresAt, setExpiresAt] = useState<Date | null>(() =>
+    parseDate(apiKey.expiresAt),
+  );
+  const [enforcedModel, setEnforcedModel] = useState<string>(
+    apiKey.enforcedModel || "",
+  );
+  const [enforcedReasoningEffort, setEnforcedReasoningEffort] =
+    useState<string>(apiKey.enforcedReasoningEffort || "none");
   const [enforcedServiceTier, setEnforcedServiceTier] = useState<string>(
     apiKey.enforcedServiceTier || "none",
+  );
+  const [trafficClass, setTrafficClass] = useState<TrafficClassType>(
+    apiKey.trafficClass,
   );
 
   const handleSubmit = async (values: FormValues) => {
@@ -102,8 +136,20 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
-      enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
-      enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
+      enforcedReasoningEffort:
+        enforcedReasoningEffort === "none"
+          ? null
+          : (enforcedReasoningEffort as
+              | "minimal"
+              | "low"
+              | "medium"
+              | "high"
+              | "xhigh"),
+      enforcedServiceTier:
+        enforcedServiceTier === "none"
+          ? null
+          : (enforcedServiceTier as ServiceTierType),
+      trafficClass,
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
@@ -127,7 +173,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
         <div className="grid gap-x-6 sm:grid-cols-2">
           {/* Left column — General */}
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2">
-            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">General</h4>
+            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              General
+            </h4>
 
             <FormField
               control={form.control}
@@ -145,12 +193,18 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Allowed models</div>
-              <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+              <ModelMultiSelect
+                value={selectedModels}
+                onChange={setSelectedModels}
+              />
             </div>
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Assigned accounts</div>
-              <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
+              <AccountMultiSelect
+                value={selectedAccountIds}
+                onChange={setSelectedAccountIds}
+              />
             </div>
 
             <div className="space-y-1">
@@ -165,7 +219,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Enforced reasoning</div>
-              <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
+              <Select
+                value={enforcedReasoningEffort}
+                onValueChange={setEnforcedReasoningEffort}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
@@ -182,7 +239,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Enforced service tier</div>
-              <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
+              <Select
+                value={enforcedServiceTier}
+                onValueChange={setEnforcedServiceTier}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
@@ -192,6 +252,24 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   <SelectItem value="default">Default</SelectItem>
                   <SelectItem value="priority">Priority</SelectItem>
                   <SelectItem value="flex">Flex</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Traffic class</div>
+              <Select
+                value={trafficClass}
+                onValueChange={(value) =>
+                  setTrafficClass(value as TrafficClassType)
+                }
+              >
+                <SelectTrigger aria-label="Traffic class">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="foreground">Foreground</SelectItem>
+                  <SelectItem value="opportunistic">Opportunistic</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -207,7 +285,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               render={({ field }) => (
                 <div className="flex items-center justify-between rounded-md border p-2">
                   <span className="text-sm">Active</span>
-                  <Switch checked={field.value} onCheckedChange={field.onChange} />
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
                 </div>
               )}
             />
@@ -215,12 +296,16 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
           {/* Right column — Limits */}
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
-            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Limits</h4>
+            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Limits
+            </h4>
             <LimitRulesEditor rules={limitRules} onChange={setLimitRules} />
 
             {apiKey.limits.length > 0 ? (
               <div className="space-y-1">
-                <div className="text-xs font-medium text-muted-foreground">Current usage</div>
+                <div className="text-xs font-medium text-muted-foreground">
+                  Current usage
+                </div>
                 <div className="space-y-1">
                   {apiKey.limits.map((limit) => (
                     <LimitUsageBar key={limit.id} limit={limit} />
@@ -243,9 +328,16 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
 function LimitUsageBar({ limit }: { limit: ApiKey["limits"][number] }) {
   const isCost = limit.limitType === "cost_usd";
-  const percent = limit.maxValue > 0 ? Math.min(100, (limit.currentValue / limit.maxValue) * 100) : 0;
-  const current = isCost ? `$${(limit.currentValue / 1_000_000).toFixed(2)}` : formatTokenCount(limit.currentValue);
-  const max = isCost ? `$${(limit.maxValue / 1_000_000).toFixed(2)}` : formatTokenCount(limit.maxValue);
+  const percent =
+    limit.maxValue > 0
+      ? Math.min(100, (limit.currentValue / limit.maxValue) * 100)
+      : 0;
+  const current = isCost
+    ? `$${(limit.currentValue / 1_000_000).toFixed(2)}`
+    : formatTokenCount(limit.currentValue);
+  const max = isCost
+    ? `$${(limit.maxValue / 1_000_000).toFixed(2)}`
+    : formatTokenCount(limit.maxValue);
   const typeLabel = LIMIT_TYPE_SHORT[limit.limitType];
   const windowLabel = limit.limitWindow;
   const modelLabel = limit.modelFilter || "all";
@@ -284,13 +376,21 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }: ApiKeyEditDialogProps) {
+export function ApiKeyEditDialog({
+  open,
+  busy,
+  apiKey,
+  onOpenChange,
+  onSubmit,
+}: ApiKeyEditDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Edit API key</DialogTitle>
-          <DialogDescription>Update restrictions and lifecycle settings.</DialogDescription>
+          <DialogDescription>
+            Update restrictions and lifecycle settings.
+          </DialogDescription>
         </DialogHeader>
 
         {apiKey ? (
@@ -302,7 +402,9 @@ export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }:
             onClose={() => onOpenChange(false)}
           />
         ) : (
-          <p className="text-sm text-muted-foreground">Select an API key to edit.</p>
+          <p className="text-sm text-muted-foreground">
+            Select an API key to edit.
+          </p>
         )}
       </DialogContent>
     </Dialog>

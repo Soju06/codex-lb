@@ -12,12 +12,24 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKeyCreateRequest, LimitRuleCreate, ServiceTierType } from "@/features/api-keys/schemas";
+import type {
+  ApiKeyCreateRequest,
+  LimitRuleCreate,
+  ServiceTierType,
+  TrafficClassType,
+} from "@/features/api-keys/schemas";
 import {
   Select,
   SelectContent,
@@ -39,7 +51,12 @@ export type ApiKeyCreateDialogProps = {
   onSubmit: (payload: ApiKeyCreateRequest) => Promise<void>;
 };
 
-export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKeyCreateDialogProps) {
+export function ApiKeyCreateDialog({
+  open,
+  busy,
+  onOpenChange,
+  onSubmit,
+}: ApiKeyCreateDialogProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: { name: "" },
@@ -49,8 +66,11 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>([]);
   const [expiresAt, setExpiresAt] = useState<Date | null>(null);
   const [enforcedModel, setEnforcedModel] = useState("");
-  const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState("none");
+  const [enforcedReasoningEffort, setEnforcedReasoningEffort] =
+    useState("none");
   const [enforcedServiceTier, setEnforcedServiceTier] = useState("none");
+  const [trafficClass, setTrafficClass] =
+    useState<TrafficClassType>("foreground");
 
   const handleSubmit = async (values: FormValues) => {
     const validLimits = limitRules.filter((r) => r.maxValue > 0);
@@ -58,8 +78,20 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : undefined,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
-      enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
-      enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
+      enforcedReasoningEffort:
+        enforcedReasoningEffort === "none"
+          ? null
+          : (enforcedReasoningEffort as
+              | "minimal"
+              | "low"
+              | "medium"
+              | "high"
+              | "xhigh"),
+      enforcedServiceTier:
+        enforcedServiceTier === "none"
+          ? null
+          : (enforcedServiceTier as ServiceTierType),
+      trafficClass,
       expiresAt: expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
@@ -75,6 +107,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
     setEnforcedModel("");
     setEnforcedReasoningEffort("none");
     setEnforcedServiceTier("none");
+    setTrafficClass("foreground");
     onOpenChange(false);
   };
 
@@ -83,7 +116,9 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Create API key</DialogTitle>
-          <DialogDescription>Set restrictions and expiration for this key.</DialogDescription>
+          <DialogDescription>
+            Set restrictions and expiration for this key.
+          </DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -91,7 +126,9 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
             <div className="grid gap-x-6 sm:grid-cols-2">
               {/* Left column — General */}
               <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2">
-                <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">General</h4>
+                <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  General
+                </h4>
 
                 <FormField
                   control={form.control}
@@ -109,7 +146,10 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
 
                 <div className="space-y-1">
                   <label className="text-sm font-medium">Allowed models</label>
-                  <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+                  <ModelMultiSelect
+                    value={selectedModels}
+                    onChange={setSelectedModels}
+                  />
                 </div>
 
                 <div className="space-y-1">
@@ -123,8 +163,13 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-sm font-medium">Enforced reasoning</label>
-                  <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
+                  <label className="text-sm font-medium">
+                    Enforced reasoning
+                  </label>
+                  <Select
+                    value={enforcedReasoningEffort}
+                    onValueChange={setEnforcedReasoningEffort}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="None" />
                     </SelectTrigger>
@@ -140,8 +185,13 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-sm font-medium">Enforced service tier</label>
-                  <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
+                  <label className="text-sm font-medium">
+                    Enforced service tier
+                  </label>
+                  <Select
+                    value={enforcedServiceTier}
+                    onValueChange={setEnforcedServiceTier}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="None" />
                     </SelectTrigger>
@@ -156,6 +206,26 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                 </div>
 
                 <div className="space-y-1">
+                  <label className="text-sm font-medium">Traffic class</label>
+                  <Select
+                    value={trafficClass}
+                    onValueChange={(value) =>
+                      setTrafficClass(value as TrafficClassType)
+                    }
+                  >
+                    <SelectTrigger aria-label="Traffic class">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="foreground">Foreground</SelectItem>
+                      <SelectItem value="opportunistic">
+                        Opportunistic
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1">
                   <label className="text-sm font-medium">Expiry</label>
                   <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
                 </div>
@@ -163,13 +233,18 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
 
               {/* Right column — Limits */}
               <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
-                <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Limits</h4>
+                <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Limits
+                </h4>
                 <LimitRulesEditor rules={limitRules} onChange={setLimitRules} />
               </div>
             </div>
 
             <DialogFooter className="mt-4">
-              <Button type="submit" disabled={busy || form.formState.isSubmitting}>
+              <Button
+                type="submit"
+                disabled={busy || form.formState.isSubmitting}
+              >
                 Create
               </Button>
             </DialogFooter>

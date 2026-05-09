@@ -70,6 +70,7 @@ class AccountState:
     status: AccountStatus
     used_percent: float | None = None
     reset_at: float | None = None
+    primary_reset_at: int | float | None = None
     blocked_at: float | None = None
     cooldown_until: float | None = None
     secondary_used_percent: float | None = None
@@ -168,8 +169,12 @@ def _weekly_pace_floor_pct(state: AccountState, current: float) -> float:
     return max(PRESERVE_MIN_WEEKLY_FLOOR_PCT, pace_floor)
 
 
+def _primary_window_reset_at(state: AccountState) -> int | float | None:
+    return state.primary_reset_at if state.primary_reset_at is not None else state.reset_at
+
+
 def _short_window_floor_pct(state: AccountState, current: float, *, preserve_count: int) -> float:
-    remaining_seconds = _seconds_until(state.reset_at, current)
+    remaining_seconds = _seconds_until(_primary_window_reset_at(state), current)
     floor = PRESERVE_MIN_SHORT_WINDOW_FLOOR_PCT
     if remaining_seconds is None:
         return 100.0
@@ -187,7 +192,7 @@ def _preserve_allows_opportunistic_burn(state: AccountState, current: float, *, 
         return False
     if _remaining_pct(state, secondary=True) is None or _remaining_pct(state, secondary=False) is None:
         return False
-    if state.secondary_reset_at is None or state.reset_at is None:
+    if state.secondary_reset_at is None or _primary_window_reset_at(state) is None:
         return False
     weekly_floor = _weekly_pace_floor_pct(state, current)
     short_floor = _short_window_floor_pct(state, current, preserve_count=preserve_count)
@@ -210,7 +215,7 @@ def _has_other_usable_foreground_capacity(
         if other.status != AccountStatus.ACTIVE and not ignore_standard_quota:
             continue
         if _routing_policy(other) == ROUTING_POLICY_PRESERVE:
-            if _preserve_keeps_foreground_reserve(other) or _preserve_allows_opportunistic_burn(
+            if _preserve_allows_opportunistic_burn(
                 other,
                 current,
                 preserve_count=preserve_count,
@@ -220,10 +225,6 @@ def _has_other_usable_foreground_capacity(
         if _above_emergency_floor(other):
             return True
     return False
-
-
-def _preserve_keeps_foreground_reserve(state: AccountState) -> bool:
-    return _above_emergency_floor(state)
 
 
 def _above_emergency_floor(state: AccountState) -> bool:
@@ -370,11 +371,12 @@ def select_account(
                 state.reset_at = None
             elif not ignore_standard_quota:
                 continue
+        standard_quota_status_ignored = ignore_standard_quota and state.status == AccountStatus.QUOTA_EXCEEDED
         if state.cooldown_until and current >= state.cooldown_until:
             state.cooldown_until = None
             state.last_error_at = None
             state.error_count = 0
-        if state.cooldown_until and current < state.cooldown_until:
+        if state.cooldown_until and current < state.cooldown_until and not standard_quota_status_ignored:
             continue
         if state.error_count >= 3:
             backoff = min(300, 30 * (2 ** (state.error_count - 3)))

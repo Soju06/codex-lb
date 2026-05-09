@@ -1430,27 +1430,36 @@ def _omit_historical_response_input_items_to_fit(
     if not slimmed_historical:
         return payload, 0
 
-    omitted_count = 0
-    remaining_historical = list(slimmed_historical)
-    candidate_payload = payload
-    while remaining_historical:
-        omitted_count += 1
-        remaining_historical = remaining_historical[1:]
+    def candidate_with_omitted_count(omitted_count: int) -> JsonObject:
         candidate_payload = dict(payload)
         candidate_payload["input"] = [
             _response_create_history_omission_notice_item(omitted_count),
-            *remaining_historical,
+            *slimmed_historical[omitted_count:],
             *recent,
         ]
+        return candidate_payload
+
+    low = 1
+    high = len(slimmed_historical)
+    best: tuple[JsonObject, int] | None = None
+    while low <= high:
+        omitted_count = (low + high) // 2
+        candidate_payload = candidate_with_omitted_count(omitted_count)
         if _serialized_json_size(candidate_payload) <= max_bytes:
-            return candidate_payload, omitted_count
+            best = (candidate_payload, omitted_count)
+            high = omitted_count - 1
+        else:
+            low = omitted_count + 1
+
+    if best is not None:
+        return best
 
     recent_only_payload = dict(payload)
     recent_only_payload["input"] = list(recent)
     if _serialized_json_size(recent_only_payload) <= max_bytes:
-        return recent_only_payload, omitted_count
+        return recent_only_payload, len(slimmed_historical)
 
-    return candidate_payload, omitted_count
+    return candidate_with_omitted_count(len(slimmed_historical)), len(slimmed_historical)
 
 
 def _serialized_json_size(payload: JsonObject) -> int:

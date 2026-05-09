@@ -5219,6 +5219,46 @@ def test_slim_response_create_drops_omission_notice_when_only_recent_fits():
     assert proxy_service._serialized_json_size(slimmed_payload) <= max_bytes
 
 
+def test_slim_response_create_omits_history_with_bounded_serialization(monkeypatch):
+    recent_item: dict[str, JsonValue] = {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "please continue"}],
+    }
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            *[
+                {"role": "assistant", "content": [{"type": "output_text", "text": f"old-{index}"}]}
+                for index in range(1024)
+            ],
+            recent_item,
+        ],
+    }
+    original_serialized_json_size = proxy_service._serialized_json_size
+    max_bytes = original_serialized_json_size(
+        {
+            **payload,
+            "input": [proxy_service._response_create_history_omission_notice_item(1024), recent_item],
+        }
+    )
+    calls = 0
+
+    def counted_serialized_json_size(payload: dict[str, JsonValue]) -> int:
+        nonlocal calls
+        calls += 1
+        return original_serialized_json_size(payload)
+
+    monkeypatch.setattr(proxy_service, "_serialized_json_size", counted_serialized_json_size)
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=max_bytes)
+
+    assert summary is not None
+    assert summary["historical_items_omitted"] == 1024
+    assert slimmed_payload["input"] == [proxy_service._response_create_history_omission_notice_item(1024), recent_item]
+    assert calls <= 16
+
+
 def test_oversized_response_create_dump_dir_uses_default_home_dir():
     assert proxy_service._OVERSIZED_RESPONSE_CREATE_DUMP_DIR == (DEFAULT_HOME_DIR / "debug" / "response-create-dumps")
 

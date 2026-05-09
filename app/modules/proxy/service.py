@@ -300,6 +300,44 @@ def _response_create_text(
     return json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
 
 
+def _response_create_retry_text(
+    payload: ResponsesRequest,
+    *,
+    include_type_field: bool,
+    client_metadata: Mapping[str, JsonValue] | None,
+    request_id: str,
+    transport: str,
+) -> str:
+    text_data = _response_create_text(
+        payload,
+        include_type_field=include_type_field,
+        client_metadata=client_metadata,
+    )
+    payload_size = len(text_data.encode("utf-8"))
+    if payload_size > _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+        upstream_payload = json.loads(text_data)
+        if isinstance(upstream_payload, dict):
+            slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
+                cast(dict[str, JsonValue], upstream_payload),
+                max_bytes=_UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
+            )
+            if slim_summary is not None:
+                text_data = json.dumps(slimmed_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = _WebSocketRequestState(
+        request_id=request_id,
+        model=payload.model,
+        service_tier=_normalize_service_tier_value(dict(payload.to_payload()).get("service_tier")),
+        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id=payload.previous_response_id,
+        transport=transport,
+        request_text=text_data,
+    )
+    _enforce_response_create_size_limit(request_state)
+    return text_data
+
+
 class ProxyService:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
@@ -2606,20 +2644,29 @@ class ProxyService:
                                     api_key=api_key,
                                     continuity_state=continuity_state,
                                 )
-                                if await _websocket_full_replay_should_wait_for_continuity(
+                                observed_completion_generation = await _websocket_full_replay_continuity_wait_snapshot(
                                     prepared_request.request_state,
                                     pending_requests,
                                     pending_lock=pending_lock,
                                     codex_session_affinity=codex_session_affinity,
-                                ):
+                                    continuity_state=continuity_state,
+                                )
+                                if observed_completion_generation is not None:
                                     await self._release_websocket_reservation(
                                         prepared_request.request_state.api_key_reservation
                                     )
                                     wait_started_at = time.monotonic()
+                                    wait_timeout_seconds = max(
+                                        0.0,
+                                        runtime_settings.proxy_request_budget_seconds
+                                        - (wait_started_at - prepared_request.request_state.started_at),
+                                    )
                                     waited_for_anchor = await _wait_for_websocket_continuity_gap(
                                         pending_requests,
                                         pending_lock=pending_lock,
-                                        timeout_seconds=runtime_settings.proxy_request_budget_seconds,
+                                        timeout_seconds=wait_timeout_seconds,
+                                        continuity_state=continuity_state,
+                                        observed_completion_generation=observed_completion_generation,
                                     )
                                     logger.info(
                                         "websocket_full_replay_waited_for_continuity waited=%s elapsed_ms=%s "
@@ -2628,6 +2675,16 @@ class ProxyService:
                                         int((time.monotonic() - wait_started_at) * 1000),
                                         prepared_request.request_state.input_item_count,
                                     )
+                                    if not waited_for_anchor:
+                                        raise ProxyResponseError(
+                                            502,
+                                            openai_error(
+                                                "upstream_request_timeout",
+                                                "Proxy request budget exhausted",
+                                                error_type="server_error",
+                                            ),
+                                        )
+                                    original_started_at = prepared_request.request_state.started_at
                                     prepared_request = await self._prepare_websocket_response_create_request(
                                         payload,
                                         headers=headers,
@@ -2638,6 +2695,7 @@ class ProxyService:
                                         api_key=api_key,
                                         continuity_state=continuity_state,
                                     )
+                                    prepared_request.request_state.started_at = original_started_at
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
@@ -2990,13 +3048,6 @@ class ProxyService:
                     "input": original_input_items[session_anchor.stored_input_item_count :],
                 }
             )
-        if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
-            previous_response_input_items = cast(list[JsonValue], responses_payload.input)
-            trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
-                previous_response_trimmed_input_count = len(previous_response_input_items)
-                previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
-                responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -3015,6 +3066,7 @@ class ProxyService:
                 transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 client_metadata=client_metadata,
                 session_id=session_id,
+                trim_previous_response_input_items=True,
             )
         except ProxyResponseError:
             await self._release_websocket_reservation(reservation)
@@ -3024,7 +3076,10 @@ class ProxyService:
             request_state.input_item_count = original_input_item_count or request_state.input_item_count
             request_state.input_full_fingerprint = original_input_fingerprint
             request_state.fresh_upstream_request_text = original_full_resend_text
-            request_state.fresh_upstream_request_is_retry_safe = original_full_resend_text is not None
+            request_state.fresh_upstream_request_is_retry_safe = (
+                original_full_resend_text is not None
+                and len(original_full_resend_text.encode("utf-8")) <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES
+            )
             logger.info(
                 "websocket_session_anchor_injected request_id=%s response_id=%s original_items=%s trimmed_to=%s",
                 request_state.request_id,
@@ -3135,6 +3190,7 @@ class ProxyService:
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
+            trim_previous_response_input_items=True,
         )
 
     def _prepare_response_bridge_request_state(
@@ -3150,9 +3206,19 @@ class ProxyService:
         session_id: str | None = None,
         request_id: str | None = None,
         request_log_id: str | None = None,
+        trim_previous_response_input_items: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
-        if payload.previous_response_id is not None and isinstance(payload.input, list):
+        input_item_count = 0
+        input_full_fingerprint: str | None = None
+        if (
+            trim_previous_response_input_items
+            and payload.previous_response_id is not None
+            and isinstance(payload.input, list)
+        ):
             input_items = cast(list[JsonValue], payload.input)
+            input_item_count = len(input_items)
+            if input_item_count > 0:
+                input_full_fingerprint = _fingerprint_input_items(input_items)
             trimmed_input_items = _trim_websocket_previous_response_input_items(input_items)
             if len(trimmed_input_items) != len(input_items):
                 payload = payload.model_copy(update={"input": trimmed_input_items})
@@ -3164,10 +3230,8 @@ class ProxyService:
         if client_metadata:
             upstream_payload["client_metadata"] = client_metadata
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
-        input_item_count = 0
-        input_full_fingerprint: str | None = None
         payload_input = payload.input
-        if isinstance(payload_input, list):
+        if input_item_count == 0 and isinstance(payload_input, list):
             payload_input_list = cast(list[JsonValue], payload_input)
             input_item_count = len(payload_input_list)
             if input_item_count > 0:
@@ -5502,13 +5566,10 @@ class ProxyService:
             # original unanchored request is equivalent to the client's own
             # retry. Session-level injections do not opt in because their
             # payload may depend on the anchor for context preservation.
-            if (
-                not request_state.proxy_injected_previous_response_id
-                or not request_state.fresh_upstream_request_text
-                or not request_state.fresh_upstream_request_is_retry_safe
-            ):
+            if not _request_state_has_safe_fresh_replay(request_state):
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
+            assert retry_text_data is not None
         if request_state.replay_count >= 1:
             return False
         request_state.replay_count += 1
@@ -5529,9 +5590,7 @@ class ProxyService:
             )
             if send_request:
                 if retry_text_data != text_data:
-                    request_state.previous_response_id = None
-                    request_state.proxy_injected_previous_response_id = False
-                    request_state.request_text = retry_text_data
+                    _switch_request_state_to_fresh_replay(request_state)
                 await session.upstream.send_text(retry_text_data)
             session.last_used_at = time.monotonic()
             return True
@@ -5764,13 +5823,6 @@ class ProxyService:
                 release_create_gate = False
             else:
                 release_create_gate = False
-
-            if _mark_duplicate_tool_call_downstream_event(
-                payload,
-                upstream_control=session.upstream_control,
-                response_id=_websocket_event_dedupe_response_id(response_id, matched_request_state),
-            ):
-                return
 
             if matched_request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
@@ -6345,13 +6397,6 @@ class ProxyService:
                 release_create_gate = False
             else:
                 release_create_gate = False
-            if _mark_duplicate_tool_call_downstream_event(
-                payload,
-                upstream_control=upstream_control,
-                response_id=_websocket_event_dedupe_response_id(response_id, request_state),
-            ):
-                upstream_control.suppress_downstream_event = True
-                return text
             if request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
@@ -6450,10 +6495,13 @@ class ProxyService:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        if retry_is_previous_response_not_found and not _request_state_has_safe_fresh_replay(request_state):
+            retry_error_code = None
         if (
             retry_error_code in _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
+            and not _request_state_has_safe_fresh_replay(request_state)
         ):
             await self._handle_stream_error(
                 account,
@@ -6466,26 +6514,12 @@ class ProxyService:
             retry_error_code = None
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:
-                if not (
-                    request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-                ):
-                    # A short continuation depends entirely on the upstream
-                    # anchor. Replaying the same lost previous_response_id on a
-                    # new websocket just re-surfaces the raw upstream 400; only
-                    # full-resend payloads with a prepared fresh body can be
-                    # transparently retried.
-                    retry_error_code = None
-                else:
-                    upstream_control.reconnect_requested = True
-                    request_state.request_text = request_state.fresh_upstream_request_text
-                    request_state.previous_response_id = None
-                    request_state.proxy_injected_previous_response_id = False
-                    request_state.fresh_upstream_request_is_retry_safe = False
-                    request_state.replay_count += 1
-                    request_state.awaiting_response_created = True
-                    request_state.response_id = None
-                    upstream_control.suppress_downstream_event = True
-                    upstream_control.replay_request_state = request_state
+                _switch_request_state_to_fresh_replay(request_state)
+                request_state.replay_count += 1
+                request_state.awaiting_response_created = True
+                request_state.response_id = None
+                upstream_control.suppress_downstream_event = True
+                upstream_control.replay_request_state = request_state
             else:
                 upstream_control.reconnect_requested = True
                 request_state.replay_count += 1
@@ -8749,6 +8783,7 @@ class _WebSocketContinuityState:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
+    completion_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -8763,7 +8798,6 @@ class _WebSocketUpstreamControl:
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
-    seen_tool_call_keys: set[tuple[str, str, str | None, str]] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -8842,16 +8876,13 @@ def _websocket_continuity_anchor_for_payload(
 
 
 def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
-    first_output_index = next(
-        (index for index, item in enumerate(input_items) if _websocket_input_item_type(item) == "function_call_output"),
-        None,
+    first_non_output_index = next(
+        (index for index, item in enumerate(input_items) if not _is_websocket_previous_response_output_item(item)),
+        len(input_items),
     )
-    if first_output_index is None or first_output_index == 0:
+    if first_non_output_index == 0:
         return input_items
-    prefix = input_items[:first_output_index]
-    if not all(_is_websocket_previous_response_output_item(item) for item in prefix):
-        return input_items
-    return input_items[first_output_index:]
+    return input_items[first_non_output_index:]
 
 
 def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:
@@ -8877,11 +8908,23 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
-    if response_id is not None:
-        continuity_state.last_completed_response_id = response_id
+    if (
+        request_state.input_item_count > 0
+        and continuity_state.last_completed_input_count > 0
+        and request_state.input_item_count < continuity_state.last_completed_input_count
+    ):
+        continuity_state.completion_generation += 1
+        return
     if request_state.input_item_count > 0:
+        if response_id is not None:
+            continuity_state.last_completed_response_id = response_id
         continuity_state.last_completed_input_count = request_state.input_item_count
         continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    elif response_id is not None:
+        continuity_state.last_completed_response_id = response_id
+        continuity_state.last_completed_input_count = 0
+        continuity_state.last_completed_input_prefix_fingerprint = None
+    continuity_state.completion_generation += 1
 
 
 async def _wait_for_websocket_continuity_gap(
@@ -8889,11 +8932,18 @@ async def _wait_for_websocket_continuity_gap(
     *,
     pending_lock: anyio.Lock,
     timeout_seconds: float,
+    continuity_state: _WebSocketContinuityState | None = None,
+    observed_completion_generation: int | None = None,
 ) -> bool:
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     while True:
         async with pending_lock:
-            if not pending_requests:
+            continuity_updated = (
+                continuity_state is None
+                or observed_completion_generation is None
+                or continuity_state.completion_generation != observed_completion_generation
+            )
+            if not pending_requests and continuity_updated:
                 return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -8901,57 +8951,25 @@ async def _wait_for_websocket_continuity_gap(
         await asyncio.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
 
 
-async def _websocket_full_replay_should_wait_for_continuity(
+async def _websocket_full_replay_continuity_wait_snapshot(
     request_state: _WebSocketRequestState,
     pending_requests: deque[_WebSocketRequestState],
     *,
     pending_lock: anyio.Lock,
     codex_session_affinity: bool,
-) -> bool:
+    continuity_state: _WebSocketContinuityState | None,
+) -> int | None:
     if (
         not codex_session_affinity
-        or request_state.previous_response_id is not None
-        or request_state.input_item_count < _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS
+        or (request_state.previous_response_id is not None and not request_state.proxy_injected_previous_response_id)
+        or not request_state.proxy_injected_previous_response_id
+        or continuity_state is None
     ):
-        return False
+        return None
     async with pending_lock:
-        return bool(pending_requests)
-
-
-def _mark_duplicate_tool_call_downstream_event(
-    payload: dict[str, JsonValue] | None,
-    *,
-    upstream_control: _WebSocketUpstreamControl,
-    response_id: str | None,
-) -> bool:
-    if not isinstance(payload, dict) or payload.get("type") != "response.output_item.done":
-        return False
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return False
-    item_type = item.get("type")
-    if item_type == "function_call":
-        argument_value = item.get("arguments")
-    elif item_type == "custom_tool_call":
-        argument_value = item.get("input")
-    else:
-        return False
-    if not isinstance(argument_value, str):
-        return False
-    item_name = item.get("name")
-    if item_name is not None and not isinstance(item_name, str):
-        item_name = None
-    key = (response_id or "", str(item_type), item_name, argument_value)
-    if key in upstream_control.seen_tool_call_keys:
-        logger.warning(
-            "Suppressed duplicate websocket tool call response_id=%s item_type=%s name=%s",
-            response_id,
-            item_type,
-            item_name,
-        )
-        return True
-    upstream_control.seen_tool_call_keys.add(key)
-    return False
+        if not pending_requests:
+            return None
+        return continuity_state.completion_generation
 
 
 def _websocket_event_dedupe_response_id(
@@ -9250,20 +9268,32 @@ async def _pop_replayable_precreated_websocket_request_state(
             return None
         if request_state.replay_count >= 1:
             return None
+        if request_state.previous_response_id is not None and not _request_state_has_safe_fresh_replay(request_state):
+            return None
         pending_requests.popleft()
-    if (
-        request_state.proxy_injected_previous_response_id
-        and request_state.fresh_upstream_request_is_retry_safe
-        and request_state.fresh_upstream_request_text
-    ):
-        request_state.request_text = request_state.fresh_upstream_request_text
-        request_state.previous_response_id = None
-        request_state.proxy_injected_previous_response_id = False
-        request_state.fresh_upstream_request_is_retry_safe = False
+    _switch_request_state_to_fresh_replay(request_state)
     request_state.replay_count += 1
     request_state.awaiting_response_created = True
     request_state.response_id = None
     return request_state
+
+
+def _request_state_has_safe_fresh_replay(request_state: _WebSocketRequestState) -> bool:
+    return (
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and bool(request_state.fresh_upstream_request_text)
+    )
+
+
+def _switch_request_state_to_fresh_replay(request_state: _WebSocketRequestState) -> None:
+    if not _request_state_has_safe_fresh_replay(request_state):
+        return
+    request_state.request_text = request_state.fresh_upstream_request_text
+    request_state.previous_response_id = None
+    request_state.proxy_injected_previous_response_id = False
+    request_state.fresh_upstream_request_is_retry_safe = False
+    _enforce_response_create_size_limit(request_state)
 
 
 def _is_previous_response_not_found_error(

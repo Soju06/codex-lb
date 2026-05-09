@@ -8,6 +8,7 @@ import {
   buildRemainingItems,
   buildWeeklyCreditPace,
   sumRemaining,
+  weeklyCreditPaceStatus,
   type RemainingItem,
 } from "@/features/dashboard/utils";
 import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
@@ -334,6 +335,11 @@ describe("buildWeeklyCreditPace", () => {
       remainingCreditsSecondary: remainingCreditBudget,
     });
   }
+
+  it("marks over-schedule weekly usage as ahead before hard shortfall states", () => {
+    expect(weeklyCreditPaceStatus(6, 0)).toBe("ahead");
+    expect(weeklyCreditPaceStatus(6, 1)).toBe("danger");
+  });
 
   it("treats a 99% used account at 99% elapsed as on pace", () => {
     const pace = buildWeeklyCreditPace(

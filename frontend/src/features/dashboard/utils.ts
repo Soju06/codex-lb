@@ -209,9 +209,10 @@ function isNonNegativeFinite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function weeklyCreditPaceStatus(deltaPercent: number, projectedShortfallCredits: number): WeeklyCreditPaceStatus {
+export function weeklyCreditPaceStatus(deltaPercent: number, projectedShortfallCredits: number): WeeklyCreditPaceStatus {
   if (projectedShortfallCredits > 0) return "danger";
   if (deltaPercent < -5) return "behind";
+  if (deltaPercent > 5) return "ahead";
   return "on_track";
 }
 

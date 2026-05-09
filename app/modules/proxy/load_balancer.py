@@ -77,6 +77,7 @@ class RuntimeState:
     cooldown_until: float | None = None
     last_error_at: float | None = None
     last_selected_at: float | None = None
+    last_foreground_selected_at: float | None = None
     error_count: int = 0
     version: int = 0
     blocked_at: float | None = None
@@ -215,6 +216,7 @@ class LoadBalancer:
                         account,
                         state,
                         selected=result.account is not None and state.account_id == result.account.account_id,
+                        traffic_class=traffic_class,
                     )
                     selected_states.append(state)
 
@@ -743,6 +745,7 @@ class LoadBalancer:
         *,
         selected: bool = False,
         expected_version: int | None = None,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ) -> bool:
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -751,6 +754,7 @@ class LoadBalancer:
                 state,
                 selected=selected,
                 expected_version=expected_version,
+                traffic_class=traffic_class,
             )
 
     async def _select_with_stickiness(
@@ -998,6 +1002,7 @@ class LoadBalancer:
             secondary_reset_at=None,
             last_error_at=runtime.last_error_at,
             last_selected_at=runtime.last_selected_at,
+            last_foreground_selected_at=runtime.last_foreground_selected_at,
             error_count=runtime.error_count,
             deactivation_reason=account.deactivation_reason,
             plan_type=account.plan_type,
@@ -1012,11 +1017,14 @@ class LoadBalancer:
         *,
         selected: bool = False,
         expected_version: int | None = None,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ) -> bool:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
         if expected_version is not None and runtime.version != expected_version:
             if selected:
                 runtime.last_selected_at = time.time()
+                if traffic_class == TRAFFIC_CLASS_FOREGROUND:
+                    runtime.last_foreground_selected_at = runtime.last_selected_at
                 runtime.version += 1
             return False
 
@@ -1042,6 +1050,8 @@ class LoadBalancer:
             dirty = True
         if selected:
             runtime.last_selected_at = time.time()
+            if traffic_class == TRAFFIC_CLASS_FOREGROUND:
+                runtime.last_foreground_selected_at = runtime.last_selected_at
             dirty = True
         if dirty:
             runtime.version += 1
@@ -1287,6 +1297,7 @@ def _state_from_account(
         secondary_reset_at=secondary_reset,
         last_error_at=runtime.last_error_at,
         last_selected_at=runtime.last_selected_at,
+        last_foreground_selected_at=runtime.last_foreground_selected_at,
         error_count=runtime.error_count,
         deactivation_reason=account.deactivation_reason,
         plan_type=account.plan_type,

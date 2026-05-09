@@ -31,6 +31,8 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
 };
 
 function renderWithClient(ui: React.ReactElement) {

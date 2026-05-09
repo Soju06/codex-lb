@@ -942,9 +942,64 @@ def test_extract_input_file_ids_ignores_non_input_file_types():
         {
             "role": "user",
             "content": [
-                {"type": "input_image", "file_id": "file_should_not_match"},
+                {"type": "input_text", "text": "hello"},
+                {"type": "output_text", "text": "ignore"},
                 {"type": "input_text", "text": "ignore"},
             ],
         },
     ]
+    assert extract_input_file_ids(input_value) == set()
+
+
+def test_extract_input_file_ids_recognizes_input_image_file_id():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "file_id": "file_image"},
+            ],
+        },
+    ]
+
+    assert extract_input_file_ids(input_value) == {"file_image"}
+
+
+def test_extract_input_file_ids_recognizes_input_image_sediment_uri():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "sediment://file_image"},
+            ],
+        },
+    ]
+
+    assert extract_input_file_ids(input_value) == {"file_image"}
+
+
+def test_extract_input_file_ids_ignores_input_image_non_sediment_url():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/file.png"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+            ],
+        },
+    ]
+
+    assert extract_input_file_ids(input_value) == set()
+
+
+def test_extract_input_file_ids_ignores_input_file_without_file_id():
+    input_value: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_file"},
+                {"type": "input_file", "file_id": ""},
+            ],
+        },
+    ]
+
     assert extract_input_file_ids(input_value) == set()

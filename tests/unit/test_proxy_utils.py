@@ -3606,6 +3606,177 @@ def test_sticky_key_for_responses_request_preserves_client_supplied_prompt_cache
     assert payload.prompt_cache_key == "thread_123"
 
 
+@pytest.mark.asyncio
+async def test_resolve_file_account_for_responses_returns_pinned_account_for_input_image_file_id():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account("file_image", "acc_image")
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Describe the image.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "file_id": "file_image"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    resolved_account_id = await service._resolve_file_account_for_responses(payload, {})
+
+    assert resolved_account_id == "acc_image"
+
+
+@pytest.mark.asyncio
+async def test_resolve_file_account_for_responses_returns_pinned_account_for_sediment_input_image():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account("file_image", "acc_image")
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Describe the image.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "sediment://file_image"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    resolved_account_id = await service._resolve_file_account_for_responses(payload, {})
+
+    assert resolved_account_id == "acc_image"
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_normalizes_input_image_file_id_before_sticky_key_derivation(monkeypatch):
+    class _StopAfterNormalization(RuntimeError):
+        pass
+
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_session_bridge_enabled = True
+    settings.http_responses_session_bridge_idle_ttl_seconds = 30.0
+    settings.http_responses_session_bridge_codex_idle_ttl_seconds = 30.0
+    settings.http_responses_session_bridge_max_sessions = 4
+    settings.http_responses_session_bridge_queue_limit = 8
+    settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds = 30.0
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    captured: dict[str, JsonValue] = {}
+
+    def fake_sticky_key_for_responses_request(payload, headers, **kwargs):
+        del headers, kwargs
+        captured["input"] = payload.input
+        raise _StopAfterNormalization()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_sticky_key_for_responses_request",
+        fake_sticky_key_for_responses_request,
+    )
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Describe the image.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "file_id": "file_image"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(_StopAfterNormalization):
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=1,
+            queue_limit=1,
+            prompt_cache_idle_ttl_seconds=30.0,
+        ):
+            pass
+
+    assert captured["input"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "sediment://file_image"},
+            ],
+        }
+    ]
+
+
+def test_classify_upstream_close_clean_close_without_response_events_is_rejected():
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
+    assert proxy_service._classify_upstream_close(1001, response_events_seen=0) == "transient"
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_does_not_retry_clean_close_without_response_events():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_http_bridge_rejected",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create"}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="bridge-key",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.1",
+        account=_make_account("acc_http_bridge"),
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    retried = await service._retry_http_bridge_precreated_request(session, close_code=1000)
+
+    assert retried is False
+    assert request_state.replay_count == 0
+    assert request_state.error_code_override == "upstream_rejected_input"
+    assert request_state.error_message_override == (
+        "Upstream rejected the request before response.created (close_code=1000)"
+    )
+
+
 def test_sticky_key_for_responses_request_strips_whitespace_before_accepting_payload_key():
     payload = ResponsesRequest.model_validate(
         {

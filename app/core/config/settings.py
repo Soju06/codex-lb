@@ -134,7 +134,7 @@ class Settings(BaseSettings):
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = False
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
-    http_responses_session_bridge_codex_request_budget_seconds: float = Field(default=180.0, gt=0)
+    http_responses_session_bridge_codex_request_budget_seconds: float = Field(default=600.0, gt=0)
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)

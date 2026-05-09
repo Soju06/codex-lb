@@ -33,7 +33,7 @@ def _make_app_settings(*, bridge_enabled: bool = True) -> Settings:
 def test_responses_request_budget_seconds_uses_codex_http_budget() -> None:
     settings = Settings(
         proxy_request_budget_seconds=600.0,
-        http_responses_session_bridge_codex_request_budget_seconds=180.0,
+        http_responses_session_bridge_codex_request_budget_seconds=600.0,
     )
 
     assert (
@@ -42,7 +42,7 @@ def test_responses_request_budget_seconds_uses_codex_http_budget() -> None:
             codex_session_affinity=True,
             request_transport="http",
         )
-        == 180.0
+        == 600.0
     )
     assert (
         proxy_service._responses_request_budget_seconds(
@@ -1676,6 +1676,52 @@ async def test_close_http_bridge_session_fails_pending_downstream_requests() -> 
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
     assert list(session.pending_requests) == []
     assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_retirement_removes_session_and_releases_durable_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-reader-retire", None)
+    upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=SimpleNamespace(kind="close", text=None, close_code=1006, error=None)),
+            close=AsyncMock(),
+        ),
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={"x-codex-session-id": "sid-reader-retire"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-reader-retire",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-retire", status=AccountStatus.ACTIVE)),
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+        durable_session_id="durable-reader-retire",
+        durable_owner_epoch=3,
+    )
+    service._http_bridge_sessions[key] = session
+    release_live_session = AsyncMock()
+    monkeypatch.setattr(service._durable_bridge, "release_live_session", release_live_session)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert session.closed is True
+    assert key not in service._http_bridge_sessions
+    upstream.close.assert_awaited_once()
+    release_live_session.assert_awaited_once()
 
 
 @pytest.mark.asyncio

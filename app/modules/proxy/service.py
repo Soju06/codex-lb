@@ -5289,6 +5289,7 @@ class ProxyService:
             runtime_settings,
             session=session,
         )
+        retire_session = False
         try:
             while True:
                 receive_timeout = await self._next_websocket_receive_timeout(
@@ -5325,6 +5326,7 @@ class ProxyService:
                         response_create_gate=session.response_create_gate,
                     )
                     session.closed = True
+                    retire_session = True
                     break
 
                 if message.kind == "text" and message.text is not None:
@@ -5348,6 +5350,7 @@ class ProxyService:
                     response_create_gate=session.response_create_gate,
                 )
                 session.closed = True
+                retire_session = True
                 break
         except asyncio.CancelledError:
             raise
@@ -5369,8 +5372,40 @@ class ProxyService:
                 api_key=None,
                 response_create_gate=session.response_create_gate,
             )
+            retire_session = True
         finally:
             session.closed = True
+            if retire_session:
+                await self._retire_http_bridge_session_from_reader(session)
+
+    async def _retire_http_bridge_session_from_reader(self, session: "_HTTPBridgeSession") -> None:
+        async with self._http_bridge_lock:
+            if self._http_bridge_sessions.get(session.key) is session:
+                self._http_bridge_sessions.pop(session.key, None)
+            self._unregister_http_bridge_turn_states_locked(session)
+            self._unregister_http_bridge_previous_response_ids_locked(session)
+        try:
+            await session.upstream.close()
+        except Exception:
+            logger.debug("Failed to close retired HTTP bridge upstream websocket", exc_info=True)
+        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
+            try:
+                await self._durable_bridge.release_live_session(
+                    session_id=session.durable_session_id,
+                    instance_id=get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    draining=shutdown_state.is_bridge_drain_active(),
+                )
+            except Exception:
+                logger.warning("Failed to release retired durable HTTP bridge session", exc_info=True)
+        _log_http_bridge_event(
+            "reader_retire",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
 
     async def _retry_http_bridge_request_on_fresh_upstream(
         self,

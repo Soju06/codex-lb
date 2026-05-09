@@ -231,13 +231,13 @@ def test_select_account_can_ignore_standard_rate_limit_for_additional_pool():
     assert result.account.account_id == "spark"
 
 
-def test_select_account_does_not_ignore_live_cooldown_for_additional_pool():
+def test_select_account_still_honors_live_cooldown_for_additional_pool():
     now = time.time()
     states = [
         AccountState(
             "spark",
             AccountStatus.ACTIVE,
-            used_percent=1.0,
+            used_percent=5.0,
             cooldown_until=now + 60,
         )
     ]
@@ -245,6 +245,61 @@ def test_select_account_does_not_ignore_live_cooldown_for_additional_pool():
     result = select_account(states, now=now, routing_strategy="usage_weighted", ignore_standard_quota=True)
 
     assert result.account is None
+
+
+def test_select_account_ignores_standard_rate_limit_after_live_cooldown_for_additional_pool():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "standard-limited",
+            AccountStatus.RATE_LIMITED,
+            used_percent=5.0,
+            secondary_used_percent=5.0,
+            reset_at=now + 3600,
+            blocked_at=now - 10,
+            cooldown_until=now - 1,
+        ),
+        AccountState(
+            "standard-limited-fallback",
+            AccountStatus.RATE_LIMITED,
+            used_percent=5.0,
+            secondary_used_percent=5.0,
+            reset_at=now + 3600,
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        routing_strategy="usage_weighted",
+        ignore_standard_quota=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "standard-limited"
+
+
+def test_select_account_ignores_standard_quota_exceeded_after_live_cooldown_for_additional_pool():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "standard-quota",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        secondary_used_percent=100.0,
+        reset_at=now + 3600,
+        blocked_at=now - 300,
+        cooldown_until=now - 1,
+    )
+
+    result = select_account(
+        [state],
+        now=now,
+        routing_strategy="usage_weighted",
+        ignore_standard_quota=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "standard-quota"
 
 
 def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
@@ -303,6 +358,36 @@ def test_budget_safe_selection_keeps_preserve_behind_over_budget_normal():
 
     assert result.account is not None
     assert result.account.account_id == "normal"
+
+
+def test_budget_safe_opportunistic_selection_keeps_burn_first_with_foreground_reserve():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            routing_policy="normal",
+        ),
+        AccountState(
+            "temp",
+            AccountStatus.ACTIVE,
+            used_percent=100.0,
+            secondary_used_percent=100.0,
+            routing_policy="burn_first",
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        traffic_class="opportunistic",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "temp"
 
 
 def test_opportunistic_burn_first_can_reach_zero_when_another_account_remains():
@@ -427,6 +512,8 @@ def test_opportunistic_recent_selection_does_not_raise_preserve_floor_without_fo
             secondary_reset_at=int(now + 3 * 24 * 3600),
             last_selected_at=now - 60,
             last_foreground_selected_at=None,
+            primary_usage_fresh=True,
+            secondary_usage_fresh=True,
             routing_policy="preserve",
         )
     ]
@@ -435,6 +522,28 @@ def test_opportunistic_recent_selection_does_not_raise_preserve_floor_without_fo
 
     assert result.account is not None
     assert result.account.account_id == "review"
+
+
+def test_opportunistic_preserve_requires_fresh_usage_data():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "review",
+            AccountStatus.ACTIVE,
+            used_percent=30.0,
+            reset_at=now + 3 * 3600,
+            secondary_used_percent=40.0,
+            secondary_reset_at=int(now + 3 * 24 * 3600),
+            routing_policy="preserve",
+        )
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
+
+    assert result.account is None
+    assert result.error_message == (
+        "opportunistic burn window closed: preserve floor or stale usage data blocks opportunistic burn"
+    )
 
 
 def test_opportunistic_recent_foreground_activity_raises_preserve_floor():
@@ -471,6 +580,33 @@ def test_opportunistic_last_normal_keeps_emergency_floor():
             secondary_used_percent=96.0,
             routing_policy="normal",
         )
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
+
+    assert result.account is None
+    assert result.error_message == (
+        "opportunistic burn window closed: no expendable account has emergency foreground reserve"
+    )
+
+
+def test_opportunistic_other_normal_must_have_foreground_reserve():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "last-reserve",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=96.0,
+            routing_policy="normal",
+        ),
+        AccountState(
+            "exhausted-peer",
+            AccountStatus.ACTIVE,
+            used_percent=100.0,
+            secondary_used_percent=100.0,
+            routing_policy="normal",
+        ),
     ]
 
     result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
@@ -535,6 +671,8 @@ def test_opportunistic_preserve_weekly_floor_decreases_near_reset_when_pace_is_b
             reset_at=now + 3 * 3600,
             secondary_used_percent=90.0,
             secondary_reset_at=int(now + 5 * 3600),
+            primary_usage_fresh=True,
+            secondary_usage_fresh=True,
             routing_policy="preserve",
         )
     ]

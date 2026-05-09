@@ -231,7 +231,21 @@ async def opportunistic_admission(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    denial = await _opportunistic_admission_denial(request, context, api_key, model=model)
+    effective_model = api_key.enforced_model if api_key is not None and api_key.enforced_model else model
+    if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and effective_model is None:
+        error = openai_error(
+            "invalid_request_error",
+            "model is required for opportunistic admission checks",
+            error_type="invalid_request_error",
+        )
+        error["error"]["param"] = "model"
+        return _logged_error_json_response(
+            request,
+            400,
+            error,
+        )
+    validate_model_access(api_key, effective_model)
+    denial = await _opportunistic_admission_denial(request, context, api_key, model=effective_model)
     if denial is not None:
         return denial
     return JSONResponse({"admitted": True})
@@ -649,6 +663,7 @@ async def backend_files_create(
             request,
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
+            headers=exc.headers,
         )
     finally:
         await _release_reservation(reservation)
@@ -693,6 +708,7 @@ async def backend_files_finalize(
             request,
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
+            headers=exc.headers,
         )
     finally:
         await _release_reservation(reservation)
@@ -915,7 +931,7 @@ async def _prime_upstream_stream(
             request,
             exc.status_code,
             exc.payload,
-            headers=dict(rate_limit_headers),
+            headers={**rate_limit_headers, **exc.headers},
         )
 
     async def _replay() -> AsyncIterator[str]:
@@ -1092,7 +1108,7 @@ async def _proxy_images_generation_request(
             request,
             exc.status_code,
             exc.payload,
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
 
     response_id = captured.get("response_id")
@@ -1281,7 +1297,7 @@ async def _proxy_images_edit_request(
             request,
             exc.status_code,
             exc.payload,
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
 
     response_id = captured.get("response_id")
@@ -1509,6 +1525,9 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=effective_model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=effective_model,
@@ -1550,7 +1569,12 @@ async def v1_chat_completions(
     except StopAsyncIteration:
         first = None
     except ProxyResponseError as exc:
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers={**rate_limit_headers, **exc.headers},
+        )
 
     stream_with_first = _prepend_first(first, stream)
     result = await collect_chat_completion(stream_with_first, model=responses_payload.model)
@@ -1744,7 +1768,7 @@ async def _collect_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
@@ -1816,6 +1840,9 @@ async def _compact_responses(
 ) -> JSONResponse:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -1853,7 +1880,7 @@ async def _compact_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
     finally:
         await _release_reservation(reservation)
@@ -1894,7 +1921,7 @@ async def _transcribe_request(
             request,
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
     finally:
         await _release_reservation(reservation)

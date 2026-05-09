@@ -464,8 +464,13 @@ class UsageUpdater:
         if account.status != AccountStatus.QUOTA_EXCEEDED or not self._auth_manager:
             return
         windows = [window for window in (primary, secondary) if window is not None]
-        if any(_window_is_exhausted(window) for window in windows) or not any(
-            _window_has_available_quota(window) for window in windows
+        if (
+            secondary is None
+            or not _window_has_available_quota(secondary)
+            or any(_window_is_exhausted(window) for window in windows)
+            or not any(
+                _window_has_available_quota(window) for window in windows
+            )
         ):
             return
 

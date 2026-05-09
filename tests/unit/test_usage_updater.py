@@ -401,6 +401,11 @@ async def test_usage_refresh_recovers_quota_exceeded_account_when_usage_is_avail
                         "reset_at": 1735689600,
                         "limit_window_seconds": 60,
                     },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
                 }
             }
         )
@@ -430,6 +435,51 @@ async def test_usage_refresh_recovers_quota_exceeded_account_when_usage_is_avail
             "blocked_at": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_does_not_recover_when_secondary_quota_is_missing(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 5.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 300 * 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": None,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_unknown_secondary", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1736208000
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.reset_at == 1736208000
+    assert account.blocked_at == 1735600000
+    assert accounts_repo.status_updates == []
 
 
 @pytest.mark.asyncio

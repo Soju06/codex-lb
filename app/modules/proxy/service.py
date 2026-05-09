@@ -3024,19 +3024,6 @@ class ProxyService:
                     slim_summary["historical_images_slimmed"],
                 )
         request_state.request_text = text_data
-        if (
-            transport == _REQUEST_TRANSPORT_WEBSOCKET
-            and payload.previous_response_id is not None
-            and _http_bridge_payload_looks_like_full_resend(payload)
-        ):
-            fresh_upstream_payload = dict(upstream_payload)
-            fresh_upstream_payload.pop("previous_response_id", None)
-            request_state.fresh_upstream_request_text = json.dumps(
-                fresh_upstream_payload,
-                ensure_ascii=True,
-                separators=(",", ":"),
-            )
-            request_state.fresh_upstream_request_is_retry_safe = True
         _enforce_response_create_size_limit(request_state)
         return request_state, text_data
 

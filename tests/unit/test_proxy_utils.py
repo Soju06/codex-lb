@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from collections import deque
@@ -56,6 +57,12 @@ def _proxy_error_code(exc: proxy_module.ProxyResponseError) -> str | None:
 
 def _proxy_error_message(exc: proxy_module.ProxyResponseError) -> str | None:
     return exc.payload["error"].get("message")
+
+
+def _tiny_png_bytes() -> bytes:
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7d8AAAAASUVORK5CYII="
+    )
 
 
 def test_filter_inbound_headers_strips_auth_and_account():
@@ -9696,3 +9703,303 @@ async def test_cb_context_open_circuit_closes_request_context_manager(monkeypatc
             pass  # pragma: no cover
 
     assert cm.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_lookup_file_pin_returns_live_entry_and_evicts_expired(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    fake_now = [100.0]
+
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: fake_now[0])
+
+    await service._pin_file_account(
+        "file_live",
+        "acc_live",
+        download_url="https://blob.example/file?se=2099-01-01T00:00:00Z",
+        mime_type="image/png",
+        file_name="a.png",
+    )
+
+    entry = await service._lookup_file_pin("file_live")
+
+    assert entry is not None
+    assert entry.account_id == "acc_live"
+    assert entry.mime_type == "image/png"
+
+    fake_now[0] += service._FILE_ACCOUNT_PIN_TTL_SECONDS + 1
+
+    expired = await service._lookup_file_pin("file_live")
+
+    assert expired is None
+
+
+@pytest.mark.asyncio
+async def test_rewrite_input_image_file_references_rewrites_single_file_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account(
+        "file_img",
+        "acc_img",
+        download_url="https://blob.example/file.png",
+        mime_type="image/png",
+        file_name="file.png",
+    )
+
+    async def fake_fetch_file_bytes(download_url, expected_mime, max_bytes, *, session=None):
+        del download_url, expected_mime, max_bytes, session
+        return _tiny_png_bytes()
+
+    monkeypatch.setattr(proxy_service, "fetch_file_bytes", fake_fetch_file_bytes)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "file_id": "file_img"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    rewritten, account_id, rewritten_ids = await service._rewrite_input_image_file_references(
+        payload,
+        {},
+        request_id="req_inline_one",
+    )
+
+    content = rewritten.input[0]["content"]  # type: ignore[index]
+    image_part = content[1]  # type: ignore[index]
+    assert image_part["type"] == "input_image"
+    assert image_part["image_url"].startswith("data:image/png;base64,")
+    assert image_part["detail"] == "auto"
+    assert account_id == "acc_img"
+    assert rewritten_ids == ["file_img"]
+    assert request_logs.calls[-1]["model"] == "image-inline-rewrite"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_input_image_file_references_rewrites_multiple_references(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account(
+        "file_a",
+        "acc_img",
+        download_url="https://blob.example/a.png",
+        mime_type="image/png",
+        file_name="a.png",
+    )
+    await service._pin_file_account(
+        "file_b",
+        "acc_img",
+        download_url="https://blob.example/b.png",
+        mime_type="image/png",
+        file_name="b.png",
+    )
+
+    async def fake_fetch_file_bytes(download_url, expected_mime, max_bytes, *, session=None):
+        del download_url, expected_mime, max_bytes, session
+        return _tiny_png_bytes()
+
+    monkeypatch.setattr(proxy_service, "fetch_file_bytes", fake_fetch_file_bytes)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"type": "input_image", "file_id": "file_a"},
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "sediment://file_b", "detail": "high"}],
+                },
+            ],
+        }
+    )
+
+    rewritten, _, rewritten_ids = await service._rewrite_input_image_file_references(
+        payload,
+        {},
+        request_id="req_inline_multi",
+    )
+
+    top_level = rewritten.input[0]  # type: ignore[index]
+    nested = rewritten.input[1]["content"][0]  # type: ignore[index]
+    assert top_level["image_url"].startswith("data:image/png;base64,")
+    assert top_level["detail"] == "auto"
+    assert nested["image_url"].startswith("data:image/png;base64,")
+    assert nested["detail"] == "high"
+    assert rewritten_ids == ["file_a", "file_b"]
+
+
+@pytest.mark.asyncio
+async def test_rewrite_input_image_file_references_raises_file_not_found_when_pin_missing():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "file_id": "file_missing"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as info:
+        await service._rewrite_input_image_file_references(payload, {}, request_id="req_missing")
+
+    assert info.value.status_code == 400
+    assert _proxy_error_code(info.value) == "file_not_found"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_input_image_file_references_raises_file_too_large(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account(
+        "file_big",
+        "acc_img",
+        download_url="https://blob.example/big.png",
+        mime_type="image/png",
+        file_name="big.png",
+    )
+
+    async def fake_fetch_file_bytes(download_url, expected_mime, max_bytes, *, session=None):
+        del download_url, expected_mime, max_bytes, session
+        raise proxy_service.FileProxyError(400, openai_error("file_too_large", "too large"))
+
+    monkeypatch.setattr(proxy_service, "fetch_file_bytes", fake_fetch_file_bytes)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "file_id": "file_big"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as info:
+        await service._rewrite_input_image_file_references(payload, {}, request_id="req_big")
+
+    assert info.value.status_code == 400
+    assert _proxy_error_code(info.value) == "file_too_large"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_input_image_file_references_preserves_other_content(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account(
+        "file_keep",
+        "acc_img",
+        download_url="https://blob.example/file.png",
+        mime_type="image/png",
+        file_name="keep.png",
+    )
+
+    async def fake_fetch_file_bytes(download_url, expected_mime, max_bytes, *, session=None):
+        del download_url, expected_mime, max_bytes, session
+        return _tiny_png_bytes()
+
+    monkeypatch.setattr(proxy_service, "fetch_file_bytes", fake_fetch_file_bytes)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "keep me"},
+                        {"type": "input_image", "file_id": "file_keep"},
+                    ],
+                    "name": "alice",
+                }
+            ],
+        }
+    )
+
+    rewritten, _, _ = await service._rewrite_input_image_file_references(payload, {}, request_id="req_keep")
+
+    assert rewritten.input[0]["role"] == "user"  # type: ignore[index]
+    assert rewritten.input[0]["name"] == "alice"  # type: ignore[index]
+    assert rewritten.input[0]["content"][0] == {"type": "input_text", "text": "keep me"}  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_rewrite_input_image_file_references_returns_pin_account_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account(
+        "file_route",
+        "acc_route",
+        download_url="https://blob.example/file.png",
+        mime_type="image/png",
+        file_name="route.png",
+    )
+
+    async def fake_fetch_file_bytes(download_url, expected_mime, max_bytes, *, session=None):
+        del download_url, expected_mime, max_bytes, session
+        return _tiny_png_bytes()
+
+    monkeypatch.setattr(proxy_service, "fetch_file_bytes", fake_fetch_file_bytes)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "file_id": "file_route"}],
+        }
+    )
+
+    _, account_id, _ = await service._rewrite_input_image_file_references(payload, {}, request_id="req_route")
+
+    assert account_id == "acc_route"
+
+
+def test_classify_upstream_close_rejected_only_for_clean_close_before_any_response_event():
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
+    assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejected_close():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create"}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_upstream_close_code=1000,
+    )
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is False
+    assert request_state.error_code_override == "upstream_rejected_input"
+    assert request_state.error_http_status_override == 502
+    assert "close_code=1000" in (request_state.error_message_override or "")

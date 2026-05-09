@@ -334,3 +334,64 @@ async def finalize_file(
             # issuing one extra ``POST`` whose own request timeout could
             # block well past ``_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS``.
             return parsed
+
+
+async def fetch_file_bytes(
+    download_url: str,
+    expected_mime: str | None,
+    max_bytes: int,
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> bytes:
+    """Fetch file bytes from the finalize SAS URL with a hard size cap."""
+    client_session = session or get_http_client().session
+    headers = {"Accept": expected_mime or "*/*"}
+    timeout = aiohttp.ClientTimeout(total=_effective_files_total_timeout())
+    try:
+        async with client_session.get(download_url, headers=headers, timeout=timeout) as response:
+            if response.status >= 400:
+                raise FileProxyError(
+                    502,
+                    openai_error(
+                        "upstream_unavailable",
+                        f"File download failed with status {response.status}",
+                    ),
+                )
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                except ValueError:
+                    declared_length = None
+                if declared_length is not None and declared_length > max_bytes:
+                    raise FileProxyError(
+                        400,
+                        openai_error(
+                            "file_too_large",
+                            f"Fetched file exceeds the {max_bytes} byte inline image limit",
+                        ),
+                    )
+            chunks: list[bytes] = []
+            total_bytes = 0
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise FileProxyError(
+                        400,
+                        openai_error(
+                            "file_too_large",
+                            f"Fetched file exceeds the {max_bytes} byte inline image limit",
+                        ),
+                    )
+                chunks.append(chunk)
+            return b"".join(chunks)
+    except FileProxyError:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        message = str(exc) or "Request to file download URL timed out"
+        raise FileProxyError(
+            502,
+            openai_error("upstream_unavailable", message),
+        ) from exc

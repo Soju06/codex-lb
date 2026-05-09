@@ -31,3 +31,44 @@ When multiple `file_id`s are referenced and several are pinned, the most-recentl
 - **GIVEN** a pinned `file_xyz -> account_a`
 - **WHEN** a `/v1/responses` request references `file_xyz` AND sets an explicit `prompt_cache_key`
 - **THEN** the proxy MUST follow the prompt-cache affinity for routing and MUST NOT use the file_id pin
+
+### Requirement: Responses requests inline-rewrite uploaded input_image references
+
+The system SHALL accept the following attached-file shapes in `/v1/responses`, `/backend-api/codex/responses`, and `/responses/compact` request payloads:
+
+- `{"type":"input_file","file_id":"file_*"}` forwarded verbatim
+- `{"type":"input_image","file_id":"file_*"}` rewritten to an inline `data:` URL
+- `{"type":"input_image","image_url":"sediment://file_*"}` rewritten to an inline `data:` URL
+
+For `input_image` upload references, the proxy MUST resolve the file pin to the upload's owning account, fetch bytes from the pinned finalize `download_url`, run a codex-faithful image processing pipeline, and replace only the referenced `input_image` part with an inline `data:{mime};base64,{b64}` URL before forwarding. The rewrite pipeline MUST whitelist `PNG`, `JPEG`, `GIF`, and `WebP`; preserve PNG/JPEG/WebP bytes verbatim when the image already fits within 2048x2048; re-encode GIF as PNG; resize oversized images to fit within 2048x2048; keep resized PNG/JPEG/WebP in their source format; use JPEG quality 85 for resized JPEG; and use lossless encoding for resized WebP. The proxy MUST cap each fetched attachment at 16 MiB and reject larger items with HTTP 400 `file_too_large`.
+
+The proxy MUST NOT trim, slim, or rewrite any conversation content other than the `input_image` parts that reference an upload.
+
+#### Scenario: input_image file_id is rewritten inline before forwarding
+
+- **GIVEN** a finalized upload pin for `file_img`
+- **WHEN** a `/v1/responses` request contains `{"type":"input_image","file_id":"file_img"}`
+- **THEN** the proxy fetches the upload bytes from the pinned `download_url`
+- **AND** forwards the request with that part rewritten to an inline `data:image/...;base64,...` URL
+
+#### Scenario: sediment upload URL is rewritten inline before forwarding
+
+- **GIVEN** a finalized upload pin for `file_img`
+- **WHEN** a `/responses/compact` request contains `{"type":"input_image","image_url":"sediment://file_img"}`
+- **THEN** the proxy rewrites only that `input_image` part to an inline `data:` URL before forwarding
+
+#### Scenario: missing image pin fails the whole request
+
+- **WHEN** a `/v1/responses` request references `input_image.file_id = "file_missing"` and no live finalized pin exists
+- **THEN** the proxy returns HTTP 400 with `error.code = "file_not_found"`
+- **AND** does not partially forward other images from the same request
+
+### Requirement: Clean upstream close before any response event fails fast
+
+When the HTTP responses bridge observes an upstream websocket close with `close_code = 1000` before any `response.*` event has been surfaced for the pending request, the proxy MUST classify the close as rejected input, surface HTTP 502 `upstream_rejected_input`, and MUST NOT trigger `retry_precreated` or `retry_fresh_upstream`.
+
+#### Scenario: clean close before response.created is not retried
+
+- **WHEN** upstream closes the HTTP responses bridge with `close_code = 1000` before any `response.*` event for the pending request
+- **THEN** the proxy returns HTTP 502 with `error.code = "upstream_rejected_input"`
+- **AND** does not transparently replay the pre-created request

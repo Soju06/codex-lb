@@ -7,3 +7,6 @@
 - [x] 7. Add integration tests for `/backend-api/files` and `/backend-api/files/{id}/uploaded` covering happy path, validation error (file_size, file_name), upstream error mapping, retry passthrough, and API-key auth gating.
 - [x] 8. Add a regression test asserting `ResponsesRequest` / `ResponsesCompactRequest` accept an `input_file` content item with a `file_id` (no longer raises). Update the prior `test_v1_responses_rejects_input_file_id` integration test to assert acceptance.
 - [x] 9. Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, and the targeted pytest suites for files / requests / proxy.
+- [x] 10. Persist finalize `download_url` / `mime_type` / `file_name` in `_FilePinEntry`, clamping pin expiry to the shorter of `_FILE_ACCOUNT_PIN_TTL_SECONDS` and the SAS `se=` expiry when present.
+- [x] 11. Add a codex-faithful prompt image processor plus `fetch_file_bytes()` and inline-rewrite `input_image.file_id` / `input_image.image_url = "sediment://file_*"` to `data:` URLs for `/v1/responses`, `/backend-api/codex/responses`, `/responses/compact`, and websocket response.create payloads without mutating any other conversation content.
+- [x] 12. Add fail-fast clean-close classification for the HTTP responses bridge and cover the classifier / retry suppression paths with unit tests.

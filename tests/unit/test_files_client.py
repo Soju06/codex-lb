@@ -30,6 +30,7 @@ from app.core.clients.files import (
     OPENAI_FILE_USE_CASE,
     FileProxyError,
     create_file,
+    fetch_file_bytes,
     finalize_file,
 )
 
@@ -47,6 +48,8 @@ class _FakeResponse:
     def __init__(self, *, status: int, body: str) -> None:
         self.status = status
         self._body = body
+        self.headers: dict[str, str] = {}
+        self.content = _FakeContent([])
 
     async def __aenter__(self) -> "_FakeResponse":
         return self
@@ -78,6 +81,24 @@ class _FakeSession:
         if isinstance(next_value, Exception):
             raise next_value
         return next_value
+
+    def get(self, url: str, *, headers: dict[str, str], timeout: object) -> _FakeResponse:
+        if not self._responses:
+            raise AssertionError(f"_FakeSession exhausted on GET {url}")
+        next_value = self._responses.pop(0)
+        self.calls.append({"url": url, "data": None, "headers": dict(headers), "timeout": timeout, "method": "GET"})
+        if isinstance(next_value, Exception):
+            raise next_value
+        return next_value
+
+
+class _FakeContent:
+    def __init__(self, chunks: Sequence[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def iter_chunked(self, _chunk_size: int):
+        for chunk in self._chunks:
+            yield chunk
 
 
 @pytest.mark.asyncio
@@ -302,3 +323,59 @@ async def test_finalize_file_transport_timeout_yields_502(monkeypatch: pytest.Mo
         )
     assert info.value.status_code == 502
     assert info.value.payload["error"]["code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_fetch_file_bytes_returns_downloaded_body() -> None:
+    response = _FakeResponse(status=200, body="")
+    response.headers = {"Content-Length": "6"}
+    response.content = _FakeContent([b"abc", b"def"])
+    session = _FakeSession([response])
+
+    result = await fetch_file_bytes(
+        "https://download.example/file",
+        "image/png",
+        16,
+        session=session,  # type: ignore[arg-type]
+    )
+
+    assert result == b"abcdef"
+    assert session.calls[0]["method"] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_fetch_file_bytes_raises_file_too_large_from_content_length() -> None:
+    response = _FakeResponse(status=200, body="")
+    response.headers = {"Content-Length": "20"}
+    response.content = _FakeContent([])
+    session = _FakeSession([response])
+
+    with pytest.raises(FileProxyError) as info:
+        await fetch_file_bytes(
+            "https://download.example/file",
+            "image/png",
+            8,
+            session=session,  # type: ignore[arg-type]
+        )
+
+    assert info.value.status_code == 400
+    assert info.value.payload["error"]["code"] == "file_too_large"
+
+
+@pytest.mark.asyncio
+async def test_fetch_file_bytes_raises_file_too_large_while_streaming() -> None:
+    response = _FakeResponse(status=200, body="")
+    response.headers = {}
+    response.content = _FakeContent([b"abcd", b"efgh"])
+    session = _FakeSession([response])
+
+    with pytest.raises(FileProxyError) as info:
+        await fetch_file_bytes(
+            "https://download.example/file",
+            "image/png",
+            6,
+            session=session,  # type: ignore[arg-type]
+        )
+
+    assert info.value.status_code == 400
+    assert info.value.payload["error"]["code"] == "file_too_large"

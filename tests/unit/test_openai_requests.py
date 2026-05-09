@@ -6,7 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesRequest,
+    _input_image_file_reference,
+    extract_input_file_ids,
+    extract_input_image_file_references,
+)
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
 
@@ -929,22 +935,46 @@ def test_extract_input_file_ids_finds_top_level_and_nested_ids():
             ],
         },
         {"type": "input_file", "file_id": "file_b"},
+        {"type": "input_image", "file_id": "file_c"},
         # Duplicates and missing/blank ids are filtered out.
         {"type": "input_file", "file_id": "file_a"},
         {"type": "input_file", "file_id": ""},
         {"type": "input_file"},
     ]
-    assert extract_input_file_ids(input_value) == {"file_a", "file_b"}
+    assert extract_input_file_ids(input_value) == {"file_a", "file_b", "file_c"}
 
 
-def test_extract_input_file_ids_ignores_non_input_file_types():
+def test_input_image_file_reference_returns_file_id_from_input_image_file_id():
+    assert _input_image_file_reference({"type": "input_image", "file_id": "file_img"}) == "file_img"
+
+
+def test_input_image_file_reference_returns_file_id_from_sediment_url():
+    assert _input_image_file_reference({"type": "input_image", "image_url": "sediment://file_img"}) == "file_img"
+
+
+def test_input_image_file_reference_ignores_data_url():
+    assert _input_image_file_reference({"type": "input_image", "image_url": "data:image/png;base64,AAAA"}) is None
+
+
+def test_input_image_file_reference_ignores_https_url():
+    assert _input_image_file_reference({"type": "input_image", "image_url": "https://example.com/a.png"}) is None
+
+
+def test_extract_input_image_file_references_collects_multi_message_paths():
     input_value: list[JsonValue] = [
         {
             "role": "user",
             "content": [
-                {"type": "input_image", "file_id": "file_should_not_match"},
                 {"type": "input_text", "text": "ignore"},
+                {"type": "input_image", "file_id": "file_a"},
             ],
         },
+        {"type": "input_image", "image_url": "sediment://file_b"},
     ]
-    assert extract_input_file_ids(input_value) == set()
+
+    references = extract_input_image_file_references(input_value)
+
+    assert [(reference.item_index, reference.content_index, reference.file_id) for reference in references] == [
+        (0, 1, "file_a"),
+        (1, None, "file_b"),
+    ]

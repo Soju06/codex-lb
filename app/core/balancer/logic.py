@@ -184,7 +184,7 @@ def select_account(
                 state.status = AccountStatus.ACTIVE
                 state.error_count = 0
                 state.reset_at = None
-            else:
+            elif not ignore_standard_quota:
                 continue
         if state.status == AccountStatus.QUOTA_EXCEEDED and not ignore_standard_quota:
             if state.reset_at and current >= state.reset_at:

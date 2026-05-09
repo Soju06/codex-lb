@@ -5,6 +5,9 @@ from dataclasses import dataclass
 
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
+    ADDITIONAL_QUOTA_ROUTING_POLICIES,
+    canonicalize_additional_quota_routing_policy,
+    get_additional_quota_definition_for_key,
     get_additional_quota_routing_policy,
     list_additional_quota_definitions,
     normalize_additional_quota_routing_policy_overrides,
@@ -55,6 +58,10 @@ class DashboardSettingsUpdateData:
     additional_quota_routing_policies: dict[str, str]
 
 
+class AdditionalQuotaRoutingPolicyValidationError(ValueError):
+    pass
+
+
 def parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
     if not raw:
         return {}
@@ -67,9 +74,44 @@ def parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
     return normalize_additional_quota_routing_policy_overrides({str(key): str(value) for key, value in payload.items()})
 
 
+def validate_additional_quota_routing_policies(policies: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    unknown_keys: list[str] = []
+    invalid_policies: list[str] = []
+
+    for key, value in policies.items():
+        definition = get_additional_quota_definition_for_key(str(key))
+        if definition is None:
+            unknown_keys.append(str(key))
+            continue
+
+        routing_policy = canonicalize_additional_quota_routing_policy(str(value))
+        if routing_policy is None:
+            invalid_policies.append(f"{definition.quota_key}={value}")
+            continue
+
+        normalized[definition.quota_key] = routing_policy
+
+    if unknown_keys or invalid_policies:
+        details = []
+        if unknown_keys:
+            details.append(f"unknown quota keys: {', '.join(sorted(unknown_keys))}")
+        if invalid_policies:
+            details.append(f"invalid routing policies: {', '.join(sorted(invalid_policies))}")
+        valid_keys = ", ".join(sorted(definition.quota_key for definition in list_additional_quota_definitions()))
+        valid_policies = ", ".join(sorted(ADDITIONAL_QUOTA_ROUTING_POLICIES))
+        details.append(f"valid quota keys: {valid_keys}")
+        details.append(f"valid routing policies: {valid_policies}")
+        raise AdditionalQuotaRoutingPolicyValidationError(
+            "Invalid additional quota routing policies; " + "; ".join(details)
+        )
+
+    return normalized
+
+
 def serialize_additional_quota_routing_policies(policies: dict[str, str]) -> str:
     return json.dumps(
-        normalize_additional_quota_routing_policy_overrides(policies),
+        validate_additional_quota_routing_policies(policies),
         sort_keys=True,
         separators=(",", ":"),
     )

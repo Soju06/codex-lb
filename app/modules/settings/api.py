@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, Request
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.config.settings_cache import get_settings_cache
-from app.core.exceptions import DashboardBadRequestError
+from app.core.exceptions import DashboardBadRequestError, DashboardValidationError
 from app.dependencies import SettingsContext, get_settings_context
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.settings.schemas import (
@@ -18,7 +18,7 @@ from app.modules.settings.schemas import (
     DashboardSettingsUpdateRequest,
     RuntimeConnectAddressResponse,
 )
-from app.modules.settings.service import DashboardSettingsUpdateData
+from app.modules.settings.service import AdditionalQuotaRoutingPolicyValidationError, DashboardSettingsUpdateData
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
@@ -174,6 +174,8 @@ async def update_settings(
                 ),
             )
         )
+    except AdditionalQuotaRoutingPolicyValidationError as exc:
+        raise DashboardValidationError(str(exc), code="invalid_additional_quota_routing_policies") from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
 

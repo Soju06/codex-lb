@@ -7,8 +7,10 @@ function visibleQuotaResetTimestamps(
   quotaDisplay: AccountQuotaDisplayPreference,
 ): number[] {
   const now = Date.now();
-  const showPrimary = account.windowMinutesPrimary != null && (quotaDisplay !== "weekly" || account.windowMinutesSecondary == null);
-  const showSecondary = account.windowMinutesSecondary != null && (quotaDisplay !== "5h" || account.windowMinutesPrimary == null);
+  const hasPrimary = account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null || account.resetAtPrimary != null;
+  const hasSecondary = account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null || account.resetAtSecondary != null;
+  const showPrimary = hasPrimary && (quotaDisplay !== "weekly" || !hasSecondary);
+  const showSecondary = hasSecondary && (quotaDisplay !== "5h" || !hasPrimary);
 
   return [
     showPrimary ? parseDate(account.resetAtPrimary)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY,

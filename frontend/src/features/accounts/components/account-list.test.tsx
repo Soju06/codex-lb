@@ -159,6 +159,56 @@ describe("AccountList", () => {
     ]);
   });
 
+  it("sorts legacy primary quota rows by their reset timestamp", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-late",
+            email: "late@example.com",
+            displayName: "Late",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: null,
+            },
+            resetAtPrimary: "2026-01-01T13:00:00.000Z",
+            resetAtSecondary: null,
+            windowMinutesPrimary: null,
+            windowMinutesSecondary: null,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-early",
+            email: "early@example.com",
+            displayName: "Early",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: null,
+            },
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            resetAtSecondary: null,
+            windowMinutesPrimary: null,
+            windowMinutesSecondary: null,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Early|Late)$/).map((el) => el.textContent)).toEqual([
+      "Early",
+      "Late",
+    ]);
+  });
+
   it("shows empty state when no items match filter", async () => {
     const user = userEvent.setup();
 

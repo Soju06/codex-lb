@@ -44,8 +44,8 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
-  const hasPrimaryWindow = account.windowMinutesPrimary != null;
-  const hasSecondaryWindow = account.windowMinutesSecondary != null;
+  const hasPrimaryWindow = account.windowMinutesPrimary != null || primary !== null || account.resetAtPrimary != null;
+  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondary !== null || account.resetAtSecondary != null;
   const showPrimaryRow = hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
   const showSecondaryRow = hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
   const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow);
@@ -96,7 +96,12 @@ function MiniQuotaRow({
         <span className="tabular-nums font-medium">{formatPercentNullable(percent)}</span>
       </div>
       <MiniQuotaBar percent={percent} testId={`mini-quota-track-${label.toLowerCase()}`} />
-      <div className="text-[10px] text-muted-foreground">Reset {formatQuotaResetLabel(resetAt ?? null)}</div>
+      <div className="text-[10px] text-muted-foreground">{formatMiniQuotaResetLabel(resetAt ?? null)}</div>
     </div>
   );
+}
+
+function formatMiniQuotaResetLabel(resetAt: string | null): string {
+  const label = formatQuotaResetLabel(resetAt);
+  return label.startsWith("Reset ") ? label : `Reset ${label}`;
 }

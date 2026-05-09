@@ -53,6 +53,44 @@ describe("AccountListItem", () => {
     expect(screen.getByText("Reset in 1d")).toBeInTheDocument();
   });
 
+  it("renders legacy primary quota data without window metadata", () => {
+    const account = createAccountSummary({
+      usage: {
+        primaryRemainingPercent: 64,
+        secondaryRemainingPercent: null,
+      },
+      resetAtPrimary: "2026-01-01T13:00:00.000Z",
+      resetAtSecondary: null,
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("5h")).toBeInTheDocument();
+    expect(screen.getByTestId("mini-quota-track-5h-fill")).toHaveStyle({ width: "64%" });
+    expect(screen.getByText("Reset in 1h")).toBeInTheDocument();
+    expect(screen.queryByText("Weekly")).not.toBeInTheDocument();
+  });
+
+  it("does not duplicate unavailable reset labels", () => {
+    const account = createAccountSummary({
+      usage: {
+        primaryRemainingPercent: 64,
+        secondaryRemainingPercent: null,
+      },
+      resetAtPrimary: null,
+      resetAtSecondary: null,
+      windowMinutesPrimary: 300,
+      windowMinutesSecondary: null,
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Reset --")).toBeInTheDocument();
+    expect(screen.queryByText("Reset Reset unavailable")).not.toBeInTheDocument();
+  });
+
   it("shows only the 5h row when the account quota preference is 5h", () => {
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "5h" });
 

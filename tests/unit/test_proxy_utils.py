@@ -24,7 +24,7 @@ from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.resilience.circuit_breaker import CircuitState
-from app.core.types import JsonValue
+from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
@@ -1781,7 +1781,7 @@ async def test_stream_responses_uses_websocket_transport(monkeypatch):
     ]
 
     assert session.ws_calls[0]["url"] == "wss://chatgpt.com/backend-api/codex/responses"
-    request_payload = websocket.sent_json[0]
+    request_payload = cast(JsonObject, websocket.sent_json[0])
     expected_request_payload = {
         "type": "response.create",
         **{k: v for k, v in payload.to_payload().items() if k != "stream"},
@@ -1916,7 +1916,7 @@ async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_
 
     assert len(events) == 2
     assert len(session.ws_calls) == 1
-    request_payload = websocket.sent_json[0]
+    request_payload = cast(JsonObject, websocket.sent_json[0])
     request_input = cast(list[dict[str, object]], request_payload["input"])
     assert request_input[1]["output"] == proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
         bytes=len(("data:image/png;base64," + ("A" * 1200)).encode("utf-8"))
@@ -1984,7 +1984,7 @@ async def test_stream_responses_websocket_omits_oldest_historical_items_to_fit_b
 
     assert len(events) == 2
     assert len(session.ws_calls) == 1
-    request_payload = websocket.sent_json[0]
+    request_payload = cast(JsonObject, websocket.sent_json[0])
     request_input = cast(list[dict[str, object]], request_payload["input"])
     assert request_input[0] == proxy_module._response_create_history_omission_notice_item(2)
     assert request_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]}

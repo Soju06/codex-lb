@@ -6,6 +6,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
+from app.core.account_priority import AccountPriority, account_priority_rank
 from app.core.auth import (
     DEFAULT_EMAIL,
     DEFAULT_PLAN,
@@ -18,6 +19,7 @@ from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidatio
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
+from app.core.config.settings_cache import get_settings_cache
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
@@ -112,7 +114,7 @@ class AccountsService:
         for account_quota_list in additional_quotas_by_account.values():
             account_quota_list.sort(key=lambda quota: quota.display_label or quota.quota_key or quota.limit_name)
 
-        return build_account_summaries(
+        summaries = build_account_summaries(
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
@@ -120,6 +122,17 @@ class AccountsService:
             additional_quotas_by_account=additional_quotas_by_account,
             encryptor=self._encryptor,
         )
+        settings = await get_settings_cache().get()
+        if getattr(settings, "priorities_enabled", False):
+            return sorted(
+                summaries,
+                key=lambda account: (
+                    account_priority_rank(account.priority),
+                    account.email.lower(),
+                    account.account_id,
+                ),
+            )
+        return summaries
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
         account = await self._repo.get_by_id(account_id)
@@ -160,6 +173,7 @@ class AccountsService:
             chatgpt_account_id=raw_account_id,
             email=email,
             plan_type=plan_type,
+            priority=AccountPriority.SILVER,
             access_token_encrypted=self._encryptor.encrypt(auth.tokens.access_token),
             refresh_token_encrypted=self._encryptor.encrypt(auth.tokens.refresh_token),
             id_token_encrypted=self._encryptor.encrypt(auth.tokens.id_token),
@@ -179,6 +193,12 @@ class AccountsService:
             plan_type=saved.plan_type,
             status=saved.status,
         )
+
+    async def update_account_priority(self, account_id: str, priority: AccountPriority) -> bool:
+        result = await self._repo.update_priority(account_id, priority.value)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
 
     async def reactivate_account(self, account_id: str) -> bool:
         result = await self._repo.update_status(account_id, AccountStatus.ACTIVE, None, None, blocked_at=None)

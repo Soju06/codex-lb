@@ -8,15 +8,16 @@ import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 
 const ACCOUNT_CARD_VISIBLE_ROWS = 2;
 // Account cards can grow when the optional email row is rendered.
-const ACCOUNT_CARD_ROW_HEIGHT_REM = 12.5;
+const ACCOUNT_CARD_ROW_HEIGHT_REM = 13.5;
 const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {
   accounts: AccountSummary[];
+  showPriorities?: boolean;
   onAction?: AccountCardProps["onAction"];
 };
 
-export function AccountCards({ accounts, onAction }: AccountCardsProps) {
+export function AccountCards({ accounts, showPriorities = true, onAction }: AccountCardsProps) {
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 
   if (accounts.length === 0) {
@@ -42,6 +43,7 @@ export function AccountCards({ accounts, onAction }: AccountCardsProps) {
           <AccountCard
             account={account}
             showAccountId={duplicateAccountIds.has(account.accountId)}
+            showPriorities={showPriorities}
             onAction={onAction}
           />
         </div>

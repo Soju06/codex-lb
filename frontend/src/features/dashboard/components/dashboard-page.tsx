@@ -5,6 +5,7 @@ import { RefreshCw } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
+import { accountPriorityRank } from "@/features/accounts/priority";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
 import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
@@ -15,6 +16,7 @@ import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
+import { useSettings } from "@/features/settings/hooks/use-settings";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   parseOverviewTimeframe,
@@ -37,8 +39,10 @@ export function DashboardPage() {
     [searchParams],
   );
   const dashboardQuery = useDashboard(overviewTimeframe);
+  const { settingsQuery } = useSettings();
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
   const { resumeMutation } = useAccountMutations();
+  const prioritiesEnabled = settingsQuery.data?.prioritiesEnabled ?? false;
 
   const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
 
@@ -78,6 +82,24 @@ export function DashboardPage() {
 
   const overview = dashboardQuery.data;
   const logPage = logsQuery.data;
+  const sortedOverviewAccounts = useMemo(() => {
+    const accounts = overview?.accounts ?? [];
+    return accounts.slice().sort((left, right) => {
+      if (prioritiesEnabled) {
+        const leftPriority = accountPriorityRank(left.priority);
+        const rightPriority = accountPriorityRank(right.priority);
+        if (leftPriority !== rightPriority) {
+          return leftPriority - rightPriority;
+        }
+      }
+
+      const emailComparison = left.email.toLowerCase().localeCompare(right.email.toLowerCase());
+      if (emailComparison !== 0) {
+        return emailComparison;
+      }
+      return left.accountId.localeCompare(right.accountId);
+    });
+  }, [overview?.accounts, prioritiesEnabled]);
 
   const view = useMemo(() => {
     if (!overview || !logPage) {
@@ -187,7 +209,11 @@ export function DashboardPage() {
               <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
               <div className="h-px flex-1 bg-border" />
             </div>
-            <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+            <AccountCards
+              accounts={sortedOverviewAccounts}
+              showPriorities={prioritiesEnabled}
+              onAction={handleAccountAction}
+            />
           </section>
 
           <section className="space-y-4">

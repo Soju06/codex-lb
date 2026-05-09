@@ -4,6 +4,7 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { cn } from "@/lib/utils";
+import { AccountPriorityBadge } from "@/features/accounts/components/account-priority-badge";
 import type { AccountSummary } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
@@ -18,6 +19,7 @@ type AccountAction = "details" | "resume" | "reauth";
 export type AccountCardProps = {
   account: AccountSummary;
   showAccountId?: boolean;
+  showPriorities?: boolean;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
 
@@ -65,7 +67,7 @@ function QuotaBar({
   );
 }
 
-export function AccountCard({ account, showAccountId = false, onAction }: AccountCardProps) {
+export function AccountCard({ account, showAccountId = false, showPriorities = true, onAction }: AccountCardProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
   const status = normalizeStatus(account.status);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
@@ -104,7 +106,10 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             </p>
           ) : null}
         </div>
-        <StatusBadge status={status} />
+        <div className="flex items-center gap-1.5">
+          <StatusBadge status={status} />
+          {showPriorities ? <AccountPriorityBadge priority={account.priority} /> : null}
+        </div>
       </div>
 
       {/* Quota bars */}

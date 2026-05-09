@@ -9,6 +9,7 @@ const BASE_SETTINGS: DashboardSettings = {
   stickyThreadsEnabled: false,
   upstreamStreamTransport: "default",
   preferEarlierResetAccounts: true,
+  prioritiesEnabled: true,
   routingStrategy: "usage_weighted",
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
@@ -17,6 +18,23 @@ const BASE_SETTINGS: DashboardSettings = {
   totpConfigured: false,
   apiKeyAuthEnabled: true,
 };
+
+if (!HTMLElement.prototype.hasOwnProperty("hasPointerCapture")) {
+  Object.defineProperties(HTMLElement.prototype, {
+    hasPointerCapture: {
+      value: () => false,
+    },
+    setPointerCapture: {
+      value: () => undefined,
+    },
+    releasePointerCapture: {
+      value: () => undefined,
+    },
+    scrollIntoView: {
+      value: () => undefined,
+    },
+  });
+}
 
 describe("RoutingSettings", () => {
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
@@ -35,6 +53,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      prioritiesEnabled: true,
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 43200,
@@ -58,6 +77,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      prioritiesEnabled: true,
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 240,
       dashboardSessionTtlSeconds: 43200,
@@ -86,6 +106,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      prioritiesEnabled: true,
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
@@ -93,6 +114,21 @@ describe("RoutingSettings", () => {
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
     });
+  });
+
+  it("shows the priorities tooltip and dropdown options", async () => {
+    const user = userEvent.setup();
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByRole("button", { name: "Priorities help" })).toBeInTheDocument();
+
+    const prioritiesSelect = screen.getByRole("combobox", { name: "Priorities" });
+    expect(prioritiesSelect).toHaveTextContent("Priorities");
+
+    await user.click(prioritiesSelect);
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveTextContent("Disabled");
+    expect(options[1]).toHaveTextContent("Priorities");
   });
 
   it("shows the configured upstream transport", () => {

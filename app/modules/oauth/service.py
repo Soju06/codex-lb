@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 
 from aiohttp import web
 
+from app.core.account_priority import AccountPriority
 from app.core.auth import (
     DEFAULT_EMAIL,
     DEFAULT_PLAN,
@@ -372,6 +373,7 @@ class OauthService:
             chatgpt_account_id=raw_account_id,
             email=email,
             plan_type=plan_type,
+            priority=AccountPriority.SILVER,
             access_token_encrypted=self._encryptor.encrypt(tokens.access_token),
             refresh_token_encrypted=self._encryptor.encrypt(tokens.refresh_token),
             id_token_encrypted=self._encryptor.encrypt(tokens.id_token),

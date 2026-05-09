@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 
 from app.core import usage as usage_core
+from app.core.account_priority import AccountPriority, coerce_account_priority
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -111,6 +112,7 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
+        priorities_enabled: bool = True,
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
@@ -168,6 +170,7 @@ class LoadBalancer:
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
+                    priorities_enabled=priorities_enabled,
                 )
 
                 result = _select_account_preferring_budget_safe(
@@ -298,6 +301,7 @@ class LoadBalancer:
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
+                    priorities_enabled=priorities_enabled,
                 )
                 async with self._repo_factory() as repos:
                     result = await self._select_with_stickiness(
@@ -849,6 +853,7 @@ class LoadBalancer:
         return AccountState(
             account_id=account.id,
             status=account.status,
+            priority=coerce_account_priority(getattr(account, "priority", None)),
             used_percent=None,
             reset_at=runtime.reset_at,
             blocked_at=float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at,
@@ -995,6 +1000,7 @@ def _build_states(
     latest_primary: dict[str, UsageHistory],
     latest_secondary: dict[str, UsageHistory],
     runtime: dict[str, RuntimeState],
+    priorities_enabled: bool = True,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
@@ -1005,6 +1011,7 @@ def _build_states(
             primary_entry=latest_primary.get(account.id),
             secondary_entry=latest_secondary.get(account.id),
             runtime=runtime.setdefault(account.id, RuntimeState()),
+            priorities_enabled=priorities_enabled,
         )
         states.append(state)
         account_map[account.id] = account
@@ -1017,6 +1024,7 @@ def _state_from_account(
     primary_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
     runtime: RuntimeState,
+    priorities_enabled: bool = True,
 ) -> AccountState:
     primary_used = primary_entry.used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
@@ -1133,6 +1141,7 @@ def _state_from_account(
     return AccountState(
         account_id=account.id,
         status=status,
+        priority=coerce_account_priority(getattr(account, "priority", None)) if priorities_enabled else AccountPriority.SILVER,
         used_percent=used_percent,
         reset_at=reset_at,
         blocked_at=next_blocked_at,

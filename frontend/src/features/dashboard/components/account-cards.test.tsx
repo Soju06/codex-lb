@@ -20,7 +20,7 @@ describe("AccountCards", () => {
     );
 
     expect(screen.getByTestId("dashboard-account-cards")).toHaveStyle({
-      maxHeight: "calc(2 * 12.5rem + 1rem)",
+      maxHeight: "calc(2 * 13.5rem + 1rem)",
     });
   });
 
@@ -37,5 +37,17 @@ describe("AccountCards", () => {
       "[scrollbar-width:none]",
       "[&::-webkit-scrollbar]:hidden",
     );
+  });
+
+  it("passes the priorities toggle through to dashboard cards", () => {
+    render(
+      <AccountCards
+        accounts={[createAccountSummary({ priority: "gold" })]}
+        showPriorities={false}
+        onAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Gold")).not.toBeInTheDocument();
   });
 });

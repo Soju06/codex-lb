@@ -5,6 +5,7 @@ from typing import List
 
 from pydantic import Field
 
+from app.core.account_priority import AccountPriority
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -62,6 +63,7 @@ class AccountSummary(DashboardModel):
     display_name: str
     plan_type: str
     status: str
+    priority: AccountPriority = AccountPriority.SILVER
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
@@ -87,6 +89,10 @@ class AccountImportResponse(DashboardModel):
     email: str
     plan_type: str
     status: str
+
+
+class AccountPriorityUpdateRequest(DashboardModel):
+    priority: AccountPriority
 
 
 class AccountPauseResponse(DashboardModel):

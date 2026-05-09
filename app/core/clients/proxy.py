@@ -95,6 +95,9 @@ _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
     "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
 )
 _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
+_RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (
+    "[codex-lb omitted {count} historical input items to fit upstream websocket budget]"
+)
 _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
     {
         "accept",
@@ -1328,13 +1331,14 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
                 (
                     "Slimmed response.create before upstream websocket connect request_id=%s "
                     "original_bytes=%s slimmed_bytes=%s historical_tool_outputs_slimmed=%s "
-                    "historical_images_slimmed=%s"
+                    "historical_images_slimmed=%s historical_items_omitted=%s"
                 ),
                 get_request_id(),
                 payload_size,
                 len(slimmed_text.encode("utf-8")),
                 slim_summary["historical_tool_outputs_slimmed"],
                 slim_summary["historical_images_slimmed"],
+                slim_summary["historical_items_omitted"],
             )
             payload_text = slimmed_text
             payload_size = len(payload_text.encode("utf-8"))
@@ -1375,7 +1379,6 @@ def _slim_response_create_payload_for_upstream(
     *,
     max_bytes: int,
 ) -> tuple[JsonObject, dict[str, int] | None]:
-    del max_bytes
     input_value = payload.get("input")
     if not isinstance(input_value, list) or not input_value:
         return payload, None
@@ -1395,15 +1398,63 @@ def _slim_response_create_payload_for_upstream(
         images_slimmed += item_images_slimmed
         slimmed_historical.append(slimmed_item)
 
-    if tool_outputs_slimmed == 0 and images_slimmed == 0:
-        return payload, None
-
     candidate_payload = dict(payload)
     candidate_payload["input"] = slimmed_historical + recent
+
+    items_omitted = 0
+    if _serialized_json_size(candidate_payload) > max_bytes:
+        candidate_payload, items_omitted = _omit_historical_response_input_items_to_fit(
+            candidate_payload,
+            slimmed_historical=slimmed_historical,
+            recent=recent,
+            max_bytes=max_bytes,
+        )
+
+    if tool_outputs_slimmed == 0 and images_slimmed == 0 and items_omitted == 0:
+        return payload, None
+
     return candidate_payload, {
         "historical_tool_outputs_slimmed": tool_outputs_slimmed,
         "historical_images_slimmed": images_slimmed,
+        "historical_items_omitted": items_omitted,
     }
+
+
+def _omit_historical_response_input_items_to_fit(
+    payload: JsonObject,
+    *,
+    slimmed_historical: list[JsonValue],
+    recent: list[JsonValue],
+    max_bytes: int,
+) -> tuple[JsonObject, int]:
+    if not slimmed_historical:
+        return payload, 0
+
+    omitted_count = 0
+    remaining_historical = list(slimmed_historical)
+    candidate_payload = payload
+    while remaining_historical:
+        omitted_count += 1
+        remaining_historical = remaining_historical[1:]
+        candidate_payload = dict(payload)
+        candidate_payload["input"] = [
+            _response_create_history_omission_notice_item(omitted_count),
+            *remaining_historical,
+            *recent,
+        ]
+        if _serialized_json_size(candidate_payload) <= max_bytes:
+            return candidate_payload, omitted_count
+
+    recent_only_payload = dict(payload)
+    recent_only_payload["input"] = list(recent)
+    if _serialized_json_size(recent_only_payload) <= max_bytes:
+        return recent_only_payload, omitted_count
+
+    return candidate_payload, omitted_count
+
+
+def _serialized_json_size(payload: JsonObject) -> int:
+    return len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
 
 
 def _response_create_recent_suffix_start(input_items: list[JsonValue]) -> int:
@@ -1489,6 +1540,18 @@ def _response_create_inline_image_notice_part() -> JsonObject:
 
 def _response_create_inline_image_notice_item() -> JsonObject:
     return {"role": "user", "content": [_response_create_inline_image_notice_part()]}
+
+
+def _response_create_history_omission_notice_item(count: int) -> JsonObject:
+    return {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE.format(count=count),
+            }
+        ],
+    }
 
 
 def _is_inline_image_reference(value: JsonValue) -> bool:

@@ -1929,6 +1929,69 @@ async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_websocket_omits_oldest_historical_items_to_fit_budget(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64, raising=False)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 360, raising=False)
+
+    messages = [
+        SimpleNamespace(
+            type=proxy_module.aiohttp.WSMsgType.TEXT,
+            data='{"type":"response.created","response":{"id":"resp_ws_omit","service_tier":"auto"}}',
+        ),
+        SimpleNamespace(
+            type=proxy_module.aiohttp.WSMsgType.TEXT,
+            data='{"type":"response.completed","response":{"id":"resp_ws_omit","service_tier":"default"}}',
+        ),
+    ]
+    websocket = _WsResponse(messages)
+    session = _WsSession(websocket)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "assistant", "content": [{"type": "output_text", "text": "old-a" * 200}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "old-b" * 200}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]},
+            ],
+        }
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert len(events) == 2
+    assert len(session.ws_calls) == 1
+    request_payload = websocket.sent_json[0]
+    request_input = cast(list[dict[str, object]], request_payload["input"])
+    assert request_input[0] == proxy_module._response_create_history_omission_notice_item(2)
+    assert request_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]}
+    assert proxy_module._serialized_json_size(request_payload) <= 360
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_websocket_forces_response_create_event_type(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

@@ -204,7 +204,7 @@ def _has_other_usable_foreground_capacity(
         if other.status != AccountStatus.ACTIVE:
             continue
         if _routing_policy(other) == ROUTING_POLICY_PRESERVE:
-            if _above_emergency_floor(other) or _preserve_allows_opportunistic_burn(
+            if _preserve_keeps_foreground_reserve(other) or _preserve_allows_opportunistic_burn(
                 other,
                 current,
                 preserve_count=preserve_count,
@@ -213,6 +213,10 @@ def _has_other_usable_foreground_capacity(
             continue
         return True
     return False
+
+
+def _preserve_keeps_foreground_reserve(state: AccountState) -> bool:
+    return _above_emergency_floor(state)
 
 
 def _above_emergency_floor(state: AccountState) -> bool:

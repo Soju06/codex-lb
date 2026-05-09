@@ -5127,6 +5127,35 @@ def test_slim_response_create_omits_oldest_historical_items_to_fit_budget():
     assert proxy_service._serialized_json_size(slimmed_payload) <= 360
 
 
+def test_slim_response_create_drops_omission_notice_when_only_recent_fits():
+    recent_item: dict[str, JsonValue] = {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "please continue"}],
+    }
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "assistant", "content": [{"type": "output_text", "text": "old context"}]},
+            recent_item,
+        ],
+    }
+    max_bytes = proxy_service._serialized_json_size({**payload, "input": [recent_item]})
+    notice_payload = {
+        **payload,
+        "input": [proxy_service._response_create_history_omission_notice_item(1), recent_item],
+    }
+
+    assert proxy_service._serialized_json_size(notice_payload) > max_bytes
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=max_bytes)
+
+    assert summary is not None
+    assert summary["historical_items_omitted"] == 1
+    assert slimmed_payload["input"] == [recent_item]
+    assert proxy_service._serialized_json_size(slimmed_payload) <= max_bytes
+
+
 def test_oversized_response_create_dump_dir_uses_default_home_dir():
     assert proxy_service._OVERSIZED_RESPONSE_CREATE_DUMP_DIR == (DEFAULT_HOME_DIR / "debug" / "response-create-dumps")
 

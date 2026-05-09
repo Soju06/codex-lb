@@ -9152,6 +9152,11 @@ def _omit_historical_response_input_items_to_fit(
         if _serialized_json_size(candidate_payload) <= max_bytes:
             return candidate_payload, omitted_count
 
+    recent_only_payload = dict(payload)
+    recent_only_payload["input"] = list(recent)
+    if _serialized_json_size(recent_only_payload) <= max_bytes:
+        return recent_only_payload, omitted_count
+
     return candidate_payload, omitted_count
 
 

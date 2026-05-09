@@ -7,3 +7,6 @@
 - [x] 7. Add integration tests for `/backend-api/files` and `/backend-api/files/{id}/uploaded` covering happy path, validation error (file_size, file_name), upstream error mapping, retry passthrough, and API-key auth gating.
 - [x] 8. Add a regression test asserting `ResponsesRequest` / `ResponsesCompactRequest` accept an `input_file` content item with a `file_id` (no longer raises). Update the prior `test_v1_responses_rejects_input_file_id` integration test to assert acceptance.
 - [x] 9. Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, and the targeted pytest suites for files / requests / proxy.
+- [x] 10. Extend file-pin extraction and routing to cover `input_image.file_id` plus `input_image.image_url: sediment://<file_id>`, and add regressions for both shapes.
+- [x] 11. Normalize `input_image.file_id` to `input_image.image_url: sediment://<file_id>` before prompt-cache affinity derivation and before forwarding upstream.
+- [x] 12. Fail closed when the HTTP bridge upstream websocket closes with `close_code=1000` before any `response.*` event, and add unit coverage proving the bridge does not transparent-retry that request.

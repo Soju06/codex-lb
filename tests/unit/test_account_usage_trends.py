@@ -117,6 +117,23 @@ class TestBuildAccountUsageTrends:
         scheduled = result["a1"].secondary_scheduled
         assert [point.v for point in scheduled] == [100.0, 75.0, 50.0, 25.0]
 
+    def test_secondary_scheduled_line_uses_weekly_primary_bucket(self):
+        reset_at = SINCE_EPOCH + 10080 * 60
+        buckets = [
+            _bucket(
+                SINCE_EPOCH,
+                "a1",
+                "primary",
+                30.0,
+                reset_at=reset_at,
+                window_minutes=10080,
+            ),
+        ]
+        result = build_account_usage_trends(buckets, SINCE_EPOCH, BUCKET_SECONDS, BUCKET_COUNT)
+
+        scheduled = result["a1"].secondary_scheduled
+        assert [point.v for point in scheduled] == [100.0, 96.43, 92.86, 89.29]
+
     def test_secondary_scheduled_line_jumps_after_weekly_reset(self):
         first_reset = SINCE_EPOCH + BUCKET_SECONDS
         second_reset = SINCE_EPOCH + 5 * BUCKET_SECONDS

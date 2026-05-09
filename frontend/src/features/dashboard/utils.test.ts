@@ -428,6 +428,20 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.status).toBe("on_track");
   });
 
+  it("expires unused account credits at reset instead of carrying them forward", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "unused-near-reset", fullCredits: 1_000, remainingCredits: 1_000, timeLeftPercent: 10 }),
+        weeklyAccount({ accountId: "empty-later-reset", fullCredits: 1_000, remainingCredits: 0, timeLeftPercent: 90 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.overPlanCredits).toBeCloseTo(0);
+    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(111.11);
+  });
+
   it("does not let a tiny near reset hide depletion before the next meaningful reset", () => {
     const pace = buildWeeklyCreditPace(
       [

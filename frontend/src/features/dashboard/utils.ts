@@ -222,6 +222,10 @@ type WeeklyPoolAccount = {
   windowMs: number;
 };
 
+type WeeklyPoolSimulationAccount = WeeklyPoolAccount & {
+  balanceCredits: number;
+};
+
 type WeeklyPoolProjection = {
   burnRateCreditsPerMs: number;
   projectedShortfallCredits: number;
@@ -231,11 +235,30 @@ type WeeklyPoolProjection = {
 };
 
 type WeeklyResetEvent = {
+  fullCredits: number;
+  balanceCredits: number;
   resetAtMs: number;
-  topUpCredits: number;
-  recurringTopUpCredits: number;
   windowMs: number;
 };
+
+function totalWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[]): number {
+  return accounts.reduce((sum, account) => sum + account.balanceCredits, 0);
+}
+
+function consumeWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[], amountCredits: number): void {
+  let remainingToConsume = amountCredits;
+  const spendOrder = [...accounts].sort((a, b) => a.resetAtMs - b.resetAtMs);
+
+  for (const account of spendOrder) {
+    if (remainingToConsume <= 0) {
+      return;
+    }
+
+    const consumed = Math.min(account.balanceCredits, remainingToConsume);
+    account.balanceCredits -= consumed;
+    remainingToConsume -= consumed;
+  }
+}
 
 function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number): WeeklyPoolProjection | null {
   const totalRemainingCredits = accounts.reduce((sum, account) => sum + account.remainingCredits, 0);
@@ -266,14 +289,13 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
     };
   }
 
-  const resetEvents: WeeklyResetEvent[] = accounts
+  const simulationAccounts: WeeklyPoolSimulationAccount[] = accounts.map((account) => ({
+    ...account,
+    balanceCredits: account.remainingCredits,
+  }));
+  const resetEvents: WeeklyResetEvent[] = simulationAccounts
     .filter((account) => account.resetAtMs > nowMs)
-    .map((account) => ({
-      resetAtMs: account.resetAtMs,
-      topUpCredits: account.fullCredits,
-      recurringTopUpCredits: account.fullCredits,
-      windowMs: account.windowMs,
-    }));
+    .map((account) => account);
   if (resetEvents.length === 0) {
     return {
       burnRateCreditsPerMs,
@@ -307,16 +329,17 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
       };
     }
 
-    balanceCredits -= intervalBurnCredits;
+    consumeWeeklyBalanceCredits(simulationAccounts, intervalBurnCredits);
+    balanceCredits = totalWeeklyBalanceCredits(simulationAccounts);
     minimumRemainingCredits = Math.min(minimumRemainingCredits, balanceCredits);
     cursorMs = nextEventAtMs;
     if (cursorMs >= horizonMs) {
       break;
     }
 
-    balanceCredits += event.topUpCredits;
-    event.topUpCredits = event.recurringTopUpCredits;
+    event.balanceCredits = event.fullCredits;
     event.resetAtMs += event.windowMs;
+    balanceCredits = totalWeeklyBalanceCredits(simulationAccounts);
   }
 
   return {

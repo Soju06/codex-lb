@@ -79,6 +79,7 @@ export function createAccountSummary(
 		displayName: "primary@example.com",
 		planType: "plus",
 		status: "active",
+		securityWorkAuthorized: false,
 		usage: {
 			primaryRemainingPercent: 82,
 			secondaryRemainingPercent: 67,

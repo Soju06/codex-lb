@@ -103,6 +103,7 @@ def _account_to_summary(
         plan_type=plan_type,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
         status=effective_status.value,
+        security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,

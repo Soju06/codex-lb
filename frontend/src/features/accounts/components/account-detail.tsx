@@ -20,6 +20,7 @@ export type AccountDetailProps = {
   onRoutingPolicyChange: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
   onReauth: () => void;
   onExport: (accountId: string) => void;
+  onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
 };
 
 export function AccountDetail({
@@ -32,6 +33,7 @@ export function AccountDetail({
   onRoutingPolicyChange,
   onReauth,
   onExport,
+  onSecurityWorkAuthorizedChange,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -85,6 +87,7 @@ export function AccountDetail({
         onDelete={onDelete}
         onReauth={onReauth}
         onExport={onExport}
+        onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
       />
     </div>
   );

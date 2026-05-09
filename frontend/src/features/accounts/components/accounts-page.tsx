@@ -29,6 +29,7 @@ export function AccountsPage() {
     resumeMutation,
     deleteMutation,
     exportMutation,
+    updateMutation,
   } = useAccounts();
   const routingPolicyMutation = useAccountRoutingPolicyMutation();
   const oauth = useOauth();
@@ -73,7 +74,8 @@ export function AccountsPage() {
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     deleteMutation.isPending ||
-    exportMutation.isPending;
+    exportMutation.isPending ||
+    updateMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(routingPolicyMutation.error) ||
@@ -81,7 +83,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
-    getErrorMessageOrNull(exportMutation.error);
+    getErrorMessageOrNull(exportMutation.error) ||
+    getErrorMessageOrNull(updateMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -121,6 +124,9 @@ export function AccountsPage() {
             }
             onReauth={() => oauthDialog.show()}
             onExport={(accountId) => void exportMutation.mutateAsync(accountId)}
+            onSecurityWorkAuthorizedChange={(accountId, enabled) =>
+              void updateMutation.mutateAsync({ accountId, securityWorkAuthorized: enabled })
+            }
           />
         </div>
       )}

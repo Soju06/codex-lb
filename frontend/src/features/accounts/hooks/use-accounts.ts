@@ -9,6 +9,7 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updateAccount,
 } from "@/features/accounts/api";
 import { updateAccountRoutingPolicy } from "@/features/accounts/api";
 import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
@@ -89,7 +90,19 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation, exportMutation };
+  const updateMutation = useMutation({
+    mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
+      updateAccount(accountId, { securityWorkAuthorized }),
+    onSuccess: () => {
+      toast.success("Account updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Update failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, exportMutation, updateMutation };
 }
 
 export function useAccountRoutingPolicyMutation() {

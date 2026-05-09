@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import cast
 
@@ -37,6 +38,8 @@ _INTERLEAVED_REASONING_KEYS = frozenset({"reasoning_content", "reasoning_details
 _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content", "reasoning_details"})
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
+_OPENAI_FILE_URI_PREFIX = "sediment://"
+_OPENAI_FILE_ID_PATTERN = re.compile(r"^file_[A-Za-z0-9_-]+$")
 
 
 def _json_mapping_or_none(value: JsonValue) -> Mapping[str, JsonValue] | None:
@@ -118,14 +121,52 @@ def _is_input_file_with_id(item: Mapping[str, JsonValue]) -> bool:
     return isinstance(file_id, str) and bool(file_id)
 
 
+def _extract_openai_file_id_from_uri(value: JsonValue) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped.startswith(_OPENAI_FILE_URI_PREFIX):
+        return None
+    file_id = stripped.removeprefix(_OPENAI_FILE_URI_PREFIX).strip()
+    if not file_id or any(separator in file_id for separator in ("/", "?", "#")):
+        return None
+    if not _OPENAI_FILE_ID_PATTERN.match(file_id):
+        return None
+    return file_id
+
+
+def openai_file_uri(file_id: str) -> str:
+    return f"{_OPENAI_FILE_URI_PREFIX}{file_id}"
+
+
+def _extract_input_part_file_id(item: Mapping[str, JsonValue]) -> str | None:
+    item_type = item.get("type")
+    if item_type == "input_file":
+        file_id = item.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            return file_id
+        return None
+    if item_type != "input_image":
+        return None
+    file_id = item.get("file_id")
+    if isinstance(file_id, str) and file_id:
+        return file_id
+    return _extract_openai_file_id_from_uri(item.get("image_url"))
+
+
 def extract_input_file_ids(input_value: JsonValue) -> set[str]:
-    """Return all ``file_id`` strings referenced by ``input_file`` items.
+    """Return all referenced ``file_id`` strings from responses input items.
 
     Walks both top-level items and nested role-message ``content`` parts,
     matching the shapes accepted by ``ResponsesRequest.input`` /
     ``ResponsesCompactRequest.input``. Returns an empty set when the
-    input is a plain string or has no ``input_file`` parts. Used by the
-    ``/responses`` flow to look up account pins recorded by
+    input is a plain string or has no file-backed parts. Recognized
+    shapes are:
+    - ``{"type":"input_file","file_id":"file_xxx"}``
+    - ``{"type":"input_image","file_id":"file_xxx"}``
+    - ``{"type":"input_image","image_url":"sediment://file_xxx"}``
+
+    Used by the ``/responses`` flow to look up account pins recorded by
     ``POST /backend-api/files`` so the response request lands on the
     upstream account that registered the file (the upstream contract is
     account-scoped via ``chatgpt-account-id``).
@@ -137,10 +178,9 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
         if not is_json_mapping(item):
             continue
         item_mapping = item
-        if _is_input_file_with_id(item_mapping):
-            file_id = item_mapping.get("file_id")
-            if isinstance(file_id, str) and file_id:
-                file_ids.add(file_id)
+        file_id = _extract_input_part_file_id(item_mapping)
+        if file_id is not None:
+            file_ids.add(file_id)
         content = item_mapping.get("content")
         if is_json_list(content):
             parts: list[JsonValue] = content
@@ -151,11 +191,78 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
         for part in parts:
             if not is_json_mapping(part):
                 continue
-            if _is_input_file_with_id(part):
-                file_id = part.get("file_id")
-                if isinstance(file_id, str) and file_id:
-                    file_ids.add(file_id)
+            file_id = _extract_input_part_file_id(part)
+            if file_id is not None:
+                file_ids.add(file_id)
     return file_ids
+
+
+def normalize_input_image_file_references(input_value: JsonValue) -> JsonValue:
+    """Canonicalize ``input_image.file_id`` items to ``image_url`` URIs.
+
+    This preserves the request structure and only rewrites the minimal
+    shape required for upstream compatibility:
+    ``{"type":"input_image","file_id":"file_xxx"}`` becomes
+    ``{"type":"input_image","image_url":"sediment://file_xxx"}``.
+    Existing ``image_url`` values, including ``sediment://`` URIs and
+    full HTTPS download URLs, are left unchanged.
+    """
+    if not is_json_list(input_value):
+        return input_value
+    normalized_items: list[JsonValue] = []
+    changed = False
+    for item in input_value:
+        normalized_item, item_changed = _normalize_input_image_file_reference_item(item)
+        normalized_items.append(normalized_item)
+        changed = changed or item_changed
+    if not changed:
+        return input_value
+    return normalized_items
+
+
+def _normalize_input_image_file_reference_item(item: JsonValue) -> tuple[JsonValue, bool]:
+    item_mapping = _json_mapping_or_none(item)
+    if item_mapping is None:
+        return item, False
+
+    updated = dict(item_mapping)
+    changed = False
+    normalized_self, self_changed = _normalize_input_image_file_reference_mapping(updated)
+    changed = changed or self_changed
+
+    content = updated.get("content")
+    if is_json_list(content):
+        normalized_parts: list[JsonValue] = []
+        content_changed = False
+        for part in content:
+            normalized_part, part_changed = _normalize_input_image_file_reference_item(part)
+            normalized_parts.append(normalized_part)
+            content_changed = content_changed or part_changed
+        if content_changed:
+            normalized_self["content"] = normalized_parts
+            changed = True
+    elif is_json_mapping(content):
+        normalized_content, content_changed = _normalize_input_image_file_reference_item(content)
+        if content_changed:
+            normalized_self["content"] = normalized_content
+            changed = True
+
+    if not changed:
+        return item, False
+    return normalized_self, True
+
+
+def _normalize_input_image_file_reference_mapping(
+    item: MutableJsonObject,
+) -> tuple[MutableJsonObject, bool]:
+    if item.get("type") != "input_image":
+        return item, False
+    file_id = item.get("file_id")
+    if not isinstance(file_id, str) or not file_id:
+        return item, False
+    item["image_url"] = openai_file_uri(file_id)
+    item.pop("file_id", None)
+    return item, True
 
 
 def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:

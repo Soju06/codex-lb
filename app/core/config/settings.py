@@ -120,6 +120,8 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
+    database_background_pool_size: int | None = Field(default=None, gt=0)
+    database_background_max_overflow: int | None = Field(default=None, ge=0)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True

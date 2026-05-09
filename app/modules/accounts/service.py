@@ -192,6 +192,14 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
+    async def update_account(self, account_id: str, *, security_work_authorized: bool | None = None) -> bool:
+        result = False
+        if security_work_authorized is not None:
+            result = await self._repo.update_security_work_authorized(account_id, security_work_authorized)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
+
     async def delete_account(self, account_id: str) -> bool:
         result = await self._repo.delete(account_id)
         if result:

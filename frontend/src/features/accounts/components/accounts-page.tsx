@@ -28,6 +28,7 @@ export function AccountsPage() {
     pauseMutation,
     resumeMutation,
     deleteMutation,
+    updateMutation,
   } = useAccounts();
   const oauth = useOauth();
 
@@ -69,13 +70,15 @@ export function AccountsPage() {
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
-    deleteMutation.isPending;
+    deleteMutation.isPending ||
+    updateMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
-    getErrorMessageOrNull(deleteMutation.error);
+    getErrorMessageOrNull(deleteMutation.error) ||
+    getErrorMessageOrNull(updateMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -111,6 +114,9 @@ export function AccountsPage() {
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
+            onSecurityWorkAuthorizedChange={(accountId, enabled) =>
+              void updateMutation.mutateAsync({ accountId, securityWorkAuthorized: enabled })
+            }
           />
         </div>
       )}

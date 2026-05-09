@@ -100,6 +100,7 @@ def _account_to_summary(
         display_name=account.email,
         plan_type=plan_type,
         status=account.status.value,
+        security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,

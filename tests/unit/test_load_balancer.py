@@ -199,6 +199,22 @@ def test_select_account_treats_unknown_routing_policy_as_normal():
     assert result.account.account_id == "legacy"
 
 
+def test_select_account_can_ignore_standard_quota_for_additional_pool():
+    states = [
+        AccountState(
+            "spark",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(time.time() + 3600),
+        )
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted", ignore_standard_quota=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "spark"
+
+
 def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
     states = [
         AccountState("normal", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),

@@ -25,6 +25,11 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
+    assert payload["additionalQuotaRoutingPolicies"] == {}
+    assert any(
+        policy["quotaKey"] == "codex_spark" and policy["routingPolicy"] == "burn_first"
+        for policy in payload["additionalQuotaPolicies"]
+    )
 
     response = await async_client.put(
         "/api/settings",
@@ -43,6 +48,7 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
+            "additionalQuotaRoutingPolicies": {"codex_spark": "inherit"},
         },
     )
     assert response.status_code == 200
@@ -62,6 +68,11 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
+    assert updated["additionalQuotaRoutingPolicies"] == {"codex_spark": "inherit"}
+    assert any(
+        policy["quotaKey"] == "codex_spark" and policy["routingPolicy"] == "inherit"
+        for policy in updated["additionalQuotaPolicies"]
+    )
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -81,6 +92,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+    assert payload["additionalQuotaRoutingPolicies"] == {"codex_spark": "inherit"}
 
 
 @pytest.mark.asyncio

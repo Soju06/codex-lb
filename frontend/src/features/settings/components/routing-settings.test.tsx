@@ -19,6 +19,8 @@ const BASE_SETTINGS: DashboardSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
 };
 
 describe("RoutingSettings", () => {

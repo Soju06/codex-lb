@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TypedDict
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
+ADDITIONAL_QUOTA_ROUTING_POLICIES = frozenset({"inherit", "burn_first", "normal", "preserve"})
 
 
 def _normalize_identifier(value: str | None) -> str | None:
@@ -67,10 +68,7 @@ def _registry_path() -> Path:
 
 
 def _normalize_routing_policy(value: str | None) -> str:
-    normalized = _normalize_identifier(value)
-    if normalized in {"burn_first", "normal", "preserve"}:
-        return normalized
-    return "inherit"
+    return canonicalize_additional_quota_routing_policy(value) or "inherit"
 
 
 def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuotaDefinition:
@@ -230,6 +228,13 @@ def get_additional_quota_definition_for_key(quota_key: str | None) -> Additional
 
 def normalize_additional_quota_routing_policy(value: str | None) -> str:
     return _normalize_routing_policy(value)
+
+
+def canonicalize_additional_quota_routing_policy(value: str | None) -> str | None:
+    normalized = _normalize_identifier(value)
+    if normalized in ADDITIONAL_QUOTA_ROUTING_POLICIES:
+        return normalized
+    return None
 
 
 def normalize_additional_quota_routing_policy_overrides(overrides: dict[str, str] | None) -> dict[str, str]:

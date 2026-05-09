@@ -31,6 +31,9 @@ from app.modules.api_keys.repository import (
 
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600
+TRAFFIC_CLASS_FOREGROUND = "foreground"
+TRAFFIC_CLASS_OPPORTUNISTIC = "opportunistic"
+_SUPPORTED_TRAFFIC_CLASSES = frozenset({TRAFFIC_CLASS_FOREGROUND, TRAFFIC_CLASS_OPPORTUNISTIC})
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -54,6 +57,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
+        traffic_class: str | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
@@ -203,6 +207,7 @@ class ApiKeyCreateData:
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     enforced_service_tier: str | None = None
+    traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     expires_at: datetime | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
@@ -219,6 +224,8 @@ class ApiKeyUpdateData:
     enforced_reasoning_effort_set: bool = False
     enforced_service_tier: str | None = None
     enforced_service_tier_set: bool = False
+    traffic_class: str | None = None
+    traffic_class_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
@@ -243,6 +250,7 @@ class ApiKeyData:
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
@@ -281,6 +289,7 @@ class ApiKeysService:
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
+        traffic_class = _normalize_traffic_class(payload.traffic_class)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
@@ -291,6 +300,7 @@ class ApiKeysService:
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
+            traffic_class=traffic_class,
             expires_at=expires_at,
             is_active=True,
             created_at=now,
@@ -356,6 +366,10 @@ class ApiKeysService:
         else:
             enforced_service_tier = None
 
+        traffic_class_update: str | _Unset = _UNSET
+        if payload.traffic_class_set:
+            traffic_class_update = _normalize_traffic_class(payload.traffic_class)
+
         if payload.allowed_models_set or payload.enforced_model_set:
             effective_allowed_models = (
                 allowed_models if payload.allowed_models_set else _deserialize_allowed_models(existing.allowed_models)
@@ -395,6 +409,7 @@ class ApiKeysService:
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
                 ),
                 enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
+                traffic_class=traffic_class_update,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
@@ -423,6 +438,7 @@ class ApiKeysService:
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.enforced_service_tier_set
+            or payload.traffic_class_set
             or payload.expires_at_set
             or payload.is_active_set
         ):
@@ -956,6 +972,21 @@ def _normalize_service_tier_lenient(value: str | None) -> str | None:
     return None
 
 
+def _normalize_traffic_class(value: str | None) -> str:
+    normalized = (value or TRAFFIC_CLASS_FOREGROUND).strip().lower()
+    if normalized not in _SUPPORTED_TRAFFIC_CLASSES:
+        options = ", ".join(sorted(_SUPPORTED_TRAFFIC_CLASSES))
+        raise ValueError(f"Unsupported traffic class '{normalized}'. Expected one of: {options}")
+    return normalized
+
+
+def _normalize_traffic_class_lenient(value: str | None) -> str:
+    normalized = (value or TRAFFIC_CLASS_FOREGROUND).strip().lower()
+    if normalized in _SUPPORTED_TRAFFIC_CLASSES:
+        return normalized
+    return TRAFFIC_CLASS_FOREGROUND
+
+
 def _validate_model_enforcement(*, enforced_model: str | None, allowed_models: list[str] | None) -> None:
     if enforced_model is None or not allowed_models:
         return
@@ -1099,6 +1130,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         enforced_service_tier=data.enforced_service_tier,
+        traffic_class=data.traffic_class,
         expires_at=data.expires_at,
         is_active=data.is_active,
         created_at=data.created_at,
@@ -1122,6 +1154,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),
+        traffic_class=_normalize_traffic_class_lenient(getattr(row, "traffic_class", TRAFFIC_CLASS_FOREGROUND)),
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
